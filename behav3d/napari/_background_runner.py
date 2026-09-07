@@ -690,6 +690,17 @@ class BackgroundOperation(QObject):
         resulting hard crash.
         """
         self._state = None
+        # Also the safest point to reclaim any pyplot figure the backend
+        # opened and never closed: the worker is gone, so nothing can be
+        # mid-draw.
+        try:
+            from behav3d.napari._matplotlib_guard import (
+                close_leftover_pyplot_figures,
+            )
+
+            close_leftover_pyplot_figures()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     def wait(self, timeout_ms: int = -1) -> bool:
