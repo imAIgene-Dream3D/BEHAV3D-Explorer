@@ -7,7 +7,11 @@ from behav3d.napari._widgets import (
     prompt_axis_order,
     resolve_external_path,
 )
-from behav3d.core.qt_help import reset_scroll_on_page_change
+from behav3d.core.qt_help import (
+    reset_scroll_on_page_change,
+    _populate_device_combo,
+    _seed_device_combo,
+)
 from behav3d.napari._preview_dims import disconnect_all_preview_dims_listeners, clear_viewer_layers
 import yaml
 from magicgui.widgets import create_widget
@@ -300,17 +304,32 @@ class SegmentationTab(QWidget):
         self._on_metadata_updated()
 
     def _on_metadata_updated(self):
-        """Trigger updates in sub-widgets."""
-        if hasattr(self, 'pixel_classifier_page'):
-            self.pixel_classifier_page._on_metadata_updated()
-        self.cellpose_page._on_metadata_updated()
-        if hasattr(self, 'cellpose_sam_page'):
-            self.cellpose_sam_page._on_metadata_updated()
-        self.import_page._on_metadata_updated()
-        if hasattr(self, 'apoc_page'):
-            self.apoc_page._on_metadata_updated()
-        if hasattr(self, 'convpaint_page'):
-            self.convpaint_page._on_metadata_updated()
+        """Trigger updates in sub-widgets.
+
+        Each sub-page's refresh is isolated in its own try/except: these
+        pages are otherwise independent, so a bug in one (e.g. a stray
+        numpy.bool_ handed to a Qt setter) must not silently prevent every
+        page after it from ever rebuilding — that previously left the APOC/
+        ConvPaint training panels stuck on their "load metadata" placeholder
+        with no visible error, since a PyQt slot exception only prints to
+        the console rather than the in-app log.
+        """
+        pages = [
+            ('pixel_classifier_page', getattr(self, 'pixel_classifier_page', None)),
+            ('cellpose_page', self.cellpose_page),
+            ('cellpose_sam_page', getattr(self, 'cellpose_sam_page', None)),
+            ('import_page', self.import_page),
+            ('apoc_page', getattr(self, 'apoc_page', None)),
+            ('convpaint_page', getattr(self, 'convpaint_page', None)),
+        ]
+        for name, page in pages:
+            if page is None:
+                continue
+            try:
+                page._on_metadata_updated()
+            except Exception as e:
+                traceback.print_exc()
+                self._log(f"⚠️ {name} failed to refresh after metadata update: {e}")
 
     def _log(self, msg):
         import datetime
@@ -3591,14 +3610,12 @@ class CellposeSAMWidget(QWidget):
         gpu_row.addWidget(QLabel("GPU Device:"))
         self.combo_gpu_device = QComboBox()
         # Reuses ConvPaint's torch/CUDA enumeration. APOC's equivalent is
-        # OpenCL/pyclesperanto and does not apply to cellpose.
-        from behav3d.preprocessing.segmentation.convpaint_train import _detect_torch_devices
-        for label, value in _detect_torch_devices():
-            self.combo_gpu_device.addItem(label, value)
-        saved_device = str(cfg.get("device", "auto"))
-        idx = self.combo_gpu_device.findData(saved_device)
-        if idx >= 0:
-            self.combo_gpu_device.setCurrentIndex(idx)
+        # OpenCL/pyclesperanto and does not apply to cellpose. Seeded from the
+        # saved value here; the real list is probed lazily (see
+        # ``_ensure_torch_devices``) so startup does not pay torch's import.
+        self._torch_devices_loaded = False
+        self._saved_device_pref = str(cfg.get("device", "auto"))
+        _seed_device_combo(self.combo_gpu_device, self._saved_device_pref)
         gpu_row.addWidget(self.combo_gpu_device)
         self.combo_gpu_device.setToolTip(
             "CUDA device to run on (ignored if 'Force CPU-only' below is checked)."
@@ -4138,6 +4155,22 @@ class CellposeSAMWidget(QWidget):
             "drop_2d_segments": bool(self.check_drop_2d.isChecked()),
         }
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._ensure_torch_devices()
+
+    def _ensure_torch_devices(self):
+        """Fill the device combo from a real torch probe, once."""
+        if self._torch_devices_loaded:
+            return
+        self._torch_devices_loaded = True
+        try:
+            _populate_device_combo(
+                self.combo_gpu_device, self._saved_device_pref or "auto"
+            )
+        except Exception as e:  # pragma: no cover - torch/driver specific
+            self.log(f"⚠️ Could not enumerate torch devices: {e}")
+
     def _selected_device(self):
         if self.btn_force_cpu.isChecked():
             return "cpu"
@@ -4176,6 +4209,7 @@ class CellposeSAMWidget(QWidget):
 
     # \u2500\u2500 preview \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     def _on_preview(self):
+        self._ensure_torch_devices()
         from behav3d.preprocessing.segmentation.cellpose_sam_prediction import preview_cellpose_sam
         from behav3d.io.images import load_image
 
@@ -4421,6 +4455,7 @@ class CellposeSAMWidget(QWidget):
         ``block=True`` (queue) runs synchronously; ``block=False`` (GUI) runs in
         a background worker. ``extra_callbacks`` is the queue's chaining hook.
         """
+        self._ensure_torch_devices()
         from behav3d.preprocessing.segmentation.cellpose_sam_prediction import (
             run_cellpose_sam_and_sync_metadata,
         )
@@ -6731,6 +6766,13 @@ class APOCWidget(QWidget):
         # Apply import
         self._training_widget.apply_import(meta, data_by_celltype, cell_type_mapping, source_path=path)
 
+        # Imported training data is usable on its own (training reads
+        # directly from ``_imported_training_data``), so unlock the
+        # feature-selection UI and training controls just like Generate
+        # Training Data does.
+        self._is_session_active = True
+        self._update_training_controls_state()
+
         # Persist import path to YAML
         pc = self.metadata_loader.behav3d_parameters.setdefault("pixel_classifier", {})
         pc["apoc_imported_training_path"] = str(path)
@@ -7002,6 +7044,10 @@ class APOCWidget(QWidget):
             self._training_widget.apply_import(
                 meta, data_by_celltype, cell_type_mapping, source_path=saved_path
             )
+            # Restoring a saved import also makes the classifier trainable,
+            # same as a fresh manual import — unlock the UI accordingly.
+            self._is_session_active = True
+            self._update_training_controls_state()
             self._update_import_panel()
             self.log(f"↩ Restored import from {saved_path}")
         except Exception as exc:
@@ -7779,21 +7825,16 @@ class ConvPaintWidget(QWidget):
         pc = _cfg_get(self.metadata_loader.behav3d_parameters, "pixel_classifier", {}) or {}
 
         # ── Device selection (PyTorch / CUDA) ─────────────────────
-        from behav3d.preprocessing.segmentation.convpaint_train import (
-            _detect_torch_devices, _default_device,
-        )
-        self._convpaint_devices = _detect_torch_devices()  # list of (label, value)
+        # Seeded from the saved value; the torch probe (and, when nothing is
+        # saved, ``_default_device()``) is deferred to ``_ensure_torch_devices``
+        # so building this page at startup costs no torch import.
+        self._torch_devices_loaded = False
+        self._saved_device_pref = str(pc.get("convpaint_device", "")).strip()
         gpu_row = QHBoxLayout()
         gpu_row.addWidget(QLabel("Device:"))
         self.combo_gpu_device = QComboBox()
         self.combo_gpu_device.setSizeAdjustPolicy(QComboBox.AdjustToContents)
-        for label, value in self._convpaint_devices:
-            self.combo_gpu_device.addItem(label, value)
-
-        saved_device = str(pc.get("convpaint_device", "")).strip() or _default_device()
-        idx = self.combo_gpu_device.findData(saved_device)
-        if idx >= 0:
-            self.combo_gpu_device.setCurrentIndex(idx)
+        _seed_device_combo(self.combo_gpu_device, self._saved_device_pref)
         gpu_row.addWidget(self.combo_gpu_device, stretch=1)
         gpu_row.addStretch()
         layout.addLayout(gpu_row)
@@ -7929,6 +7970,30 @@ class ConvPaintWidget(QWidget):
         self.spin_t_end.valueChanged.connect(lambda _: self._save_params_to_yaml())
 
     # ── Helpers ──────────────────────────────────────────────────
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._ensure_torch_devices()
+
+    def _ensure_torch_devices(self):
+        """Fill the device combo from a real torch probe, once.
+
+        With no saved preference this also applies ``_default_device()`` --
+        which is what the eager version used to do at construction time.
+        """
+        if self._torch_devices_loaded:
+            return
+        self._torch_devices_loaded = True
+        try:
+            want = self._saved_device_pref
+            if not want:
+                from behav3d.preprocessing.segmentation.convpaint_train import (
+                    _default_device,
+                )
+                want = _default_device()
+            _populate_device_combo(self.combo_gpu_device, want)
+        except Exception as e:  # pragma: no cover - torch/driver specific
+            self.log(f"⚠️ Could not enumerate torch devices: {e}")
+
     def _selected_device(self):
         return str(self.combo_gpu_device.currentData() or "auto")
 
@@ -7949,6 +8014,7 @@ class ConvPaintWidget(QWidget):
 
     # ── Training widget signal slots ─────────────────────────────
     def _on_training_started(self, cell_types_to_train):
+        self._ensure_torch_devices()
         device = self._selected_device()
         self.log(f"🖥️ ConvPaint training device: {device}")
         self.log(f"▶ Starting ConvPaint training for: {cell_types_to_train}")
@@ -8118,6 +8184,7 @@ class ConvPaintWidget(QWidget):
 
     # ── Generate Training Data ───────────────────────────────────
     def _on_load_training_clicked(self, interactive=True):
+        self._ensure_torch_devices()
         try:
             md = self.metadata_loader.metadata
             if md is None:
@@ -8528,6 +8595,7 @@ class ConvPaintWidget(QWidget):
 
     def get_queue_params(self) -> dict:
         """Snapshot current widget state for use by the processing queue."""
+        self._ensure_torch_devices()
         strategy = self._current_global_strategy()
         all_strats = self.all_strategies()
         params = {
@@ -8610,6 +8678,7 @@ class ConvPaintWidget(QWidget):
         currently expose a per-sample progress hook).
         ``extra_callbacks`` is the queue's chaining hook.
         """
+        self._ensure_torch_devices()
         try:
             md = self.metadata_loader.metadata
             if md is None:

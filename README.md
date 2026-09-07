@@ -13,7 +13,7 @@ It works with pretty much any 3D microscopy data, for example 3D live co-culture
 
 There's no one-size-fits-all solution, so BEHAV3D-Explorer is built as a set of flexible, modular tools: you pick and combine the segmentation, tracking and analysis methods that fit your experiment, or your computational power, instead of being locked into one fixed pipeline. Navigating a complex software with so many options is difficult, but you don't have to figure it out alone: **a built-in Co-pilot assistant** (QueenB) sits next to the panel, explains what each parameter does, and can fill in the forms for you.
 
-📖 [Full wiki](https://imaigene-dream3d.github.io/BEHAV3D/)
+📖 [Full wiki](https://imaigene-dream3d.github.io/BEHAV3D-Explorer/)
 
 ![BEHAV3D panel in napari](docs/source/_static/gif/Github_readme_GUI_intro_v2.gif)
 

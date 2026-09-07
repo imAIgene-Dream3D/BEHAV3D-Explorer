@@ -127,6 +127,43 @@ def expand_multicolor_celltype_names(base_name, n_channels):
         raise ValueError("n_channels must be at least 1")
     return [f"{base_name}_{idx}_multicolor" for idx in range(1, n_channels + 1)]
 
+
+def multicolor_sources_for_base(metadata_or_row, base_name):
+    """List the per-channel multicolor source cell types for ``base_name``.
+
+    Scans column/index names for ``{prefix}_{base}_{idx}_multicolor_tracks_image_path``
+    (prefix optional / one of ``or_``, ``im_``, ``ot_``) and returns the channel
+    cell-type names sorted by channel index, e.g.
+    ``["tcells_1_multicolor", "tcells_2_multicolor", "tcells_3_multicolor"]``.
+
+    Accepts either a metadata DataFrame or a single metadata row (Series); only
+    the set of column/index names is used, so channels are detected from what
+    actually exists rather than an assumed count.  Returns ``[]`` when none are
+    found.
+    """
+    base_name = str(base_name).strip()
+    if not base_name:
+        return []
+
+    if hasattr(metadata_or_row, "columns"):
+        names = list(metadata_or_row.columns)
+    else:
+        names = list(getattr(metadata_or_row, "index", []))
+
+    pattern = re.compile(
+        r'^(?:or_|im_|ot_)?'
+        + re.escape(base_name)
+        + r'_([0-9]+)_multicolor_tracks_image_path$'
+    )
+    found = {}
+    for name in names:
+        m = pattern.match(str(name))
+        if m:
+            idx = int(m.group(1))
+            found[idx] = f"{base_name}_{idx}_multicolor"
+    return [found[idx] for idx in sorted(found)]
+
+
 def detect_organoid_types_from_metadata(metadata):
     """
     Detect organoid types from metadata column names.
@@ -244,8 +281,10 @@ def has_dead_channel(metadata):
     if 'dead_channel' not in metadata.columns:
         return False
     
-    # Check if any row has a non-null dead_channel value
-    return metadata['dead_channel'].notna().any()
+    # Check if any row has a non-null dead_channel value.
+    # bool(...) normalizes numpy.bool_ -> Python bool: some callers hand this
+    # straight to Qt setters (e.g. QWidget.setVisible), which reject numpy.bool_.
+    return bool(metadata['dead_channel'].notna().any())
 
 def has_dead_mask(metadata):
     """
@@ -261,7 +300,7 @@ def has_dead_mask(metadata):
     # Check if any row has a non-null AND non-empty dead_mask_path value
     # (empty strings '' are not NaN but should be treated as missing)
     mask_values = metadata['dead_mask_path'].fillna('')
-    return (mask_values.str.strip() != '').any()
+    return bool((mask_values.str.strip() != '').any())
 
 def load_behav3d_metadata(
     metadata_path
