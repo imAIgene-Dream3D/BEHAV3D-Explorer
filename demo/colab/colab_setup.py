@@ -42,21 +42,21 @@ from pathlib import Path
 #: conda-pack tarball of the Linux ``behav3d`` environment (see demo/build_env.sh).
 ENV_URL = os.environ.get(
     "BEHAV3D_ENV_URL",
-    "https://huggingface.co/datasets/HF_ORG_PLACEHOLDER/behav3d-demo-env/resolve/main/behav3d-env.tar.gz",
+    "https://huggingface.co/datasets/Erios12/behav3d-demo-env/resolve/main/behav3d-env.tar.gz",
 )
 
 #: Demo dataset bundle: raw images + metadata.csv + PRECOMPUTED output/ folder.
 DEMO_URL = os.environ.get(
     "BEHAV3D_DEMO_URL",
-    "https://zenodo.org/records/ZENODO_RECORD_PLACEHOLDER/files/behav3d_demo.tar.gz?download=1",
+    "https://zenodo.org/records/22644564/files/BEHAV3D_demo.tar.gz?download=1",
 )
 
-REPO_URL = os.environ.get("BEHAV3D_REPO_URL", "https://github.com/imAIgene-Dream3D/BEHAV3D.git")
-REPO_REF = os.environ.get("BEHAV3D_REPO_REF", "main")
+REPO_URL = os.environ.get("BEHAV3D_REPO_URL", "https://github.com/imAIgene-Dream3D/BEHAV3D-Explorer.git")
+REPO_REF = os.environ.get("BEHAV3D_REPO_REF", "feature/demo")
 
 ENV_PREFIX = Path(os.environ.get("BEHAV3D_ENV_PREFIX", "/opt/behav3d"))
-REPO_DIR = Path(os.environ.get("BEHAV3D_REPO_DIR", "/content/BEHAV3D"))
-DEMO_ROOT = Path(os.environ.get("BEHAV3D_DEMO_ROOT", "/content/behav3d_demo"))
+REPO_DIR = Path(os.environ.get("BEHAV3D_REPO_DIR", "/content/BEHAV3D-Explorer"))
+DEMO_ROOT = Path(os.environ.get("BEHAV3D_DEMO_ROOT", "/content/BEHAV3D_demo"))
 LOG_DIR = Path(os.environ.get("BEHAV3D_LOG_DIR", "/content/behav3d_logs"))
 
 DISPLAY = ":99"
@@ -381,7 +381,15 @@ def _maximise():
 # ==========================================================================
 # step 6 - getting the pixels to the visitor
 # ==========================================================================
-_VNC_PATH = "/vnc.html?autoconnect=true&resize=remote&reconnect=true&quality=6"
+# scale, not remote: Xvfb runs a single fixed mode and x11vnc has no
+# -xrandr, so a server-side resize is refused and the visitor gets scrollbars.
+# Client-side scaling always fits the whole GUI into whatever window is open.
+_VNC_PATH = "/vnc.html?autoconnect=true&resize=scale&reconnect=true&quality=6"
+
+
+def vnc_url(host="localhost"):
+    """The noVNC URL, with the query options that make the GUI fit the window."""
+    return f"http://{host}:{WEB_PORT}{_VNC_PATH}"
 
 
 def open_viewer(in_tab=True, height=800):
@@ -389,7 +397,7 @@ def open_viewer(in_tab=True, height=800):
     try:
         from google.colab import output  # type: ignore
     except ImportError:
-        _say(f"not running in Colab - open http://localhost:{WEB_PORT}{_VNC_PATH}")
+        _say(f"not running in Colab - open {vnc_url()}")
         return None
     if not _port_open(WEB_PORT):
         raise RuntimeError("noVNC is not running - call start_display() first")
@@ -457,12 +465,34 @@ def bootstrap(with_data=True):
     print_paths()
 
 
-def print_paths():
+def demo_paths(root=None):
+    """The metadata CSV and the output folder of the bundle, as recorded in it.
+
+    The output folder has no fixed name - it is whatever the bundle was built
+    with, normally the bundle root itself - and ``prepare_demo.py`` writes that
+    choice into ``behav3d_parameters.yml``. Read it back rather than guess.
+    """
+    root = Path(root or DEMO_ROOT)
+    csv_path, output_dir = root / "metadata.csv", root
+    params = root / "behav3d_parameters.yml"
+    if params.exists():
+        try:
+            import yaml                                   # not always importable
+            paths = (yaml.safe_load(params.read_text()) or {}).get("paths", {})
+            csv_path = Path(paths.get("metadata_csv") or csv_path)
+            output_dir = Path(paths.get("output_dir") or output_dir)
+        except Exception:                                  # fall back to the root
+            pass
+    return csv_path, output_dir
+
+
+def print_paths(root=None):
     """The two paths a visitor types into the Data Preparation tab."""
+    csv_path, output_dir = demo_paths(root)
     print(
         "\n" + "=" * 68
-        + f"\n  Metadata CSV : {DEMO_ROOT / 'metadata.csv'}"
-        + f"\n  Output folder: {DEMO_ROOT / 'output'}"
+        + f"\n  Metadata CSV : {csv_path.as_posix()}"
+        + f"\n  Output folder: {output_dir.as_posix()}"
         + "\n" + "=" * 68 + "\n"
     )
 
@@ -514,13 +544,36 @@ def shutdown():
     _say("stopped")
 
 
+def prepare_local_data(root=None):
+    """Repoint an already-present bundle (a mounted folder) at this machine.
+
+    The Colab route gets this for free inside :func:`fetch_demo_data`; the local
+    dry run mounts a bundle instead of downloading one, so it needs the same
+    rewrite before the GUI can open it.
+    """
+    root = Path(root or DEMO_ROOT)
+    if not (root / "metadata.csv").exists():
+        _say(f"no demo data at {root} - starting without a dataset")
+        return None
+    prepare = Path(__file__).with_name("prepare_demo.py")
+    _say(f"preparing demo data at {root} ...")
+    print(_run([str(env_python()), str(prepare), "--root", str(root)]).stdout.strip())
+    return root
+
+
 if __name__ == "__main__":
     # Also usable outside Colab, e.g. inside the Docker dry-run container:
-    #   python colab_setup.py --local
-    if "--local" in sys.argv:
+    #   python colab_setup.py --local        run the display stack + napari
+    #   python colab_setup.py --vnc-url      print the URL to open, then exit
+    if "--vnc-url" in sys.argv:
+        print(vnc_url())
+    elif "--local" in sys.argv:
         start_display()
+        prepared = prepare_local_data()
         launch_napari()
-        _say(f"open http://localhost:{WEB_PORT}{_VNC_PATH}")
+        _say(f"open {vnc_url()}")
+        if prepared:
+            print_paths(prepared)
         _PROCS["napari"].wait()
     else:
         bootstrap()

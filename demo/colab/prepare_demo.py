@@ -136,7 +136,7 @@ def main(argv=None) -> int:
     elif not old_root:
         print("  no absolute paths detected in metadata.csv (nothing to rewrite)")
 
-    output_dir = root / "output"
+    output_dir = root
     paths = rewrite_parameters(output_dir / "behav3d_parameters.yml",
                                new_root, csv_path, args.dry_run)
     print(f"  behav3d_parameters.yml -> metadata_csv={paths['metadata_csv']}")

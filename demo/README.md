@@ -85,9 +85,14 @@ of all recorded paths):
 behav3d_demo/
 ├── raw/                     # the ~400 MB images
 ├── metadata.csv             # produced by the Data Preparation tab
-└── output/                  # segmentation, tracking, features, analysis results
-    └── behav3d_parameters.yml
+├── behav3d_parameters.yml   # the GUI's parameter snapshot, written in the output folder
+└── analysis/ ...            # segmentation, tracking, features, analysis results
 ```
+
+The **output folder is whatever folder you pointed the GUI at** - it has no required name and is
+normally the bundle root itself, as above. `prepare_demo.py` records the pair it settled on in
+`behav3d_parameters.yml`, and `colab_setup.print_paths()` reads it back, so the two paths a visitor
+pastes are always the real ones.
 
 Trim it so it stays pleasant on a free runtime: one sample, cropped in Z/T if needed, target
 ≤ 500 MB raw. Then:
@@ -136,15 +141,36 @@ uses, in about a minute:
 ./demo/build_env.sh --test
 ```
 
-Then open <http://localhost:6080/vnc.html>. The napari window with the BEHAV3D Explorer dock widget
-must appear. If it does not, read `/tmp/behav3d_logs/napari.log` inside the container.
+Then open the URL the script prints:
+
+```
+http://localhost:6080/vnc.html?autoconnect=true&resize=scale&reconnect=true&quality=6
+```
+
+The query parameters matter: `resize=scale` makes noVNC shrink the 1920x1080 virtual desktop to fit
+your browser window, so the whole GUI is visible with no scrollbars. Opening the bare `/vnc.html`
+gives you a 1:1 view and scrollbars instead.
+
+Two options for the dry run:
+
+```bash
+./demo/build_env.sh --test --screen 1600x900          # match your own screen: crisp, unscaled
+./demo/build_env.sh --test --data /path/to/behav3d_demo   # mount a bundle so the GUI has data
+```
+
+`--data` mounts the folder at `/data` and runs `prepare_demo.py` on it, which rewrites its
+`metadata.csv` **in place** for the container paths (the original is kept as
+`metadata.original.csv`). The run then prints the two paths to paste into the Data Preparation tab.
+
+The napari window with the BEHAV3D Explorer dock widget must appear. If it does not, read
+`/tmp/behav3d_logs/napari.log` inside the container.
 
 ## Step 7 — Test on Colab
 
 Push the branch, then open:
 
 ```
-https://colab.research.google.com/github/imAIgene-Dream3D/BEHAV3D/blob/main/demo/colab/BEHAV3D_Explorer_Colab.ipynb
+https://colab.research.google.com/github/imAIgene-Dream3D/BEHAV3D-Explorer/blob/feature/demo/demo/colab/BEHAV3D_Explorer_Colab.ipynb
 ```
 
 Check, in order:
@@ -156,10 +182,15 @@ Check, in order:
 5. Run the `start_cloudflared()` cell and confirm that route works too.
 6. Watch RAM in the Colab resource panel with the demo loaded — stay under ~10 GB.
 
+> **While the demo lives on `feature/demo`**, that branch name is baked into: the Colab link above,
+> the badge below, the badge in the root `README.md`, the notebook's `REPO_REF` and its screenshot
+> URL, and `REPO_REF` in `colab_setup.py`. Swap all of them to `main` when the branch merges —
+> `grep -rn feature/demo` finds them. Nothing else is branch-aware.
+
 ## Step 8 — Add the badge
 
 ```markdown
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/imAIgene-Dream3D/BEHAV3D/blob/main/demo/colab/BEHAV3D_Explorer_Colab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/imAIgene-Dream3D/BEHAV3D-Explorer/blob/feature/demo/demo/colab/BEHAV3D_Explorer_Colab.ipynb)
 ```
 
 ## Step 9 — Maintenance
@@ -180,6 +211,8 @@ Hugging Face dataset repo (needs an `HF_TOKEN` repository secret with write acce
 | napari exits immediately | see `colab_setup.tail("napari", 60)` | usually a missing library or a bad `PYTHONPATH` |
 | Session dies while loading the images | out of RAM | crop the demo bundle further |
 | Everything is very slow in 3D | software OpenGL (llvmpipe), expected | stay in 2D; a GPU runtime does not help, since the X display has no GPU |
+| Scrollbars in the noVNC tab; the window does not fit | the URL was opened without its query parameters | use the printed URL (`resize=scale`), or set noVNC ▸ Settings ▸ Scaling Mode to "Local Scaling"; `--screen WxH` runs the desktop at your own size |
+| Data Preparation cannot find `metadata.csv` | the dry run has no dataset unless `--data` is given; on Colab the paths are under `/content/BEHAV3D_demo` | paste the two paths printed by `colab_setup.print_paths()` - they are read back from `behav3d_parameters.yml` |
 
 ## Other hosting routes considered
 
