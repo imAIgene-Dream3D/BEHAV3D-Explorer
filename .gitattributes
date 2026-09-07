@@ -1,0 +1,17 @@
+# Keep LF in files that Linux executes or parses, even when they are edited or
+# checked out on Windows. A CRLF shebang makes the kernel look for an
+# interpreter literally named "bash\r" -> "/usr/bin/env: 'bash\r': No such file".
+*.sh            text eol=lf
+*.command       text eol=lf
+demo/colab/apt_packages.txt text eol=lf
+
+# Windows launchers must keep CRLF.
+*.bat           text eol=crlf
+
+# Notebooks and binary assets: never touch them.
+*.ipynb         -text
+*.png           binary
+*.jpg           binary
+*.gif           binary
+*.tif           binary
+*.zarr          binary
