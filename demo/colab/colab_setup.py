@@ -573,18 +573,6 @@ def print_paths(root=None):
     )
 
 
-def gpu_status():
-    """Report whether this runtime got a GPU. BEHAV3D runs fine without one."""
-    try:
-        return _run([
-            str(env_python()), "-c",
-            "import torch;print('GPU:', torch.cuda.get_device_name(0)) "
-            "if torch.cuda.is_available() else print('No GPU - running on CPU')",
-        ]).stdout.strip()
-    except Exception as exc:                      # environment not installed yet
-        return f"unknown ({exc})"
-
-
 def tail(name, n=30):
     log = LOG_DIR / f"{name}.log"
     if not log.exists():

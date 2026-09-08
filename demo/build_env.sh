@@ -7,8 +7,10 @@
 # 22.04 container (same base as Colab), and ship the result as a conda-pack
 # tarball that Colab restores in ~2 minutes.
 #
-#   ./demo/build_env.sh                 # CPU build  (~2.5 GB packed) - default
-#   ./demo/build_env.sh --cuda          # CUDA build (~5 GB packed), for GPU runtimes
+# The demo is CPU-only: the X display in Colab has no GPU, so a CUDA build would
+# only make the download bigger for no benefit.
+#
+#   ./demo/build_env.sh                 # CPU build (~2.5 GB packed)
 #   ./demo/build_env.sh --test          # after building: run the GUI locally on :6080
 #
 # Options for --test:
@@ -27,7 +29,6 @@
 # =============================================================================
 set -euo pipefail
 
-FLAVOUR="cpu"
 OUTPUT_DIR="dist"
 RUN_TEST=0
 SCREEN=""
@@ -35,20 +36,18 @@ DATA_DIR=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --cuda)    FLAVOUR="cuda" ;;
-    --cpu)     FLAVOUR="cpu" ;;
     --test)    RUN_TEST=1 ;;
     --screen)  SCREEN="$2"; shift ;;
     --data)    DATA_DIR="$2"; shift ;;
     --output)  OUTPUT_DIR="$2"; shift ;;
-    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
   shift
 done
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE="behav3d-demo-env:${FLAVOUR}"
+IMAGE="behav3d-demo-env:cpu"
 cd "$REPO_ROOT"
 
 if ! command -v docker >/dev/null; then
@@ -57,18 +56,14 @@ if ! command -v docker >/dev/null; then
   exit 1
 fi
 
-# CUDA 12.8 matches installation/install_behav3d.py (CUDA_VERSION = "cu128").
-if [[ "$FLAVOUR" == "cuda" ]]; then
-  TORCH_INDEX="--index-url https://download.pytorch.org/whl/cu128"
-else
-  TORCH_INDEX="--index-url https://download.pytorch.org/whl/cpu"
-fi
+# CPU-only: the Colab X display has no GPU to target.
+TORCH_INDEX="--index-url https://download.pytorch.org/whl/cpu"
 
 # The apt list is shared with the Colab bootstrap so the two never drift.
 # tr -d removes stray CRs in case the checkout brought Windows line endings.
 APT_PACKAGES="$(tr -d '\r' < demo/colab/apt_packages.txt | sed 's/#.*//' | tr '\n' ' ' | tr -s ' ')"
 
-echo "==> building ${IMAGE} (torch: ${FLAVOUR})"
+echo "==> building ${IMAGE} (torch: cpu)"
 DOCKERFILE="$(mktemp)"
 trap 'rm -f "$DOCKERFILE"' EXIT
 

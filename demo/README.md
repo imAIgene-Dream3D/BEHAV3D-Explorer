@@ -4,7 +4,7 @@ This folder lets anyone try the **real** BEHAV3D Explorer GUI in a browser, with
 for free, on Google Colab.
 
 ```
-      Colab VM (free, ~12.7 GB RAM, optional T4)
+      Colab VM (free, ~12.7 GB RAM, CPU-only)
  ┌───────────────────────────────────────────────────────────┐
  │  napari (PyQt5) + BEHAV3DWidget                           │
  │        │ renders into                                     │
@@ -48,10 +48,9 @@ result as a [conda-pack](https://conda.github.io/conda-pack/) archive that resto
 ```
 
 * Needs Docker. Takes 20–40 min the first time.
-* Produces `dist/behav3d-env.tar.gz` (~2.5 GB for the CPU build).
-* `--cuda` builds against CUDA 12.8 instead (matches `CUDA_VERSION` in
-  `installation/install_behav3d.py`). It is ~5 GB, so visitors wait longer for a GPU they may not
-  get. **Recommendation: ship the CPU build**, and keep a CUDA build around for workshop days.
+* Produces `dist/behav3d-env.tar.gz` (~2.5 GB).
+* CPU-only by design: the Colab X display has no GPU, so PyTorch is always the CPU wheel and a
+  CUDA build would only make the download bigger for no benefit.
 * The build fails loudly if `napari`, `torch`, `cellpose`, `pyopencl` or `qtpy` cannot be imported —
   better here than in front of a visitor.
 
@@ -179,9 +178,8 @@ Check, in order:
 1. Run all completes in under ~5 minutes on a cold runtime.
 2. The new tab shows the GUI and it is **interactive** — drag a slider, open a menu, switch tabs.
 3. The two paths printed by Step 2 load in the Data Preparation tab.
-4. Repeat once with a GPU runtime and once CPU-only (`Runtime ▸ Change runtime type`).
-5. Run the `start_cloudflared()` cell and confirm that route works too.
-6. Watch RAM in the Colab resource panel with the demo loaded — stay under ~10 GB.
+4. Run the `start_cloudflared()` cell and confirm that route works too.
+5. Watch RAM in the Colab resource panel with the demo loaded — stay under ~10 GB.
 
 > **While the demo lives on `feature/demo`**, that branch name is baked into: the Colab link above,
 > the badge below, the badge in the root `README.md`, the notebook's `REPO_REF` and its screenshot
@@ -197,8 +195,17 @@ Check, in order:
 ## Step 9 — Maintenance
 
 Rebuild and re-upload the tarball whenever `installation/environment.yml` changes; nothing else
-moves. `.github/workflows/build-demo-env.yml` does this on demand and pushes the result to the
-Hugging Face dataset repo (needs an `HF_TOKEN` repository secret with write access).
+moves. `.github/workflows/build-demo-env.yml` does this on demand (Actions ▸ *Build Colab demo
+environment* ▸ *Run workflow*) and pushes the result to the Hugging Face dataset repo. It needs:
+
+| Setting | Kind | Where | Value |
+|---|---|---|---|
+| `HF_TOKEN` | secret | Settings ▸ Secrets and variables ▸ Actions ▸ *Secrets* | a Hugging Face **write** token from <https://huggingface.co/settings/tokens> |
+| `HF_REPO` | variable | Settings ▸ Secrets and variables ▸ Actions ▸ *Variables* | the dataset repo id, e.g. `Erios12/behav3d-demo-env` |
+
+The dataset repo must already exist (`hf repo create behav3d-demo-env --type dataset`). The
+workflow uploads to `behav3d-env.tar.gz` at the repo root, which is the path
+`demo/colab/colab_setup.py` (`ENV_URL`) downloads.
 
 ---
 

@@ -3,19 +3,17 @@ name: Build Colab demo environment
 # Rebuilds the prebuilt conda environment that the Colab demo downloads
 # (demo/build_env.sh) and uploads it to the Hugging Face dataset repo.
 #
+# The demo is CPU-only (the Colab X display has no GPU), so there is a single
+# build flavour.
+#
 # Run it by hand from the Actions tab whenever installation/environment.yml
-# changes. Requires two repository secrets/variables:
+# changes. Requires two repository settings:
 #   HF_TOKEN  (secret)   - Hugging Face token with write access
-#   HF_REPO   (variable) - e.g. imAIgene-Dream3D/behav3d-demo-env
+#   HF_REPO   (variable) - e.g. Erios12/behav3d-demo-env
 
 on:
   workflow_dispatch:
     inputs:
-      flavour:
-        description: "PyTorch build to bundle"
-        type: choice
-        options: [cpu, cuda]
-        default: cpu
       upload:
         description: "Upload to Hugging Face after building"
         type: boolean
@@ -39,7 +37,7 @@ jobs:
       - name: Build the environment tarball
         run: |
           chmod +x demo/build_env.sh
-          ./demo/build_env.sh --${{ inputs.flavour }}
+          ./demo/build_env.sh
           ls -lh dist/
 
       - name: Upload to Hugging Face
@@ -53,8 +51,7 @@ jobs:
             exit 1
           fi
           pip install --quiet "huggingface_hub[cli]"
-          hf upload "$HF_REPO" dist/behav3d-env.tar.gz \
-            "behav3d-env${{ inputs.flavour == 'cuda' && '-cuda' || '' }}.tar.gz" \
+          hf upload "$HF_REPO" dist/behav3d-env.tar.gz behav3d-env.tar.gz \
             --repo-type dataset
 
       # Handy when you only want the artefact without publishing it.
@@ -62,6 +59,6 @@ jobs:
         if: ${{ !inputs.upload }}
         uses: actions/upload-artifact@v4
         with:
-          name: behav3d-env-${{ inputs.flavour }}
+          name: behav3d-env
           path: dist/behav3d-env.tar.gz
           retention-days: 7
