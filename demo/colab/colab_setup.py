@@ -52,7 +52,7 @@ DEMO_URL = os.environ.get(
 )
 
 REPO_URL = os.environ.get("BEHAV3D_REPO_URL", "https://github.com/imAIgene-Dream3D/BEHAV3D-Explorer.git")
-REPO_REF = os.environ.get("BEHAV3D_REPO_REF", "feature/demo")
+REPO_REF = os.environ.get("BEHAV3D_REPO_REF", "main")
 
 ENV_PREFIX = Path(os.environ.get("BEHAV3D_ENV_PREFIX", "/opt/behav3d"))
 REPO_DIR = Path(os.environ.get("BEHAV3D_REPO_DIR", "/content/BEHAV3D-Explorer"))

@@ -6,12 +6,21 @@ name: Build Colab demo environment
 # The demo is CPU-only (the Colab X display has no GPU), so there is a single
 # build flavour.
 #
-# Run it by hand from the Actions tab whenever installation/environment.yml
-# changes. Requires two repository settings:
+# Triggers:
+#   * automatically on a push to main that touches installation/environment.yml
+#     (or this workflow) - the tarball is always rebuilt and uploaded
+#   * manually from the Actions tab, with a toggle to skip the upload
+#
+# Requires two repository settings:
 #   HF_TOKEN  (secret)   - Hugging Face token with write access
 #   HF_REPO   (variable) - e.g. Erios12/behav3d-demo-env
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - installation/environment.yml
+      - .github/workflows/build-demo-env.yml
   workflow_dispatch:
     inputs:
       upload:
@@ -40,8 +49,9 @@ jobs:
           ./demo/build_env.sh
           ls -lh dist/
 
+      # Push events always upload; manual runs honour the toggle.
       - name: Upload to Hugging Face
-        if: ${{ inputs.upload }}
+        if: ${{ github.event_name == 'push' || inputs.upload }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_REPO: ${{ vars.HF_REPO }}
@@ -56,7 +66,7 @@ jobs:
 
       # Handy when you only want the artefact without publishing it.
       - name: Keep the tarball as a workflow artifact
-        if: ${{ !inputs.upload }}
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.upload }}
         uses: actions/upload-artifact@v4
         with:
           name: behav3d-env

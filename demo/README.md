@@ -167,10 +167,10 @@ The napari window with the BEHAV3D Explorer dock widget must appear. If it does 
 
 ## Step 7 — Test on Colab
 
-Push the branch, then open:
+Push to `main`, then open:
 
 ```
-https://colab.research.google.com/github/imAIgene-Dream3D/BEHAV3D-Explorer/blob/feature/demo/demo/colab/BEHAV3D_Explorer_Colab.ipynb
+https://colab.research.google.com/github/imAIgene-Dream3D/BEHAV3D-Explorer/blob/main/demo/colab/BEHAV3D_Explorer_Colab.ipynb
 ```
 
 Check, in order:
@@ -181,22 +181,28 @@ Check, in order:
 4. Run the `start_cloudflared()` cell and confirm that route works too.
 5. Watch RAM in the Colab resource panel with the demo loaded — stay under ~10 GB.
 
-> **While the demo lives on `feature/demo`**, that branch name is baked into: the Colab link above,
-> the badge below, the badge in the root `README.md`, the notebook's `REPO_REF` and its screenshot
-> URL, and `REPO_REF` in `colab_setup.py`. Swap all of them to `main` when the branch merges —
-> `grep -rn feature/demo` finds them. Nothing else is branch-aware.
+> The demo tracks `main`. The branch name `main` is baked into: the Colab link above, the badge
+> below, the badge in the root `README.md`, the notebook's `REPO_REF` and its screenshot URL, and
+> `REPO_REF` in `colab_setup.py` (`grep -rn "blob/main\|BEHAV3D_REPO_REF" demo` finds them). If you
+> ever stage demo changes on a separate branch, point those at it while testing, then back to `main`.
 
 ## Step 8 — Add the badge
 
 ```markdown
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/imAIgene-Dream3D/BEHAV3D-Explorer/blob/feature/demo/demo/colab/BEHAV3D_Explorer_Colab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/imAIgene-Dream3D/BEHAV3D-Explorer/blob/main/demo/colab/BEHAV3D_Explorer_Colab.ipynb)
 ```
 
 ## Step 9 — Maintenance
 
-Rebuild and re-upload the tarball whenever `installation/environment.yml` changes; nothing else
-moves. `.github/workflows/build-demo-env.yml` does this on demand (Actions ▸ *Build Colab demo
-environment* ▸ *Run workflow*) and pushes the result to the Hugging Face dataset repo. It needs:
+The tarball only needs rebuilding when `installation/environment.yml` changes; nothing else moves.
+`.github/workflows/build-demo-env.yml` handles it two ways:
+
+* **automatically** — any push to `main` that touches `installation/environment.yml` rebuilds the
+  tarball and re-uploads it to Hugging Face. No action needed.
+* **manually** — Actions ▸ *Build Colab demo environment* ▸ *Run workflow*, with a checkbox to
+  build without uploading (the tarball is then kept as a workflow artifact for 7 days).
+
+Both paths need these two repository settings:
 
 | Setting | Kind | Where | Value |
 |---|---|---|---|

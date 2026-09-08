@@ -19,7 +19,7 @@ There's no one-size-fits-all solution, so BEHAV3D-Explorer is built as a set of 
 
 ## Try it online, no installation
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/imAIgene-Dream3D/BEHAV3D-Explorer/blob/feature/demo/demo/colab/BEHAV3D_Explorer_Colab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/imAIgene-Dream3D/BEHAV3D-Explorer/blob/main/demo/colab/BEHAV3D_Explorer_Colab.ipynb)
 
 Want to look before you install? The badge above opens the **real** BEHAV3D Explorer GUI on a free
 Google Colab machine and streams the napari window to your browser: `Runtime > Run all`, wait ~4
