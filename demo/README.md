@@ -1,7 +1,41 @@
-# BEHAV3D Explorer — online demo (maintainer guide)
+# BEHAV3D Explorer — online demo
 
-This folder lets anyone try the **real** BEHAV3D Explorer GUI in a browser, with no installation,
-for free, on Google Colab.
+Try the **real** BEHAV3D Explorer GUI in your browser, with no installation, for free, on Google
+Colab. **Part 1** is for anyone who just wants to run it. **Part 2** is the maintainer guide for
+building and hosting the demo from source.
+
+---
+
+# Part 1 · Run the demo
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/imAIgene-Dream3D/BEHAV3D-Explorer/blob/main/demo/colab/BEHAV3D_Explorer_Colab.ipynb)
+
+1. Click the badge above — it opens `demo/colab/BEHAV3D_Explorer_Colab.ipynb` in Google Colab
+   (you need a Google account; nothing is installed on your computer).
+2. **Runtime ▸ Run all** and wait ~4 minutes while the prebuilt environment and the demo dataset
+   download.
+3. Click the link the last cell prints — the actual napari GUI opens in a **new browser tab**,
+   streamed from your own private Colab machine.
+
+**What you get.** The identical GUI to a local install — same window, menus, dock widget and layer
+list. The demo dataset ships with **segmentation and tracking already computed**, so you land
+straight on the interesting parts: visualisation, track editing, feature extraction and the
+behaviour analysis tabs.
+
+**Good to know.**
+
+* It runs entirely on **CPU** — no GPU runtime needed. Software OpenGL makes 2D views smooth and
+  the 3D view slow, so stay in 2D for a comfortable tour.
+* Colab disconnects after ~90 minutes idle (12 h max) and **saves nothing** — it is a test drive,
+  not a workspace. Download anything you want to keep.
+* To point the demo at **your own data**, see the *Using your own data* section at the bottom of
+  the notebook.
+
+For real analysis, [install BEHAV3D locally](../README.md#installation).
+
+---
+
+# Part 2 · Build the demo from source (maintainer guide)
 
 ```
       Colab VM (free, ~12.7 GB RAM, CPU-only)
@@ -17,9 +51,9 @@ for free, on Google Colab.
                      the visitor's browser tab
 ```
 
-The visitor sees the identical GUI to a local install — the same window, menus, dock widget and
-layer list. Nothing in `behav3d/` is reimplemented; only `$DISPLAY` differs. napari is started
-through the repository's own launcher, `napari/.config/launch_napari.py --internal`.
+The visitor sees the identical GUI to a local install. Nothing in `behav3d/` is reimplemented;
+only `$DISPLAY` differs. napari is started through the repository's own launcher,
+`napari/.config/launch_napari.py --internal`.
 
 ### Files here
 
@@ -181,18 +215,12 @@ Check, in order:
 4. Run the `start_cloudflared()` cell and confirm that route works too.
 5. Watch RAM in the Colab resource panel with the demo loaded — stay under ~10 GB.
 
-> The demo tracks `main`. The branch name `main` is baked into: the Colab link above, the badge
-> below, the badge in the root `README.md`, the notebook's `REPO_REF` and its screenshot URL, and
+> The demo tracks `main`. The branch name `main` is baked into: the Colab link above, the badge in
+> Part 1, the badge in the root `README.md`, and the notebook's `REPO_REF` + its screenshot URL, and
 > `REPO_REF` in `colab_setup.py` (`grep -rn "blob/main\|BEHAV3D_REPO_REF" demo` finds them). If you
 > ever stage demo changes on a separate branch, point those at it while testing, then back to `main`.
 
-## Step 8 — Add the badge
-
-```markdown
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/imAIgene-Dream3D/BEHAV3D-Explorer/blob/main/demo/colab/BEHAV3D_Explorer_Colab.ipynb)
-```
-
-## Step 9 — Maintenance
+## Step 8 — Maintenance
 
 The tarball only needs rebuilding when `installation/environment.yml` changes; nothing else moves.
 `.github/workflows/build-demo-env.yml` handles it two ways:
