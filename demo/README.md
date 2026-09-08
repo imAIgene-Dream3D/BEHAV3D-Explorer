@@ -28,6 +28,7 @@ through the repository's own launcher, `napari/.config/launch_napari.py --intern
 | `colab/BEHAV3D_Explorer_Colab.ipynb` | What visitors open. Three steps, "Run all". |
 | `colab/colab_setup.py` | All the machinery: apt, environment, data, display stack, launch, tunnel fallback, health checks. |
 | `colab/prepare_demo.py` | Rewrites the absolute paths inside a demo bundle for the machine it landed on. |
+| `colab/repair_env.py` | Reconciles packages that conda and pip disagree about after conda-pack. Run by the bootstrap; `--check` is the same comparison as a guard. |
 | `colab/apt_packages.txt` | The headless-Qt / OpenGL / VNC package list, shared by Colab and the Docker test. |
 | `build_env.sh` | Builds the prebuilt environment tarball (and can run a local dry-run of the GUI). |
 
@@ -208,6 +209,7 @@ Hugging Face dataset repo (needs an `HF_TOKEN` repository secret with write acce
 | `Could not load the Qt platform plugin "xcb"` | a missing `libxcb-*` | add it to `colab/apt_packages.txt`; run napari with `QT_DEBUG_PLUGINS=1` to see which one |
 | Tab opens but stays black / never connects | Colab's proxy dropped WebSockets | run the `start_cloudflared()` cell |
 | `no python at /opt/behav3d/bin/python` | the tarball is not a conda-pack archive, or it was built for a different base | rebuild with `demo/build_env.sh` |
+| `No module named 'numpy._utils._conversions'` / `'scipy._external'`, or any import error straight after unpacking | a pip step in the build downgraded a conda package (`cellpose==3.1.1.2` requires `numpy<2.1`, which walks numpy, scipy, numba and llvmlite back). conda-pack then packed conda's files next to pip's `.dist-info` | the bootstrap repairs this itself via `colab/repair_env.py`. To stop shipping it, pin `numpy>=2.0,<2.1` in the `micromamba create` step of `build_env.sh` so pip has nothing to downgrade |
 | napari exits immediately | see `colab_setup.tail("napari", 60)` | usually a missing library or a bad `PYTHONPATH` |
 | Session dies while loading the images | out of RAM | crop the demo bundle further |
 | Everything is very slow in 3D | software OpenGL (llvmpipe), expected | stay in 2D; a GPU runtime does not help, since the X display has no GPU |

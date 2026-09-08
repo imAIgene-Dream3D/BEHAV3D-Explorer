@@ -130,9 +130,53 @@ def _wait(predicate, timeout, what, interval=0.5):
     raise TimeoutError(f"timed out after {timeout:.0f}s waiting for {what}")
 
 
-def env_python():
+def env_python(prefix=None):
     """Path to the python interpreter of the unpacked ``behav3d`` environment."""
-    return ENV_PREFIX / "bin" / "python"
+    return Path(prefix or ENV_PREFIX) / "bin" / "python"
+
+
+#: Imports that must succeed before the environment is considered usable. They
+#: are the ones a conda-pack version mix breaks first (see repair_env.py), plus
+#: napari itself, which is what the launcher needs.
+_ENV_PROBE = "import numpy, scipy, skimage, numba, napari"
+
+
+def _env_healthy(prefix=None):
+    """Does the unpacked environment actually import?
+
+    ``bin/python`` existing is not enough: a half-unpacked environment, or one
+    conda-pack assembled from two versions of numpy/scipy, has an interpreter
+    that starts fine and fails on the first real import.
+    """
+    python = env_python(prefix)
+    if not python.exists():
+        return False
+    return _run([str(python), "-c", _ENV_PROBE], check=False).returncode == 0
+
+
+def _helper(name):
+    """Locate a sibling helper script, whether imported from the repo or copied."""
+    path = Path(__file__).with_name(name)
+    return path if path.exists() else REPO_DIR / "demo" / "colab" / name
+
+
+def repair_environment(prefix=None, check_only=False):
+    """Reconcile packages that conda and pip disagree about (see repair_env.py).
+
+    A conda-pack tarball built while pip had downgraded a conda package unpacks
+    as a mix of both versions. Repairing here means a visitor never sees it; on
+    a tarball whose build kept conda and pip in step there is nothing to do and
+    this costs only a metadata scan.
+    """
+    cmd = [str(env_python(prefix)), str(_helper("repair_env.py"))]
+    if check_only:
+        cmd.append("--check")
+    res = _run(cmd, check=False)
+    if res.stdout:
+        print(res.stdout.rstrip(), flush=True)
+    if res.returncode != 0 and not check_only:
+        _say("repair failed:\n" + res.stderr[-2000:])
+    return res.returncode == 0
 
 
 def _download(url, dest):
@@ -200,18 +244,32 @@ def install_system_packages(package_file=None):
 # ==========================================================================
 # step 2 - the conda environment (prebuilt tarball, never solved here)
 # ==========================================================================
-def install_environment(url=None, prefix=None):
+def install_environment(url=None, prefix=None, force=False):
     """Download + unpack the conda-pack'd ``behav3d`` environment.
 
     Solving ``installation/environment.yml`` inside Colab takes 10+ minutes and
     breaks whenever conda-forge moves; a packed tarball restores in ~2 minutes
     and is byte-identical to the environment the maintainer tested.
+
+    Every exit from here leaves either a *working* environment or no environment
+    at all, so a re-run after a failure retries instead of reusing the wreckage.
     """
     url = url or ENV_URL
     prefix = Path(prefix or ENV_PREFIX)
-    if env_python().exists():
+    if not force and _env_healthy(prefix):
         _say(f"environment already unpacked at {prefix} - skipping")
         return prefix
+
+    # Present but not importable: usually a conda-pack version mix, which is
+    # repairable in seconds. Worth trying before spending 2.5 GB of download.
+    if not force and env_python(prefix).exists():
+        _say(f"environment at {prefix} does not import - attempting repair")
+        if repair_environment(prefix) and _env_healthy(prefix):
+            _say("environment repaired")
+            return prefix
+        _say("repair did not help - removing and downloading a fresh copy")
+    if prefix.exists():
+        shutil.rmtree(prefix, ignore_errors=True)
 
     if "PLACEHOLDER" in url:
         raise RuntimeError(
@@ -224,18 +282,38 @@ def install_environment(url=None, prefix=None):
     _download(url, archive)
     _say(f"unpacking environment into {prefix} (~1-2 min) ...")
     prefix.mkdir(parents=True, exist_ok=True)
-    _extract(archive, prefix)
+    try:
+        _extract(archive, prefix)
+    except RuntimeError:
+        # ``wget --continue`` will happily append to a stale partial file; the
+        # only symptom is a corrupt archive. Fetch it once more from scratch.
+        _say("the archive did not extract - re-downloading it from scratch")
+        archive.unlink(missing_ok=True)
+        _download(url, archive)
+        _extract(archive, prefix)
 
     unpack = prefix / "bin" / "conda-unpack"
     if unpack.exists():
         _run([str(unpack)])          # rewrites the hard-coded build prefixes
-    if not env_python().exists():
+    if not env_python(prefix).exists():
+        shutil.rmtree(prefix, ignore_errors=True)
         raise RuntimeError(
-            f"no python at {env_python()} - is the tarball really a conda-pack archive?"
+            f"no python at {env_python(prefix)} - is the tarball really a conda-pack archive?"
+        )
+
+    repair_environment(prefix)       # no-op unless the tarball shipped a version mix
+    if not _env_healthy(prefix):
+        detail = _run([str(env_python(prefix)), "-c", _ENV_PROBE], check=False).stderr[-2000:]
+        shutil.rmtree(prefix, ignore_errors=True)   # so a re-run retries cleanly
+        raise RuntimeError(
+            "the unpacked environment does not import and could not be repaired. "
+            "Rebuild the tarball with demo/build_env.sh (see demo/README.md, "
+            f"Troubleshooting).\n--- probe ---\n{detail}"
         )
 
     archive.unlink(missing_ok=True)  # reclaim ~3 GB of Colab disk
-    ver = _run([str(env_python()), "-c", "import napari; print(napari.__version__)"]).stdout.strip()
+    ver = _run([str(env_python(prefix)), "-c",
+                "import napari; print(napari.__version__)"]).stdout.strip()
     _say(f"environment ready (napari {ver})")
     return prefix
 
@@ -279,9 +357,7 @@ def fetch_demo_data(url=None, dest=None):
     _extract(archive, dest.parent if _has_top_level_dir(archive, dest.name) else dest)
     archive.unlink(missing_ok=True)
 
-    prepare = Path(__file__).with_name("prepare_demo.py")
-    if not prepare.exists():
-        prepare = REPO_DIR / "demo" / "colab" / "prepare_demo.py"
+    prepare = _helper("prepare_demo.py")
     _say("rewriting dataset paths for this machine ...")
     print(_run([str(env_python()), str(prepare), "--root", str(dest)]).stdout.strip())
     return dest
@@ -519,7 +595,12 @@ def tail(name, n=30):
 def status():
     """One-glance health check - the first thing to run when something breaks."""
     xvfb_up = _run(["xdpyinfo", "-display", DISPLAY], check=False).returncode == 0
-    print(f"  environment   : {'ok' if env_python().exists() else 'MISSING'} ({ENV_PREFIX})")
+    if not env_python().exists():
+        env_state = "MISSING"
+    else:
+        # 'unusable' is the interesting case: present, starts, fails to import.
+        env_state = "ok" if _env_healthy() else "unusable - re-run install_environment()"
+    print(f"  environment   : {env_state} ({ENV_PREFIX})")
     print(f"  repository    : {'ok' if (REPO_DIR / '.git').exists() else 'MISSING'} ({REPO_DIR})")
     print(f"  demo data     : {'ok' if (DEMO_ROOT / 'metadata.csv').exists() else 'MISSING'} ({DEMO_ROOT})")
     print(f"  Xvfb {DISPLAY}     : {'ok' if xvfb_up else 'down'}")
