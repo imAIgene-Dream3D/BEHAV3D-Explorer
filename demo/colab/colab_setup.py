@@ -13,7 +13,7 @@ Typical use from the notebook::
 
     from colab_setup import bootstrap, open_viewer
     bootstrap()        # ~4 min on a cold runtime
-    open_viewer()      # opens the GUI in a new browser tab
+    open_viewer()      # embeds the GUI + opens a browser tab if pop-ups allowed
 
 Every step is idempotent: re-running a cell after a disconnect skips whatever
 is already in place.
@@ -468,8 +468,25 @@ def vnc_url(host="localhost"):
     return f"http://{host}:{WEB_PORT}{_VNC_PATH}"
 
 
-def open_viewer(in_tab=True, height=800):
-    """Open the GUI through Colab's own port proxy (new tab, or inline)."""
+def _scroll_here():
+    """Scroll the notebook to this cell's output (Colab runs this in the outer page)."""
+    try:
+        from IPython.display import Javascript, display  # type: ignore
+        display(Javascript(
+            "(document.querySelector('.cell.running, .code-cell.focused') "
+            "|| document.querySelectorAll('.cell')[document.querySelectorAll('.cell').length-1])"
+            ".scrollIntoView({behavior:'smooth', block:'start'});"
+        ))
+    except Exception:
+        pass
+
+
+def open_viewer(in_tab=True, height=900):
+    """Show the GUI: embed it inline *and* best-effort open a full browser tab.
+
+    ``in_tab`` is kept for backwards compatibility; ``in_tab=False`` skips the
+    new-tab attempt and only embeds the inline viewer.
+    """
     try:
         from google.colab import output  # type: ignore
     except ImportError:
@@ -477,11 +494,20 @@ def open_viewer(in_tab=True, height=800):
         return None
     if not _port_open(WEB_PORT):
         raise RuntimeError("noVNC is not running - call start_display() first")
+
+    handle = None
     if in_tab:
-        _say("opening BEHAV3D Explorer in a new browser tab "
-             "(allow pop-ups for colab.research.google.com if nothing happens)")
-        return output.serve_kernel_port_as_window(WEB_PORT, path=_VNC_PATH)
-    return output.serve_kernel_port_as_iframe(WEB_PORT, path=_VNC_PATH, height=str(height))
+        _say("Link to the BEHAV3D Explorer tab is below - if no tab opened on its "
+             "own, allow pop-ups for colab.research.google.com and click it")
+        handle = output.serve_kernel_port_as_window(
+            WEB_PORT, path=_VNC_PATH,
+            anchor_text="Link to the BEHAV3D Explorer tab",
+        )
+
+    _say("BEHAV3D Explorer is also embedded right below - no click needed")
+    output.serve_kernel_port_as_iframe(WEB_PORT, path=_VNC_PATH, height=str(height))
+    _scroll_here()
+    return handle
 
 
 def start_cloudflared(timeout=60):
