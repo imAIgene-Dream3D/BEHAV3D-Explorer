@@ -57,7 +57,18 @@ The **Before-death window** and the **Temporal Range** are two separate controls
 - **If death data is present:** **cumulative-to-death curves** (contact accumulation aligned to each target's time of death).
 - **If active-killing data is present:** an **active-killing dashboard** summarising killing-related metrics.
 
-A per-pair statistics CSV is written next to each per-pair PDF in `interaction_analysis/`, and a summary CSV accompanies the combined PDF.
+### Which CSV backs which plot
+
+`interaction_stats_<target>_vs_<effector>.csv` is a **per-sample track summary** (mean contact percentage, mean total contacts) — it cannot reproduce the time-resolved curves in the PDF. Those are exported separately to `interaction_analysis/plot_data/`:
+
+| PDF panel | Backing CSV |
+|---|---|
+| Cumulative contacts over time, all samples | `plot_data/cumulative_overall_<target>_vs_<effector>.csv` |
+| Cumulative contacts over time, per sample | `plot_data/cumulative_per_sample_<target>_vs_<effector>.csv` |
+| Alive vs dead, all samples | `plot_data/alive_vs_dead_overall_<target>_vs_<effector>.csv` |
+| Alive vs dead, per sample | `plot_data/alive_vs_dead_per_sample_<target>_vs_<effector>.csv` |
+
+Each carries `mean`, `std`, `count` and `sem` per timepoint, so the shaded band is `mean ± sem` and `count` tells you how many tracks back each point. The combined PDF is accompanied by `multi_organoid_interaction_summary*.csv` (per-track) and `multi_organoid_cumulative_to_death_curves_min*.csv` (the cumulative-to-death curve).
 
 ```{note}
 The death-aware panels (alive-vs-dead, cumulative-to-death, active-killing dashboard) only appear when the death classification exists. With no dead channel, the PDF simply contains the contact-accumulation plots.

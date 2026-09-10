@@ -536,6 +536,18 @@ def run_interaction_analysis(
             split_col=split_col,
         )
         
+        # The four PDF panels are time-resolved curves; the summary CSV above
+        # is a per-sample track summary and cannot reproduce them.
+        export_interaction_plot_data(
+            df=df,
+            results_dir=results_dir,
+            cell_type=cell_type,
+            interacting_type=ct,
+            cumulative_col=cumulative_col,
+            split_col=split_col,
+            has_dead_column=has_dead_column,
+        )
+
         # Save PDF
         pdf_path = results_dir / f"interaction_analysis_{cell_type}_vs_{ct}.pdf"
         save_plots_to_pdf(figs, pdf_path)
@@ -690,6 +702,70 @@ def calculate_interaction_stats(
     return pd.DataFrame(sample_stats)
 
 
+def _cumulative_contact_stats(df: pd.DataFrame, cumulative_col: str, by=None) -> pd.DataFrame:
+    """Per-timepoint mean / SEM of a cumulative contact column.
+
+    Single source for the interaction panels and for the CSVs exported next to
+    them, so a figure and its table can never disagree. ``by`` adds grouping
+    columns (sample name, survival status, line condition) ahead of position_t.
+    """
+    keys = list(by or []) + ["position_t"]
+    stats = (
+        df.groupby(keys)[cumulative_col]
+        .agg(["mean", "std", "count"])
+        .reset_index()
+    )
+    stats["sem"] = stats["std"] / np.sqrt(stats["count"])
+    return stats
+
+
+def export_interaction_plot_data(
+    df: pd.DataFrame,
+    results_dir: Path,
+    cell_type: str,
+    interacting_type: str,
+    cumulative_col: str,
+    split_col: str = None,
+    has_dead_column: bool = False,
+) -> Path:
+    """Write the per-timepoint curves behind each panel of the PDF.
+
+    ``interaction_stats_*.csv`` is a per-sample track summary and cannot
+    reconstruct the plotted curves, so each panel gets its own tidy table
+    built by the same helper the panel uses.
+    """
+    outdir = Path(results_dir, "plot_data")
+    outdir.mkdir(parents=True, exist_ok=True)
+    stem = f"{cell_type}_vs_{interacting_type}"
+
+    split = [split_col] if split_col and split_col in df.columns else []
+    tables = {
+        f"cumulative_overall_{stem}": _cumulative_contact_stats(
+            df, cumulative_col, by=split or None
+        ),
+        f"cumulative_per_sample_{stem}": _cumulative_contact_stats(
+            df, cumulative_col, by=["sample_name"]
+        ),
+    }
+    if has_dead_column and "survives" in df.columns:
+        tables[f"alive_vs_dead_overall_{stem}"] = _cumulative_contact_stats(
+            df, cumulative_col, by=split + ["survives"]
+        )
+        tables[f"alive_vs_dead_per_sample_{stem}"] = _cumulative_contact_stats(
+            df, cumulative_col, by=["sample_name", "survives"]
+        )
+
+    for name, table in tables.items():
+        # split_col is an internal scratch name ("__lc_<type>"); export it as
+        # the thing it actually holds.
+        if split_col and split_col in table.columns:
+            table = table.rename(columns={split_col: "line_condition"})
+        path = Path(outdir, f"{name}.csv")
+        table.to_csv(path, index=False)
+        print(f"   Plot data saved: {path.name}")
+    return outdir
+
+
 def generate_interaction_plots(
     df: pd.DataFrame,
     cell_type: str,
@@ -782,11 +858,7 @@ def plot_cumulative_overall(
         palette = sns.color_palette("tab10", max(len(groups), 1))
         for gi, gval in enumerate(groups):
             sub = df[df[split_col] == gval]
-            stats = (
-                sub.groupby("position_t")[cumulative_col]
-                .agg(["mean", "std", "count"]).reset_index()
-            )
-            stats["sem"] = stats["std"] / np.sqrt(stats["count"])
+            stats = _cumulative_contact_stats(sub, cumulative_col)
             n_g = sub.groupby(["sample_name", "TrackID"]).ngroups
             ax.plot(
                 stats["position_t"], stats["mean"],
@@ -801,8 +873,7 @@ def plot_cumulative_overall(
         ax.legend(title="Line condition", fontsize=9)
     else:
         # Calculate mean and SEM per timepoint
-        stats = df.groupby("position_t")[cumulative_col].agg(["mean", "std", "count"]).reset_index()
-        stats["sem"] = stats["std"] / np.sqrt(stats["count"])
+        stats = _cumulative_contact_stats(df, cumulative_col)
 
         ax.plot(stats["position_t"], stats["mean"], linewidth=2, color="steelblue")
         ax.fill_between(
@@ -847,10 +918,7 @@ def plot_cumulative_per_sample(
         df_sample = df[df["sample_name"] == sample]
         n_org_sample = df_sample.groupby(["sample_name", "TrackID"]).ngroups
         
-        stats_sample = df_sample.groupby("position_t")[cumulative_col].agg(
-            ["mean", "std", "count"]
-        ).reset_index()
-        stats_sample["sem"] = stats_sample["std"] / np.sqrt(stats_sample["count"])
+        stats_sample = _cumulative_contact_stats(df_sample, cumulative_col)
         
         ax.plot(stats_sample["position_t"], stats_sample["mean"], linewidth=2, color="steelblue")
         ax.fill_between(
@@ -908,11 +976,7 @@ def plot_alive_vs_dead_overall(
                 n_sub = sub.groupby(["sample_name", "TrackID"]).ngroups
                 if n_sub == 0:
                     continue
-                stats = (
-                    sub.groupby("position_t")[cumulative_col]
-                    .agg(["mean", "std", "count"]).reset_index()
-                )
-                stats["sem"] = stats["std"] / np.sqrt(stats["count"])
+                stats = _cumulative_contact_stats(sub, cumulative_col)
                 ax.plot(
                     stats["position_t"], stats["mean"],
                     linewidth=2, color=color_map[gval], linestyle=style,
@@ -945,10 +1009,7 @@ def plot_alive_vs_dead_overall(
         if n_subset == 0:
             continue
         
-        stats = df_subset.groupby("position_t")[cumulative_col].agg(
-            ["mean", "std", "count"]
-        ).reset_index()
-        stats["sem"] = stats["std"] / np.sqrt(stats["count"])
+        stats = _cumulative_contact_stats(df_subset, cumulative_col)
         
         ax.plot(
             stats["position_t"], stats["mean"], 
@@ -1006,10 +1067,7 @@ def plot_alive_vs_dead_per_sample(
             if n_subset == 0:
                 continue
             
-            stats = df_subset.groupby("position_t")[cumulative_col].agg(
-                ["mean", "std", "count"]
-            ).reset_index()
-            stats["sem"] = stats["std"] / np.sqrt(stats["count"])
+            stats = _cumulative_contact_stats(df_subset, cumulative_col)
             
             ax.plot(
                 stats["position_t"], stats["mean"],
