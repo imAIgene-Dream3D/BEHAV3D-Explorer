@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import datetime
 import time
 
 import json
@@ -50,6 +51,87 @@ def resolve_organoid_seg_path(sample_metadata, org_type, img_outdir, sample_name
     return Path(img_outdir, f"{sample_name}_{org_type}_tracked.zarr")
 
 
+def _export_plot_data(df, results_outdir, name):
+    """Write the exact frame a figure was drawn from, next to that figure.
+
+    Several Death Dynamics panels are drawn from frames that are derived on the
+    fly (grouped fractions, baseline-normalised and cummax-ed traces, flat-tail
+    extensions) and were previously never written out, so the figures could not
+    be reconstructed from any exported table. Every such frame now lands in
+    ``<results_outdir>/plot_data/<name>.csv``.
+    """
+    if df is None or len(df) == 0:
+        return None
+    outdir = Path(results_outdir, "plot_data")
+    outdir.mkdir(parents=True, exist_ok=True)
+    outpath = Path(outdir, f"{name}.csv")
+    df.to_csv(outpath, index=False)
+    print(f"- Plot data: {outpath}")
+    return outpath
+
+
+def _write_provenance(figure_outpath, source_paths, df_tracks=None, **parameters):
+    """Record what produced a figure, so a stale output can be recognised.
+
+    Death Dynamics outputs survive a re-run of Filtering, after which they
+    silently disagree with the track features sitting next to them. Storing each
+    source file's size and mtime lets the plugin (and the reader) tell.
+    """
+    try:
+        from importlib.metadata import version as _pkg_version
+        behav3d_version = _pkg_version("BEHAV3D")
+    except Exception:
+        behav3d_version = None
+
+    sources = []
+    for source_path in source_paths:
+        source_path = Path(source_path)
+        entry = {"path": str(source_path), "exists": source_path.exists()}
+        if entry["exists"]:
+            stat = source_path.stat()
+            entry["size_bytes"] = stat.st_size
+            entry["mtime"] = stat.st_mtime
+            entry["mtime_iso"] = datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds")
+        sources.append(entry)
+
+    record = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "behav3d_version": behav3d_version,
+        "sources": sources,
+        "parameters": parameters,
+    }
+    if df_tracks is not None and len(df_tracks):
+        record["input"] = {
+            "n_rows": int(len(df_tracks)),
+            "n_samples": int(df_tracks["sample_name"].nunique()),
+            "n_tracks": int(df_tracks.groupby(["sample_name", "TrackID"]).ngroups),
+        }
+
+    figure_outpath = Path(figure_outpath)
+    outpath = figure_outpath.with_name(f"{figure_outpath.stem}_provenance.json")
+    with open(outpath, "w", encoding="utf-8") as handle:
+        json.dump(record, handle, indent=2, default=str)
+    print(f"- Provenance: {outpath}")
+    return outpath
+
+
+def is_output_stale(figure_outpath, source_paths):
+    """True when any source is newer than ``figure_outpath``.
+
+    Used by the plugin panels to warn that Death Dynamics has not been re-run
+    since Filtering last rewrote the track features.
+    """
+    figure_outpath = Path(figure_outpath)
+    if not figure_outpath.exists():
+        return False
+    output_mtime = figure_outpath.stat().st_mtime
+    for source_path in source_paths:
+        source_path = Path(source_path)
+        if source_path.exists() and source_path.stat().st_mtime > output_mtime:
+            return True
+    return False
+
+
 def _compute_general_death_dynamics(df_tracks):
     """Per-sample, per-timepoint organoid counts and cumulative fractions.
 
@@ -63,9 +145,14 @@ def _compute_general_death_dynamics(df_tracks):
     is left untouched and raw values are accepted.
 
     Returns ``(df_general, grid, dead_at_t)`` where ``df_general`` has one row
-    per (``sample_name``, ``position_t``) with ``nr_alive`` / ``nr_dead`` /
-    ``nr_disappeared`` / ``nr_organoids_t0`` and the matching ``percentage_*``
-    columns. ``grid`` and ``dead_at_t`` are the per-track intermediates (grid
+    per (``sample_name``, ``position_t``). Every track sits in exactly one of
+    four states at each timepoint - ``nr_alive`` / ``nr_dead`` /
+    ``nr_disappeared`` / ``nr_not_yet_seen`` - which sum to
+    ``nr_organoids_total``, the denominator of the matching ``percentage_*``
+    columns. ``nr_organoids_t0`` (tracks present at t=0) is kept for reference
+    only; it is not the denominator, because a track that first appears later
+    would otherwise be counted in the numerator alone and push the fractions
+    above 1. ``grid`` and ``dead_at_t`` are the per-track intermediates (grid
     carries ``TrackID``) reused by the per-target grouped plots; combined
     callers can ignore them.
     """
@@ -105,19 +192,34 @@ def _compute_general_death_dynamics(df_tracks):
     seen_at_t = (t >= grid["t_first"]) & (t <= grid["t_last"])
     never_dead = grid["t_dead"].isna()
     disappeared_by_t = (t > grid["t_last"]) & never_dead
+    not_yet_seen_at_t = t < grid["t_first"]
     alive_at_t = seen_at_t & (~dead_at_t)
 
     counts = (
-        grid.assign(alive=alive_at_t, dead=dead_at_t, disappeared=disappeared_by_t)
+        grid.assign(
+            alive=alive_at_t,
+            dead=dead_at_t,
+            disappeared=disappeared_by_t,
+            not_yet_seen=not_yet_seen_at_t,
+        )
             .groupby(["sample_name", "position_t"])
             .agg(
                 nr_alive=("alive", "sum"),
                 nr_dead=("dead", "sum"),
                 nr_disappeared=("disappeared", "sum"),
+                nr_not_yet_seen=("not_yet_seen", "sum"),
             )
             .reset_index()
     )
 
+    # Denominator: every track in the sample cohort, not only those present at
+    # t=0. With the t=0 count, a track that first appears later would sit in the
+    # numerator but not the denominator, pushing the fractions above 1.
+    df_total = (
+        df.groupby("sample_name")
+        .agg(nr_organoids_total=("TrackID", "nunique"))
+        .reset_index()
+    )
     df_t0 = (
         df[df["position_t"] == 0]
         .groupby("sample_name")
@@ -125,10 +227,37 @@ def _compute_general_death_dynamics(df_tracks):
         .reset_index()
     )
 
-    df_general = counts.merge(df_t0, on="sample_name", how="left")
-    df_general["percentage_dead"]        = df_general["nr_dead"]        / df_general["nr_organoids_t0"]
-    df_general["percentage_alive"]       = df_general["nr_alive"]       / df_general["nr_organoids_t0"]
-    df_general["percentage_disappeared"] = df_general["nr_disappeared"] / df_general["nr_organoids_t0"]
+    df_general = counts.merge(df_total, on="sample_name", how="left")
+    df_general = df_general.merge(df_t0, on="sample_name", how="left")
+    df_general["nr_organoids_t0"] = df_general["nr_organoids_t0"].fillna(0).astype(int)
+
+    denom = df_general["nr_organoids_total"]
+    df_general["percentage_dead"]         = df_general["nr_dead"]         / denom
+    df_general["percentage_alive"]        = df_general["nr_alive"]        / denom
+    df_general["percentage_disappeared"]  = df_general["nr_disappeared"]  / denom
+    df_general["percentage_not_yet_seen"] = df_general["nr_not_yet_seen"] / denom
+
+    # The four states partition the cohort, so the counts must add up exactly.
+    state_sum = (
+        df_general["nr_alive"] + df_general["nr_dead"]
+        + df_general["nr_disappeared"] + df_general["nr_not_yet_seen"]
+    )
+    mismatched = df_general[state_sum != df_general["nr_organoids_total"]]
+    assert mismatched.empty, (
+        "Death-dynamics state counts do not partition the cohort for "
+        f"{sorted(mismatched['sample_name'].unique())}"
+    )
+
+    # Tracks that first appear after t=0 make the two cohort sizes disagree. Say
+    # so, because the headline fraction is then no longer "out of the targets
+    # tracked at the first timepoint".
+    late = df_general[df_general["nr_organoids_t0"] != df_general["nr_organoids_total"]]
+    for sample_name in sorted(late["sample_name"].unique()):
+        row = late[late["sample_name"] == sample_name].iloc[0]
+        print(
+            f"  Note: {sample_name} has {int(row['nr_organoids_total'])} tracks in total "
+            f"but only {int(row['nr_organoids_t0'])} at t=0; fractions use the total."
+        )
 
     return df_general, grid, dead_at_t
 
@@ -205,16 +334,25 @@ def run_organoid_analysis(
         return
     
     # death analysis (only runs if has_dead_data)
+    # min_periods=1 matches Feature Extraction and the multi-organoid comparison,
+    # so "smoothed_*" means the same thing everywhere and each track first
+    # timepoint carries a value instead of NaN.
+    if any(c in df_tracks.columns for c in
+           ("smoothed_nr_dead_mask_pixels", "smoothed_percentage_dead_mask")):
+        print("- Recomputing smoothed_* columns (rolling mean, window=5, min_periods=1)")
+
     df_tracks["smoothed_nr_dead_mask_pixels"] = smooth_value_over_time(
             df_tracks,
             column="nr_dead_mask_pixels",
-            groupby=["TrackID", "sample_name"]
+            groupby=["TrackID", "sample_name"],
+            min_periods=1
         )
-    
+
     df_tracks["smoothed_percentage_dead_mask"] = smooth_value_over_time(
             df_tracks,
             column="percentage_dead_mask",
-            groupby=["TrackID", "sample_name"]
+            groupby=["TrackID", "sample_name"],
+            min_periods=1
         )
     
     if pd.api.types.is_bool_dtype(df_tracks["dead"]):
@@ -232,7 +370,8 @@ def run_organoid_analysis(
         df_tracks["smoothed_mean_dead_dye"] = smooth_value_over_time(
                 df_tracks,
                 column="mean_dead_dye",
-                groupby=["TrackID", "sample_name"]
+                groupby=["TrackID", "sample_name"],
+                min_periods=1
             )
     else:
         df_tracks["smoothed_mean_dead_dye"] = np.nan
@@ -291,6 +430,12 @@ def run_organoid_analysis(
         )
         df_meansem_grouped.to_csv(df_meansem_grouped_outpath, sep=",", index=False)
 
+    # Page-1 panel A is drawn from `df_dead_at_t_grouped`, which no CSV carried
+    # before; export it so that panel is reproducible like the others.
+    _export_plot_data(
+        df_dead_at_t_grouped, results_outdir, f"grouped_fraction_dead_{org_type}"
+    )
+
     general_pdf_outpath = Path(results_outdir, f"combined_general_{org_type}_dynamics_analysis.pdf")
 
     plot_general_organoid_analysis(
@@ -308,6 +453,16 @@ def run_organoid_analysis(
             show_in_notebook=show_in_notebook,
             )
     
+    _write_provenance(
+        general_pdf_outpath,
+        source_paths=[df_tracks_path],
+        df_tracks=df_tracks,
+        org_type=org_type,
+        group_cols=list(group_cols) if group_cols else None,
+        dead_perc_threshold=dead_perc_threshold,
+        smoothing={"window_size": 5, "min_periods": 1},
+    )
+
     ## TODO PLOT A STACKED BARPLOT OVER TIME WHERE THE TOTAL BAR IS 
     # THE DETECTED ORGANOIDS AT THAT TIMEPOINT. 
     # STACK ALIVE AND DEAD. 
@@ -336,13 +491,36 @@ def run_organoid_analysis(
             index=False
         )
         
+        # Instantaneous view: organoids still tracked at THIS timepoint, and how
+        # many of those carry the dead flag right now. Deliberately not the same
+        # quantity as the combined page-1 curve: an organoid that dies and then
+        # stops being tracked leaves both numerator and denominator here, so
+        # this fraction can go down over time. `nr_organoids_present` used to be
+        # called `nr_organoids_t0`, which was simply wrong - it never held the
+        # t=0 count.
         df_experiment_sample = df_tracks_sample.groupby(["sample_name", "position_t"]).agg(
-            nr_organoids_t0=("TrackID", lambda x: x.nunique()),
+            nr_organoids_present=("TrackID", lambda x: x.nunique()),
             nr_dead=("TrackID", lambda x: x[df_tracks_sample.loc[x.index, "dead"]].nunique()),
         ).reset_index()
-        df_experiment_sample["nr_alive"]=df_experiment_sample["nr_organoids_t0"] - df_experiment_sample["nr_dead"]
-        df_experiment_sample["percentage_dead"]=df_experiment_sample["nr_dead"] / df_experiment_sample["nr_organoids_t0"]
+        df_experiment_sample["nr_alive"]=df_experiment_sample["nr_organoids_present"] - df_experiment_sample["nr_dead"]
+        df_experiment_sample["percentage_dead"]=df_experiment_sample["nr_dead"] / df_experiment_sample["nr_organoids_present"]
         df_experiment_sample["percentage_alive"]= 1.0 - df_experiment_sample["percentage_dead"]
+
+        # Cumulative view, taken verbatim from the shared helper, so this file
+        # also carries the numbers behind the combined page-1 curve and the two
+        # conventions can be compared row by row instead of being confused.
+        df_experiment_sample = df_experiment_sample.merge(
+            df_general.loc[
+                df_general["sample_name"] == sample_name,
+                ["sample_name", "position_t", "nr_organoids_total",
+                 "nr_dead", "percentage_dead"],
+            ].rename(columns={
+                "nr_dead": "nr_dead_cumulative",
+                "percentage_dead": "percentage_dead_cumulative",
+            }),
+            on=["sample_name", "position_t"],
+            how="left",
+        )
         
         df_experiment_outpath = Path(analysis_sample_outdir, f"{sample_name}_{org_type}_general_analysis.csv")
         df_experiment_sample.to_csv(
@@ -519,7 +697,11 @@ def plot_sample_organoid_analysis(
         ax.set_ylim(0, ymax)
         ax.set_xlim(0)
         ax.set_ylabel('')
-        ax.set_title(f'Alive Organoids')
+        # Named explicitly: this counts organoids still tracked and not yet
+        # flagged dead at each timepoint, which is not the cumulative curve on
+        # the combined overview page.
+        ax.set_title('Organoids still tracked and not yet flagged dead (instantaneous)',
+                     fontsize=10)
         
         # Secondary Y axis (percent scale)
         ax_percent = ax.twinx()
@@ -682,19 +864,41 @@ def _compute_per_sample_mean_sem_dynamics(df_tracks, value_cols, org_type=None):
     # ---- 1. cohort aggregate per (sample, timepoint) -------------------
     g = (
         df.groupby(["sample_name", time_col])[value_cols]
-          .agg(["mean", _sem])
+          .agg(["mean", _sem, "count"])
           .reset_index()
     )
     g.columns = ["_".join([c for c in col if c]).strip("_") for col in g.columns]
     # function name "_sem" produces "<col>__sem"; collapse to "<col>_sem"
     g = g.rename(columns={f"{c}__sem": f"{c}_sem" for c in value_cols})
+    # "<col>_count" -> "<col>_n": how many organoids back the mean at each
+    # timepoint. It falls as tracks end, so the curves carry survivor bias.
+    g = g.rename(columns={f"{c}_count": f"{c}_n" for c in value_cols})
     g = g.sort_values(["sample_name", time_col]).reset_index(drop=True)
 
-    # ---- 2. baseline-from-0 (per sample). SEM is constant-shift invariant
+    # ---- 2. baseline-from-0 (per sample). SEM is constant-shift invariant.
+    # "first" skips NaN, so a sample whose opening frame carries no data for a
+    # channel is anchored on its first timepoint that does. That is the sane
+    # fallback, but it must not be silent: <col>_from0_baseline_t records the
+    # timepoint whose mean was subtracted.
     for col in value_cols:
-        base = g.groupby("sample_name")[f"{col}_mean"].transform("first")
-        g[f"{col}_from0_mean"] = g[f"{col}_mean"] - base
+        mean_col = f"{col}_mean"
+        base = g.groupby("sample_name")[mean_col].transform("first")
+        base_t = (
+            g[time_col].where(g[mean_col].notna())
+            .groupby(g["sample_name"]).transform("first")
+        )
+        g[f"{col}_from0_mean"] = g[mean_col] - base
         g[f"{col}_from0_sem"] = g[f"{col}_sem"]
+        g[f"{col}_from0_baseline_t"] = base_t
+
+        first_t = g.groupby("sample_name")[time_col].transform("first")
+        shifted = g.loc[base_t.notna() & (base_t != first_t), "sample_name"].unique()
+        for sample_name in sorted(shifted):
+            used = g.loc[g["sample_name"] == sample_name, f"{col}_from0_baseline_t"].iloc[0]
+            print(
+                f"  Note: {sample_name} has no '{col}' data at its first timepoint; "
+                f"the from-baseline curve is anchored at t={int(used)} instead."
+            )
 
     return g.sort_values(["sample_name", time_col]).reset_index(drop=True)
 
@@ -717,11 +921,12 @@ def _compute_grouped_mean_sem_dynamics(df, value_cols, group_col="condition_grou
 
     g = (
         df.groupby([group_col, time_col])[value_cols]
-          .agg(["mean", _sem])
+          .agg(["mean", _sem, "count"])
           .reset_index()
     )
     g.columns = ["_".join([c for c in col if c]).strip("_") for col in g.columns]
     g = g.rename(columns={f"{c}__sem": f"{c}_sem" for c in value_cols})
+    g = g.rename(columns={f"{c}_count": f"{c}_n" for c in value_cols})
     return g.sort_values([group_col, time_col]).reset_index(drop=True)
 
 
@@ -1499,6 +1704,7 @@ def plot_grouped_dead_signal(
     screen_show_scale=1.0,
     band_alpha=0.18,
     show_in_notebook=True,
+    agg_data_out=None,
 ):
     """Plot grouped mean +/- SEM dead-signal dynamics (used for Plot 5a/5b).
 
@@ -1529,6 +1735,11 @@ def plot_grouped_dead_signal(
     )
 
     agg["sem_val"] = agg["std_val"] / np.sqrt(agg["n_val"].clip(lower=1))
+
+    # Hand the plotted aggregate back to the caller for export, mirroring the
+    # `curve_data_out` container used by the interaction analysis.
+    if agg_data_out is not None:
+        agg_data_out.append(agg.assign(feature=feature))
 
     for group_val, grp in agg.groupby(group_keys):
         grp = grp.sort_values("position_t")
@@ -1847,7 +2058,11 @@ def plot_multi_organoid_death_dynamics(
     # in [0, 1] regardless of group size, so groups are directly comparable.
     # Used by the small subpanel under Plots 4a/4b.
     # ------------------------------------------------------------------
-    df_combined["line_condition"] = np.nan
+    # object dtype, not float NaN: the loop below writes line-condition strings
+    # into slices of this column, which pandas 3 refuses on a float64 column.
+    df_combined["line_condition"] = pd.Series(
+        [None] * len(df_combined), index=df_combined.index, dtype="object"
+    )
     if metadata_df is not None and "sample_name" in metadata_df.columns:
         for org_type in df_combined["organoid_type"].unique():
             preferred = f"or_{org_type}_line_condition"
@@ -1875,6 +2090,10 @@ def plot_multi_organoid_death_dynamics(
             .mean()
             .reset_index(name="mean_cum_dead_fraction")
         )
+        # The subpanel nudges flat-at-zero curves upwards so they stay visible.
+        # Record the applied shift per row, so the exported table can be
+        # reconciled with the drawn line instead of silently disagreeing.
+        df_cumdead["plot_offset"] = 0.0
 
     # Plots
     pdf_path = results_outdir / "multi_organoid_death_dynamics_comparison.pdf"
@@ -2014,6 +2233,20 @@ def plot_multi_organoid_death_dynamics(
             style_levels_global = sorted(df_indiv[style_key].dropna().astype(str).unique())
             linestyles_cycle = ["-", "--", ":", "-.", (0, (5, 2)), (0, (1, 2))]
             type_style_map = {lvl: linestyles_cycle[i % len(linestyles_cycle)] for i, lvl in enumerate(style_levels_global)}
+
+            # Columns that actually drive plots 3/4/5; the full track table is
+            # far too wide to be a useful export.
+            _trace_cols = [
+                c for c in (
+                    "sample_name", "TrackID", "organoid_type", "line_condition",
+                    "position_t", "dead",
+                    "smoothed_percentage_dead_mask", "smoothed_nr_dead_mask_pixels",
+                )
+                if c in df_indiv.columns
+            ]
+            _export_plot_data(
+                df_indiv[_trace_cols], results_outdir, "per_organoid_traces_smoothed"
+            )
 
             # 3a) Smoothed percentage dead mask (auto-scaled so small values are visible)
             fig3a = plot_dead_signal_per_organoid(
@@ -2187,6 +2420,20 @@ def plot_multi_organoid_death_dynamics(
                 features=processed_feats,
                 group_cols=track_groups,
                 time_col="position_t",
+            )
+
+            _export_plot_data(
+                df_absolute[[c for c in _trace_cols if c in df_absolute.columns]],
+                results_outdir,
+                "per_organoid_traces_absolute_cummax",
+            )
+            _export_plot_data(
+                df_processed[[c for c in _trace_cols if c in df_processed.columns]],
+                results_outdir,
+                "per_organoid_traces_normalized_cummax",
+            )
+            _export_plot_data(
+                df_disappearance_markers, results_outdir, "disappearance_markers"
             )
 
             for feat, label in [
@@ -2409,6 +2656,15 @@ def plot_multi_organoid_death_dynamics(
                     for i, gk in enumerate(flat_groups)
                 }
 
+                # Mirror the cosmetic shift into the exported table: the drawn
+                # line is `mean_cum_dead_fraction + plot_offset`.
+                for (cond_val, org_val), offset in flat_offsets.items():
+                    df_cumdead.loc[
+                        (df_cumdead["line_condition"] == cond_val)
+                        & (df_cumdead["organoid_type"] == org_val),
+                        "plot_offset",
+                    ] = offset
+
                 for (cond_val, org_val) in draw_order:
                     grp = (
                         df_cumdead[
@@ -2442,9 +2698,12 @@ def plot_multi_organoid_death_dynamics(
                 ax_sub.grid(True, linestyle=":", alpha=0.5)
 
                 if flat_groups:
+                    _offset_names = ", ".join(
+                        f"{c}|{o} (+{flat_offsets[(c, o)]:.3g})" for c, o in flat_groups
+                    )
                     ax_sub.text(
                         0.01, 0.95,
-                        "* flat-zero curves slightly offset for visibility",
+                        f"* offset for visibility: {_offset_names}",
                         transform=ax_sub.transAxes,
                         fontsize=7,
                         style="italic",
@@ -2599,6 +2858,7 @@ def plot_multi_organoid_death_dynamics(
                 ("smoothed_percentage_dead_mask", "5a"),
                 ("smoothed_nr_dead_mask_pixels", "5b"),
             ]:
+                _agg_out = []
                 fig5 = plot_grouped_dead_signal(
                     df_processed=df_processed,
                     feature=feat,
@@ -2611,11 +2871,30 @@ def plot_multi_organoid_death_dynamics(
                     counts_annotation=counts_annotation,
                     screen_show_scale=screen_show_scale,
                     show_in_notebook=False,
+                    agg_data_out=_agg_out,
                 )
+                if _agg_out:
+                    _export_plot_data(
+                        _agg_out[0], results_outdir,
+                        f"grouped_dead_signal_meansem_{feat}",
+                    )
                 pdf.savefig(fig5, bbox_inches="tight")
                 plt.close(fig5)
 
                 
+    # Exported after plotting so `plot_offset` carries the shifts that were
+    # actually applied to the subpanel.
+    _export_plot_data(df_cumdead, results_outdir, "mean_cumulative_dead_fraction")
+
+    _write_provenance(
+        pdf_path,
+        source_paths=list(available_data.values()),
+        df_tracks=df_tracks_combined,
+        organoid_types=list(organoid_types),
+        dead_perc_threshold_map=dead_perc_threshold_map,
+        smoothing={"window_size": 5, "min_periods": 1},
+    )
+
     print(f"PDF saved to: {pdf_path}")
     print(f"### DONE\n")
     

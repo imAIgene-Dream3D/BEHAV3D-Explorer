@@ -18,6 +18,7 @@ location.
 from __future__ import annotations
 
 import datetime
+import json
 import sys
 import traceback
 from pathlib import Path
@@ -128,6 +129,30 @@ def _has_dead_channel(metadata) -> bool:
         and "dead_channel" in metadata.columns
         and metadata["dead_channel"].notna().any()
     )
+
+
+def _provenance_sources(pdf_path: Path, out_dir: Path) -> list:
+    """Files a results PDF was built from.
+
+    Reads the ``*_provenance.json`` written next to the PDF. Outputs produced
+    before provenance existed have none, so fall back to every filtered track
+    features CSV under the output dir.
+    """
+    prov = pdf_path.with_name(f"{pdf_path.stem}_provenance.json")
+    if prov.exists():
+        try:
+            record = json.loads(prov.read_text(encoding="utf-8"))
+            paths = [s.get("path") for s in record.get("sources", []) if s.get("path")]
+            if paths:
+                return paths
+        except Exception:
+            pass
+    return [
+        str(path)
+        for path in (out_dir / "analysis").glob(
+            "*/track_features/*_combined_track_features_filtered.csv"
+        )
+    ]
 
 
 def _filtered_csv(out_dir: Path, ct: str) -> Path:
@@ -1668,11 +1693,33 @@ class DeathDynamicsTab(QWidget):
             traceback.print_exc()
             self._log(f"Could not open PDF in napari: {e}")
 
+    def _warn_if_stale(self, pdf_path: Path):
+        """Log a warning when a results PDF predates its own input data.
+
+        Re-running Filtering rewrites the track features without touching the
+        Death Dynamics outputs, which then silently disagree with the data
+        sitting next to them.
+        """
+        from behav3d.analysis.organoid_analysis import is_output_stale
+
+        try:
+            out_dir = Path(self.metadata_loader.output_dir).expanduser()
+            sources = _provenance_sources(pdf_path, out_dir)
+            if sources and is_output_stale(pdf_path, sources):
+                self._log(
+                    f"⚠ {pdf_path.name} is older than the track features it was "
+                    f"built from — re-run this step to refresh it."
+                )
+        except Exception:
+            pass
+
     def _on_view_clicked(self, kind: str):
         candidates = self._view_pdf_candidates(kind)
         existing = [(lbl, p) for (lbl, p) in candidates if p.exists()]
         if not existing:
             return
+        for _lbl, path in existing:
+            self._warn_if_stale(path)
         if len(existing) == 1:
             self._open_pdf_in_napari(existing[0][1])
             return

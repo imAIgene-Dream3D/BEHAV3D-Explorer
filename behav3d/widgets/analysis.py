@@ -52,6 +52,7 @@ from behav3d.analysis.behavior.track.visualization.plots.exemplar_track_per_clus
 from behav3d.analysis.organoid_analysis import (
     run_organoid_analysis,
     plot_multi_organoid_death_dynamics,
+    is_output_stale,
     run_organoid_morphology_dead_analysis
 )
 from behav3d.analysis.filtering import filter_tracks, preview_track_length_before_filtering
@@ -2552,6 +2553,19 @@ class DeathDynamicsPanel:
             except Exception:
                 pass
 
+        # Existing results silently outlive a re-run of Filtering, so say when
+        # the PDF on disk is older than the CSV it was built from.
+        self.stale_html = widgets.HTML("")
+        if self.has_death_features and is_output_stale(
+            Path(self.output_dir, "analysis", self.cell_type, "results",
+                 f"combined_general_{self.cell_type}_dynamics_analysis.pdf"),
+            [p],
+        ):
+            self.stale_html.value = (
+                '<div style="color:#b00;">&#9888; Existing results are older than the '
+                'filtered track features - re-run to refresh them.</div>'
+            )
+
         self.btn_run = widgets.Button(
             description=f"Run {cell_type} death dynamics",
             button_style="warning",
@@ -2593,6 +2607,7 @@ class DeathDynamicsPanel:
         else:
             self.ui = widgets.VBox([
                 widgets.HTML(f'<b>{self.cell_type} Death Dynamics</b>'),
+                self.stale_html,
                 widgets.HTML('Group plots by condition column(s) (hold Ctrl/Cmd to select multiple):'),
                 self.select_group_cols,
                 widgets.HBox([self.btn_run, self.spinner_html]),
@@ -2630,13 +2645,15 @@ class MultiOrganoidDeathDynamicsPanel:
         self.organoid_types = organoid_types  # List of organoid type names
         self.output_dir = str(Path(self.metadata_loader.output_dir).expanduser())
         
-        # Check which organoid types have death dynamics data available
+        # Readiness is decided by the filtered track features, because that is
+        # what plot_multi_organoid_death_dynamics actually reads. Gating on
+        # combined_general_*.csv let a months-old file enable the run.
         self.available_data = {}
         for org_type in self.organoid_types:
-            csv_path = Path(self.output_dir, "analysis", org_type, "results", f"combined_general_{org_type}_dynamics_analysis.csv")
+            csv_path = self._filtered_csv_path(org_type)
             if csv_path.exists():
                 self.available_data[org_type] = csv_path
-        
+
         self.btn_refresh = widgets.Button(description="🔄 Refresh", button_style="info", layout=widgets.Layout(width="100px"))
         self.btn_refresh.on_click(self._on_refresh_clicked)
         self.btn_run = widgets.Button(description="Run Death Comparison Plot", button_style="warning", layout=widgets.Layout(width="250px"))
@@ -2665,21 +2682,37 @@ class MultiOrganoidDeathDynamicsPanel:
             self.out,
         ])
     
+    def _filtered_csv_path(self, org_type):
+        """The file the comparison actually reads."""
+        return Path(
+            self.output_dir, "analysis", org_type, "track_features",
+            f"BEHAV3D_{org_type}_combined_track_features_filtered.csv",
+        )
+
     def _refresh_status(self):
-        """Check which organoid types have death dynamics data available."""
+        """Check which organoid types have usable filtered track features."""
         self.available_data = {}
         for org_type in self.organoid_types:
-            csv_path = Path(self.output_dir, "analysis", org_type, "results", f"combined_general_{org_type}_dynamics_analysis.csv")
+            csv_path = self._filtered_csv_path(org_type)
             if csv_path.exists():
                 self.available_data[org_type] = csv_path
-        
+
         if len(self.available_data) < 1:
             missing = [ot for ot in self.organoid_types if ot not in self.available_data]
-            self.status_html.value = f'<div style="color:#b00;">Waiting for death dynamics data from: {", ".join(missing)}</div>'
+            self.status_html.value = f'<div style="color:#b00;">Waiting for filtered track features from: {", ".join(missing)}</div>'
             self.btn_run.disabled = True
         else:
             self.status_html.value = f'<div style="color:#080;">Ready: {", ".join(self.available_data.keys())}</div>'
             self.btn_run.disabled = False
+            pdf_path = Path(
+                self.output_dir, "analysis", "multi_organoid_comparison",
+                "multi_organoid_death_dynamics_comparison.pdf",
+            )
+            if is_output_stale(pdf_path, self.available_data.values()):
+                self.status_html.value += (
+                    '<div style="color:#b00;">&#9888; Existing comparison is older than the '
+                    'filtered track features - re-run to refresh it.</div>'
+                )
     
     def _on_refresh_clicked(self, *_):
         self._refresh_status()
