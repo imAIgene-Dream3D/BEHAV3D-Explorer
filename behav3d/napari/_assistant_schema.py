@@ -44,6 +44,7 @@ STEP_MAP = {
     "tracking_visualization": "visualization",
     "features": "feature_extraction",
     "track_filtering": "filtering",
+    "timepoint_range": "filtering",
     "analysis": "analysis",
     "backprojection": "analysis",
     "active_killing": "feature_extraction",
@@ -137,6 +138,10 @@ _DESCRIPTIONS: dict[str, str] = {
     "features_choice": "Which feature groups to compute for this cell category: movement, intensity, contact, death, morphology.",
     "contact_threshold": "Distance within which two cells count as interacting. 0 requires strict mask touching; larger values count proximity. Changing it requires feature extraction to be run again.",
     # filtering
+    "enabled": "Whether to restrict the analysis to an absolute timepoint window before any other filter runs. Global: it applies to every cell type, because cross-cell-type analyses break silently when cell types cover different spans.",
+    "start": "First timepoint to keep (inclusive) when the timepoint-range restriction is enabled.",
+    "end": "Last timepoint to keep (inclusive) when the timepoint-range restriction is enabled.",
+    "first_timepoint_from_range": "Per cell type. When a timepoint range is active, measure the min-size and dead first-timepoint filters at each track's first timepoint inside the range instead of its first frame of the whole movie. While off, those two filters are disabled.",
     "exp_duration": "Total experiment duration (hours); used to convert frame counts to time.",
     "exp_duration_enabled": "Whether to apply the experiment-duration based filter.",
     "min_track_length": "Optionally discard tracks shorter than this many timepoints. State analysis supports unequal lengths, but removing short tracks can reduce noise and computation.",

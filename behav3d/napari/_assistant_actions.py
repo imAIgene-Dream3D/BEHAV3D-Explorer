@@ -76,6 +76,10 @@ _LEAF_LABELS = {
     "features_choice": "feature groups",
     "contact_threshold": "contact distance",
     "dead_perc_threshold": "dead-pixel threshold",
+    "enabled": "use timepoint-range restriction",
+    "start": "timepoint-range start",
+    "end": "timepoint-range end",
+    "first_timepoint_from_range": "first-timepoint filters over the range",
     "exp_duration": "experiment duration",
     "exp_duration_enabled": "use experiment-duration filter",
     "min_track_length": "minimum track length",
@@ -348,6 +352,7 @@ def _fan_checkset(main_widget, tab_attr, category, dict_attr, selected):
 
 # --- Filtering tab (track_filtering.<category>.<field>) --------------------
 _FILTER_FIELD = {
+    "first_timepoint_from_range": "check_first_tp_from_range",
     "min_track_length": "spin_min_length",
     "min_track_length_enabled": "en_min_length",
     "max_track_length": "spin_max_length",
@@ -369,6 +374,44 @@ def _apply_filtering(main_widget, dotted: str, value):
 
 
 register_group_applier("track_filtering.", _apply_filtering)
+
+
+# --- Timepoint range (timepoint_range.<field>) ----------------------------
+# Global, not per cell type: the window must be identical for every cell type
+# or cross-cell-type analyses break silently. Setting it on any one panel
+# broadcasts to the rest via FilteringTab._broadcast_time_range.
+_TIME_RANGE_FIELD = {
+    "enabled": "en_time_range",
+    "start": "spin_t_start",
+    "end": "spin_t_end",
+}
+
+
+def _apply_timepoint_range(main_widget, dotted: str, value):
+    parts = dotted.split(".")           # timepoint_range.<field>
+    if len(parts) != 2:
+        return None
+    widget_attr = _TIME_RANGE_FIELD.get(parts[1])
+    if widget_attr is None:
+        return None
+
+    tab = getattr(main_widget, "filtering_tab", None)
+    panels = getattr(tab, "panels", {}) or {} if tab is not None else {}
+    if not panels:
+        return None
+    # One panel is enough: the tab mirrors the change onto the others.
+    panel = next(iter(panels.values()))
+    widget = getattr(panel, widget_attr, None)
+    if not _set_value(widget, value):
+        return None
+    try:
+        tab._broadcast_time_range(panel, persist=True)
+    except Exception:
+        pass
+    return widget
+
+
+register_group_applier("timepoint_range.", _apply_timepoint_range)
 
 
 # --- Tracking tab (tracking.<category>.{method | lap.* | trackpy.* | btrack.*}) ---

@@ -1095,10 +1095,14 @@ class ProcessingQueuePanel(QWidget):
                         break
 
             elif step.step_type == StepType.FILTER:
+                from behav3d.analysis.grouping import filtered_track_features_csv
+
                 analysis_dir = out_dir / "analysis"
                 if analysis_dir.exists():
                     for ct_dir in analysis_dir.iterdir():
-                        filt_csv = ct_dir / "track_features" / f"BEHAV3D_{ct_dir.name}_filtered_track_features.csv"
+                        # Canonical name written by filter_tracks; an earlier
+                        # spelling here never matched, so this warning never fired.
+                        filt_csv = filtered_track_features_csv(out_dir, ct_dir.name)
                         if filt_csv.exists():
                             warnings.append(f"Filtered data for {ct_dir.name}")
                             break

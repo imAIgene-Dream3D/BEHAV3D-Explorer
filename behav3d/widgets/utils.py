@@ -61,6 +61,17 @@ class Debouncer:
 CONFIG_PATH = Path("behav3d_config.yml")
 
 _DEFAULT_CONFIG = {
+    # Provenance block written by the zarr conversion step (original
+    # dimensions, the applied timepoint cut, resulting dimensions).
+    # Kept first so it stays at the top of behav3d_parameters.yml:
+    # every loader merges the file onto this dict and dumps it with
+    # sort_keys=False, so key order here is the file's key order.
+    "zarr_conversion": {},
+    # Global analysis timepoint window (see behav3d.io.parameters).
+    # Deliberately NOT inside "track_filtering": that dict is keyed by
+    # cell type and iterated as such, and the window must be identical
+    # for every cell type or cross-cell-type analyses break silently.
+    "timepoint_range": {"enabled": False, "start": 0, "end": 0},
     "seed": 42,
     "paths": {
         "metadata_csv": "",
@@ -276,6 +287,7 @@ _DEFAULT_CONFIG = {
     },
     "track_filtering": {
         "immune": {
+            "first_timepoint_from_range": False,
             "exp_duration": 24.0,
             "exp_duration_enabled": False,
             "min_track_length": 0,
@@ -284,6 +296,7 @@ _DEFAULT_CONFIG = {
             "max_track_length_enabled": True,
         },
         "organoid": {
+            "first_timepoint_from_range": False,
             "exp_duration_enabled": False,
             "exp_duration": 24.0,
             "min_track_length_enabled": False,
@@ -292,6 +305,7 @@ _DEFAULT_CONFIG = {
             "max_track_length": 999999,
         },
         "other": {
+            "first_timepoint_from_range": False,
             "exp_duration": 24.0,
             "exp_duration_enabled": False,
             "min_track_length": 0,

@@ -240,6 +240,7 @@ def _compact_experiment_config(config: dict) -> dict:
         item = {
             key: _json_value(settings[key])
             for key in (
+                "first_timepoint_from_range",
                 "exp_duration_enabled", "exp_duration", "min_length_enabled",
                 "min_track_length", "max_length_enabled", "max_track_length",
                 "split_long_tracks", "filter_min_size_t1", "min_size_t1",
@@ -251,6 +252,16 @@ def _compact_experiment_config(config: dict) -> dict:
             filtering_summary[str(cell_type)] = item
     if filtering_summary:
         summary["filtering"] = filtering_summary
+
+    # The analysis timepoint window is global (one block shared by every
+    # cell type), so it is summarised once rather than per cell type.
+    timepoint_range = config.get("timepoint_range")
+    if isinstance(timepoint_range, dict) and timepoint_range:
+        summary["timepoint_range"] = {
+            key: _json_value(timepoint_range[key])
+            for key in ("enabled", "start", "end")
+            if key in timepoint_range
+        }
 
     active_killing = config.get("active_killing")
     if not isinstance(active_killing, dict) and isinstance(filtering, dict):

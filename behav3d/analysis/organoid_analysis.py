@@ -220,8 +220,14 @@ def _compute_general_death_dynamics(df_tracks):
         .agg(nr_organoids_total=("TrackID", "nunique"))
         .reset_index()
     )
+    # The cohort at the sample's FIRST timepoint, which is not necessarily
+    # t=0: filtering may have restricted the analysis to a timepoint window
+    # (behav3d_parameters.yml -> timepoint_range), in which case a literal
+    # 'position_t == 0' matches nothing and this count comes out 0 for every
+    # sample.
+    first_t = df.groupby("sample_name")["position_t"].transform("min")
     df_t0 = (
-        df[df["position_t"] == 0]
+        df[df["position_t"] == first_t]
         .groupby("sample_name")
         .agg(nr_organoids_t0=("TrackID", "nunique"))
         .reset_index()

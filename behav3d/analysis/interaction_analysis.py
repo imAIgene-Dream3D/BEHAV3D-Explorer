@@ -307,6 +307,49 @@ def format_period_label(analysis_period_min) -> str:
 # Timepoint-based temporal range (position_t) — new API
 # ---------------------------------------------------------------------------
 
+def intersect_timepoint_windows(*windows):
+    """Intersect several ``(start, end)`` timepoint windows.
+
+    ``None`` (or a ``None`` bound) means "open", so it never narrows the
+    result. Returns ``None`` when nothing constrains the range.
+
+    Used to combine the GLOBAL filtering window (behav3d_parameters.yml ->
+    timepoint_range) with an explicit per-analysis period: the global
+    window is the floor, and the analysis period may only narrow further
+    inside it.
+    """
+    starts, ends = [], []
+    for w in windows:
+        start, end = _normalize_period_t(w)
+        if start is not None:
+            starts.append(start)
+        if end is not None:
+            ends.append(end)
+    if not starts and not ends:
+        return None
+    return (max(starts) if starts else None, min(ends) if ends else None)
+
+
+def _resolve_global_timepoint_range(output_dir, analysis_period_t):
+    """Narrow ``analysis_period_t`` by the global filtering window.
+
+    Active Killing deliberately scans the raw, unfiltered tracks so that it
+    never has to be re-run when the filtering window changes. Its outputs
+    are therefore a full-movie superset, and the window has to be applied
+    where they are READ - which is here, via the existing period_bounds
+    machinery.
+    """
+    try:
+        from behav3d.io.parameters import load_timepoint_range
+        global_range = load_timepoint_range(output_dir)
+    except Exception:
+        global_range = None
+    if global_range is None:
+        return analysis_period_t, None
+    resolved = intersect_timepoint_windows(global_range, analysis_period_t)
+    return resolved, global_range
+
+
 def _normalize_period_t(analysis_period_t):
     """Coerce a timepoint period spec to ``(start, end)`` ints/None."""
     if analysis_period_t is None:
@@ -1167,6 +1210,19 @@ def run_multi_organoid_interaction_comparison(
         _use_minutes_fallback = True
     else:
         _use_minutes_fallback = False
+
+    # Narrow by the global filtering window. The track CSVs this reads are
+    # already windowed by filter_tracks, but the active-killing event files
+    # are not (they are produced from the raw tracks on purpose), so without
+    # this the killing panels would count events from timepoints the user
+    # filtered out.
+    analysis_period_t, _global_range = _resolve_global_timepoint_range(
+        output_dir, analysis_period_t
+    )
+    if _global_range is not None:
+        print(f"  Global timepoint range {_global_range} applied; "
+              f"effective analysis period: "
+              f"{format_period_label_timepoints(analysis_period_t)}")
 
     output_dir = Path(output_dir)
     results_dir = output_dir / "analysis" / "multi_organoid_comparison"

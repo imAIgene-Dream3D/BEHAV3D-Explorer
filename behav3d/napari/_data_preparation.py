@@ -64,6 +64,17 @@ from behav3d.core.qt_help import HelpButton
 
 # Default config (mirrors widgets/utils.py _DEFAULT_CONFIG)
 _DEFAULT_CONFIG: dict = {
+    # Provenance block written by the zarr conversion step (original
+    # dimensions, the applied timepoint cut, resulting dimensions).
+    # Kept first so it stays at the top of behav3d_parameters.yml:
+    # every loader merges the file onto this dict and dumps it with
+    # sort_keys=False, so key order here is the file's key order.
+    "zarr_conversion": {},
+    # Global analysis timepoint window (see behav3d.io.parameters).
+    # Deliberately NOT inside "track_filtering": that dict is keyed by
+    # cell type and iterated as such, and the window must be identical
+    # for every cell type or cross-cell-type analyses break silently.
+    "timepoint_range": {"enabled": False, "start": 0, "end": 0},
     "seed": 42,
     "paths": {"metadata_csv": "", "output_dir": ""},
     "dim_order": {"default_apply_all": "TCZYX"},
@@ -194,19 +205,26 @@ class _MetadataLoadWorker(QThread):
 # ═══════════════════════════════════════════════════════════════════════════
 class _ZarrWorker(QThread):
     progress = Signal(str)
-    # (success, message, updated_metadata_df_or_None, originals_map_or_None)
+    # (success, message, updated_metadata_df_or_None, originals_map_or_None,
+    #  sample_records_or_None)
     # originals_map is a list of dicts: {"sample": str, "original": str, "new_zarr": str}
-    finished = Signal(bool, str, object, object)
+    # sample_records maps sample_name -> a provenance record built by
+    # behav3d.io.parameters.make_zarr_sample_record
+    finished = Signal(bool, str, object, object, object)
 
     def __init__(self, output_dir: str, metadata: pd.DataFrame,
                  t_start: int = None, t_end: int = None,
-                 n_workers: int = 1, parent=None):
+                 n_workers: int = 1, originals: dict = None, parent=None):
         super().__init__(parent)
         self.output_dir = output_dir
         self.metadata = metadata
         self.t_start = t_start
         self.t_end = t_end
         self.n_workers = n_workers
+        # sample_name -> {"shape": [...], "order": "TCZYX"}, snapshotted from
+        # the Dimension Order table before conversion (so no extra disk I/O,
+        # and it still reflects the raw file once raw_image_path is rewritten).
+        self.originals = originals or {}
 
     def run(self):
         try:
@@ -245,11 +263,43 @@ class _ZarrWorker(QThread):
                     "new_zarr": new_zarr,
                 })
 
-            self.finished.emit(True, "✅ Zarr conversion complete!", updated_md, originals_map)
+            # Record what each image looked like before and after the cut, so
+            # the applied timepoint range stays recoverable even after the
+            # originals are deleted. The resulting shape is read back from the
+            # produced .zarr (a metadata-only read) rather than computed, so it
+            # reflects what is actually on disk.
+            from behav3d.io.images import get_image_shape
+            from behav3d.io.parameters import make_zarr_sample_record
+
+            sample_records = {}
+            for entry in originals_map:
+                sample = entry["sample"]
+                original = self.originals.get(sample, {})
+                new_shape = None
+                if entry["new_zarr"]:
+                    try:
+                        new_shape = get_image_shape(Path(entry["new_zarr"]))
+                    except Exception:
+                        new_shape = None
+                sample_records[sample] = make_zarr_sample_record(
+                    original_shape=original.get("shape"),
+                    original_dimension_order=original.get("order"),
+                    new_shape=new_shape,
+                    mode="converted",
+                )
+
+            self.finished.emit(
+                True,
+                "✅ Zarr conversion complete!",
+                updated_md,
+                originals_map,
+                sample_records,
+            )
         except Exception:
             self.finished.emit(
                 False,
                 f"❌ Conversion failed:\n{traceback.format_exc()}",
+                None,
                 None,
                 None,
             )
@@ -258,8 +308,8 @@ class _ZarrWorker(QThread):
 class _ZarrClipWorker(QThread):
     """Clips already-converted .zarr files in place to a timepoint range."""
     progress = Signal(str)
-    # (success, message)
-    finished = Signal(bool, str)
+    # (success, message, sample_records_or_None)
+    finished = Signal(bool, str, object)
 
     def __init__(self, samples: list, t_start: int, t_end: int, parent=None):
         super().__init__(parent)
@@ -270,17 +320,49 @@ class _ZarrClipWorker(QThread):
 
     def run(self):
         try:
-            from behav3d.io.images import clip_zarr_timepoints
+            from behav3d.io.images import clip_zarr_timepoints, get_image_shape
+            from behav3d.io.parameters import (
+                ZARR_TARGET_AXIS_ORDER,
+                make_zarr_sample_record,
+            )
 
+            sample_records = {}
             for entry in self.samples:
                 sample_name = entry["sample_name"]
                 zarr_path = entry["zarr_path"]
                 self.progress.emit(f"Clipping '{sample_name}' to timepoints [{self.t_start}, {self.t_end}]…")
+                # Shape before/after the in-place clip, read straight from the
+                # store so the record matches what ends up on disk. These zarrs
+                # are always TCZYX (that is what the conversion writes).
+                try:
+                    shape_before = get_image_shape(Path(zarr_path))
+                except Exception:
+                    shape_before = None
                 clip_zarr_timepoints(zarr_path, t_start=self.t_start, t_end=self.t_end)
+                try:
+                    shape_after = get_image_shape(Path(zarr_path))
+                except Exception:
+                    shape_after = None
+                sample_records[sample_name] = make_zarr_sample_record(
+                    original_shape=shape_before,
+                    original_dimension_order=(
+                        ZARR_TARGET_AXIS_ORDER if shape_before is not None else None
+                    ),
+                    new_shape=shape_after,
+                    mode="clipped_existing",
+                )
 
-            self.finished.emit(True, f"✅ Clipped {len(self.samples)} existing zarr file(s)!")
+            self.finished.emit(
+                True,
+                f"✅ Clipped {len(self.samples)} existing zarr file(s)!",
+                sample_records,
+            )
         except Exception:
-            self.finished.emit(False, f"❌ Clipping existing zarr failed:\n{traceback.format_exc()}")
+            self.finished.emit(
+                False,
+                f"❌ Clipping existing zarr failed:\n{traceback.format_exc()}",
+                None,
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -302,6 +384,9 @@ class DataPreparationTab(QWidget):
         self._zarr_worker: _ZarrWorker | None = None
         self._zarr_clip_worker: _ZarrClipWorker | None = None
         self._sample_t_counts: dict = {}       # sample_name -> T count (Section 5)
+        # (t_start, t_end) of the conversion currently running, so the
+        # finished handlers can record the cut (the signals don't carry it).
+        self._zarr_cut: tuple = (None, None)
         self._edit_mode: bool = False          # True when editing loaded metadata
         self._loaded_csv_path: str = ""        # CSV path of last loaded metadata
         self._metadata_builder_dirty: bool = False
@@ -1795,6 +1880,70 @@ class DataPreparationTab(QWidget):
                 found.append({"sample_name": sample_name, "zarr_path": str(zarr_path)})
         return found
 
+    def _snapshot_original_shapes(self) -> dict:
+        """Per-sample ``{"shape": [...], "order": "..."}`` read off the
+        Dimension Order table.
+
+        The table already holds each raw image's shape and axis order (read
+        once at metadata load), so this needs no disk access. Taken before
+        conversion because ``convert_input_files_to_zarr`` rewrites
+        ``raw_image_path`` to point at the new .zarr.
+        """
+        import ast
+
+        originals = {}
+        for i in range(self.dim_table.rowCount()):
+            sample_item = self.dim_table.item(i, 0)
+            shape_item = self.dim_table.item(i, 1)
+            combo = self.dim_table.cellWidget(i, 2)
+            if sample_item is None:
+                continue
+            shape = None
+            if shape_item is not None and shape_item.text():
+                try:
+                    shape = list(ast.literal_eval(shape_item.text()))
+                except Exception:
+                    shape = None
+            originals[sample_item.text()] = {
+                "shape": shape,
+                "order": combo.currentText() if combo is not None else None,
+            }
+        return originals
+
+    def _persist_zarr_conversion(self, t_start, t_end, sample_records):
+        """Write the zarr cut + per-sample dimensions into the params file.
+
+        Recorded even when nothing was clipped, so the parameters file
+        always answers "what were the original dimensions" \u2014 the raw files
+        may be deleted right after this (see ``_offer_delete_originals``).
+        """
+        out_dir = self.output_dir_edit.text().strip() or self.output_dir
+        if not out_dir:
+            self._log("\u26a0 No output directory \u2014 zarr conversion details not recorded.")
+            return
+        try:
+            from behav3d.io.parameters import record_zarr_conversion, params_path_for
+
+            self.behav3d_parameters = record_zarr_conversion(
+                out_dir,
+                t_start=t_start,
+                t_end=t_end,
+                sample_records=sample_records or {},
+                params=self.behav3d_parameters,
+            )
+            if t_start is None and t_end is None:
+                self._log(
+                    f"\u2705 Recorded image dimensions (no clipping) in "
+                    f"{params_path_for(out_dir)}"
+                )
+            else:
+                self._log(
+                    f"\u2705 Recorded timepoint cut [{t_start}, {t_end}] and image "
+                    f"dimensions in {params_path_for(out_dir)}"
+                )
+        except Exception as e:
+            self._log(f"\u26a0 Could not record zarr conversion details: {e}")
+
     def _on_convert_zarr(self):
         if self._zarr_worker is not None:
             self._log("⚠️ Zarr conversion already running. Please wait.")
@@ -1809,6 +1958,10 @@ class DataPreparationTab(QWidget):
 
         # Save dim orders first
         self._save_dim_order()
+
+        # Snapshot the pre-conversion shapes while the table still
+        # describes the raw files.
+        originals = self._snapshot_original_shapes()
 
         # Gather clipping params
         t_start = None
@@ -1860,42 +2013,49 @@ class DataPreparationTab(QWidget):
                     )
                     self._zarr_clip_worker.progress.connect(lambda msg: self._log(msg))
                     self._zarr_clip_worker.finished.connect(
-                        lambda success, message: self._on_zarr_clip_done(
-                            success, message, out_dir, t_start, t_end
+                        lambda success, message, records: self._on_zarr_clip_done(
+                            success, message, out_dir, t_start, t_end,
+                            records, originals,
                         )
                     )
                     self._zarr_clip_worker.start()
                     return
                 # else: "Leave As-Is" clicked — fall through to normal conversion
 
-        self._start_zarr_conversion(out_dir, t_start, t_end)
+        self._start_zarr_conversion(out_dir, t_start, t_end, originals)
 
     def _on_zarr_clip_done(self, success: bool, message: str,
-                            out_dir: str, t_start, t_end):
+                            out_dir: str, t_start, t_end,
+                            sample_records=None, originals=None):
         self._log(message)
         if not success:
             self.zarr_btn.setEnabled(True)
             self.zarr_status.setText(message.split("\n")[0])
             return
+        # Record the clipped samples now; the conversion that follows
+        # merges its own samples into the same block.
+        self._persist_zarr_conversion(t_start, t_end, sample_records)
         # Continue with the normal conversion for any not-yet-converted samples.
-        self._start_zarr_conversion(out_dir, t_start, t_end)
+        self._start_zarr_conversion(out_dir, t_start, t_end, originals)
 
-    def _start_zarr_conversion(self, out_dir: str, t_start, t_end):
+    def _start_zarr_conversion(self, out_dir: str, t_start, t_end, originals=None):
         self.zarr_btn.setEnabled(False)
         self.zarr_status.setText("⏳ Converting…")
         self._log("Starting zarr conversion…")
 
+        self._zarr_cut = (t_start, t_end)
         self._zarr_worker = _ZarrWorker(
             out_dir, self.metadata.copy(),
             t_start=t_start, t_end=t_end,
-            n_workers=self.zarr_workers_spin.value(), parent=self
+            n_workers=self.zarr_workers_spin.value(),
+            originals=originals, parent=self
         )
         self._zarr_worker.progress.connect(lambda msg: self._log(msg))
         self._zarr_worker.finished.connect(self._on_zarr_done)
         self._zarr_worker.start()
 
     def _on_zarr_done(self, success: bool, message: str,
-                       updated_metadata, originals_map):
+                       updated_metadata, originals_map, sample_records=None):
         self.zarr_btn.setEnabled(True)
         self.zarr_status.setText(message.split("\n")[0])
         self._log(message)
@@ -1938,7 +2098,13 @@ class DataPreparationTab(QWidget):
         except Exception as e:
             self._log(f"⚠ Could not auto-reload converted metadata: {e}")
 
-        # 5) Offer deletion of the now-redundant original files
+        # 5) Record the applied cut and the original/new dimensions BEFORE
+        # offering to delete the originals, so the provenance survives
+        # even if the raw files are removed in the next step.
+        t_start, t_end = self._zarr_cut
+        self._persist_zarr_conversion(t_start, t_end, sample_records)
+
+        # 6) Offer deletion of the now-redundant original files
         self._offer_delete_originals(originals_map or [])
 
     # ══════════════════════════════════════════════════════════════════════
