@@ -76,6 +76,10 @@ _LEAF_LABELS = {
     "features_choice": "feature groups",
     "contact_threshold": "contact distance",
     "dead_perc_threshold": "dead-pixel threshold",
+    "enabled": "use timepoint-range restriction",
+    "start": "timepoint-range start",
+    "end": "timepoint-range end",
+    "first_timepoint_from_range": "first-timepoint filters over the range",
     "exp_duration": "experiment duration",
     "exp_duration_enabled": "use experiment-duration filter",
     "min_track_length": "minimum track length",
@@ -348,6 +352,7 @@ def _fan_checkset(main_widget, tab_attr, category, dict_attr, selected):
 
 # --- Filtering tab (track_filtering.<category>.<field>) --------------------
 _FILTER_FIELD = {
+    "first_timepoint_from_range": "check_first_tp_from_range",
     "min_track_length": "spin_min_length",
     "min_track_length_enabled": "en_min_length",
     "max_track_length": "spin_max_length",
@@ -369,6 +374,44 @@ def _apply_filtering(main_widget, dotted: str, value):
 
 
 register_group_applier("track_filtering.", _apply_filtering)
+
+
+# --- Timepoint range (timepoint_range.<field>) ----------------------------
+# Global, not per cell type: the window must be identical for every cell type
+# or cross-cell-type analyses break silently. Setting it on any one panel
+# broadcasts to the rest via FilteringTab._broadcast_time_range.
+_TIME_RANGE_FIELD = {
+    "enabled": "en_time_range",
+    "start": "spin_t_start",
+    "end": "spin_t_end",
+}
+
+
+def _apply_timepoint_range(main_widget, dotted: str, value):
+    parts = dotted.split(".")           # timepoint_range.<field>
+    if len(parts) != 2:
+        return None
+    widget_attr = _TIME_RANGE_FIELD.get(parts[1])
+    if widget_attr is None:
+        return None
+
+    tab = getattr(main_widget, "filtering_tab", None)
+    panels = getattr(tab, "panels", {}) or {} if tab is not None else {}
+    if not panels:
+        return None
+    # One panel is enough: the tab mirrors the change onto the others.
+    panel = next(iter(panels.values()))
+    widget = getattr(panel, widget_attr, None)
+    if not _set_value(widget, value):
+        return None
+    try:
+        tab._broadcast_time_range(panel, persist=True)
+    except Exception:
+        pass
+    return widget
+
+
+register_group_applier("timepoint_range.", _apply_timepoint_range)
 
 
 # --- Tracking tab (tracking.<category>.{method | lap.* | trackpy.* | btrack.*}) ---
@@ -868,6 +911,7 @@ def build_actions(
             view = str(args.get("view") or "")
             act = ProposedAction("open_analysis_view", view=view)
             labels = {
+                "population_dynamics": "Population Dynamics",
                 "death_dynamics": "Death Dynamics",
                 "interaction": "Interaction Analysis",
                 "invasiveness": "Invasiveness Analysis",
@@ -1527,6 +1571,16 @@ def apply_action(main_widget, action: ProposedAction) -> bool:
     return False
 
 
+def _inner_tab_index(tabs, widget, fallback: int) -> int:
+    """Index of ``widget`` in the Analysis inner tabs, so the order can change."""
+    index_of = getattr(tabs, "indexOf", None)
+    if widget is not None and index_of is not None:
+        index = index_of(widget)
+        if index >= 0:
+            return index
+    return fallback
+
+
 def _apply_open_analysis_view(main_widget, view: str) -> bool:
     if view == "active_killing":
         if not apply_navigate(main_widget, "feature_extraction"):
@@ -1547,10 +1601,15 @@ def _apply_open_analysis_view(main_widget, view: str) -> bool:
     if tabs is None:
         return False
     try:
-        if view in {"death_dynamics", "interaction", "invasiveness"}:
-            tabs.setCurrentIndex(0)
-            death_tab = getattr(analysis, "death_dynamics_tab", None)
-            start = getattr(death_tab, "_on_guided_start", None)
+        if view in {"population_dynamics", "death_dynamics", "interaction", "invasiveness"}:
+            pop_tab = getattr(analysis, "population_dynamics_tab", None)
+            tabs.setCurrentIndex(_inner_tab_index(tabs, pop_tab, 1))
+            if view == "population_dynamics":
+                show = getattr(pop_tab, "show_overview", None)
+                if show is not None:
+                    show()
+                return True
+            start = getattr(pop_tab, "_on_guided_start", None)
             if start is not None:
                 start(view)
             return True
@@ -1558,7 +1617,7 @@ def _apply_open_analysis_view(main_widget, view: str) -> bool:
         start = getattr(single, "_on_guided_start", None) if single is not None else None
         if start is None:
             return False
-        tabs.setCurrentIndex(1)
+        tabs.setCurrentIndex(_inner_tab_index(tabs, single, 2))
         start("state" if view == "behavioral_state" else "track")
         return True
     except Exception:
@@ -2070,7 +2129,8 @@ TOOL_SCHEMA = [
         "name": "open_analysis_view",
         "description": (
             "Open one specific Analysis view. Use this instead of navigating to the "
-            "generic Analysis tab when the user names Death Dynamics, Interaction "
+            "generic Analysis tab when the user names Population Dynamics (the tab "
+            "overview), Death Dynamics, Interaction "
             "Analysis, Invasiveness Analysis, Active Killing, Behavioral State, or "
             "State Trajectory. Active Killing opens its panel in Feature Extraction."
         ),
@@ -2080,6 +2140,7 @@ TOOL_SCHEMA = [
                 "view": {
                     "type": "string",
                     "enum": [
+                        "population_dynamics",
                         "death_dynamics",
                         "interaction",
                         "invasiveness",

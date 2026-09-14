@@ -12,6 +12,7 @@ from .utils import (
 )
 from behav3d.preprocessing import convert_input_files_to_zarr
 from behav3d.io.images import load_image, get_image_shape, get_image_dimension_order
+from behav3d.io.parameters import record_zarr_conversion, make_zarr_sample_record
 #from behav3d.preprocessing.unmixing import visualize_unmix
 #from behav3d.preprocessing.unmixing.signal_unmixing import signal_unmixing
 
@@ -100,6 +101,27 @@ def convert_zarr_button(metadata_loader, dim_order_widget):
             worker_count = max(1, int(n_workers.value))
             print(f"Using {worker_count} worker(s)")
 
+            # Snapshot each raw image's shape/axis order BEFORE converting:
+            # convert_input_files_to_zarr rewrites 'raw_image_path' to point
+            # at the new .zarr, and the originals may be deleted afterwards.
+            originals = {}
+            for _, row in metadata_loader.metadata.iterrows():
+                sample = str(row.get("sample_name", ""))
+                raw_path = Path(str(row.get("raw_image_path", "")).strip())
+                shape = order = None
+                if raw_path.exists():
+                    try:
+                        shape = get_image_shape(raw_path)
+                    except Exception:
+                        shape = None
+                    try:
+                        order = get_image_dimension_order(raw_path)
+                    except Exception:
+                        order = None
+                if order is None:
+                    order = row.get("dimension_order")
+                originals[sample] = {"shape": shape, "order": order}
+
             result = metadata_loader.metadata
             try:
                 result = convert_input_files_to_zarr(
@@ -115,6 +137,39 @@ def convert_zarr_button(metadata_loader, dim_order_widget):
                 metadata_loader.metadata = result
                 try:
                     metadata_loader.metadata.to_csv(metadata_loader.metadata_csv_path, index=False)
+                except Exception:
+                    traceback.print_exc()
+
+                # Record original dimensions, the applied cut and the
+                # resulting dimensions in behav3d_parameters.yml. Written
+                # even when no range was selected, so the file always
+                # documents what the images looked like going in.
+                try:
+                    sample_records = {}
+                    for _, row in metadata_loader.metadata.iterrows():
+                        sample = str(row.get("sample_name", ""))
+                        new_shape = None
+                        zarr_path = Path(str(row.get("raw_image_path", "")).strip())
+                        if zarr_path.exists():
+                            try:
+                                new_shape = get_image_shape(zarr_path)
+                            except Exception:
+                                new_shape = None
+                        original = originals.get(sample, {})
+                        sample_records[sample] = make_zarr_sample_record(
+                            original_shape=original.get("shape"),
+                            original_dimension_order=original.get("order"),
+                            new_shape=new_shape,
+                            mode="converted",
+                        )
+                    metadata_loader.behav3d_parameters = record_zarr_conversion(
+                        metadata_loader.output_dir,
+                        t_start=t_start,
+                        t_end=t_end,
+                        sample_records=sample_records,
+                        params=metadata_loader.behav3d_parameters,
+                    )
+                    print("Recorded image dimensions and timepoint cut in behav3d_parameters.yml")
                 except Exception:
                     traceback.print_exc()
                 print("Done ✅")

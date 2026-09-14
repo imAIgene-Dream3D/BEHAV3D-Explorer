@@ -925,6 +925,8 @@ def _filter_bindings(main_widget) -> list[dict]:
     panels = getattr(tab, "panels", {}) or {} if tab is not None else {}
     out = []
     specs = [
+        ("first_timepoint_filters.over_range", "First-timepoint filters over the range",
+         "check_first_tp_from_range", None),
         ("trim_to_maximum.enabled", "Trim full time series", "en_exp_duration", None),
         ("trim_to_maximum.timepoints", "Maximum timepoints", "spin_exp_duration", "timepoints"),
         ("minimum_length.enabled", "Filter short tracks", "en_min_length", None),
@@ -938,6 +940,20 @@ def _filter_bindings(main_widget) -> list[dict]:
         ("dead_at_first_timepoint.enabled", "Filter dead cells at first timepoint", "check_filter_dead_t0", None),
         ("time_unit", "Filtering time unit", "combo_time_type", None),
     ]
+    # The timepoint window is global: one binding, taken from any panel,
+    # rather than one per cell type.
+    if panels:
+        any_panel = next(iter(panels.values()))
+        for suffix, label, attr, unit in [
+            ("enabled", "Restrict to a timepoint range (all cell types)", "en_time_range", None),
+            ("start", "Timepoint range start", "spin_t_start", "timepoints"),
+            ("end", "Timepoint range end", "spin_t_end", "timepoints"),
+        ]:
+            widget = getattr(any_panel, attr, None)
+            if widget is not None:
+                out.append(_binding(f"timepoint_range.{suffix}", label, widget,
+                                    step="filtering", unit=unit))
+
     for cell_type, panel in panels.items():
         for suffix, label, attr, unit in specs:
             widget = getattr(panel, attr, None)

@@ -240,6 +240,7 @@ def _compact_experiment_config(config: dict) -> dict:
         item = {
             key: _json_value(settings[key])
             for key in (
+                "first_timepoint_from_range",
                 "exp_duration_enabled", "exp_duration", "min_length_enabled",
                 "min_track_length", "max_length_enabled", "max_track_length",
                 "split_long_tracks", "filter_min_size_t1", "min_size_t1",
@@ -251,6 +252,16 @@ def _compact_experiment_config(config: dict) -> dict:
             filtering_summary[str(cell_type)] = item
     if filtering_summary:
         summary["filtering"] = filtering_summary
+
+    # The analysis timepoint window is global (one block shared by every
+    # cell type), so it is summarised once rather than per cell type.
+    timepoint_range = config.get("timepoint_range")
+    if isinstance(timepoint_range, dict) and timepoint_range:
+        summary["timepoint_range"] = {
+            key: _json_value(timepoint_range[key])
+            for key in ("enabled", "start", "end")
+            if key in timepoint_range
+        }
 
     active_killing = config.get("active_killing")
     if not isinstance(active_killing, dict) and isinstance(filtering, dict):
@@ -1176,11 +1187,13 @@ def _analysis_state(main_widget) -> dict:
     if single is None:
         return {}
     outer_tabs = getattr(analysis, "inner_tabs", None)
-    outer_index = _safe(outer_tabs.currentIndex, 1) if outer_tabs is not None else 1
-    if outer_index != 1:
-        death_tab = getattr(analysis, "death_dynamics_tab", None)
-        focused = str(getattr(death_tab, "_focused_analysis_id", "") or "")
-        return {"view": focused or "death_dynamics"}
+    current = _safe(outer_tabs.currentWidget, single) if outer_tabs is not None else single
+    if current is not single:
+        pop_tab = getattr(analysis, "population_dynamics_tab", None)
+        if current is not pop_tab:
+            return {"view": "feature_backprojection"}
+        focused = str(getattr(pop_tab, "_focused_analysis_id", "") or "")
+        return {"view": focused or "population_dynamics_overview"}
     stack = getattr(single, "_stack", None)
     if stack is not None and _safe(stack.currentIndex, 0) == 0:
         view = "single_cell_overview"

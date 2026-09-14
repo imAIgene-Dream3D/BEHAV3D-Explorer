@@ -71,6 +71,55 @@ def filter_by_full_duration(df: pd.DataFrame,
     return df
 
 
+def filter_by_timepoint_range(df: pd.DataFrame,
+                              t_start=None,
+                              t_end=None,
+                              time_column="position_t"
+                              ) -> pd.DataFrame:
+    """
+    Restrict the data to an inclusive [t_start, t_end] window on time_column.
+
+    Unlike the length-based filters, the bounds are *absolute* timepoints
+    (or absolute hours when time_column is "time"), not durations: this
+    selects a slice of the experiment rather than a span within each track.
+
+    'relative_time' is deliberately left untouched, so a track that started
+    before the window keeps its original per-track numbering. Note that such
+    a track therefore has no 'relative_time == 1' row inside the window, and
+    the min-size-at-first-timepoint and dead-at-first-timepoint filters skip
+    it. Tracks that become too short are removed by min_track_length.
+    """
+    if t_start is not None:
+        df = df[df[time_column] >= t_start]
+    if t_end is not None:
+        df = df[df[time_column] <= t_end]
+    return df.reset_index(drop=True)
+
+
+def first_timepoint_mask(df: pd.DataFrame,
+                         group_cols=["TrackID", "sample_name"],
+                         time_column="position_t",
+                         from_window=False):
+    """Boolean mask selecting each track's first row.
+
+    ``from_window=False`` reproduces the historical behaviour: the first
+    frame of the *original film*, identified by ``relative_time == 1``.
+
+    ``from_window=True`` instead takes the first row each track still has
+    in the data as it now stands, i.e. inside the timepoint window
+    selected by :func:`filter_by_timepoint_range`. Use it so the
+    "first timepoint" filters stay meaningful when the movie has been
+    windowed: a track that began before the window no longer has a
+    ``relative_time == 1`` row and would otherwise be skipped entirely.
+
+    Either way this is *each track's own* first frame, not one fixed
+    timepoint, so tracks that appear part-way through are still evaluated.
+    """
+    if from_window:
+        return df[time_column] == df.groupby(group_cols)[time_column].transform("min")
+    return df["relative_time"] == 1
+
+
 def filter_minimal_track_length(
     df,
     min_track_length=None,
@@ -517,6 +566,9 @@ def filter_tracks(
     exp_duration=None,
     min_track_length=None,
     max_track_length=None,
+    t_range_start=None,
+    t_range_end=None,
+    first_timepoint_from_range=False,
     filter_t0_dead=True,
     min_size=None,
     cell_type="tcell",
@@ -529,6 +581,7 @@ def filter_tracks(
     This code filters tracks based on supplied parameters in the config.yml
     
     Filtering is based on:
+    - An absolute timepoint window (t_range_start/t_range_end), applied first
     - Maximum experiment length (exp_duration)    
     - Minimum track length (min_track_length)
     - Tracks starting at timepoint 1 with a dead dye mean over the dead_dye_threshold (dead_dye_threshold)
@@ -541,6 +594,20 @@ def filter_tracks(
     df_input_path : Path or str, optional
         Path to input CSV file. If provided, reads from this file instead of the default
         combined_track_features.csv. Useful for reading advanced features CSV with active killing data.
+    t_range_start, t_range_end : int or float, optional
+        Inclusive absolute timepoint window to restrict the analysis to,
+        applied before every other filter. Expressed in frames when
+        ``time_type`` is "frames" and in hours otherwise, matching the
+        column the other time filters run on. Unlike the length-based
+        parameters these are absolute positions, not durations, so they are
+        used as given (no 0-indexing adjustment).
+    first_timepoint_from_range : bool, default False
+        Make the two "first timepoint" filters (``min_size`` and
+        ``filter_t0_dead``) and the dead-dye-at-first-timepoint QC plot
+        evaluate each track at its first timepoint *inside* the selected
+        window instead of at ``relative_time == 1`` (the first frame of
+        the original movie). Only meaningful together with
+        ``t_range_start``/``t_range_end``; see :func:`first_timepoint_mask`.
 
     Output:
     - A .csv file containing filtered tracks from all experiments. Includes an
@@ -646,7 +713,10 @@ def filter_tracks(
         # Don't subtract 1 for real time units (hours)
     else:  # frames
         time_column="position_t"
-        # Only subtract 1 if values are not None (frames are 0-indexed)
+        # Only subtract 1 if values are not None (frames are 0-indexed).
+        # 't_range_start'/'t_range_end' are deliberately excluded: they are
+        # absolute frame positions, not durations, so they are compared
+        # against 'position_t' exactly as supplied.
         if exp_duration is not None:
             exp_duration = exp_duration - 1
         if min_track_length is not None:
@@ -661,6 +731,26 @@ def filter_tracks(
     )
 
     df_all_tracks_filt = df_all_tracks_filt.sort_values(resolved_group_cols + [time_column]).reset_index(drop=True)
+
+    # Restrict to an absolute timepoint window before anything else, so every
+    # filter below only sees (and measures spans within) the selected range.
+    applied_t_range = t_range_start is not None or t_range_end is not None
+    if applied_t_range:
+        print(f"- Restricting to {time_type} range [{t_range_start}, {t_range_end}]")
+        if first_timepoint_from_range:
+            print("  First-timepoint filters will use each track's "
+                  "first timepoint inside this range")
+        df_all_tracks_filt = filter_by_timepoint_range(
+            df=df_all_tracks_filt,
+            t_start=t_range_start,
+            t_end=t_range_end,
+            time_column=time_column,
+            )
+        df_track_counts=count_tracks(
+            df_all_tracks_filt,
+            col_name="nr_tracks_timepoint_range",
+            df_track_counts=df_track_counts
+            )
 
     df_all_tracks_filt=filter_by_full_duration(
         df=df_all_tracks_filt,
@@ -688,7 +778,14 @@ def filter_tracks(
             size_col = "volume"
 
     if min_size is not None and size_col is not None:
-        first_tp = df_all_tracks_filt[df_all_tracks_filt["relative_time"] == 1]
+        first_tp = df_all_tracks_filt[
+            first_timepoint_mask(
+                df_all_tracks_filt,
+                group_cols=resolved_group_cols,
+                time_column=time_column,
+                from_window=first_timepoint_from_range,
+            )
+        ]
         t1_small = first_tp[first_tp[size_col] < min_size][["TrackID", "sample_name"]]
         before = df_all_tracks_filt[["TrackID", "sample_name"]].drop_duplicates().shape[0]
         df_all_tracks_filt = df_all_tracks_filt[
@@ -762,7 +859,10 @@ def filter_tracks(
             rows_per_page=3,
             )
     
-    filter_cols=["nr_tracks_before_filtering", "nr_tracks_exp_duration", "nr_tracks_min_track_length"]
+    filter_cols=["nr_tracks_before_filtering"]
+    if applied_t_range:
+        filter_cols.append("nr_tracks_timepoint_range")
+    filter_cols += ["nr_tracks_exp_duration", "nr_tracks_min_track_length"]
     if min_size is not None and size_col is not None:
         filter_cols.append("nr_tracks_min_size")
 
@@ -781,17 +881,31 @@ def filter_tracks(
         plot_dead_dye_distr_t0_outpath = Path(qc_outdir, f"BEHAV3D_dead_dye_distribution_t0.pdf")
         print(f"- Plotting dead dye distribution at first timepoint to {plot_dead_dye_distr_t0_outpath}")
         plot_dead_dye_distribution(
-            df_all_tracks_filt[df_all_tracks_filt["relative_time"]==1],
+            df_all_tracks_filt[
+                first_timepoint_mask(
+                    df_all_tracks_filt,
+                    group_cols=resolved_group_cols,
+                    time_column=time_column,
+                    from_window=first_timepoint_from_range,
+                )
+            ],
             outpath=plot_dead_dye_distr_t0_outpath,
             nr_cols=2,
             rows_per_page=2
             )
     
-    # Filter out tracks that are dead at the first timepoint (relative_time==1)
+    # Filter out tracks that are dead at their first timepoint. That is
+    # 'relative_time == 1' normally, or the first row inside the selected
+    # window when first_timepoint_from_range is set.
     if filter_t0_dead and 'dead' in df_all_tracks_filt.columns:
         dead_t0 = df_all_tracks_filt[
-            (df_all_tracks_filt["relative_time"]==1) & 
-            (df_all_tracks_filt["dead"])
+            first_timepoint_mask(
+                df_all_tracks_filt,
+                group_cols=resolved_group_cols,
+                time_column=time_column,
+                from_window=first_timepoint_from_range,
+            )
+            & (df_all_tracks_filt["dead"])
             ][["TrackID","sample_name"]]
         df_all_tracks_filt=df_all_tracks_filt[~df_all_tracks_filt.set_index(['TrackID', 'sample_name']).index.isin(dead_t0.set_index(['TrackID', 'sample_name']).index)]
         filter_cols.append("nr_tracks_dead_t0")   

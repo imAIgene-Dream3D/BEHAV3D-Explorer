@@ -5,7 +5,7 @@ The Analysis section covers everything that happens **after tracking**: turning 
 ```{note}
 **Which route fits depends on your readout, not on your cell types.**
 
-- A reporter that **switches on and stays on** — a death dye, a differentiation or activation marker — belongs in [Population Analysis](population_analysis/index), which measures how that signal rises across a population and whether the rise follows contact.
+- A reporter that **switches on and stays on** — a death dye, a differentiation or activation marker — belongs in [Population Dynamics](population_analysis/index), which measures how that signal rises across a population and whether the rise follows contact.
 - A **fluctuating** reporter that goes on and off, such as calcium, belongs in [Single Cell](single_cell/index), where its intensity becomes a behavioural feature.
 - **No reporter at all** is fine: [Single Cell](single_cell/index) profiles cells on motility, morphology, or contact alone.
 
@@ -25,13 +25,13 @@ flowchart LR
 |---|---|---|
 | [Feature Extraction](feature_extraction) | 🧪 Feature Extraction | ✅ Documented |
 | [Filtering](filtering.md) | 🧹 Filtering | ✅ Documented |
-| [Population Analysis](population_analysis/index) — Death Dynamics, Interaction, Invasiveness, Active Killing | 📊 Analysis → 💀 Death Dynamics (Active Killing runs in 🧪 Feature Extraction) | ✅ Documented |
+| [Population Dynamics](population_analysis/index) — Death Dynamics, Interaction, Invasiveness, Active Killing | 📊 Analysis → 👥 Population Dynamics (Active Killing runs in 🧪 Feature Extraction) | ✅ Documented |
 | [Single Cell](single_cell/index) | 📊 Analysis → 🧬 Single Cell | ✅ State Classification · ✅ Track Classification |
 
 ```{note}
 The **📊 Analysis** tab has two sub-tabs:
 
-- **💀 Death Dynamics** — the population analyses: signal dynamics across target populations, target–effector interaction, and effector invasiveness (organoid/other vs immune/other). **Active Killing** completes this group but is configured in the 🧪 Feature Extraction tab.
+- **👥 Population Dynamics** — the population analyses: signal dynamics across target populations (Death Dynamics), target–effector interaction, and effector invasiveness (organoid/other vs immune/other). **Active Killing** completes this group but is configured in the 🧪 Feature Extraction tab.
 - **🧬 Single Cell** — per-cell behavioural classification: **🔬 State Classification** (per-timepoint HMM states) and **🛤️ Track Classification** (whole-trajectory DTW clustering with a trainable classifier).
 
 **Backprojection** — painting state / track-cluster labels back onto the raw images — is  the final step inside each Single Cell workflow (**State Classification → Step 4** and **Track Classification → Step 5**).

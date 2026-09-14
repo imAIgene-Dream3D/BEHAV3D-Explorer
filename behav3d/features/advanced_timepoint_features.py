@@ -861,8 +861,20 @@ def calculate_killing_dynamics_over_time(
         return pd.DataFrame()
     
     if time_bins is None:
-        max_t = df_immune_tracks["position_t"].max()
-        time_bins = [0, max_t // 4, max_t // 2, 3 * max_t // 4, max_t + 1]
+        # Quartiles of the OBSERVED span, not of [0, max]: the analysis may be
+        # restricted to a timepoint window that does not start at 0, in which
+        # case fixed 0-based edges leave the leading bins empty (and pd.cut is
+        # left-open, so the very first timepoint would fall outside them).
+        min_t = int(df_immune_tracks["position_t"].min())
+        max_t = int(df_immune_tracks["position_t"].max())
+        span = max(max_t - min_t, 1)
+        time_bins = [
+            min_t - 1,
+            min_t + span // 4,
+            min_t + span // 2,
+            min_t + 3 * span // 4,
+            max_t + 1,
+        ]
     
     df = df_killing_per_timepoint.copy()
     df["time_bin"] = pd.cut(

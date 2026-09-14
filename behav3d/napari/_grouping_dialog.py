@@ -1,7 +1,7 @@
 """Cell-type grouping dialog for the Analysis tab.
 
 Lets the user merge several already-*filtered* cell-type populations under
-a single name for use in Death Dynamics / Single Cell. Group membership is
+a single name for use in Population Dynamics / Single Cell. Group membership is
 persisted to ``behav3d_parameters.yml`` (``cell_type_groups``) — metadata.csv
 is never touched, so multicolor merged-tracking outputs (which must still
 be processed through Feature Extraction + Filtering as their own real cell
@@ -56,7 +56,7 @@ class GroupBuilderDialog(QDialog):
     Emits :pyattr:`group_created` with the merged cell-type id when the
     user successfully creates a new group, and :pyattr:`group_removed` when
     an existing group is deleted. The host (the Analysis tab) listens to
-    these signals to refresh the Death Dynamics / Single Cell cell-type
+    these signals to refresh the Population Dynamics / Single Cell cell-type
     dropdowns.
     """
 
@@ -87,7 +87,7 @@ class GroupBuilderDialog(QDialog):
             "Select cell types that have already been <b>filtered</b>, give "
             "the group a name, and click <b>Create Group</b>. The group "
             "merges each member's filtered track-features CSV into a single "
-            "population, selectable in Death Dynamics and Single Cell "
+            "population, selectable in Population Dynamics and Single Cell "
             "alongside the original cell types. Metadata is not modified."
         )
         instructions.setWordWrap(True)
@@ -539,7 +539,7 @@ class GroupBuilderDialog(QDialog):
                 "Confirm Removal",
                 f"Remove group '{group_id}' from the configuration?\n\n"
                 "The merged CSV on disk will be kept, but the group will no "
-                "longer be offered as a population in Death Dynamics / "
+                "longer be offered as a population in Population Dynamics / "
                 "Single Cell.\n\nThis cannot be undone.",
                 QMessageBox.Yes | QMessageBox.Cancel,
                 QMessageBox.Cancel,

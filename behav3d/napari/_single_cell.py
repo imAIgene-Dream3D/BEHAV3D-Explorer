@@ -109,7 +109,7 @@ def _detect_sc_cell_types(metadata_loader) -> list[str]:
                 oth.append(ct)
 
         # Every group is offered here regardless of its best-effort display
-        # category — groups exist specifically for Death Dynamics/Single
+        # category — groups exist specifically for Population Dynamics/Single
         # Cell use (see behav3d/analysis/grouping.py), so an "organoid"
         # category (picked from the group's first member, for icon/bucket
         # purposes only) must never cause a group to be silently dropped.

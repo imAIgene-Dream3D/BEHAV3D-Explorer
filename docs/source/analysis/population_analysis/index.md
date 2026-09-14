@@ -1,12 +1,12 @@
-# 💀 Population Analysis
+# 👥 Population Dynamics
 
-**Population analysis** is the family of analyses that describe what happens to whole populations and to the contacts between them, as opposed to [Single Cell](../single_cell/index), which classifies the behaviour of individual cells. It answers four related questions about your **target** populations (organoid or "other" cell types) and the **effector** populations that contact them (immune or "other" cell types):
+**Population Dynamics** is the family of analyses that describe what happens to whole populations and to the contacts between them, as opposed to [Single Cell](../single_cell/index), which classifies the behaviour of individual cells. It answers four related questions about your **target** populations (organoid or "other" cell types) and the **effector** populations that contact them (immune or "other" cell types):
 
 | Page | Question it answers | Where you run it |
 |---|---|---|
-| [💀 Death Dynamics](death_dynamics) | How, and how fast, does a signal rise across each target population over the movie? | 📊 Analysis tab, Step 1 |
-| [🤝 Interaction Analysis](interaction_analysis.md) | How do contacts between targets and effectors relate to that signal, and to effector behaviour? | 📊 Analysis tab, Step 2 |
-| [🫳 Invasiveness Analysis](invasiveness) | How deeply does an effector engage the target's surface, from the *effector's* perspective? | 📊 Analysis tab, Step 3 |
+| [💀 Death Dynamics](death_dynamics) | How, and how fast, does a signal rise across each target population over the movie? | 📊 Analysis → 👥 Population Dynamics, Step 1 |
+| [🤝 Interaction Analysis](interaction_analysis.md) | How do contacts between targets and effectors relate to that signal, and to effector behaviour? | 📊 Analysis → 👥 Population Dynamics, Step 2 |
+| [🫳 Invasiveness Analysis](invasiveness) | How deeply does an effector engage the target's surface, from the *effector's* perspective? | 📊 Analysis → 👥 Population Dynamics, Step 3 |
 | [🎯 Active Killing](active_killing) | Which *individual* effectors are associated with a signal rise in the target they touched? | 🧪 Feature Extraction tab |
 
 ```{note}
@@ -16,8 +16,6 @@
 The first three steps read the **filtered** per-timepoint feature tables produced by the [Filtering](../filtering.md) tab, so you must run Feature Extraction and Filtering for every cell type involved before anything here will turn on.
 
 ```{important}
-The 📊 Analysis tab currently labels its first sub-tab **💀 Death Dynamics**. The documentation calls this group *Population Analysis*, because the same machinery covers signals other than death and because Active Killing belongs with it conceptually while living in another tab.
-
 **These analyses are not restricted to cell death.** What they actually compute is the rise of a per-object signal — across a population over time (Death Dynamics), and in association with contact (Active Killing, configured in Feature Extraction). Cell death measured with a dye is the original and canonical use, which is why the controls are named after it.
 
 To use them with **any reporter that switches on** — a differentiation marker, an activation reporter, a stress or damage signal — declare that reporter's channel as `dead_channel` in [Data Preparation](../../data_preparation). Everything downstream then works unchanged; read "dead" as "the signal has risen past your threshold".
@@ -25,7 +23,7 @@ To use them with **any reporter that switches on** — a differentiation marker,
 This applies only to reporters that **go up and stay up**. A **fluctuating** reporter that switches on and off, such as calcium, is not suited to these analyses — use [Single Cell](../single_cell/index) analysis instead, where the reporter intensity becomes a behavioural feature.
 ```
 
-![Death Dynamics sub-tab](../../_static/screenshots/death_dynamics_tab.png)
+![Population Dynamics sub-tab](../../_static/screenshots/population_dynamics_tab.png)
 
 ```{note}
 *Screenshot placeholder.*

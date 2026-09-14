@@ -1271,7 +1271,7 @@ def _ambiguous_contact_analysis_case() -> dict:
             "role": "user",
             "content": "I want to look at contact between my populations.",
         }],
-        "context": _context("analysis", [], analysis={"view": "death_dynamics"}),
+        "context": _context("analysis", [], analysis={"view": "population_dynamics_overview"}),
         "check": _check_ambiguous_contact_analysis,
     }
 
@@ -2162,7 +2162,7 @@ def _choose_analysis_case() -> dict:
         "context": _context(
             "analysis", [],
             assistant_session={"intent": "choose_analysis"},
-            analysis={"view": "death_dynamics"},
+            analysis={"view": "population_dynamics_overview"},
             metadata={
                 "loaded": True,
                 "n_samples": 8,
@@ -2263,6 +2263,21 @@ def _open_death_dynamics_case() -> dict:
             analysis={"view": "behavioral_state"},
         ),
         "check": _check_open_death_dynamics,
+    }
+
+
+def _open_population_dynamics_case() -> dict:
+    return {
+        "name": "population_dynamics_opens_tab_overview",
+        "messages": [{
+            "role": "user",
+            "content": "Can you take me to Population Dynamics?",
+        }],
+        "context": _context(
+            "analysis", [],
+            analysis={"view": "behavioral_state"},
+        ),
+        "check": _check_open_population_dynamics,
     }
 
 
@@ -2414,6 +2429,15 @@ def _check_metadata_not_added(result: dict) -> list[str]:
     if re.search(r"\bline value\s+none\b", text):
         errors.append("still recommended None as the line value")
     return errors
+
+
+def _check_open_population_dynamics(result: dict) -> list[str]:
+    calls = _tool_calls(result, "open_analysis_view")
+    if calls != [{"view": "population_dynamics"}]:
+        return [f"expected Population Dynamics tab action, got {result['calls']!r}"]
+    if _tool_calls(result, "navigate_to_step"):
+        return ["used generic Analysis navigation instead of the named tab"]
+    return []
 
 
 def _check_open_death_dynamics(result: dict) -> list[str]:
@@ -3522,6 +3546,7 @@ SCENARIOS = [
     _analysis_question_on_metadata_tab_case,
     _metadata_not_added_case,
     _open_death_dynamics_case,
+    _open_population_dynamics_case,
     _metadata_setup_case,
     _pixel_fill_case,
     _metadata_structure_correction_case,

@@ -3,7 +3,8 @@ BEHAV3D napari plugin – Analysis Tab.
 
 Top-level tab wrapping two sub-tabs:
 
-- **Death Dynamics** — multi-select target cell-type picker, per-target /
+- **Population Dynamics** — Death Dynamics, Interaction and Invasiveness:
+  multi-select target cell-type picker, per-target /
   combined death dynamics, interaction analysis with its own interaction
   cell-type picker, per-step Advanced Settings, and processing-queue
   integration. Disabled when no dead channel is configured in metadata
@@ -385,10 +386,10 @@ class DualListGroupSelector(QWidget):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Death Dynamics sub-tab
+# Population Dynamics sub-tab
 # ═══════════════════════════════════════════════════════════════════════════
-class DeathDynamicsTab(QWidget):
-    """Death dynamics + interaction analysis controls.
+class PopulationDynamicsTab(QWidget):
+    """Population dynamics controls: Death Dynamics, Interaction, Invasiveness.
 
     UI structure
     ------------
@@ -483,7 +484,7 @@ class DeathDynamicsTab(QWidget):
     def _init_ui(self):
         from behav3d.napari._guided import GuidedPanel, make_back_header
         from behav3d.napari.analysis_guided_copy import (
-            DEATH_DYNAMICS_ANALYSES, GUIDED_INTRO,
+            POPULATION_DYNAMICS_ANALYSES, GUIDED_INTRO,
         )
 
         outer = QVBoxLayout(self)
@@ -496,7 +497,7 @@ class DeathDynamicsTab(QWidget):
 
         # Page 0 — Guided explainers.
         self._guided_panel = GuidedPanel(
-            DEATH_DYNAMICS_ANALYSES,
+            POPULATION_DYNAMICS_ANALYSES,
             start_cb=self._on_guided_start,
             intro=GUIDED_INTRO,
         )
@@ -510,7 +511,7 @@ class DeathDynamicsTab(QWidget):
         form_outer.setContentsMargins(0, 0, 0, 0)
         form_outer.setSpacing(0)
         back_bar, self._focus_title = make_back_header(
-            on_back=lambda: self._stack.setCurrentIndex(0)
+            on_back=self.show_overview
         )
         form_outer.addWidget(back_bar)
         scroll = QScrollArea()
@@ -1081,9 +1082,14 @@ class DeathDynamicsTab(QWidget):
 
         # Always land on the Guided overview; a specific analysis's settings
         # are only reached via that analysis's Start button.
-        self._stack.setCurrentIndex(0)
+        self.show_overview()
 
     # ── Guided overview / focused settings ──────────────────────────────────
+    def show_overview(self):
+        """Return to the Guided overview with no analysis focused."""
+        self._focused_analysis_id = ""
+        self._stack.setCurrentIndex(0)
+
     def _on_guided_start(self, analysis_id: str):
         """Start from a Guided card: show only that analysis's settings."""
         self._focus_step(analysis_id)
@@ -2427,7 +2433,7 @@ from behav3d.napari._feature_backprojection import FeatureBackprojectionTab  # n
 # Outer Analysis tab
 # ═══════════════════════════════════════════════════════════════════════════
 class AnalysisTab(QWidget):
-    """Outer tab wrapping Death Dynamics + (placeholder) Single Cell.
+    """Outer tab wrapping Feature Backprojection, Population Dynamics and Single Cell.
 
     Hosts a shared :class:`ResultsPanel` under a vertical splitter so the
     panel is visible from both inner sub-tabs.
@@ -2475,7 +2481,7 @@ class AnalysisTab(QWidget):
         # ── Cell type grouping ──────────────────────────────────────────
         # Sits above both subtabs: grouping merges already-*filtered*
         # populations (see behav3d.analysis.grouping), so it belongs after
-        # Filtering and before Death Dynamics / Single Cell, not before
+        # Filtering and before Population Dynamics / Single Cell, not before
         # Feature Extraction — that would duplicate feature
         # extraction/filtering work for every group.
         grouping_row = QHBoxLayout()
@@ -2483,7 +2489,7 @@ class AnalysisTab(QWidget):
         self.btn_open_grouping = QPushButton("🧬  Group cells together for analysis…")
         self.btn_open_grouping.setToolTip(
             "Merge several already-filtered cell types into a single "
-            "'{name}_merged' population for Death Dynamics / Single Cell.\n"
+            "'{name}_merged' population for Population Dynamics / Single Cell.\n"
             "Metadata is not modified — only behav3d_parameters.yml and a "
             "merged filtered CSV are written."
         )
@@ -2499,7 +2505,7 @@ class AnalysisTab(QWidget):
         grouping_row.addWidget(HelpButton(
             "Group cells together for analysis",
             "Combine several already-filtered cell types (e.g. CD4 T cells + "
-            "CD8 T cells) into one merged population you can run Death "
+            "CD8 T cells) into one merged population you can run Population "
             "Dynamics / Single Cell on as a single group.\n\n"
             "Each cell keeps its original type too — a new 'origin_cell_type' "
             "column records which type it came from, so you can still split "
@@ -2522,10 +2528,10 @@ class AnalysisTab(QWidget):
         )
         self.inner_tabs.addTab(self.feature_backprojection_tab, "🔬 Feature Backprojection")
 
-        self.death_dynamics_tab = DeathDynamicsTab(
+        self.population_dynamics_tab = PopulationDynamicsTab(
             viewer=viewer, metadata_loader=metadata_loader, parent=self
         )
-        self.inner_tabs.addTab(self.death_dynamics_tab, "💀 Death Dynamics")
+        self.inner_tabs.addTab(self.population_dynamics_tab, "👥 Population Dynamics")
 
         self.single_cell_tab = SingleCellTab(
             viewer=viewer, metadata_loader=metadata_loader, parent=self
@@ -2580,8 +2586,8 @@ class AnalysisTab(QWidget):
         """Cascade metadata updates to inner tabs and results panel."""
         if hasattr(self, "feature_backprojection_tab"):
             self.feature_backprojection_tab._on_metadata_updated()
-        if hasattr(self, "death_dynamics_tab"):
-            self.death_dynamics_tab._on_metadata_updated()
+        if hasattr(self, "population_dynamics_tab"):
+            self.population_dynamics_tab._on_metadata_updated()
         if hasattr(self, "single_cell_tab"):
             self.single_cell_tab._on_metadata_updated()
         if hasattr(self, "results_panel"):
@@ -2590,7 +2596,7 @@ class AnalysisTab(QWidget):
     # ── Cell type grouping ────────────────────────────────────────────────
     def _on_open_grouping_dialog(self):
         """Open the cell-type grouping dialog and refresh cell-type
-        dropdowns (Death Dynamics / Single Cell) on success."""
+        dropdowns (Population Dynamics / Single Cell) on success."""
         from behav3d.napari._grouping_dialog import GroupBuilderDialog
 
         if self.metadata_loader is None or self.metadata_loader.metadata is None:
@@ -2605,6 +2611,6 @@ class AnalysisTab(QWidget):
         dlg.exec_()
 
     def _on_group_changed(self, group_id: str):
-        """Slot: refresh Death Dynamics / Single Cell dropdowns after a
+        """Slot: refresh Population Dynamics / Single Cell dropdowns after a
         group is created or removed."""
         self._on_metadata_updated()

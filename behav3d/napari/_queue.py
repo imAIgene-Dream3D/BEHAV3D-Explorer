@@ -1095,10 +1095,14 @@ class ProcessingQueuePanel(QWidget):
                         break
 
             elif step.step_type == StepType.FILTER:
+                from behav3d.analysis.grouping import filtered_track_features_csv
+
                 analysis_dir = out_dir / "analysis"
                 if analysis_dir.exists():
                     for ct_dir in analysis_dir.iterdir():
-                        filt_csv = ct_dir / "track_features" / f"BEHAV3D_{ct_dir.name}_filtered_track_features.csv"
+                        # Canonical name written by filter_tracks; an earlier
+                        # spelling here never matched, so this warning never fired.
+                        filt_csv = filtered_track_features_csv(out_dir, ct_dir.name)
                         if filt_csv.exists():
                             warnings.append(f"Filtered data for {ct_dir.name}")
                             break
@@ -1692,15 +1696,15 @@ class ProcessingQueuePanel(QWidget):
         )
         return self.filtering_tab
 
-    def _require_death_dynamics_tab(self):
-        if self.analysis_tab is None or not hasattr(self.analysis_tab, "death_dynamics_tab"):
+    def _require_population_dynamics_tab(self):
+        if self.analysis_tab is None or not hasattr(self.analysis_tab, "population_dynamics_tab"):
             raise RuntimeError("Analysis tab not wired to queue.")
-        return self.analysis_tab.death_dynamics_tab
+        return self.analysis_tab.population_dynamics_tab
 
     def _run_sync_analysis(self, fn, extra_callbacks):
         """Run a synchronous analysis-tab call and fire ``extra_callbacks``.
 
-        Wraps the existing ``death_dynamics_tab.run_*`` helpers so the
+        Wraps the existing ``population_dynamics_tab.run_*`` helpers so the
         state machine sees the same on_done / on_failed flow as the
         async batch methods.  These calls are synchronous on purpose —
         napari will briefly freeze for the duration of each step, but
@@ -1716,7 +1720,7 @@ class ProcessingQueuePanel(QWidget):
                 extra_callbacks["on_failed"](str(e))
 
     def _run_death_dynamics(self, step: QueueStep, extra_callbacks):
-        dd = self._require_death_dynamics_tab()
+        dd = self._require_population_dynamics_tab()
         cell_types = step.params.get("cell_types") or []
         self._run_sync_analysis(
             lambda: dd.run_death_dynamics_for(cell_types, interactive=False),
@@ -1725,7 +1729,7 @@ class ProcessingQueuePanel(QWidget):
         return None
 
     def _run_multi_org_death(self, step: QueueStep, extra_callbacks):
-        dd = self._require_death_dynamics_tab()
+        dd = self._require_population_dynamics_tab()
         cell_types = step.params.get("cell_types") or []
         self._run_sync_analysis(
             lambda: dd.run_multi_organoid_death_for(cell_types, interactive=False),
@@ -1734,7 +1738,7 @@ class ProcessingQueuePanel(QWidget):
         return None
 
     def _run_interaction(self, step: QueueStep, extra_callbacks):
-        dd = self._require_death_dynamics_tab()
+        dd = self._require_population_dynamics_tab()
         cell_types = step.params.get("cell_types") or []
         interaction_cts = step.params.get("interaction_cell_types") or []
         group_by_line_condition = bool(
@@ -1752,7 +1756,7 @@ class ProcessingQueuePanel(QWidget):
         return None
 
     def _run_multi_org_interaction(self, step: QueueStep, extra_callbacks):
-        dd = self._require_death_dynamics_tab()
+        dd = self._require_population_dynamics_tab()
         cell_types = step.params.get("cell_types") or []
         interaction_cts = step.params.get("interaction_cell_types") or []
         time_window_min = float(step.params.get("time_window_min", 60.0))
@@ -1778,7 +1782,7 @@ class ProcessingQueuePanel(QWidget):
         return None
 
     def _run_invasiveness(self, step: QueueStep, extra_callbacks):
-        dd = self._require_death_dynamics_tab()
+        dd = self._require_population_dynamics_tab()
         # Prefer the multi-immune list; fall back to the legacy single field
         # for older queued steps.
         immune = step.params.get("immune_cell_types")

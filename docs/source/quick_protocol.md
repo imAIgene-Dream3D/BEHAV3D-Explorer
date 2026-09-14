@@ -113,7 +113,7 @@ Computes, for every cell at every timepoint, the features every later analysis r
 1. **Run [Filtering](analysis/filtering)** first (Tab 6) — the analyses read the filtered tracks, not the raw ones.
 2. Run whichever analyses you need. The 📊 Analysis tab has two groups.
 
-**Population Analysis** (📊 → 💀 Death Dynamics) — population- and interaction-level readouts:
+**Population Dynamics** (📊 → 👥 Population Dynamics) — population- and interaction-level readouts:
 
 | Analysis | What it gives you |
 |---|---|

@@ -42,7 +42,7 @@ The widget has seven tabs, stacked top to bottom inside the right-hand dock:
 | 4 | 📍 **Tracking** | Per cell-type subtabs: btrack (objects that do not overlap between frames), fragmentation propagation (objects that do), Bounded Propagation, Reporter Propagation, LapTrack, TrackPy, or Import existing. Manual editing of tracked segments lives in the Visualization tab. | [Tracking](processing/tracking/index) |
 | 5 | 🧪 **Feature Extraction** | Movement, intensity, morphology, contact and death features per track. Extended analysis: active killing. | [Feature Extraction](analysis/feature_extraction) |
 | 6 | 🧹 **Filtering** | Track-length, experiment-duration, dead-at-t0 and minimal size filters. | [Filtering](analysis/filtering) |
-| 7 | 📊 **Analysis** | Population Analysis (signal dynamics, interaction, invasiveness), plus Single Cell behavioural-state and trajectory (track) classification — each ending in a Backprojection step that paints the labels back onto the raw images. | [Analysis](analysis/index) |
+| 7 | 📊 **Analysis** | Population Dynamics (signal dynamics, interaction, invasiveness), plus Single Cell behavioural-state and trajectory (track) classification — each ending in a Backprojection step that paints the labels back onto the raw images. | [Analysis](analysis/index) |
 
 At the bottom of the dock widget sits the **🛒 Processing Queue**, a collapsible panel that accepts steps from tabs 3 / 4 / 5 / 6 / 7 and runs them sequentially per sample. See [Processing Queue](plugin_essentials/processing_queue).
 
@@ -66,11 +66,11 @@ This is the happy path. Each step links to its full reference page.
    - In the Visualization tab the resulting tracked segments can be manually corrected.
 5. **Extract features in Feature Extraction** ([details](analysis/feature_extraction))
    - Pick the feature families you want from the six available (movement, intensity, morphology, contact, invasiveness, death). Some are forced on for some cell types — e.g. movement for immune cells, death whenever a dead channel is present. Set the global organoid dead threshold and per-immune/per-other cell types thresholds.
-   - You can also run Extended Analysis → Active Killing to detect which effector contacts were followed by a signal rise in the target they touched. Requires baseline feature extraction (with contact + death features) on both cell types first, and the effector must be declared as an immune (`im_`) type. It is explained with the other [population analyses](analysis/population_analysis/index).
+   - You can also run Extended Analysis → Active Killing to detect which effector contacts were followed by a signal rise in the target they touched. Requires baseline feature extraction (with contact + death features) on both cell types first, and the effector must be declared as an immune (`im_`) type. It is explained with the other [Population Dynamics analyses](analysis/population_analysis/index).
 6. **Filter in Filtering** ([details](analysis/filtering))
    - Drop tracks shorter than `min_track_length`, optionally cap them at `max_track_length`, drop undersized starting cells with `min_size_t1`, drop dead-at-t0 cells, cap the experiment duration.
 7. **Analyse in Analysis** ([details](analysis/index))
-   - **💀 Population Analysis** — signal dynamics across your target populations, target–effector interaction, invasiveness, and active killing ([details](analysis/population_analysis/index)).
+   - **👥 Population Dynamics** — signal dynamics across your target populations, target–effector interaction, invasiveness, and active killing ([details](analysis/population_analysis/index)).
    - **🧬 Single Cell** — classify each cell's behavioural states over time ([State Classification](analysis/single_cell/state_classification)) and group whole trajectories into clusters ([Track Classification](analysis/single_cell/track_classification)).
    - Each Single Cell workflow ends with a **Backprojection** step that overlays the behavioural-state / track-cluster labels on the raw images so you can sanity-check the analysis and export figures or movies.
 

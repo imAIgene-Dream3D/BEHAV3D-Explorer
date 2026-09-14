@@ -303,8 +303,8 @@ class BEHAV3DWidget(QWidget):
             lambda: self.queue_panel.add_step(StepType.FILTER)
         )
 
-        # Analysis tab +🛒 buttons (Death Dynamics + Interaction)
-        dd = self.analysis_tab.death_dynamics_tab
+        # Population Dynamics tab +🛒 buttons (Death Dynamics + Interaction)
+        dd = self.analysis_tab.population_dynamics_tab
         dd.btn_queue_dd_single.clicked.connect(self._add_death_dynamics_to_queue)
         dd.btn_queue_dd_combined.clicked.connect(self._add_multi_org_death_to_queue)
         dd.btn_queue_ia_single.clicked.connect(self._add_interaction_to_queue)
@@ -563,7 +563,7 @@ class BEHAV3DWidget(QWidget):
 
     # ── Analysis tab queue helpers ─────────────────────────────────────
     def _add_death_dynamics_to_queue(self):
-        dd = self.analysis_tab.death_dynamics_tab
+        dd = self.analysis_tab.population_dynamics_tab
         targets = dd._selected_targets()
         if not targets:
             from qtpy.QtWidgets import QMessageBox
@@ -576,7 +576,7 @@ class BEHAV3DWidget(QWidget):
         )
 
     def _add_multi_org_death_to_queue(self):
-        dd = self.analysis_tab.death_dynamics_tab
+        dd = self.analysis_tab.population_dynamics_tab
         targets = dd._selected_targets()
         if len(targets) < 2:
             from qtpy.QtWidgets import QMessageBox
@@ -590,7 +590,7 @@ class BEHAV3DWidget(QWidget):
         )
 
     def _add_interaction_to_queue(self):
-        dd = self.analysis_tab.death_dynamics_tab
+        dd = self.analysis_tab.population_dynamics_tab
         targets = dd._selected_targets()
         interactions = dd._selected_interactions()
         if not targets or not interactions:
@@ -611,7 +611,7 @@ class BEHAV3DWidget(QWidget):
         )
 
     def _add_multi_org_interaction_to_queue(self):
-        dd = self.analysis_tab.death_dynamics_tab
+        dd = self.analysis_tab.population_dynamics_tab
         targets = dd._selected_targets()
         interactions = dd._selected_interactions()
         if not targets or not interactions:
@@ -638,7 +638,7 @@ class BEHAV3DWidget(QWidget):
         )
 
     def _add_invasiveness_to_queue(self):
-        dd = self.analysis_tab.death_dynamics_tab
+        dd = self.analysis_tab.population_dynamics_tab
         immune_list = dd._selected_invasiveness_immune()
         targets = dd._selected_invasiveness_targets()
         if not immune_list or not targets:
@@ -675,7 +675,7 @@ class BEHAV3DWidget(QWidget):
         """
         from qtpy.QtWidgets import QMessageBox
 
-        dd = self.analysis_tab.death_dynamics_tab
+        dd = self.analysis_tab.population_dynamics_tab
         targets = dd._selected_targets()
         interactions = dd._selected_interactions()
         if not targets:

@@ -970,6 +970,60 @@ class TrackFilterPanel:
         params = self.metadata_loader.behav3d_parameters
         cfg = params.setdefault("track_filtering", {}).setdefault(self.cell_type, {})
         
+        # Absolute timepoint window, applied before every other filter.
+        # GLOBAL: stored once in its own top-level block and mirrored across
+        # every cell type's panel. It cannot be per cell type because
+        # cross-cell-type analyses join on 'position_t' and silently produce
+        # wrong denominators or fabricated data when two cell types cover
+        # different spans.
+        time_range = params.setdefault(
+            "timepoint_range", {"enabled": False, "start": 0, "end": 0}
+        )
+        _unit = cfg.get('time_type', 'frames')
+        self.en_time_range = widgets.Checkbox(description="Restrict analysis to a timepoint range (applies to ALL cell types)", value=bool(time_range.get("enabled", False)), indent=False)
+        self.t_range_start = widgets.IntText(description=f"Start timepoint ({_unit})", value=int(time_range.get("start", 0) or 0), style={'description_width': '180px'})
+        self.t_range_end = widgets.IntText(description=f"End timepoint ({_unit})", value=int(time_range.get("end", 0) or 0), style={'description_width': '180px'})
+
+        # The two "first timepoint" filters key on each track's first frame of
+        # the ORIGINAL movie, which a window normally cuts away. This opt-in
+        # re-points them at the window instead. Per cell type, unlike the
+        # window itself.
+        self.first_tp_from_range = widgets.Checkbox(
+            description="Enable first-timepoint filters, measured at the start of this range",
+            value=bool(cfg.get("first_timepoint_from_range", False)),
+            indent=False,
+        )
+        self.range_note = widgets.HTML(
+            '<div style="font-size:12px;color:#555;padding:2px 0;">'
+            'Timepoint numbering is never rewritten: results keep the original '
+            'timepoints, so plots of a 56&#8211;78 window read 56&#8211;78, not 1&#8211;23.'
+            '</div>'
+        )
+        self.row_time_range = widgets.VBox(
+            [widgets.HBox([self.t_range_start, self.t_range_end]),
+             self.first_tp_from_range, self.range_note],
+            layout=widgets.Layout(display=(None if self.en_time_range.value else "none")),
+        )
+
+        # Register with the shared loader so an edit in one cell type's panel
+        # reaches the others; the window is one setting, not one per panel.
+        if not hasattr(self.metadata_loader, "_filter_panels"):
+            self.metadata_loader._filter_panels = []
+        self.metadata_loader._filter_panels.append(self)
+
+        def _on_range_changed(change):
+            self.row_time_range.layout.display = (
+                None if self.en_time_range.value else "none"
+            )
+            self._sync_first_timepoint_filters()
+            self._broadcast_time_range()
+        self.en_time_range.observe(_on_range_changed, names="value")
+        self.t_range_start.observe(lambda c: self._broadcast_time_range(), names="value")
+        self.t_range_end.observe(lambda c: self._broadcast_time_range(), names="value")
+        self.first_tp_from_range.observe(
+            lambda c: self._sync_first_timepoint_filters(), names="value"
+        )
+
         self.exp_duration = widgets.IntText(description=f"Max timepoints ({cfg.get('time_type','frames')})", value=int(cfg.get("exp_duration", 350)), style={'description_width': '180px'})
         self.en_exp_duration = widgets.Checkbox(description="Trim down full time series", value=bool(cfg.get("exp_duration_enabled", True)), indent=False)
         self.row_exp = widgets.HBox([self.exp_duration], layout=widgets.Layout(display=(None if self.en_exp_duration.value else "none")))
@@ -1002,11 +1056,15 @@ class TrackFilterPanel:
         self.filter_t0_dead = widgets.Checkbox(description="Filter tracks that are dead at first timepoint", value=bool(cfg.get("filter_t0_dead", False)), indent=False)
         if not self.has_dead: self.filter_t0_dead.layout.display = "none"
         
+        self._sync_first_timepoint_filters()
+
         # --- Time unit toggle (available for ALL cell types) ---
         self.time_type = widgets.ToggleButtons(options=["frames", "hours"], value=cfg.get("time_type", "frames"))
         def _on_time_unit_change(change):
             if change['name'] == 'value':
                 u = change['new']
+                self.t_range_start.description = f"Start timepoint ({u})"
+                self.t_range_end.description = f"End timepoint ({u})"
                 self.exp_duration.description = f"Max timepoints ({u})"
                 self.min_track_length.description = f"Minimal length ({u})"
                 self.max_track_length.description = f"Maximal length ({u})"
@@ -1040,6 +1098,7 @@ class TrackFilterPanel:
             self._qc_hint,
             widgets.HBox([self.btn_preview_lengths, self.spinner_html]),
             self.out_preview,
+            self.en_time_range, self.row_time_range,
             self.en_exp_duration, self.row_exp,
             self.en_min_length, self.row_min,
             self.en_max_length, self.row_max,
@@ -1052,8 +1111,41 @@ class TrackFilterPanel:
         self.ui = widgets.VBox(ui_elements)
 
     def _lock(self, locked):
-        w_list = [self.en_exp_duration, self.exp_duration, self.en_min_length, self.min_track_length, self.en_max_length, self.max_track_length, self.en_min_size, self.min_size_val, self.filter_t0_dead, self.time_type, self.btn_run, self.btn_preview_lengths]
+        w_list = [self.en_time_range, self.t_range_start, self.t_range_end, self.first_tp_from_range, self.en_exp_duration, self.exp_duration, self.en_min_length, self.min_track_length, self.en_max_length, self.max_track_length, self.en_min_size, self.min_size_val, self.filter_t0_dead, self.time_type, self.btn_run, self.btn_preview_lengths]
         for w in w_list: w.disabled = locked
+
+    def _sync_first_timepoint_filters(self):
+        """Enable/disable the two 'first timepoint' filters for the window.
+
+        With a window active, 'relative_time == 1' points at a frame the
+        window cut away, so both filters would silently skip every track
+        that started earlier. They are therefore disabled and switched off
+        unless the user opts in to measuring them at the start of the range.
+        """
+        ranged = bool(self.en_time_range.value)
+        self.first_tp_from_range.layout.display = None if ranged else "none"
+        usable = (not ranged) or bool(self.first_tp_from_range.value)
+        for w in (self.en_min_size, self.filter_t0_dead):
+            w.disabled = not usable
+            if not usable and w.value:
+                w.value = False
+
+    def _broadcast_time_range(self):
+        """Mirror this panel's (global) window onto every sibling panel."""
+        loader = self.metadata_loader
+        if getattr(loader, "_syncing_range", False):
+            return
+        loader._syncing_range = True
+        try:
+            for panel in getattr(loader, "_filter_panels", []):
+                if panel is self:
+                    continue
+                panel.en_time_range.value = self.en_time_range.value
+                panel.t_range_start.value = self.t_range_start.value
+                panel.t_range_end.value = self.t_range_end.value
+                panel._sync_first_timepoint_filters()
+        finally:
+            loader._syncing_range = False
 
     def _get_advanced_features_path(self):
         from behav3d.features.advanced_timepoint_features import find_advanced_features_csv
@@ -1084,7 +1176,15 @@ class TrackFilterPanel:
         with self.out_run:
             try:
                 cfg = self.metadata_loader.behav3d_parameters["track_filtering"][self.cell_type]
+                # The window is global, so it lives in its own top-level
+                # block rather than being duplicated per cell type.
+                self.metadata_loader.behav3d_parameters["timepoint_range"] = {
+                    "enabled": bool(self.en_time_range.value),
+                    "start": int(self.t_range_start.value),
+                    "end": int(self.t_range_end.value),
+                }
                 cfg.update({
+                    "first_timepoint_from_range": bool(self.first_tp_from_range.value),
                     "exp_duration_enabled": self.en_exp_duration.value,
                     "exp_duration": int(self.exp_duration.value),
                     "min_length_enabled": self.en_min_length.value,
@@ -1101,9 +1201,18 @@ class TrackFilterPanel:
 
                 adv_path = self._get_advanced_features_path()
                 df_input_path = str(adv_path) if adv_path is not None else None
+                if self.en_time_range.value and int(self.t_range_end.value) <= int(self.t_range_start.value):
+                    raise ValueError(
+                        f"End timepoint ({self.t_range_end.value}) must be greater "
+                        f"than start ({self.t_range_start.value})."
+                    )
+
                 filter_tracks(
                     metadata=self.metadata_loader.metadata,
                     output_dir=self.output_dir,
+                    t_range_start=(int(self.t_range_start.value) if self.en_time_range.value else None),
+                    t_range_end=(int(self.t_range_end.value) if self.en_time_range.value else None),
+                    first_timepoint_from_range=bool(self.first_tp_from_range.value),
                     exp_duration=(int(self.exp_duration.value) if self.en_exp_duration.value else None),
                     min_track_length=(int(self.min_track_length.value) if self.en_min_length.value else None),
                     max_track_length=(int(self.max_track_length.value) if self.en_max_length.value else None),

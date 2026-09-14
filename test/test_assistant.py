@@ -2686,7 +2686,7 @@ def test_analysis_view_actions_focus_interaction_and_expand_active_killing():
         feature_extraction_tab=SimpleNamespace(_ak_toggle_btn=_Toggle()),
         analysis_tab=SimpleNamespace(
             inner_tabs=_Tabs(),
-            death_dynamics_tab=SimpleNamespace(
+            population_dynamics_tab=SimpleNamespace(
                 _on_guided_start=lambda view: focused.append(view)
             ),
         ),
@@ -2697,6 +2697,44 @@ def test_analysis_view_actions_focus_interaction_and_expand_active_killing():
     active = ProposedAction("open_analysis_view", view="active_killing")
     assert apply_action(main, active)
     assert main.feature_extraction_tab._ak_toggle_btn.isChecked()
+
+
+def test_population_dynamics_view_opens_tab_overview_by_widget_index():
+    from types import SimpleNamespace
+
+    calls = []
+    pop_tab = SimpleNamespace(
+        show_overview=lambda: calls.append("overview"),
+        _on_guided_start=lambda view: calls.append(view),
+    )
+    single_tab = SimpleNamespace(_on_guided_start=lambda view: calls.append(view))
+    order = ["feature_backprojection", pop_tab, single_tab]
+
+    class _Tabs:
+        def __init__(self):
+            self.index = None
+
+        def setCurrentIndex(self, value):
+            self.index = value
+
+        def indexOf(self, widget):
+            return order.index(widget) if widget in order else -1
+
+    main = SimpleNamespace(
+        tabs=_Tabs(),
+        analysis_tab=SimpleNamespace(
+            inner_tabs=_Tabs(),
+            population_dynamics_tab=pop_tab,
+            single_cell_tab=single_tab,
+        ),
+    )
+    assert apply_action(main, ProposedAction("open_analysis_view", view="population_dynamics"))
+    assert main.analysis_tab.inner_tabs.index == 1
+    assert calls == ["overview"]
+    assert apply_action(main, ProposedAction("open_analysis_view", view="death_dynamics"))
+    assert calls == ["overview", "death_dynamics"]
+    assert apply_action(main, ProposedAction("open_analysis_view", view="behavioral_state"))
+    assert main.analysis_tab.inner_tabs.index == 2
 
 
 def test_prompt_data_prep_reconciles_state_and_lists_tools():
