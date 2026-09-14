@@ -2,7 +2,7 @@
 
 Grouping lives entirely after Filtering, in the Analysis step: it merges
 several cell types' *filtered* track-features CSVs into one pseudo
-cell-type population (``{name}_merged``) for use in Death Dynamics / Single
+cell-type population (``{name}_merged``) for use in Population Dynamics / Single
 Cell. Group membership is recorded in ``behav3d_parameters.yml`` under
 ``cell_type_groups`` — metadata.csv is never touched, so multicolor
 merged-tracking outputs (which must still be processed through Feature

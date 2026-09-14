@@ -350,6 +350,6 @@ A **fluctuating** reporter that goes on and off, such as calcium, is a different
 ## See also
 
 - [Filtering](filtering.md) — the next step. Drops low-quality tracks and produces QC plots.
-- [Population Analysis](population_analysis/index) — uses the signal and contact columns for population dynamics, interaction, invasiveness and active killing.
+- [Population Dynamics](population_analysis/index) — uses the signal and contact columns for population dynamics, interaction, invasiveness and active killing.
 - [Single Cell](single_cell/index) — classifies per-cell behavioural states from the movement / contact / morphology table.
 - [Output Directory & File Layout](../plugin_essentials/output_layout) — where the CSVs live.

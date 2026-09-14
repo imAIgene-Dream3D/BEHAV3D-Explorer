@@ -1,6 +1,6 @@
 # 🧬 Single Cell
 
-The second sub-tab of the **📊 Analysis** tab. Where the [Population Analyses](../population_analysis/index) work at the **population** level, Single Cell classifies the **behaviour of individual cells** over time. It has two inner sub-tabs:
+The second sub-tab of the **📊 Analysis** tab. Where the [Population Dynamics analyses](../population_analysis/index) work at the **population** level, Single Cell classifies the **behaviour of individual cells** over time. It has two inner sub-tabs:
 
 | Inner sub-tab | What it does | Status |
 |---|---|---|
@@ -22,7 +22,7 @@ These combine, but starting with a small, biologically interpretable set is bett
 
 ## Cell-type scope and selector
 
-At the top of the Single Cell sub-tab there is a single **Cell type** dropdown that both inner sub-tabs share. It lists **immune** and **other** cell types only (multicolor channel splits are excluded) — these are the individually-tracked populations the analysis is designed for. Organoid types are not offered here; they are analysed at the population level in [Population Analysis](../population_analysis/index).
+At the top of the Single Cell sub-tab there is a single **Cell type** dropdown that both inner sub-tabs share. It lists **immune** and **other** cell types only (multicolor channel splits are excluded) — these are the individually-tracked populations the analysis is designed for. Organoid types are not offered here; they are analysed at the population level in [Population Dynamics](../population_analysis/index).
 
 Nothing about these analyses is specific to immune cells. Any population tracked as individual objects can be profiled here — declare it as an *other* cell type if it is not immune, and it becomes available.
 

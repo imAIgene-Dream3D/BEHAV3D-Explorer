@@ -169,7 +169,7 @@ class ResultsPanel(QWidget):
     """Tree view of every file produced under ``output_dir/analysis/``.
 
     Grouped by analysis stage (Filtering, Feature Extraction,
-    Analysis → Death Dynamics / Single Cell) and then by cell type.
+    Analysis → Population Dynamics / Single Cell) and then by cell type.
     Each leaf carries a tooltip from
     :data:`behav3d.napari._results_catalog.FILE_CATALOG`.
 
@@ -415,7 +415,7 @@ class ResultsPanel(QWidget):
         # Top-level categories in deterministic order. ``Analysis`` is the
         # only one with subcategories.
         category_order = ["filtering", "feature_extraction", "analysis"]
-        subcategory_order = ["death_dynamics", "single_cell", None]
+        subcategory_order = ["population_dynamics", "single_cell", None]
 
         tree = group_by_tree(files)
         for cat in category_order:
@@ -489,8 +489,8 @@ class ResultsPanel(QWidget):
         return ""
 
     def _subcategory_tooltip(self, sub: Optional[str]) -> str:
-        if sub == "death_dynamics":
-            return ("Death-dynamics outputs: per-organoid analyses, "
+        if sub == "population_dynamics":
+            return ("Population-dynamics outputs: death dynamics, invasiveness, "
                     "interaction analyses, multi-organoid comparisons, "
                     "morpho-dead clustering.")
         if sub == "single_cell":

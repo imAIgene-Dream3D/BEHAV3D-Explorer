@@ -1032,8 +1032,10 @@ class AssistantDock(QWidget):
                     action.message = "That tab is already open."
                 if (
                     action.kind == "open_analysis_view"
-                    and action.data.get("view")
-                    == (ctx.get("analysis") or {}).get("view")
+                    and (ctx.get("analysis") or {}).get("view") in {
+                        action.data.get("view"),
+                        f"{action.data.get('view')}_overview",
+                    }
                 ):
                     action.ok = False
                     action.data["no_op"] = True

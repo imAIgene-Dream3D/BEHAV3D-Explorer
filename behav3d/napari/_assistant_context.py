@@ -1187,11 +1187,13 @@ def _analysis_state(main_widget) -> dict:
     if single is None:
         return {}
     outer_tabs = getattr(analysis, "inner_tabs", None)
-    outer_index = _safe(outer_tabs.currentIndex, 1) if outer_tabs is not None else 1
-    if outer_index != 1:
-        death_tab = getattr(analysis, "death_dynamics_tab", None)
-        focused = str(getattr(death_tab, "_focused_analysis_id", "") or "")
-        return {"view": focused or "death_dynamics"}
+    current = _safe(outer_tabs.currentWidget, single) if outer_tabs is not None else single
+    if current is not single:
+        pop_tab = getattr(analysis, "population_dynamics_tab", None)
+        if current is not pop_tab:
+            return {"view": "feature_backprojection"}
+        focused = str(getattr(pop_tab, "_focused_analysis_id", "") or "")
+        return {"view": focused or "population_dynamics_overview"}
     stack = getattr(single, "_stack", None)
     if stack is not None and _safe(stack.currentIndex, 0) == 0:
         view = "single_cell_overview"

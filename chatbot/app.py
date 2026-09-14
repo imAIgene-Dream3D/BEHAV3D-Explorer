@@ -212,8 +212,9 @@ def _asks_general_analysis_question(messages: list[dict]) -> bool:
     """Recognize an analysis overview without stealing requests for one view."""
     latest = _normalized_user_message(messages)
     targeted = any(phrase in latest for phrase in (
-        "death dynamics", "interaction analysis", "invasiveness analysis",
-        "active killing", "behavioral state", "behavioural state",
+        "population dynamics", "death dynamics", "interaction analysis",
+        "invasiveness analysis", "active killing", "behavioral state",
+        "behavioural state",
         "state trajectory", "contact-based grouping", "contact based grouping",
         "state-shift", "state shift", "backprojection",
     ))
@@ -870,7 +871,8 @@ def analysis_choice_summary(context: dict, messages: list[dict]) -> str | None:
         "changes before versus after contact, compared with matched no-contact tracks. |\n"
         "| **Backprojection** | Where state, trajectory, or killing labels occur in the "
         "original images for visual validation. |\n\n"
-        "Interaction and Invasiveness are in the **Death Dynamics** analysis tab. "
+        "Death Dynamics, Interaction and Invasiveness are in the **Population Dynamics** "
+        "analysis tab. "
         "State Trajectory also provides diagnostics, track-proportion plots, condition "
         "comparisons, exemplar tracks, and the two contact analyses above. Contact-Based "
         "Grouping requires contact features and Categorical DTW classification; Contact "
@@ -905,6 +907,7 @@ def analysis_navigation_action(context: dict, messages: list[dict]) -> dict | No
 
     requested = None
     for phrases, view, label in (
+        (("population dynamics",), "population_dynamics", "Population Dynamics"),
         (("death dynamics",), "death_dynamics", "Death Dynamics"),
         (("interaction analysis", "contact counts", "contact comparison"),
          "interaction", "Interaction Analysis"),
@@ -940,7 +943,7 @@ def analysis_navigation_action(context: dict, messages: list[dict]) -> dict | No
     view, label = requested
     if (
         context.get("current_step") == "analysis"
-        and (context.get("analysis") or {}).get("view") == view
+        and (context.get("analysis") or {}).get("view") in {view, f"{view}_overview"}
     ):
         return {
             "text": f"You are already in **{label}**.",

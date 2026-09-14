@@ -3,7 +3,7 @@ BEHAV3D napari plugin – Results catalog.
 
 Walks ``output_dir/analysis/`` once and returns a flat list of
 :class:`ResultFile` entries grouped by *category* (Filtering, Feature
-Extraction, Analysis) and *subcategory* (Death Dynamics, Single Cell).
+Extraction, Analysis) and *subcategory* (Population Dynamics, Single Cell).
 
 Categorisation is rule-based:
 
@@ -17,7 +17,7 @@ Categorisation is rule-based:
    ``example_tracks_overview*``, ``*_confusion_matrices*``,
    ``transition_matrix_heatmap``, ``sankey_all_pairs``) ->
    ``analysis / single_cell``.
-4. Everything else under ``analysis/`` -> ``analysis / death_dynamics``.
+4. Everything else under ``analysis/`` -> ``analysis / population_dynamics``.
 
 The "cell type" bucket is simply the first path component under
 ``analysis/`` (e.g. ``tcell``, ``organoid1``, ``morpho-dead``,
@@ -130,7 +130,7 @@ FILE_CATALOG: list[tuple[str, str]] = [
         "Per-movie invasiveness summary (one row per sample x target).",
     ),
 
-    # ── Analysis: Death Dynamics ──────────────────────────────────────────
+    # ── Analysis: Population Dynamics ──────────────────────────────────────────
     (
         "interaction_analysis_*_vs_*.pdf",
         "Interaction analysis between a target cell type and an interaction"
@@ -297,7 +297,7 @@ class ResultFile:
     description: str    # tooltip, from FILE_CATALOG (or "")
     kind: str           # "pdf" | "image" | "csv" | "html" | "zarr" | "other"
     category: str       # "filtering" | "feature_extraction" | "analysis"
-    subcategory: Optional[str]  # "death_dynamics" | "single_cell" | None
+    subcategory: Optional[str]  # "population_dynamics" | "single_cell" | None
     cell_type: Optional[str]    # first folder under analysis/, e.g. "tcell"
 
     @property
@@ -332,7 +332,7 @@ def _classify(path: Path, analysis_root: Path) -> tuple[str, Optional[str], Opti
     try:
         rel = path.relative_to(analysis_root)
     except ValueError:
-        return ("analysis", "death_dynamics", None)
+        return ("analysis", "population_dynamics", None)
 
     parts = rel.parts
     cell_type = parts[0] if parts else None
@@ -350,7 +350,7 @@ def _classify(path: Path, analysis_root: Path) -> tuple[str, Optional[str], Opti
     if "track_features" in parts:
         return ("feature_extraction", None, cell_type)
 
-    return ("analysis", "death_dynamics", cell_type)
+    return ("analysis", "population_dynamics", cell_type)
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +449,7 @@ CATEGORY_LABELS = {
 }
 
 SUBCATEGORY_LABELS = {
-    "death_dynamics": "Death Dynamics",
+    "population_dynamics": "Population Dynamics",
     "single_cell": "Single Cell",
 }
 

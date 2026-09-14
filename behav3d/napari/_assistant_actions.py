@@ -911,6 +911,7 @@ def build_actions(
             view = str(args.get("view") or "")
             act = ProposedAction("open_analysis_view", view=view)
             labels = {
+                "population_dynamics": "Population Dynamics",
                 "death_dynamics": "Death Dynamics",
                 "interaction": "Interaction Analysis",
                 "invasiveness": "Invasiveness Analysis",
@@ -1570,6 +1571,16 @@ def apply_action(main_widget, action: ProposedAction) -> bool:
     return False
 
 
+def _inner_tab_index(tabs, widget, fallback: int) -> int:
+    """Index of ``widget`` in the Analysis inner tabs, so the order can change."""
+    index_of = getattr(tabs, "indexOf", None)
+    if widget is not None and index_of is not None:
+        index = index_of(widget)
+        if index >= 0:
+            return index
+    return fallback
+
+
 def _apply_open_analysis_view(main_widget, view: str) -> bool:
     if view == "active_killing":
         if not apply_navigate(main_widget, "feature_extraction"):
@@ -1590,10 +1601,15 @@ def _apply_open_analysis_view(main_widget, view: str) -> bool:
     if tabs is None:
         return False
     try:
-        if view in {"death_dynamics", "interaction", "invasiveness"}:
-            tabs.setCurrentIndex(0)
-            death_tab = getattr(analysis, "death_dynamics_tab", None)
-            start = getattr(death_tab, "_on_guided_start", None)
+        if view in {"population_dynamics", "death_dynamics", "interaction", "invasiveness"}:
+            pop_tab = getattr(analysis, "population_dynamics_tab", None)
+            tabs.setCurrentIndex(_inner_tab_index(tabs, pop_tab, 1))
+            if view == "population_dynamics":
+                show = getattr(pop_tab, "show_overview", None)
+                if show is not None:
+                    show()
+                return True
+            start = getattr(pop_tab, "_on_guided_start", None)
             if start is not None:
                 start(view)
             return True
@@ -1601,7 +1617,7 @@ def _apply_open_analysis_view(main_widget, view: str) -> bool:
         start = getattr(single, "_on_guided_start", None) if single is not None else None
         if start is None:
             return False
-        tabs.setCurrentIndex(1)
+        tabs.setCurrentIndex(_inner_tab_index(tabs, single, 2))
         start("state" if view == "behavioral_state" else "track")
         return True
     except Exception:
@@ -2113,7 +2129,8 @@ TOOL_SCHEMA = [
         "name": "open_analysis_view",
         "description": (
             "Open one specific Analysis view. Use this instead of navigating to the "
-            "generic Analysis tab when the user names Death Dynamics, Interaction "
+            "generic Analysis tab when the user names Population Dynamics (the tab "
+            "overview), Death Dynamics, Interaction "
             "Analysis, Invasiveness Analysis, Active Killing, Behavioral State, or "
             "State Trajectory. Active Killing opens its panel in Feature Extraction."
         ),
@@ -2123,6 +2140,7 @@ TOOL_SCHEMA = [
                 "view": {
                     "type": "string",
                     "enum": [
+                        "population_dynamics",
                         "death_dynamics",
                         "interaction",
                         "invasiveness",
