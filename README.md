@@ -15,7 +15,7 @@ There's no one-size-fits-all solution, so BEHAV3D-Explorer is built as a set of 
 
 📖 [Full wiki](https://imaigene-dream3d.github.io/BEHAV3D-Explorer/)
 
-![BEHAV3D panel in napari](docs/source/_static/gif/Github_readme_GUI_intro_v2.gif)
+![BEHAV3D panel in napari](docs/source/_static/gif/Github_readme_GUI_intro_v3_cropped.gif)
 
 
 > [!TIP]
