@@ -4081,17 +4081,40 @@ class TrackClassificationSubTab(QWidget):
             self.combo_duration_test_mode, "Comparison test",
             "'Welch's t-test': compares the raw per-touch durations between the two groups without "
             "assuming equal variances. 'Paired t-test': averages durations within each 'Pairing "
-            "column' value first, then pairs the two groups' averages for the same value (e.g. the "
-            "same sample) — pairing units missing either side are dropped."
+            "column(s)' value (combined, if more than one is selected) first, then pairs the two "
+            "groups' averages for the same value (e.g. the same sample) — pairing units missing "
+            "either side are dropped."
         ))
-        self.combo_duration_pairing_col = QComboBox()
-        duration_form.addRow("Pairing column:", self.combo_duration_pairing_col)
+        g_contact.addLayout(duration_form)
+        self.label_duration_pairing_cols = QLabel("Pairing column(s) (Ctrl/Cmd click for multiple):")
+        g_contact.addWidget(self.label_duration_pairing_cols)
+        self.list_duration_pairing_cols = QListWidget()
+        self.list_duration_pairing_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        g_contact.addWidget(self.list_duration_pairing_cols)
+        duration_form2 = QFormLayout()
+        duration_form2.setSpacing(3)
         self.spin_duration_comparisons_per_page = QSpinBox()
         self.spin_duration_comparisons_per_page.setRange(1, 100)
         self.spin_duration_comparisons_per_page.setValue(12)
         self.spin_duration_comparisons_per_page.setMaximumWidth(100)
-        duration_form.addRow("Comparisons per page:", self.spin_duration_comparisons_per_page)
-        g_contact.addLayout(duration_form)
+        duration_form2.addRow("Comparisons per page:", self.spin_duration_comparisons_per_page)
+        self.spin_long_contact_minutes = QDoubleSpinBox()
+        self.spin_long_contact_minutes.setRange(0.0, 1_000_000.0)
+        self.spin_long_contact_minutes.setDecimals(1)
+        self.spin_long_contact_minutes.setSingleStep(1.0)
+        self.spin_long_contact_minutes.setValue(0.0)
+        self.spin_long_contact_minutes.setSpecialValueText("(off)")
+        self.spin_long_contact_minutes.setSuffix(" min")
+        self.spin_long_contact_minutes.setMaximumWidth(100)
+        duration_form2.addRow("Long contact threshold:", make_help_row(
+            self.spin_long_contact_minutes, "Long contact threshold",
+            "When set above 0, adds an extra page per group: for tracks in contact with each "
+            "touched class, the percentage with 'long' contact (longest contact bout with that "
+            "class ≥ this many minutes) vs. shorter contact — restricted to tracks that touched "
+            "that class at all (long vs. short contact, not vs. no contact). Requires time metadata "
+            "(frame interval) to convert minutes to timepoints."
+        ))
+        g_contact.addLayout(duration_form2)
         duration_row = QHBoxLayout()
         self.btn_duration_comparison = QPushButton("▶ Create Contact Duration Comparison")
         _style_secondary(self.btn_duration_comparison)
@@ -5056,18 +5079,18 @@ class TrackClassificationSubTab(QWidget):
         self._sync_track_comparison_group_y_text()
         self._refresh_track_comparison_group_levels()
 
-        # Pairing column for the paired contact-duration test: "sample_name" is always offered
+        # Pairing column(s) for the paired contact-duration test: "sample_name" is always offered
         # first (the common case, matching a typical R paired-t-test workflow) even though it's
-        # not itself one of the condition-like candidate_cols above.
+        # not itself one of the condition-like candidate_cols above, and is pre-selected by
+        # default so a fresh list behaves like the old single-select combo box did.
         pairing_options = ["sample_name"] + [c for c in candidate_cols if c != "sample_name"]
-        prev_pairing = self.combo_duration_pairing_col.currentText()
-        self.combo_duration_pairing_col.blockSignals(True)
-        self.combo_duration_pairing_col.clear()
-        self.combo_duration_pairing_col.addItems(pairing_options)
-        self.combo_duration_pairing_col.setCurrentText(
-            prev_pairing if prev_pairing in pairing_options else "sample_name"
-        )
-        self.combo_duration_pairing_col.blockSignals(False)
+        self.list_duration_pairing_cols.clear()
+        for col in pairing_options:
+            self.list_duration_pairing_cols.addItem(col)
+        _fit_list_widget_height(self.list_duration_pairing_cols)
+        if not self.list_duration_pairing_cols.selectedItems():
+            for item in self.list_duration_pairing_cols.findItems("sample_name", Qt.MatchExactly):
+                item.setSelected(True)
 
     def _on_track_proportion_group_x_changed(self, _text):
         self._refresh_track_proportion_group_x_levels()
@@ -5283,7 +5306,8 @@ class TrackClassificationSubTab(QWidget):
 
     def _on_duration_test_mode_changed(self, *_args):
         is_paired = self.combo_duration_test_mode.currentData() == "paired"
-        self.combo_duration_pairing_col.setVisible(is_paired)
+        self.label_duration_pairing_cols.setVisible(is_paired)
+        self.list_duration_pairing_cols.setVisible(is_paired)
 
     def _refresh_contact_columns(self):
         import pandas as pd
@@ -6702,20 +6726,33 @@ class TrackClassificationSubTab(QWidget):
             QMessageBox.warning(self, "No data", "Track-features CSV not found. Run feature extraction first.")
             return
         test_mode = self.combo_duration_test_mode.currentData()
-        pairing_col = None
+        pairing_cols = []
         if test_mode == "paired":
-            pairing_col = self.combo_duration_pairing_col.currentText().strip()
-            if not pairing_col:
-                QMessageBox.warning(self, "Missing selection", "Select a pairing column for the paired t-test.")
+            pairing_cols = [item.text() for item in self.list_duration_pairing_cols.selectedItems()]
+            if not pairing_cols:
+                QMessageBox.warning(self, "Missing selection", "Select at least one pairing column for the paired t-test.")
+                return
+        long_contact_minutes = self.spin_long_contact_minutes.value()
+        long_contact_minutes = float(long_contact_minutes) if long_contact_minutes > 0 else None
+        md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
+        if long_contact_minutes is not None:
+            from behav3d.core.utils import minutes_per_frame_from_metadata
+            _mpf, _mpf_valid = minutes_per_frame_from_metadata(md)
+            if not _mpf_valid:
+                QMessageBox.warning(
+                    self, "Time metadata unavailable",
+                    "Long contact threshold requires time metadata (frame interval) to convert "
+                    "minutes to timepoints — none is available.",
+                )
                 return
         comparisons_per_page = int(self.spin_duration_comparisons_per_page.value())
+        selected_extra_cols = [item.text() for item in self.list_contact_group_cols.selectedItems()]
         target_ct = self._contact_target_cell_type()
         target_source = self.combo_target_class_source.currentData()
         target_state_choice = self.combo_target_state_col.currentText()
         out = self._out_dir()
         self._log(f"▶ Running contact duration comparison for '{ct}'…")
         track_adata = self._track_adata
-        md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
 
         def _run(**kw):
             import pandas as pd
@@ -6735,8 +6772,12 @@ class TrackClassificationSubTab(QWidget):
             df_timepoints = pd.read_csv(csv_path)
             contact_dir = _resolve_dtaidistance_paths(str(out) if out else "", ct)["outfolder"]
 
-            if pairing_col and pairing_col not in track_adata.obs.columns and md is not None:
-                merge_condition_columns_into_obs(track_adata, md, [pairing_col])
+            cols_to_merge = [
+                c for c in pairing_cols + selected_extra_cols
+                if c not in track_adata.obs.columns
+            ]
+            if cols_to_merge and md is not None:
+                merge_condition_columns_into_obs(track_adata, md, cols_to_merge)
 
             touching_col = touching_column_name(target_ct)
             if target_source == "track":
@@ -6768,9 +6809,11 @@ class TrackClassificationSubTab(QWidget):
                 time_varying=time_varying,
                 target_cell_type_label=target_ct,
                 test_mode=test_mode,
-                pairing_col=pairing_col,
+                pairing_col=pairing_cols or None,
                 minutes_per_frame=minutes_per_frame if minutes_valid else None,
+                long_contact_minutes=long_contact_minutes,
                 comparisons_per_page=comparisons_per_page,
+                group_cols=selected_extra_cols or None,
                 verbose=True,
             )
 

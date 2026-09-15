@@ -18,6 +18,8 @@ from behav3d.analysis.behavior.track.contact_grouping import (
 from behav3d.analysis.behavior.track.visualization.plots.contact_duration_report import (
     save_track_contact_duration_comparison,
     _build_comparisons,
+    _compute_per_sample_long_contact_pct,
+    _LONG_CONTACT_BUCKET_COL,
 )
 
 _N_TIMEPOINTS = 30
@@ -211,6 +213,81 @@ def test_invalid_test_mode_raises():
             adata_tracks, df_timepoints, Path("unused"),
             test_mode="bogus", **_common_kwargs(),
         )
+
+
+def test_long_contact_percentage_splits_long_vs_short(tmp_path):
+    adata_tracks = _build_adata_tracks()
+    df_timepoints = _build_df_timepoints()
+
+    # minutes_per_frame=1.0, long_contact_minutes=7.0 -> threshold is 7 timepoints.
+    # round bouts (2 per sample x 4 samples): s1=[5,7] s2=[6,8] s3=[4,6] s4=[5,7]
+    # -> bouts >= 7: the 7,8,7 from s1/s2/s4's second track = 3 of 8 "long".
+    result = save_track_contact_duration_comparison(
+        adata_tracks, df_timepoints, tmp_path,
+        test_mode="welch", minutes_per_frame=1.0, long_contact_minutes=7.0, verbose=False,
+        **_common_kwargs(),
+    )
+    assert result["long_contact_minutes"] == 7.0
+    assert Path(result["long_contact_csv_path"]).exists()
+
+    long_csv = pd.read_csv(result["long_contact_csv_path"])
+    assert set(long_csv["page_group"]) == {"(all)"}
+
+    round_row = long_csv[long_csv["target_class"] == "round"].iloc[0]
+    assert round_row["n_total"] == 8
+    assert round_row["n_long_contact"] == 3
+    assert round_row["n_short_contact"] == 5
+    assert round_row["pct_long_contact"] == pytest.approx(3 / 8)
+
+
+def test_long_contact_per_sample_pct_for_boxplot():
+    # round bouts per sample (2 tracks/sample): s1=[5,7] s2=[6,8] s3=[4,6] s4=[5,7];
+    # threshold=7 -> each sample has exactly 1 of its 2 round tracks "long", except s3 (0 of 2).
+    duration_df = pd.DataFrame({
+        "sample_name": ["s1", "s1", "s2", "s2", "s3", "s3", "s4", "s4"],
+        "target_class": ["round"] * 8,
+        "duration_timepoints": [5, 7, 6, 8, 4, 6, 5, 7],
+    })
+    duration_df[_LONG_CONTACT_BUCKET_COL] = np.where(
+        duration_df["duration_timepoints"] >= 7, "long_contact", "short_contact",
+    )
+    per_sample = _compute_per_sample_long_contact_pct(
+        duration_df, sample_col="sample_name", class_order=["round"],
+    )
+    pct_by_sample = per_sample.set_index("sample_name")["pct_long_contact"].to_dict()
+    assert pct_by_sample == {"s1": 50.0, "s2": 50.0, "s3": 0.0, "s4": 50.0}
+
+
+def test_long_contact_minutes_requires_minutes_per_frame():
+    adata_tracks = _build_adata_tracks()
+    df_timepoints = _build_df_timepoints()
+    with pytest.raises(ValueError, match="minutes_per_frame"):
+        save_track_contact_duration_comparison(
+            adata_tracks, df_timepoints, Path("unused"),
+            test_mode="welch", minutes_per_frame=None, long_contact_minutes=7.0,
+            **_common_kwargs(),
+        )
+
+
+def test_paired_mode_multiple_pairing_cols_composite_key(tmp_path):
+    adata_tracks = _build_adata_tracks()
+    df_timepoints = _build_df_timepoints()
+    # exp_nr is constant across samples here, so pairing on [sample_name, exp_nr] behaves
+    # exactly like pairing on sample_name alone -- this just exercises the composite-key path.
+    adata_tracks.obs["exp_nr"] = "run1"
+
+    result = save_track_contact_duration_comparison(
+        adata_tracks, df_timepoints, tmp_path,
+        test_mode="paired", pairing_col=["sample_name", "exp_nr"], minutes_per_frame=None, verbose=False,
+        **_common_kwargs(),
+    )
+    assert result["pairing_col"] == "sample_name + exp_nr"
+
+    csv = pd.read_csv(result["csv_path"])
+    assert (csv["pairing_col"] == "sample_name + exp_nr").all()
+    round_vs_elong = _find_row(csv, "round", "elongated")
+    assert round_vs_elong["n_a"] == 4
+    assert round_vs_elong["n_b"] == 4
 
 
 def test_fewer_than_two_classes_writes_placeholder(tmp_path):
