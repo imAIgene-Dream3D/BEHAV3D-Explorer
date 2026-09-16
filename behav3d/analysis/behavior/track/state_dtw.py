@@ -651,7 +651,7 @@ def save_dtaidistance_exemplar_overview(
     cell_type,
     *,
     outfolder=None,
-    n_per_cluster=10,
+    n_per_cluster=None,
     random_state=None,
     verbose=True,
 ):
@@ -661,6 +661,8 @@ def save_dtaidistance_exemplar_overview(
     resolved_cluster_key = _resolve_cluster_key(adata_tracks)
     state_col = str(meta.get("state_col", FULL_STATE_COL))
     time_col = str(meta.get("time_col", "position_t"))
+    if n_per_cluster is None:
+        n_per_cluster = int(meta.get("n_per_cluster", 10))
     if random_state is None:
         random_state = int(meta.get("random_state", 123))
     adata_filt = _load_filtered_state_adata_for_model(

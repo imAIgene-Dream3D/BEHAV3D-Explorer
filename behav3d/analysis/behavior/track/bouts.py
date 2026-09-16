@@ -1972,10 +1972,25 @@ def run_state_based_analysis(
     # generic downstream consumers (rename dialog, diagnostics refresh, cluster
     # key resolution) can recognize this model type without bouts-specific
     # branching, the same way "original_behav3d_feature_dtw" already does
-    # (see feature_dtw.py).
+    # (see feature_dtw.py). Also stamp the same filtering/splitting metadata the
+    # DTW pipeline stamps (state_dtw.py) so _load_filtered_state_adata_for_model
+    # can reconstruct the exact same filtered + windowed tracks on a later
+    # diagnostics-only regenerate, instead of silently reverting to defaults
+    # (unsplit tracks, size=100) that don't match what was actually clustered.
     adata_state_features.uns["dtai_trajectory_clustering"] = {
         "method": "bouts_feature_clustering",
         "cluster_key": str(cluster_key),
+        "groupby_cols": [str(c) for c in list(groupby_cols)],
+        "time_col": str(time_col),
+        "state_col": str(state_col),
+        "behavioral_trajectory_size": int(behavioral_trajectory_size),
+        "min_track_length": int(behavioral_trajectory_size),
+        "trajectory_trim_mode": trim_mode,
+        "split_long_tracks": bool(split_long_tracks),
+        "trajectory_window_col": str(trajectory_window_col),
+        "n_per_cluster": int(n_per_cluster),
+        "random_state": int(random_state),
+        "source_adata_full_path": str(adata_full_path),
     }
 
     exemplar_statebar_track_pdf_by_cluster = {}

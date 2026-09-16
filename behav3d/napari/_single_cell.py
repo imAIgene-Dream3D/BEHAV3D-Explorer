@@ -5725,7 +5725,12 @@ class TrackClassificationSubTab(QWidget):
             return
 
         def _run(**kw):
-            from behav3d.analysis.behavior.track.state_dtw import save_dtaidistance_diagnostics
+            from behav3d.analysis.behavior.track.state_dtw import (
+                FEATURE_ONLY_METHODS,
+                save_dtaidistance_diagnostics,
+                save_dtaidistance_exemplar_overview,
+                save_dtaidistance_medoid_overview,
+            )
             from behav3d.analysis.behavior.track.visualization.plots.reports import (
                 generate_track_clustering_report_pdfs,
                 save_track_class_proportions_by_sample_plot,
@@ -5778,6 +5783,29 @@ class TrackClassificationSubTab(QWidget):
                     )
                 except Exception as exc:
                     result["window_transitions_error"] = str(exc)
+            # Refresh the example-track PDF too, so it reflects the just-renamed
+            # cluster labels/colors rather than staying stale - caught locally
+            # so a failure here doesn't take down the reports above, which
+            # already succeeded by this point.
+            try:
+                result["exemplar_overview"] = save_dtaidistance_exemplar_overview(
+                    track_adata,
+                    output_dir=str(out) if out else "",
+                    cell_type=ct,
+                    verbose=True,
+                )
+            except Exception as exc:
+                result["exemplar_overview_error"] = str(exc)
+            if method not in FEATURE_ONLY_METHODS:
+                try:
+                    result["medoid_overview"] = save_dtaidistance_medoid_overview(
+                        track_adata,
+                        output_dir=str(out) if out else "",
+                        cell_type=ct,
+                        verbose=True,
+                    )
+                except Exception as exc:
+                    result["medoid_overview_error"] = str(exc)
             return result
 
         self._bg.run(
@@ -6246,6 +6274,7 @@ class TrackClassificationSubTab(QWidget):
 
         def _run(**kw):
             from behav3d.analysis.behavior.track.state_dtw import (
+                FEATURE_ONLY_METHODS,
                 save_dtaidistance_diagnostics,
                 save_dtaidistance_exemplar_overview,
                 save_dtaidistance_medoid_overview,
@@ -6287,24 +6316,37 @@ class TrackClassificationSubTab(QWidget):
                     cell_type=ct,
                     verbose=True,
                 )
-            try:
-                save_dtaidistance_exemplar_overview(
-                    track_adata,
-                    output_dir=str(out) if out else "",
-                    cell_type=ct,
-                    verbose=True,
-                )
-            except Exception as _exc:
-                print(f"[BEHAV3D] Could not generate exemplar overview: {_exc}")
-            try:
-                save_dtaidistance_medoid_overview(
-                    track_adata,
-                    output_dir=str(out) if out else "",
-                    cell_type=ct,
-                    verbose=True,
-                )
-            except Exception as _exc:
-                print(f"[BEHAV3D] Could not generate medoid overview: {_exc}")
+            # Exemplar overview needs a state_col/behavioral-states linkage to
+            # reconstruct per-timepoint tracks - not applicable to the
+            # "Original BEHAV3D" feature-DTW method, which clusters raw
+            # per-frame kinematic/contact features with no such concept.
+            # _save_feature_dtw_quality_control above is that method's
+            # complete diagnostics/QC output.
+            if method != "original_behav3d_feature_dtw":
+                try:
+                    save_dtaidistance_exemplar_overview(
+                        track_adata,
+                        output_dir=str(out) if out else "",
+                        cell_type=ct,
+                        verbose=True,
+                    )
+                except Exception as _exc:
+                    print(f"[BEHAV3D] Could not generate exemplar overview: {_exc}")
+            # Medoid overview requires a precomputed pairwise DTW distance
+            # matrix to pick a per-cluster medoid - structurally unavailable
+            # for feature-based clustering methods (bouts and Original
+            # BEHAV3D), so re-running clustering can never produce it for
+            # these; skip instead of always failing with a misleading message.
+            if method not in FEATURE_ONLY_METHODS:
+                try:
+                    save_dtaidistance_medoid_overview(
+                        track_adata,
+                        output_dir=str(out) if out else "",
+                        cell_type=ct,
+                        verbose=True,
+                    )
+                except Exception as _exc:
+                    print(f"[BEHAV3D] Could not generate medoid overview: {_exc}")
             return result
 
         self._bg.run(
