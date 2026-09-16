@@ -10,6 +10,7 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
 from behav3d.analysis.behavior.general.umap import fit_umap
+from behav3d.analysis.behavior.track.utils import _resolve_track_paths
 from behav3d.analysis.behavior.track.visualization.plots.feature_dtw import (
     plot_cluster_percentage_bars,
     plot_clustering_feature_heatmap,
@@ -739,11 +740,7 @@ def run_tcell_analysis(
 # ---------------------------------------------------------------------------
 
 def _feature_dtw_outdir(output_dir, cell_type):
-    return (
-        Path(output_dir).expanduser()
-        / "analysis" / str(cell_type)
-        / "behavorial_trajectories" / "original_behav3d"
-    )
+    return _resolve_track_paths(output_dir, cell_type).original_behav3d_outfolder
 
 
 def _feature_dtw_raw_outdir(output_dir, cell_type):
@@ -907,11 +904,11 @@ def _save_feature_dtw_quality_control(
 ):
     """Regenerate the original-BEHAV3D QC plots ("Create diagnostics").
 
-    Reads the raw clustered UMAP CSV (behavorial_trajectories/original_behav3d/raw/)
+    Reads the raw clustered UMAP CSV (behavioral_trajectories/original_behav3d/raw/)
     and writes the refreshed plots — reflecting any cluster renaming — directly
-    into behavorial_trajectories/original_behav3d/ (unless `outfolder` overrides it).
+    into behavioral_trajectories/original_behav3d/ (unless `outfolder` overrides it).
     The cluster-percentage (proportion) plot is written into `proportions_outfolder`
-    when given (e.g. the shared behavorial_trajectories/behavior_proportions folder),
+    when given (e.g. the shared behavioral_trajectories/behavior_proportions folder),
     falling back to `qc_outdir` otherwise.
 
     Known limitation: colors/order come from this pipeline's standalone YAML mapping
@@ -993,7 +990,7 @@ def _create_original_behav3d_adata(output_dir, cell_type):
     way it works with the dtaidistance method.
 
     The file is saved to:
-        behavorial_trajectories/BEHAV3D_{cell_type}_behavioral_trajectories.h5ad
+        behavioral_trajectories/BEHAV3D_{cell_type}_behavioral_trajectories.h5ad
     """
     import anndata as ad
     from behav3d.analysis.behavior.track.utils import get_dtaidistance_track_trajectories_filename

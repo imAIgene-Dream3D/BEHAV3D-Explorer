@@ -60,7 +60,10 @@ from behav3d.features.state_descriptive_features import (
     log1p_transform_columns,
 )
 from behav3d.analysis.filtering import filter_and_truncate_tracks_anndata
-from behav3d.analysis.behavior.track.utils import _filter_tracks_for_dtaidistance
+from behav3d.analysis.behavior.track.utils import (
+    _filter_tracks_for_dtaidistance,
+    _resolve_track_paths,
+)
 from behav3d.analysis.behavior.general.leiden import (
     run_pca, 
     run_leiden_clustering
@@ -92,7 +95,6 @@ from behav3d.analysis.behavior.track.visualization.plots.reports import (
 from behav3d.analysis.behavior.utils import (
     _categorical_natural_sorted,
     _mixed_label_sort_key,
-    _resolve_output_dir,
     _save_adata_obs_csv,
     _sanitize_filename_token,
     _to_numpy_2d,
@@ -101,29 +103,6 @@ from behav3d.analysis.behavior.utils import (
     _vsave,
     _vstart,
 )
-def _resolve_track_paths(output_dir, cell_type, output_subdir_name="behavioral_state_trajectories"):
-    """Resolve canonical track-classification paths under analysis/<cell_type>/."""
-    if cell_type is None or len(str(cell_type).strip()) == 0:
-        raise ValueError("cell_type is required.")
-
-    root = _resolve_output_dir(output_dir)
-    analysis_outdir = root / "analysis" / str(cell_type)
-    analysis_outdir.mkdir(parents=True, exist_ok=True)
-
-    state_outdir = analysis_outdir / "behavioral_states"
-    state_outdir.mkdir(parents=True, exist_ok=True)
-
-    outfolder = analysis_outdir / str(output_subdir_name)
-    outfolder.mkdir(parents=True, exist_ok=True)
-
-    return {
-        "output_dir": root,
-        "analysis_outdir": analysis_outdir,
-        "state_outdir": state_outdir,
-        "outfolder": outfolder,
-    }
-
-
 def get_track_trajectories_filename(cell_type):
     cell_token = _sanitize_filename_token(cell_type, fallback="cell")
     return f"BEHAV3D_{cell_token}_behavioral_trajectories.h5ad"
@@ -134,15 +113,14 @@ def get_track_classifier_filename(cell_type):
     return f"track_classification_random_forest_{cell_token}.pkl"
 
 
-def _resolve_track_classifier_path(output_dir, cell_type, output_subdir_name="behavioral_state_trajectories"):
+def _resolve_track_classifier_path(output_dir, cell_type, output_subdir_name=None):
     paths = _resolve_track_paths(
         output_dir=output_dir,
         cell_type=cell_type,
         output_subdir_name=output_subdir_name,
     )
-    classifier_dir = paths["outfolder"] / "classification"
-    classifier_dir.mkdir(parents=True, exist_ok=True)
-    return classifier_dir / get_track_classifier_filename(cell_type)
+    paths.classification_outfolder.mkdir(parents=True, exist_ok=True)
+    return paths.classification_outfolder / get_track_classifier_filename(cell_type)
 
 
 def train_random_forest_classifier(
@@ -635,7 +613,7 @@ def train_track_classifier(
     classifier_min_samples_split=2,
     classifier_max_features="sqrt",
     classifier_class_weight=None,
-    output_subdir_name="behavioral_state_trajectories",
+    output_subdir_name=None,
     save_classifier=True,
     classifier_path=None,
     random_state=123,
@@ -651,7 +629,7 @@ def train_track_classifier(
         cell_type=cell_type,
         output_subdir_name=output_subdir_name,
     )
-    outfolder = resolved_paths["outfolder"]
+    outfolder = resolved_paths.outfolder
     model_adata_path = outfolder / get_track_trajectories_filename(cell_type)
     if model_adata is None:
         if not model_adata_path.exists():
@@ -928,7 +906,7 @@ def apply_track_classifier_to_subtracks(
     state_col=None,
     output_col="ClusterID",
     confidence_col=None,
-    output_subdir_name="behavioral_state_trajectories",
+    output_subdir_name=None,
     plot_exemplars=False,
     plot_exemplar_backprojection_videos=False,
     plot_exemplar_backprojection_pdfs=False,
@@ -972,8 +950,8 @@ def apply_track_classifier_to_subtracks(
         cell_type=cell_type,
         output_subdir_name=output_subdir_name,
     )
-    outfolder = resolved_paths["outfolder"]
-    state_folder = resolved_paths["state_outdir"]
+    outfolder = resolved_paths.outfolder
+    state_folder = resolved_paths.state_outdir
 
     if classifier_artifact_or_path is None:
         classifier_artifact_or_path = _resolve_track_classifier_path(
@@ -1197,7 +1175,7 @@ def apply_track_classifier_to_subtracks(
             f"backprojection_videos={bool(plot_exemplar_backprojection_videos)} | "
             f"backprojection_pdfs={bool(plot_exemplar_backprojection_pdfs)}",
         )
-        exemplar_root = outfolder / "example_tracks"
+        exemplar_root = resolved_paths.example_tracks_outfolder
         exemplar_root.mkdir(parents=True, exist_ok=True)
 
         adata_plot = filter_and_truncate_tracks_anndata(
@@ -1269,7 +1247,7 @@ def apply_track_classifier_to_subtracks(
                 require_pixel_for_video=True,
             )
             exemplar_render_config["coordinate_enrichment_video"] = dict(coord_enrichment_video)
-            exemplar_backprojection_outdir = exemplar_root
+            exemplar_backprojection_outdir = exemplar_root / "backprojection"
             exemplar_backprojection_outdir.mkdir(parents=True, exist_ok=True)
             prep_t0 = time.perf_counter()
             exemplar_backprojection_prepared = _prepare_exemplar_backprojection_data(
@@ -1622,7 +1600,7 @@ def run_state_based_analysis(
 
     # Saving
     save_outputs=True,
-    output_subdir_name="behavioral_state_trajectories",
+    output_subdir_name=None,
     relabel_mapping=None,
     relabel_keep_unmapped=True,
 
@@ -1637,10 +1615,10 @@ def run_state_based_analysis(
         cell_type=cell_type,
         output_subdir_name=output_subdir_name,
     )
-    outfolder = resolved_paths["outfolder"]
-    clustering_outfolder = outfolder / "clustering"
-    exemplar_root = outfolder / "example_tracks"
-    state_folder = resolved_paths["state_outdir"]
+    outfolder = resolved_paths.outfolder
+    clustering_outfolder = resolved_paths.clustering_outfolder
+    exemplar_root = resolved_paths.example_tracks_outfolder
+    state_folder = resolved_paths.state_outdir
     
     if adata_full_path is None:
         adata_full_path = Path(state_folder, f"BEHAV3D_{cell_type}_behavioral_states.h5ad")
@@ -2101,7 +2079,7 @@ def run_state_based_analysis(
                     require_pixel_for_video=True,
                 )
                 exemplar_render_config["coordinate_enrichment_video"] = dict(coord_enrichment_video)
-                exemplar_backprojection_outdir = exemplar_root
+                exemplar_backprojection_outdir = exemplar_root / "backprojection"
                 exemplar_backprojection_outdir.mkdir(parents=True, exist_ok=True)
                 prep_t0 = time.perf_counter()
                 exemplar_backprojection_prepared = _prepare_exemplar_backprojection_data(

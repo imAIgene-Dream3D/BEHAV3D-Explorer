@@ -32,7 +32,7 @@ from behav3d.analysis.behavior.track.dtw import (
 from behav3d.analysis.behavior.track.utils import (
     _default_behavioral_states_path,
     _filter_tracks_for_dtaidistance,
-    _resolve_dtaidistance_paths,
+    _resolve_track_paths,
     _winfo,
     get_dtaidistance_track_trajectories_filename,
 )
@@ -584,7 +584,7 @@ def _resolve_cluster_key(adata_tracks, cluster_key=None):
 
 def _write_model_if_requested(adata_tracks, output_dir, cell_type, *, save_outputs=True):
     output_path = (
-        _resolve_dtaidistance_paths(output_dir, cell_type)["outfolder"]
+        _resolve_track_paths(output_dir, cell_type).outfolder
         / get_dtaidistance_track_trajectories_filename(cell_type)
     )
     if bool(save_outputs):
@@ -611,7 +611,7 @@ def save_dtaidistance_diagnostics(
     group_col optionally breaks the cluster-count/UMAP diagnostics down by a
     per-track grouping column (default: auto-detects "origin_cell_type" if present).
     """
-    paths = _resolve_dtaidistance_paths(output_dir, cell_type)
+    paths = _resolve_track_paths(output_dir, cell_type)
     resolved_cluster_key = _resolve_cluster_key(adata_tracks, cluster_key=cluster_key)
     if _dtai_meta(adata_tracks).get("method") in FEATURE_ONLY_METHODS:
         raise ValueError(
@@ -624,7 +624,7 @@ def save_dtaidistance_diagnostics(
     plot_paths = _save_diagnostics(
         adata_tracks,
         distances,
-        paths["quality_control_outfolder"] if outfolder is None else outfolder,
+        paths.clustering_outfolder if outfolder is None else outfolder,
         cluster_key=resolved_cluster_key,
         max_heatmap_tracks=int(max_heatmap_tracks),
         random_state=int(random_state),
@@ -655,8 +655,8 @@ def save_dtaidistance_exemplar_overview(
     random_state=None,
     verbose=True,
 ):
-    """Save only the exemplar overview grid PDF to outfolder (default: quality_control/)."""
-    paths = _resolve_dtaidistance_paths(output_dir, cell_type)
+    """Save only the exemplar overview grid PDF to outfolder (default: clustering/)."""
+    paths = _resolve_track_paths(output_dir, cell_type)
     meta = _dtai_meta(adata_tracks)
     resolved_cluster_key = _resolve_cluster_key(adata_tracks)
     state_col = str(meta.get("state_col", FULL_STATE_COL))
@@ -671,7 +671,7 @@ def save_dtaidistance_exemplar_overview(
     _ensure_exemplar_coordinate_columns(
         adata_filt, output_dir=output_dir, cell_type=cell_type, require_pixel_for_video=False,
     )
-    dest = Path(outfolder) if outfolder is not None else paths["quality_control_outfolder"]
+    dest = Path(outfolder) if outfolder is not None else paths.clustering_outfolder
     dest.mkdir(parents=True, exist_ok=True)
     fig, _, _ = plot_exemplar_tracks_by_cluster(
         adata_filt, adata_tracks,
@@ -747,7 +747,7 @@ def save_dtaidistance_medoid_overview(
     that cluster's medoid track - the single track closest (on average) to every
     other track in its cluster under the DTW distance used for clustering.
     """
-    paths = _resolve_dtaidistance_paths(output_dir, cell_type)
+    paths = _resolve_track_paths(output_dir, cell_type)
     meta = _dtai_meta(adata_tracks)
     resolved_cluster_key = _resolve_cluster_key(adata_tracks)
     state_col = str(meta.get("state_col", FULL_STATE_COL))
@@ -758,7 +758,7 @@ def save_dtaidistance_medoid_overview(
     _ensure_exemplar_coordinate_columns(
         adata_filt, output_dir=output_dir, cell_type=cell_type, require_pixel_for_video=False,
     )
-    dest = Path(outfolder) if outfolder is not None else paths["quality_control_outfolder"]
+    dest = Path(outfolder) if outfolder is not None else paths.clustering_outfolder
     dest.mkdir(parents=True, exist_ok=True)
     fig = _build_medoid_overview_figure(
         adata_filt,
@@ -839,7 +839,7 @@ def save_dtaidistance_exemplar_plots(
     verbose=True,
 ):
     """Write exemplar overview and per-cluster statebar PDFs for a DTAI model."""
-    paths = _resolve_dtaidistance_paths(output_dir, cell_type)
+    paths = _resolve_track_paths(output_dir, cell_type)
     meta = _dtai_meta(adata_tracks)
     resolved_cluster_key = _resolve_cluster_key(adata_tracks, cluster_key=cluster_key)
     state_col = str(meta.get("state_col", FULL_STATE_COL))
@@ -856,7 +856,7 @@ def save_dtaidistance_exemplar_plots(
         adata_full_path=adata_full_path,
         verbose=verbose,
     )
-    exemplar_root = paths["outfolder"] / "example_tracks"
+    exemplar_root = paths.example_tracks_outfolder
     exemplar_root.mkdir(parents=True, exist_ok=True)
 
     coord_enrichment = _ensure_exemplar_coordinate_columns(
@@ -1068,7 +1068,7 @@ def run_categorical_dtaidistance_trajectory_clustering(
     exemplar_pdf_rows_per_page=6,
     exemplar_layout_mode="both",
     exemplar_num_example_ranks=5,
-    output_subdir_name="behavorial_trajectories",
+    output_subdir_name=None,
     random_state=123,
     verbose=True,
 ):
@@ -1082,12 +1082,12 @@ def run_categorical_dtaidistance_trajectory_clustering(
     """
     started = time.perf_counter()
     if bool(clear_outputs):
-        outfolder = Path(output_dir).expanduser() / "analysis" / str(cell_type) / str(output_subdir_name)
-        if outfolder.exists():
-            shutil.rmtree(outfolder, ignore_errors=True)
+        existing_paths = _resolve_track_paths(output_dir, cell_type, output_subdir_name=output_subdir_name)
+        if existing_paths.outfolder.exists():
+            shutil.rmtree(existing_paths.outfolder, ignore_errors=True)
             if bool(verbose):
-                _winfo("trajectory-dtai", f"cleared previous outputs: {outfolder}")
-    paths = _resolve_dtaidistance_paths(output_dir, cell_type, output_subdir_name=output_subdir_name)
+                _winfo("trajectory-dtai", f"cleared previous outputs: {existing_paths.outfolder}")
+    paths = _resolve_track_paths(output_dir, cell_type, output_subdir_name=output_subdir_name)
     if adata_full_path is None:
         adata_full_path = _default_behavioral_states_path(output_dir, cell_type)
     adata_full_path = Path(adata_full_path).expanduser()
@@ -1245,7 +1245,7 @@ def run_categorical_dtaidistance_trajectory_clustering(
     }
 
     if bool(plot_results):
-        raw_qc_dir = paths["quality_control_outfolder"] / "raw"
+        raw_qc_dir = paths.clustering_outfolder / "raw"
         raw_qc_dir.mkdir(parents=True, exist_ok=True)
         plot_paths = _save_diagnostics(
             adata_tracks,
@@ -1259,7 +1259,7 @@ def run_categorical_dtaidistance_trajectory_clustering(
         adata_tracks.uns["visualization"].update(plot_paths)
 
     if bool(plot_exemplars):
-        exemplar_root = paths["outfolder"] / "example_tracks"
+        exemplar_root = paths.example_tracks_outfolder
         exemplar_root.mkdir(parents=True, exist_ok=True)
         try:
             _ensure_exemplar_coordinate_columns(
@@ -1366,13 +1366,13 @@ def run_categorical_dtaidistance_trajectory_clustering(
                 _winfo("trajectory-dtai", f"skipping exemplar PDFs due to error: {exc}")
 
     if bool(save_distance_matrix):
-        paths["clustering_outfolder"].mkdir(parents=True, exist_ok=True)
-        distance_csv = paths["clustering_outfolder"] / "categorical_dtai_distance_matrix.csv"
+        paths.clustering_outfolder.mkdir(parents=True, exist_ok=True)
+        distance_csv = paths.clustering_outfolder / "categorical_dtai_distance_matrix.csv"
         pd.DataFrame(distances, index=adata_tracks.obs.index, columns=adata_tracks.obs.index).to_csv(distance_csv)
         adata_tracks.uns.setdefault("dtai_trajectory_clustering", {})
         adata_tracks.uns["dtai_trajectory_clustering"]["distance_matrix_csv"] = str(distance_csv)
 
-    output_path = paths["outfolder"] / get_dtaidistance_track_trajectories_filename(cell_type)
+    output_path = paths.outfolder / get_dtaidistance_track_trajectories_filename(cell_type)
     if bool(save_outputs):
         adata_tracks.write(output_path, compression="gzip")
         _save_adata_obs_csv(adata_tracks, output_path)
@@ -1492,9 +1492,7 @@ def train_dtaidistance_trajectory_classifier(
     feature_adata = feature_adata[has_label.values].copy()
     feature_adata.obs[cluster_col] = feat_obs.loc[has_label, "_cluster"].astype(str).values
 
-    classifier_path = _resolve_track_classifier_path(
-        output_dir, cell_type, output_subdir_name="behavorial_trajectories"
-    )
+    classifier_path = _resolve_track_classifier_path(output_dir, cell_type)
 
     result = train_track_classifier(
         output_dir=output_dir,
@@ -1512,7 +1510,6 @@ def train_dtaidistance_trajectory_classifier(
         random_state=int(random_state),
         save_classifier=bool(save_classifier),
         classifier_path=classifier_path,
-        output_subdir_name="behavorial_trajectories",
         verbose=bool(verbose),
     )
     return result

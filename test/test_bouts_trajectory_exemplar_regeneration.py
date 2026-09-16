@@ -57,7 +57,6 @@ def _run_split_bouts_clustering(output_dir, states_path):
         n_neighbors=5,
         plot_results=False,
         plot_exemplars=False,
-        output_subdir_name="behavorial_trajectories",
         n_per_cluster=25,
         random_state=7,
         save_outputs=True,

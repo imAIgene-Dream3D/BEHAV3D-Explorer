@@ -4924,11 +4924,14 @@ class TrackClassificationSubTab(QWidget):
         return Path(str(od)).expanduser() if od else None
 
     def _track_adata_path(self, ct: str) -> Optional[Path]:
-        from behav3d.analysis.behavior.track.utils import get_dtaidistance_track_trajectories_filename
+        from behav3d.analysis.behavior.track.utils import (
+            _peek_track_outfolder,
+            get_dtaidistance_track_trajectories_filename,
+        )
         out = self._out_dir()
         if not out:
             return None
-        d = out / "analysis" / ct / "behavorial_trajectories"
+        d = _peek_track_outfolder(out, ct)
         canonical = d / get_dtaidistance_track_trajectories_filename(ct)
         if canonical.exists():
             return canonical
@@ -4938,12 +4941,16 @@ class TrackClassificationSubTab(QWidget):
         return None
 
     def _track_diagnostics_qc_dirs(self, traj_dir: Optional[Path]) -> list:
-        """Both possible diagnostics output folders: dtaidistance's shared
-        quality_control/, and the original-BEHAV3D method's own
-        original_behav3d/ folder (root — Create Diagnostics writes there)."""
+        """All possible diagnostics output folders: the shared clustering/
+        folder (dtaidistance and bouts diagnostics both write here), the
+        legacy quality_control/ folder (older dtaidistance runs, before
+        diagnostics moved into clustering/), and the original-BEHAV3D
+        method's own original_behav3d/ folder (root — Create Diagnostics
+        writes there)."""
         if not traj_dir:
             return []
         return [
+            traj_dir / "clustering",
             traj_dir / "quality_control",
             traj_dir / "original_behav3d",
         ]
@@ -4967,10 +4974,14 @@ class TrackClassificationSubTab(QWidget):
         self.combo_track_color_by.blockSignals(False)
 
     def _track_classifier_path(self, ct: str) -> Optional[Path]:
+        from behav3d.analysis.behavior.track.bouts import get_track_classifier_filename
+        from behav3d.analysis.behavior.track.utils import _peek_track_outfolder
         out = self._out_dir()
         if not out:
             return None
-        return out / "analysis" / ct / "behavorial_trajectories" / f"classifier_{ct}.pkl"
+        return (
+            _peek_track_outfolder(out, ct) / "classification" / get_track_classifier_filename(ct)
+        )
 
     def _state_adata_path(self, ct: str) -> Optional[Path]:
         """Path to the behavioral states h5ad produced by State Classification."""
@@ -5353,7 +5364,8 @@ class TrackClassificationSubTab(QWidget):
                 btn.setEnabled(False)
             return
         out = self._out_dir()
-        traj_dir = (out / "analysis" / ct / "behavorial_trajectories") if out else None
+        from behav3d.analysis.behavior.track.utils import _peek_track_outfolder
+        traj_dir = _peek_track_outfolder(out, ct) if out else None
         self.btn_view_exemplars.setEnabled(
             bool(traj_dir and any(traj_dir.glob("exemplar_tracks*.pdf")))
         )
@@ -5475,9 +5487,6 @@ class TrackClassificationSubTab(QWidget):
                 "plot_results": True,
                 "plot_exemplars": self.chk_bouts_plot_exemplars.isChecked(),
                 "random_state": int(self.spin_seed.value()),
-                # Share the DTW basis's output folder so both bases' diagnostics/exemplar
-                # PDFs and the canonical model .h5ad land in the same place on disk.
-                "output_subdir_name": "behavorial_trajectories",
             }
         else:
             params = {
@@ -5501,9 +5510,15 @@ class TrackClassificationSubTab(QWidget):
         on_fail_ext = extra_callbacks.get("on_failed") if extra_callbacks else None
 
         def _run(**kw):
-            _traj_dir = out / "analysis" / ct / "behavorial_trajectories"
-            if _traj_dir.exists():
-                rmtree_ignore_missing(_traj_dir)
+            from behav3d.analysis.behavior.track.utils import _peek_track_outfolder
+            _existing_traj_dir = _peek_track_outfolder(out, ct)
+            if _existing_traj_dir.exists():
+                rmtree_ignore_missing(_existing_traj_dir)
+            # Re-resolve after clearing: with neither the canonical nor legacy
+            # folder left on disk, this always lands on the canonical name,
+            # matching what run_state_based_analysis/run_categorical_dtaidistance_
+            # trajectory_clustering will independently resolve to below.
+            _traj_dir = _peek_track_outfolder(out, ct)
             if is_bouts:
                 from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
                 from behav3d.analysis.behavior.track.bouts import run_state_based_analysis
@@ -5646,10 +5661,23 @@ class TrackClassificationSubTab(QWidget):
 
         def _run(**kw):
             import shutil
-            _traj_dir = out / "analysis" / ct / "behavorial_trajectories"
+            from behav3d.analysis.behavior.track.utils import (
+                _peek_track_outfolder,
+                _resolve_track_paths,
+            )
+            _traj_dir = _peek_track_outfolder(out, ct)
             if _traj_dir.exists():
                 rmtree_ignore_missing(_traj_dir)
             from behav3d.analysis.behavior.track.feature_dtw import run_tcell_analysis
+            # Resolve the legacy method's raw-output staging dir (relative to
+            # analysis/<cell_type>/) through the shared resolver, so it lands
+            # under the canonical "behavioral_trajectories" folder — or its
+            # legacy "behavorial_trajectories" spelling if this is an older
+            # project that still uses it.
+            _paths = _resolve_track_paths(str(out) if out else "", ct)
+            _original_subdir_name = str(
+                (_paths.original_behav3d_outfolder / "raw").relative_to(_paths.analysis_outdir)
+            )
             # contact_cols left as None → the preset auto-detects every raw
             # `*_contact` column (each organoid and each other cell type) and
             # uses each as its own scaled DTW feature.
@@ -5662,7 +5690,7 @@ class TrackClassificationSubTab(QWidget):
                 umap_n_neighbors=n_neigh,
                 umap_minimal_distance=min_dist,
                 feature_scaling_preset="original_behav3d",
-                output_subdir_name="behavorial_trajectories/original_behav3d/raw",
+                output_subdir_name=_original_subdir_name,
             )
 
         def _done(_):
@@ -6163,9 +6191,8 @@ class TrackClassificationSubTab(QWidget):
             full_adata = _ad.read_h5ad(str(state_adata_path))
 
             out_path = _Path(out) if out else _Path(".")
-            exemplar_root = (
-                out_path / "analysis" / ct / "behavorial_trajectories" / "example_tracks"
-            )
+            from behav3d.analysis.behavior.track.utils import _resolve_track_paths
+            exemplar_root = _resolve_track_paths(str(out) if out else "", ct).example_tracks_outfolder
             exemplar_root.mkdir(parents=True, exist_ok=True)
             results = {}
 
@@ -7352,7 +7379,8 @@ class TrackClassificationSubTab(QWidget):
         if not ct:
             return
         out = self._out_dir()
-        traj_dir = (out / "analysis" / ct / "behavorial_trajectories") if out else None
+        from behav3d.analysis.behavior.track.utils import _peek_track_outfolder
+        traj_dir = _peek_track_outfolder(out, ct) if out else None
         candidates = []
         if kind == "track_exemplars" and traj_dir:
             exemplar_dir = traj_dir / "example_tracks"

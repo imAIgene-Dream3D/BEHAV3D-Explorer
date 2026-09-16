@@ -30,7 +30,7 @@ You pick it once, in **Data Preparation → Output Directory**. Every other tab 
     │   ├── results/                                # organoid-type dynamics analyses
     │   ├── interaction_analysis/                   # immune ↔ organoid contact analyses
     │   ├── behavioral_states/                      # state classification (.h5ad) + backprojection/ subfolder (state-labelled zarrs)
-    │   └── behavorial_trajectories/                 # track classification (DTW) results
+    │   └── behavioral_trajectories/                 # track classification results (DTW, bouts, and legacy methods share this folder)
     └── multi_organoid_comparison/                  # multi-organoid death-dynamics comparisons
     
 ```

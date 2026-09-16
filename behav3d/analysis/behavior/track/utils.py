@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -22,26 +23,117 @@ def _ordered_unique(values):
     return out
 
 
-def _resolve_dtaidistance_paths(output_dir, cell_type, output_subdir_name="behavorial_trajectories"):
+# Canonical shared output folder for every track-classification method (DTW
+# distance clustering, bouts/proportion feature clustering, classifier-apply,
+# and the legacy "original BEHAV3D" feature-DTW method).
+TRACK_TRAJECTORIES_SUBDIR_NAME = "behavioral_trajectories"
+# Older projects may still have this misspelled folder on disk (missing the
+# second "i" in "behavioral"); it is only ever read as a fallback, never written.
+_LEGACY_TRACK_TRAJECTORIES_SUBDIR_NAME = "behavorial_trajectories"
+
+
+@dataclass(frozen=True)
+class TrackPaths:
+    output_dir: Path
+    analysis_outdir: Path
+    state_outdir: Path
+    outfolder: Path
+    clustering_outfolder: Path
+    behavior_proportions_outfolder: Path
+    behavior_comparisons_outfolder: Path
+    example_tracks_outfolder: Path
+    example_tracks_backprojection_outfolder: Path
+    classification_outfolder: Path
+    original_behav3d_outfolder: Path
+
+
+def _peek_track_outfolder(output_dir, cell_type, *, output_subdir_name=None):
+    """Read-only lookup of the track-classification outfolder — no directories
+    are created. Applies the same canonical-name-with-legacy-fallback logic as
+    `_resolve_track_paths`, so UI code doing existence checks (e.g. enabling a
+    "view results" button, autofilling a path on tab switch) can be called
+    freely/often without side effects, while getting the same folder that
+    `_resolve_track_paths` would resolve to for reading/writing.
+    """
+    if cell_type is None or len(str(cell_type).strip()) == 0:
+        raise ValueError("cell_type is required.")
+
     root = Path(output_dir).expanduser()
     analysis_outdir = root / "analysis" / str(cell_type)
+
+    if output_subdir_name is None:
+        outfolder = analysis_outdir / TRACK_TRAJECTORIES_SUBDIR_NAME
+        if not outfolder.exists():
+            legacy_outfolder = analysis_outdir / _LEGACY_TRACK_TRAJECTORIES_SUBDIR_NAME
+            if legacy_outfolder.exists():
+                outfolder = legacy_outfolder
+    else:
+        outfolder = analysis_outdir / str(output_subdir_name)
+    return outfolder
+
+
+def _resolve_track_paths(output_dir, cell_type, *, output_subdir_name=None):
+    """Resolve canonical track-classification paths under analysis/<cell_type>/.
+
+    Shared by every track-classification method so they all write into the same
+    folder layout regardless of which clustering basis (DTW vs. bouts) or which
+    step (clustering, classifier-apply, legacy feature-DTW) produced them.
+
+    When `output_subdir_name` is not given, resolves to the canonical
+    "behavioral_trajectories" folder — falling back to the legacy misspelled
+    "behavorial_trajectories" folder only if that is the sole one already
+    present on disk (older projects), without renaming or migrating anything.
+    Callers that need a different/nested subfolder (e.g. the legacy method's
+    own raw-output staging dir) can pass an explicit `output_subdir_name`,
+    which bypasses the fallback entirely.
+    """
+    if cell_type is None or len(str(cell_type).strip()) == 0:
+        raise ValueError("cell_type is required.")
+
+    root = Path(output_dir).expanduser()
+    analysis_outdir = root / "analysis" / str(cell_type)
+    analysis_outdir.mkdir(parents=True, exist_ok=True)
+
     state_outdir = analysis_outdir / "behavioral_states"
-    outfolder = analysis_outdir / str(output_subdir_name)
-    clustering_outfolder = outfolder / "clustering"
-    quality_control_outfolder = outfolder / "quality_control"
-    behavior_proportions_outfolder = outfolder / "behavior_proportions"
-    behavior_comparisons_outfolder = outfolder / "behavior_comparisons"
+
+    outfolder = _peek_track_outfolder(root, cell_type, output_subdir_name=output_subdir_name)
     outfolder.mkdir(parents=True, exist_ok=True)
-    quality_control_outfolder.mkdir(parents=True, exist_ok=True)
+
+    example_tracks_outfolder = outfolder / "example_tracks"
+
+    return TrackPaths(
+        output_dir=root,
+        analysis_outdir=analysis_outdir,
+        state_outdir=state_outdir,
+        outfolder=outfolder,
+        clustering_outfolder=outfolder / "clustering",
+        behavior_proportions_outfolder=outfolder / "behavior_proportions",
+        behavior_comparisons_outfolder=outfolder / "behavior_comparisons",
+        example_tracks_outfolder=example_tracks_outfolder,
+        example_tracks_backprojection_outfolder=example_tracks_outfolder / "backprojection",
+        classification_outfolder=outfolder / "classification",
+        original_behav3d_outfolder=outfolder / "original_behav3d",
+    )
+
+
+def _resolve_dtaidistance_paths(output_dir, cell_type, output_subdir_name=None):
+    """Deprecated: use `_resolve_track_paths` (returns a `TrackPaths` dataclass).
+
+    Kept as a dict-shaped shim so not-yet-migrated call sites keep working.
+    `"quality_control_outfolder"` is aliased to `clustering_outfolder`, since
+    track-classification diagnostics now live in `clustering/` for every method.
+    """
+    paths = _resolve_track_paths(output_dir, cell_type, output_subdir_name=output_subdir_name)
+    paths.clustering_outfolder.mkdir(parents=True, exist_ok=True)
     return {
-        "root": root,
-        "analysis_outdir": analysis_outdir,
-        "state_outdir": state_outdir,
-        "outfolder": outfolder,
-        "clustering_outfolder": clustering_outfolder,
-        "quality_control_outfolder": quality_control_outfolder,
-        "behavior_proportions_outfolder": behavior_proportions_outfolder,
-        "behavior_comparisons_outfolder": behavior_comparisons_outfolder,
+        "root": paths.output_dir,
+        "analysis_outdir": paths.analysis_outdir,
+        "state_outdir": paths.state_outdir,
+        "outfolder": paths.outfolder,
+        "clustering_outfolder": paths.clustering_outfolder,
+        "quality_control_outfolder": paths.clustering_outfolder,
+        "behavior_proportions_outfolder": paths.behavior_proportions_outfolder,
+        "behavior_comparisons_outfolder": paths.behavior_comparisons_outfolder,
     }
 
 

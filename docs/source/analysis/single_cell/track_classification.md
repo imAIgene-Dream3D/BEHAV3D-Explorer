@@ -76,7 +76,7 @@ A good cluster count for categorical DTW is one where each cluster looks like a 
 For the default categorical workflow, the main evidence is the **exemplar overview PDF** saved as:
 
 ```text
-<output_dir>/analysis/<cell_type>/behavorial_trajectories/example_tracks/example_tracks_overview.pdf
+<output_dir>/analysis/<cell_type>/behavioral_trajectories/example_tracks/example_tracks_overview.pdf
 ```
 
 By default, this overview shows **10 representative tracks per cluster**, which is why it is the first thing to inspect after clustering. Use it to ask:
@@ -123,7 +123,7 @@ Ticking **Use original feature-based BEHAV3D DTW clustering** (at the bottom of 
 Run it with **▶ Run Original BEHAV3D DTW**. It reads the **filtered track-features CSV** (from [Filtering](../filtering.md)), applies the original BEHAV3D feature scaling, and writes UMAP cluster tables and diagnostic PDFs (UMAP plot, feature heatmap, cluster-percentage bars) under `analysis/<cell_type>/results/`.
 
 ```{important}
-Original mode performs **clustering only**. The integrated Steps 2–5 (rename, train/apply classifier, exemplar plots, backprojection) read the categorical trajectory `.h5ad` from `behavorial_trajectories/`, which only the **Categorical DTW** run produces. After an original-only run, inspect the results through the **Results** panel or the CSV/PDF files under `results/`; run the categorical method if you need the full downstream workflow.
+Original mode performs **clustering only**. The integrated Steps 2–5 (rename, train/apply classifier, exemplar plots, backprojection) read the categorical trajectory `.h5ad` from `behavioral_trajectories/`, which only the **Categorical DTW** run produces. After an original-only run, inspect the results through the **Results** panel or the CSV/PDF files under `results/`; run the categorical method if you need the full downstream workflow.
 ```
 
 ## Step 2 — Rename Track Clusters
@@ -228,8 +228,8 @@ Only available for the **Categorical DTW** method (needs a fitted one-hot dtaidi
 Output:
 
 ```text
-<output_dir>/analysis/<cell_type>/behavorial_trajectories/contact_analysis/<contact_col>/contact_analysis.pdf
-<output_dir>/analysis/<cell_type>/behavorial_trajectories/contact_analysis/<contact_col>/csv/
+<output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/contact_analysis.pdf
+<output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/csv/
 ```
 
 ### Contact Duration Comparison
@@ -255,8 +255,8 @@ Requires **Use contact cell classification** (above) to be enabled — there is 
 Click **▶ Create Contact Duration Comparison**. Output, written as a sibling artifact to the bundle above:
 
 ```text
-<output_dir>/analysis/<cell_type>/behavorial_trajectories/contact_analysis/<contact_col>/contact_duration_comparison.pdf
-<output_dir>/analysis/<cell_type>/behavorial_trajectories/contact_analysis/<contact_col>/csv/contact_duration_comparison.csv
+<output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/contact_duration_comparison.pdf
+<output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/csv/contact_duration_comparison.csv
 ```
 
 ### Contact State-Shift Analysis
@@ -283,10 +283,10 @@ Only available for the **Categorical DTW** method, and only once **State Classif
 Output, written as sibling artifacts to the Contact Analysis report (so re-running one does not overwrite the other):
 
 ```text
-<output_dir>/analysis/<cell_type>/behavorial_trajectories/contact_analysis/<contact_col>/contact_state_shift.pdf
-<output_dir>/analysis/<cell_type>/behavorial_trajectories/contact_analysis/<contact_col>/csv/state_shift_track_windows.csv
-<output_dir>/analysis/<cell_type>/behavorial_trajectories/contact_analysis/<contact_col>/csv/state_shift_diff_bars.csv
-<output_dir>/analysis/<cell_type>/behavorial_trajectories/contact_analysis/<contact_col>/csv/state_shift_stacked_composition.csv
+<output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/contact_state_shift.pdf
+<output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/csv/state_shift_track_windows.csv
+<output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/csv/state_shift_diff_bars.csv
+<output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/csv/state_shift_stacked_composition.csv
 ```
 
 ## Step 5 — Backprojection
@@ -322,14 +322,14 @@ Click **▶ Export Track Backprojection** to run the export in the background; t
 Track Classification writes its results under:
 
 ```text
-<output_dir>/analysis/<cell_type>/behavorial_trajectories/
+<output_dir>/analysis/<cell_type>/behavioral_trajectories/
 ```
 
 You will find there, depending on which steps you ran:
 
 - The **track-cluster data** as an `.h5ad` file (one trajectory per row, with its cluster label).
 - A **track-cluster table** (`BEHAV3D_<cell_type>_track_clusters.csv`) once the classifier is applied.
-- The trained **classifier** (`classifier_<cell_type>.pkl`).
+- The trained **classifier** (`classification/track_classification_random_forest_<cell_type>.pkl`).
 - The **exemplar overview PDF** at `example_tracks/example_tracks_overview.pdf`, which is the main visual QC output for deciding whether `N clusters` split the trajectories sensibly.
 - Additional **exemplar** PDFs under `example_tracks/` and **diagnostics** PDFs under the trajectory-clustering output folders.
 - **Track-class proportion plots** under `behavior_proportions/`: `track_class_proportions_by_sample_<class>.pdf`/`.csv`, plus `track_class_proportions_by_group_<class>.csv` when grouping is used.
@@ -342,7 +342,7 @@ You will find there, depending on which steps you ran:
 The **Original feature-based BEHAV3D DTW** engine instead writes its UMAP cluster tables (`BEHAV3D_<cell_type>_UMAP_clusters.csv`, `..._combined_track_features_clustered.csv`, `..._UMAP_cluster_percentages.csv`) and diagnostic PDFs under `analysis/<cell_type>/results/`.
 
 ```{tip}
-The folder name on disk is `behavorial_trajectories`. The easiest way to reopen any of these results is the **👁** buttons or the shared **Results** panel rather than browsing the path by hand.
+The folder name on disk is `behavioral_trajectories`. The easiest way to reopen any of these results is the **👁** buttons or the shared **Results** panel rather than browsing the path by hand.
 ```
 
 ## Tips & best practices

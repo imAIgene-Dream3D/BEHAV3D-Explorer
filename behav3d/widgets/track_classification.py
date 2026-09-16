@@ -78,8 +78,10 @@ from behav3d.analysis.behavior.track.utils import (
     _default_behavioral_states_path,
     _filter_tracks_for_dtaidistance,
     _ordered_unique,
+    _peek_track_outfolder,
     _resolve_dtaidistance_paths,
     _resolve_optional_int,
+    _resolve_track_paths,
     _winfo,
     get_dtaidistance_track_trajectories_filename,
 )
@@ -1217,13 +1219,7 @@ class TrackClassificationPanel:
 
     def _model_adata_path(self, cell_type=None):
         ct = self._current_cell_type() if cell_type is None else str(cell_type)
-        return (
-            Path(self.output_dir)
-            / "analysis"
-            / ct
-            / "behavorial_trajectories"
-            / get_dtaidistance_track_trajectories_filename(ct)
-        )
+        return _peek_track_outfolder(self.output_dir, ct) / get_dtaidistance_track_trajectories_filename(ct)
 
     def _original_track_features_path(self, cell_type=None):
         ct = self._current_cell_type() if cell_type is None else str(cell_type)
@@ -1837,7 +1833,7 @@ class TrackClassificationPanel:
         _set_classification_state_order(adata_tracks, "ClusterID", new_order)
         adata_tracks.write(self._model_adata_path(), compression="lzf")
         qc_dir = _resolve_dtaidistance_paths(self.output_dir, self._current_cell_type())[
-            "quality_control_outfolder"
+            "clustering_outfolder"
         ] / "after_renaming"
         plot_paths = save_dtaidistance_diagnostics(
             adata_tracks,
@@ -2090,7 +2086,7 @@ class TrackClassificationPanel:
         with self.out_run:
             try:
                 import shutil
-                _traj_dir = Path(self.output_dir) / "analysis" / self._current_cell_type() / "behavorial_trajectories"
+                _traj_dir = _peek_track_outfolder(self.output_dir, self._current_cell_type())
                 if _traj_dir.exists():
                     rmtree_ignore_missing(_traj_dir)
                 trajectory_size = _resolve_optional_int(self.behavioral_trajectory_size.value)
@@ -2190,9 +2186,6 @@ class TrackClassificationPanel:
             plot_exemplars=bool(self.bouts_plot_exemplars.value),
             n_per_cluster=int(self.n_per_cluster.value),
             random_state=int(self.random_state.value),
-            # Share the DTW basis's output folder so both bases' diagnostics/exemplar PDFs
-            # and the canonical model .h5ad land in the same place on disk.
-            output_subdir_name="behavorial_trajectories",
             verbose=True,
         )
         # Write to the same canonical path the DTW branch uses so every generic downstream
@@ -2209,7 +2202,7 @@ class TrackClassificationPanel:
             "<b>Ready for plots:</b> clustering finished. Diagnostics"
             + (" and exemplar" if bool(self.bouts_plot_exemplars.value) else "")
             + " PDFs for this basis were written under "
-            "<code>analysis/&lt;cell_type&gt;/behavorial_trajectories/</code>."
+            "<code>analysis/&lt;cell_type&gt;/behavioral_trajectories/</code>."
         )
 
     def _on_run_original_clicked(self, _):
@@ -2219,9 +2212,18 @@ class TrackClassificationPanel:
             try:
                 ct = self._current_cell_type()
                 import shutil
-                _traj_dir = Path(self.output_dir) / "analysis" / ct / "behavorial_trajectories"
+                _traj_dir = _peek_track_outfolder(self.output_dir, ct)
                 if _traj_dir.exists():
                     rmtree_ignore_missing(_traj_dir)
+                # Resolve the legacy method's raw-output staging dir (relative to
+                # analysis/<cell_type>/) through the shared resolver, so it lands
+                # under the canonical "behavioral_trajectories" folder — or its
+                # legacy "behavorial_trajectories" spelling if this is an older
+                # project that still uses it.
+                _paths = _resolve_track_paths(self.output_dir, ct)
+                _original_subdir_name = str(
+                    (_paths.original_behav3d_outfolder / "raw").relative_to(_paths.analysis_outdir)
+                )
                 csv_path = self._original_track_features_path(ct)
                 if not csv_path.exists():
                     raise FileNotFoundError(f"Original BEHAV3D track-features CSV not found: {csv_path}")
@@ -2250,7 +2252,7 @@ class TrackClassificationPanel:
                     nr_of_clusters=int(self.original_n_clusters.value),
                     plot_results=False,
                     seed=int(self.random_state.value),
-                    output_subdir_name="behavorial_trajectories/original_behav3d/raw",
+                    output_subdir_name=_original_subdir_name,
                     feature_scaling_preset="original_behav3d",
                     min_track_length=int(self.original_trajectory_size.value),
                     max_track_length=int(self.original_trajectory_size.value),
@@ -2714,7 +2716,6 @@ class TrackClassificationPanel:
         return _resolve_track_classifier_path(
             self.output_dir,
             self._current_cell_type(),
-            output_subdir_name="behavorial_trajectories",
         )
 
     def _on_train_classifier_clicked(self, _):
@@ -2791,7 +2792,6 @@ class TrackClassificationPanel:
                     cell_type=ct,
                     classifier_artifact_or_path=clf_path,
                     adata_full_path=states_path,
-                    output_subdir_name="behavorial_trajectories",
                     group_cols=list(self.apply_group_cols_select.value) or None,
                     metadata=getattr(self.metadata_loader, "metadata", None),
                     verbose=True,
