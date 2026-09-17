@@ -315,7 +315,8 @@ def _compact_experiment_config(config: dict) -> dict:
                 if module == "state_classification" else
                 (
                     "behavioral_trajectory_size", "n_clusters", "linkage",
-                    "trajectory_trim_mode", "split_long_tracks", "use_original",
+                    "trajectory_trim_mode", "split_long_tracks", "clustering_family",
+                    "use_exact_original_settings", "feature_dtw_selected_columns",
                 )
             )
             by_cell_type = {}

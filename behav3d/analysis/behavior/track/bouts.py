@@ -1506,6 +1506,99 @@ def rename_track_clusters(
     return adata
 
 
+def _save_bouts_exemplar_overview_pdf(
+    adata_filt,
+    adata_tracks,
+    *,
+    out_dir,
+    n_per_cluster,
+    state_col,
+    cluster_key,
+    seed=0,
+    plot_dpi=300,
+):
+    """Build and save the exemplar-overview grid PDF (one panel per cluster).
+
+    This is the exact plotting/saving logic `run_state_based_analysis` runs
+    right after clustering. Factored out so later regenerate flows (e.g. after
+    renaming clusters in the napari UI) can reuse it instead of a separate,
+    reload-based path that has previously drifted from this one.
+
+    `out_dir` is the `clustering/` outfolder, not `example_tracks/` - the
+    overview grid is a clustering-diagnostic artifact (like the diagnostics
+    PDF and medoid overview), not one of the per-track exemplar outputs.
+    """
+    fig_exemplar, _, chosen_exemplars = plot_exemplar_tracks_by_cluster(
+        adata_filt,
+        adata_tracks,
+        n_per_cluster=n_per_cluster,
+        state_key=state_col,
+        cluster_key=cluster_key,
+        seed=seed,
+    )
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    exemplar_path = out_dir / "example_tracks_overview.pdf"
+    with PdfPages(exemplar_path) as pdf:
+        _apply_best_pdf_orientation(fig_exemplar, default_orientation="landscape")
+        pdf.savefig(fig_exemplar, dpi=int(plot_dpi), bbox_inches="tight")
+    return fig_exemplar, chosen_exemplars, exemplar_path
+
+
+def save_bouts_exemplar_overview(
+    adata_tracks,
+    output_dir,
+    cell_type,
+    *,
+    outfolder=None,
+    n_per_cluster=None,
+    seed=0,
+    verbose=True,
+):
+    """Regenerate just the exemplar-overview grid PDF for a saved bouts model.
+
+    Reloads and re-filters the source behavioral-states h5ad from the
+    filtering/splitting metadata `run_state_based_analysis` stamped onto
+    `adata_tracks.uns["dtai_trajectory_clustering"]`, then renders through the
+    same `_save_bouts_exemplar_overview_pdf` helper used right after
+    clustering - so a regenerate (e.g. after renaming clusters) looks the same
+    as the original, just with whatever cluster labels are currently on
+    `adata_tracks.obs`. The selected tracks are not guaranteed to match the
+    original run's random sample.
+    """
+    # Deferred import: state_dtw.py imports from this module at load time, so
+    # importing it back at module level here would create a circular import.
+    from behav3d.analysis.behavior.track.state_dtw import (
+        _dtai_meta,
+        _load_filtered_state_adata_for_model,
+    )
+
+    paths = _resolve_track_paths(output_dir, cell_type)
+    meta = _dtai_meta(adata_tracks)
+    cluster_key = str(meta.get("cluster_key", "ClusterID"))
+    state_col = str(meta.get("state_col", FULL_STATE_COL))
+    if n_per_cluster is None:
+        n_per_cluster = int(meta.get("n_per_cluster", 10))
+
+    adata_filt = _load_filtered_state_adata_for_model(
+        adata_tracks, output_dir, cell_type, verbose=verbose,
+    )
+
+    dest = Path(outfolder) if outfolder is not None else paths.clustering_outfolder
+    _, _, exemplar_path = _save_bouts_exemplar_overview_pdf(
+        adata_filt,
+        adata_tracks,
+        out_dir=dest,
+        n_per_cluster=int(n_per_cluster),
+        state_col=state_col,
+        cluster_key=cluster_key,
+        seed=seed,
+        plot_dpi=300,
+    )
+    _vsave(verbose, "trajectory-clustering", "exemplar overview", exemplar_path)
+    return str(exemplar_path)
+
+
 def run_state_based_analysis(
     output_dir,
     cell_type="tcell",
@@ -1918,10 +2011,11 @@ def run_state_based_analysis(
     if plot_results:
         if bool(autosave_plots):
             diagnostics_started = time.perf_counter()
-            clustering_outfolder.mkdir(parents=True, exist_ok=True)
+            raw_clustering_outfolder = clustering_outfolder / "raw"
+            raw_clustering_outfolder.mkdir(parents=True, exist_ok=True)
             report_paths = generate_track_clustering_report_pdfs(
                 adata_tracks=adata_state_features,
-                outfolder=clustering_outfolder,
+                outfolder=raw_clustering_outfolder,
                 cluster_key=cluster_key,
                 heatmap_figsize=heatmap_figsize,
                 matrixplot_figsize=matrixplot_figsize,
@@ -2008,28 +2102,21 @@ def run_state_based_analysis(
     }
 
     # --------- Exemplar tracks by cluster ----------
+    fig_exemplar = None
     if plot_exemplars:
         exemplar_started = time.perf_counter()
-        # This assumes plot_exemplar_tracks_by_cluster signature: (adata_tracks, adata_clusters, n_per_cluster, state_key)
-        # where `adata_clusters` contains the clustering in .obs[cluster_key].
-        fig_exemplar, _, chosen_exemplars = plot_exemplar_tracks_by_cluster(
-            adata_filt,
-            adata_state_features,
-            n_per_cluster=n_per_cluster,
-            state_key=state_col,
-            cluster_key=cluster_key,
-        )
-        if bool(autosave_plots) and fig_exemplar is not None:
-            exemplar_root.mkdir(parents=True, exist_ok=True)
-            exemplar_path = Path(
-                exemplar_root,
-                "example_tracks_overview.pdf",
+        if bool(autosave_plots):
+            fig_exemplar, chosen_exemplars, _exemplar_overview_path = _save_bouts_exemplar_overview_pdf(
+                adata_filt,
+                adata_state_features,
+                out_dir=clustering_outfolder,
+                n_per_cluster=n_per_cluster,
+                state_col=state_col,
+                cluster_key=cluster_key,
+                seed=0,
+                plot_dpi=plot_dpi,
             )
-            exemplar_path.parent.mkdir(parents=True, exist_ok=True)
-            with PdfPages(exemplar_path) as pdf:
-                _apply_best_pdf_orientation(fig_exemplar, default_orientation="landscape")
-                pdf.savefig(fig_exemplar, dpi=int(plot_dpi), bbox_inches="tight")
-
+        if bool(autosave_plots) and fig_exemplar is not None:
             coord_enrichment_pdf = _shared_ensure_exemplar_coordinate_columns(
                 adata=adata_filt,
                 output_dir=output_dir,
@@ -2208,7 +2295,8 @@ def run_state_based_analysis(
                         )
                     )
         _vdone(verbose, "trajectory-clustering", "render exemplar outputs", exemplar_started)
-        plt.close(fig_exemplar)
+        if fig_exemplar is not None:
+            plt.close(fig_exemplar)
 
     adata_state_features.uns.setdefault("visualization", {})
     adata_state_features.uns["visualization"].update(

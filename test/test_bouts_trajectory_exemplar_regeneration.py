@@ -5,7 +5,10 @@ import numpy as np
 import pandas as pd
 
 from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
-from behav3d.analysis.behavior.track.bouts import run_state_based_analysis
+from behav3d.analysis.behavior.track.bouts import (
+    run_state_based_analysis,
+    save_bouts_exemplar_overview,
+)
 from behav3d.analysis.behavior.track.state_dtw import (
     _load_filtered_state_adata_for_model,
     save_dtaidistance_exemplar_overview,
@@ -128,4 +131,33 @@ def test_exemplar_overview_regenerates_with_multiple_tracklets_per_track(tmp_pat
     assert windows_per_track.max() > 1, (
         "expected at least one TrackID to contribute more than one distinct "
         "tracklet (trajectory_window_id) to the exemplar selection"
+    )
+
+
+def test_bouts_native_exemplar_overview_regenerates_with_multiple_tracklets_per_track(tmp_path):
+    """The napari rename/"Create Diagnostics" flows regenerate the bouts exemplar
+    overview via `save_bouts_exemplar_overview` (reusing the same plotting logic
+    bouts.py runs right after clustering), not `save_dtaidistance_exemplar_overview`.
+    This mirrors `test_exemplar_overview_regenerates_with_multiple_tracklets_per_track`
+    above, but exercises that function directly to make sure it also renders
+    split tracks (multiple tracklets sharing one TrackID) without raising."""
+    output_dir = Path(tmp_path) / "bouts_native_exemplar_case"
+    state_dir = output_dir / "analysis" / "tcell" / "behavioral_states"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    states_path = state_dir / "BEHAV3D_tcell_behavioral_states.h5ad"
+    _make_behavioral_states_adata(n_tracks=4, track_len=200).write(states_path, compression="gzip")
+
+    result = _run_split_bouts_clustering(output_dir, states_path)
+
+    overview_pdf = save_bouts_exemplar_overview(
+        result,
+        output_dir=str(output_dir),
+        cell_type="tcell",
+        n_per_cluster=25,
+        verbose=False,
+    )
+    assert Path(overview_pdf).exists()
+    assert Path(overview_pdf).parent.name == "clustering", (
+        "expected the regenerated overview to land directly in the same "
+        "clustering/ folder run_state_based_analysis itself writes to"
     )

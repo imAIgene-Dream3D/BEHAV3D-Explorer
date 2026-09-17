@@ -858,6 +858,8 @@ def save_dtaidistance_exemplar_plots(
     )
     exemplar_root = paths.example_tracks_outfolder
     exemplar_root.mkdir(parents=True, exist_ok=True)
+    clustering_outfolder = paths.clustering_outfolder
+    clustering_outfolder.mkdir(parents=True, exist_ok=True)
 
     coord_enrichment = _ensure_exemplar_coordinate_columns(
         adata_filt,
@@ -902,7 +904,7 @@ def save_dtaidistance_exemplar_plots(
             seed=int(random_state),
             window_key=str(meta.get("trajectory_window_col", "trajectory_window_id")),
         )
-        overview_pdf = exemplar_root / "example_tracks_overview.pdf"
+        overview_pdf = clustering_outfolder / "example_tracks_overview.pdf"
         with PdfPages(overview_pdf) as pdf:
             pdf.savefig(fig_exemplar, bbox_inches="tight", dpi=300)
         plt.close(fig_exemplar)
@@ -916,7 +918,7 @@ def save_dtaidistance_exemplar_plots(
                 time_col=time_col,
                 window_key=str(meta.get("trajectory_window_col", "trajectory_window_id")),
             )
-            medoid_overview_pdf = exemplar_root / "medoid_tracks_overview.pdf"
+            medoid_overview_pdf = clustering_outfolder / "medoid_tracks_overview.pdf"
             with PdfPages(medoid_overview_pdf) as pdf:
                 pdf.savefig(fig_medoid, bbox_inches="tight", dpi=300)
             plt.close(fig_medoid)
@@ -1261,6 +1263,8 @@ def run_categorical_dtaidistance_trajectory_clustering(
     if bool(plot_exemplars):
         exemplar_root = paths.example_tracks_outfolder
         exemplar_root.mkdir(parents=True, exist_ok=True)
+        clustering_outfolder = paths.clustering_outfolder
+        clustering_outfolder.mkdir(parents=True, exist_ok=True)
         try:
             _ensure_exemplar_coordinate_columns(
                 adata_filt,
@@ -1297,7 +1301,7 @@ def run_categorical_dtaidistance_trajectory_clustering(
                 tmax_key="position_t_max",
                 seed=int(random_state),
             )
-            overview_pdf = exemplar_root / "example_tracks_overview.pdf"
+            overview_pdf = clustering_outfolder / "example_tracks_overview.pdf"
             with PdfPages(overview_pdf) as pdf:
                 pdf.savefig(fig_exemplar, bbox_inches="tight", dpi=300)
             plt.close(fig_exemplar)
@@ -1311,7 +1315,7 @@ def run_categorical_dtaidistance_trajectory_clustering(
                     state_key=str(state_cols[0]),
                     time_col=str(time_col),
                 )
-                medoid_overview_pdf = exemplar_root / "medoid_tracks_overview.pdf"
+                medoid_overview_pdf = clustering_outfolder / "medoid_tracks_overview.pdf"
                 with PdfPages(medoid_overview_pdf) as pdf:
                     pdf.savefig(fig_medoid, bbox_inches="tight", dpi=300)
                 plt.close(fig_medoid)

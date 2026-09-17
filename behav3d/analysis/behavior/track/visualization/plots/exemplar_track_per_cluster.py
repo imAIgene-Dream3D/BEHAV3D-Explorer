@@ -238,7 +238,16 @@ def plot_tracks_bars_on_ax(
             mask = mask & (obs[window_key] == row[window_key])
         df = obs[mask]
         if df.empty:
-            continue
+            key_desc = f"{sample_key}={row[sample_key]!r}, {track_key}={row[track_key]!r}"
+            if has_window_key:
+                key_desc += f", {window_key}={row[window_key]!r}"
+            raise ValueError(
+                f"No rows found in adata_full.obs for exemplar tracklet ({key_desc}) - "
+                "this tracklet was selected for plotting but its data could not be "
+                "resolved, which indicates an upstream inconsistency (e.g. adata_full "
+                "does not match the data the tracklet was selected from) rather than "
+                "something safe to silently skip."
+            )
 
         x = df["_x"].to_numpy()
         st = df[state_key].to_numpy()

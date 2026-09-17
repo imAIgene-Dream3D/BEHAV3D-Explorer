@@ -3355,13 +3355,37 @@ class TrackClassificationSubTab(QWidget):
         g1 = QVBoxLayout(self.grp1)
         g1.setSpacing(4)
 
-        # "Use original" at top (shown only when original mode is active)
-        self.chk_use_original_top = QCheckBox(
-            "Use original feature-based BEHAV3D DTW Clustering"
+        # Trajectory clustering method — the top-level choice between the newer
+        # state-based pipelines (DTW/Bouts, chosen just below once selected) and
+        # the legacy feature-based BEHAV3D pipeline. Styled as a standalone
+        # highlighted card so it reads as the first decision to make here, not
+        # just another form row.
+        method_frame = QFrame()
+        method_frame.setObjectName("clusteringMethodCard")
+        method_frame.setStyleSheet(
+            "QFrame#clusteringMethodCard { background: #1b2b3a; "
+            "border: 1px solid #3a6ea5; border-radius: 6px; }"
         )
-        self.chk_use_original_top.setChecked(False)
-        self.chk_use_original_top.hide()
-        g1.addWidget(self.chk_use_original_top)
+        method_lay = QHBoxLayout(method_frame)
+        method_lay.setContentsMargins(8, 6, 8, 6)
+        method_label = QLabel("Trajectory clustering method:")
+        method_label.setStyleSheet("font-weight: bold; font-size: 12px; color: #ddeeff;")
+        method_lay.addWidget(method_label)
+        self.combo_clustering_family = QComboBox()
+        self.combo_clustering_family.addItem("State-based (behavioral states)", "state_based")
+        self.combo_clustering_family.addItem("Feature-based (legacy BEHAV3D)", "feature_based")
+        self.combo_clustering_family.setStyleSheet("font-weight: bold;")
+        method_lay.addWidget(self.combo_clustering_family, stretch=1)
+        method_lay.addWidget(HelpButton(
+            "Trajectory clustering method",
+            "'State-based' clusters tracks using their behavioral-state sequence "
+            "(from State Classification), via either DTW or Bouts/proportions "
+            "below. 'Feature-based (legacy BEHAV3D)' instead clusters tracks by "
+            "dynamic time warping over their raw per-timepoint kinematic/contact "
+            "features, matching the original BEHAV3D R pipeline; it does not "
+            "require State Classification to have been run."
+        ))
+        g1.addWidget(method_frame)
 
         # Shared: Trajectory size + divide-long-tracks (always visible)
         basic_form = QFormLayout()
@@ -3611,14 +3635,6 @@ class TrackClassificationSubTab(QWidget):
             "(threshold 0.95) before clustering -- catches exact collinearities such as K "
             "fractions that must sum to 1."
         ))
-        self.chk_bouts_plot_exemplars = QCheckBox("Also generate exemplar PDFs")
-        self.chk_bouts_plot_exemplars.setChecked(True)
-        bouts_form.addRow("", _make_chk_help_row(
-            self.chk_bouts_plot_exemplars, "Also generate exemplar PDFs",
-            "Generate exemplar-track PDFs during Run, matching the DTW basis's automatic "
-            "exemplar overview. Bouts diagnostics/exemplar PDFs are produced inline here; "
-            "the separate Diagnostics/Exemplar PDF buttons below are DTW-only."
-        ))
         self.adv1.addWidget(self._bouts_frame)
 
         # Parallel computation / save-distance-matrix are DTW-distance-matrix-specific
@@ -3658,22 +3674,49 @@ class TrackClassificationSubTab(QWidget):
         ))
         self.adv1.addLayout(seed_form)
 
-        # Separator + "Use original" checkbox at the bottom of Advanced Config
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("color: #444;")
-        self.adv1.addWidget(sep)
+        # Separator + Feature-based (legacy BEHAV3D)-only settings at the bottom
+        # of Advanced Config: shown only when the top-level method dropdown is
+        # set to Feature-based.
+        self._feature_based_sep = QFrame()
+        self._feature_based_sep.setFrameShape(QFrame.HLine)
+        self._feature_based_sep.setStyleSheet("color: #444;")
+        self._feature_based_sep.setVisible(False)
+        self.adv1.addWidget(self._feature_based_sep)
 
-        self.chk_use_original = QCheckBox(
-            "Use original feature-based BEHAV3D DTW Clustering"
+        self._feature_based_frame = QFrame()
+        self._feature_based_frame.setVisible(False)
+        fb_lay = QVBoxLayout(self._feature_based_frame)
+        fb_lay.setContentsMargins(0, 0, 0, 0)
+        fb_lay.setSpacing(4)
+
+        self.chk_use_exact_original_settings = QCheckBox(
+            "Use exact original BEHAV3D settings"
         )
-        self.chk_use_original.setChecked(False)
-        self.adv1.addLayout(_make_chk_help_row(
-            self.chk_use_original, "Use original BEHAV3D DTW",
-            "Switch to the original feature-based BEHAV3D DTW pipeline (run_tcell_analysis). "
-            "When checked, the checkbox moves to the top of Step 1, Advanced Configuration "
-            "is hidden, and UMAP parameters appear."
+        self.chk_use_exact_original_settings.setChecked(True)
+        fb_lay.addLayout(_make_chk_help_row(
+            self.chk_use_exact_original_settings, "Use exact original BEHAV3D settings",
+            "When checked, reproduces the original BEHAV3D R pipeline exactly: DTW over "
+            "mean_square_displacement, speed and mean_dead_dye (quantile-scaled), plus "
+            "every detected contact column (min-max scaled). Uncheck to hand-pick which "
+            "features feed the DTW distance instead."
         ))
+
+        self._feature_picker_frame = QFrame()
+        fp_lay = QVBoxLayout(self._feature_picker_frame)
+        fp_lay.setContentsMargins(0, 0, 0, 0)
+        fp_lay.setSpacing(2)
+        fp_lay.addWidget(_make_info_label(
+            "Select which per-timepoint features feed the DTW distance calculation. "
+            "Binary features (contact, active-killing, death, invasiveness) are used as "
+            "raw 0/1 values; continuous features (movement, morphology, intensity) are "
+            "z-normalized."
+        ))
+        self._feature_dtw_groups_lay = QVBoxLayout()
+        self._feature_dtw_groups_lay.setSpacing(2)
+        fp_lay.addLayout(self._feature_dtw_groups_lay)
+        fb_lay.addWidget(self._feature_picker_frame)
+
+        self.adv1.addWidget(self._feature_based_frame)
 
         g1.addWidget(self.adv1)
 
@@ -4382,8 +4425,8 @@ class TrackClassificationSubTab(QWidget):
         self.chk_apply_pretrained.toggled.connect(self._toggle_pretrained_mode)
         self.combo_trajectory_basis.currentTextChanged.connect(self._apply_clustering_controls_mode)
         self.combo_clustering_method.currentTextChanged.connect(self._apply_clustering_controls_mode)
-        self.chk_use_original.toggled.connect(self._on_original_toggled_from_adv)
-        self.chk_use_original_top.toggled.connect(self._on_original_toggled_from_top)
+        self.combo_clustering_family.currentIndexChanged.connect(self._on_clustering_family_changed)
+        self.chk_use_exact_original_settings.toggled.connect(self._on_exact_settings_toggled)
         self.btn_run_track.clicked.connect(self._on_run_cluster)
         self.btn_rename_track.clicked.connect(self._on_rename_track)
         self.btn_train_track.clicked.connect(self._on_train_track)
@@ -4423,10 +4466,11 @@ class TrackClassificationSubTab(QWidget):
         """Check if behavioral states h5ad exists; conditionally enable/disable steps.
 
         - If state adata is absent: Step 1 (grp1) stays enabled but is locked into
-          'original BEHAV3D DTW' mode (chk_use_original forced True + disabled).
-          Steps 2-5 are disabled since they all require state adata.
-        - If state adata is present: all steps enabled; if the checkbox was previously
-          force-locked, it is automatically unchecked and re-enabled (standard mode).
+          'Feature-based (legacy BEHAV3D)' mode (combo_clustering_family forced +
+          disabled), since State-based clustering cannot run without it. Steps 2-5
+          are disabled since they all require state adata.
+        - If state adata is present: all steps enabled; if the dropdown was previously
+          force-locked, it is automatically reset to State-based and re-enabled.
         """
         ct = self._cell_type()
         out = self._out_dir()
@@ -4438,27 +4482,29 @@ class TrackClassificationSubTab(QWidget):
         if not states_path or not states_path.exists():
             self.warning_label.setText(
                 f"⚠ Behavioral states not found for cell type '{ct}'.\n"
-                "Run State Classification first to unlock all steps.\n"
-                "You can still run the original BEHAV3D DTW clustering (Step 1) below."
+                "State-based clustering requires running State Classification first "
+                "and is unavailable until then.\n"
+                "You can still run Feature-based (legacy BEHAV3D) clustering (Step 1) below."
             )
             self.warning_label.show()
 
-            # Step 1 stays available, but lock into 'original DTW' mode.
+            # Step 1 stays available, but lock into Feature-based mode.
             # NB: disable only the plotting page, not the whole `_subtab_stack`
             # — grp1 lives on page 0 of that stack, so disabling the stack would
-            # also grey out Step 1's "Run Original BEHAV3D DTW" button despite
-            # the setEnabled(True) above.
+            # also grey out Step 1's "Run Feature-based BEHAV3D Clustering" button
+            # despite the setEnabled(True) above.
             self.grp1.setEnabled(True)
             for grp in [self.grp2, self.grp3, self._plotting_page, self.grp_bp]:
                 grp.setEnabled(False)
 
-            # Force 'use original' on and prevent the user from unchecking it.
-            for chk in (self.chk_use_original, self.chk_use_original_top):
-                chk.blockSignals(True)
-                chk.setChecked(True)
-                chk.setEnabled(False)
-                chk.blockSignals(False)
-            self._apply_original_mode(True)
+            # Force the method dropdown to Feature-based and prevent switching.
+            self.combo_clustering_family.blockSignals(True)
+            self.combo_clustering_family.setCurrentIndex(
+                self.combo_clustering_family.findData("feature_based")
+            )
+            self.combo_clustering_family.setEnabled(False)
+            self.combo_clustering_family.blockSignals(False)
+            self._apply_clustering_family_mode("feature_based")
 
             return False
         else:
@@ -4466,17 +4512,18 @@ class TrackClassificationSubTab(QWidget):
             for grp in [self.grp1, self.grp2, self.grp3, self._plotting_page, self.grp_bp]:
                 grp.setEnabled(True)
 
-            # Only revert to standard mode if the checkbox was previously force-locked
+            # Only revert to State-based if the dropdown was previously force-locked
             # (i.e. disabled because state adata was missing). Otherwise preserve the
             # user's/config's current choice.
-            was_force_locked = not self.chk_use_original.isEnabled()
-            for chk in (self.chk_use_original, self.chk_use_original_top):
-                chk.blockSignals(True)
-                if was_force_locked:
-                    chk.setChecked(False)
-                chk.setEnabled(True)
-                chk.blockSignals(False)
-            self._apply_original_mode(self.chk_use_original.isChecked())
+            was_force_locked = not self.combo_clustering_family.isEnabled()
+            self.combo_clustering_family.blockSignals(True)
+            if was_force_locked:
+                self.combo_clustering_family.setCurrentIndex(
+                    self.combo_clustering_family.findData("state_based")
+                )
+            self.combo_clustering_family.setEnabled(True)
+            self.combo_clustering_family.blockSignals(False)
+            self._apply_clustering_family_mode(self.combo_clustering_family.currentData())
 
             _apply_group_tracked_gate(self.warning_label, self.grp_bp, self.metadata_loader, ct)
             return True
@@ -4592,28 +4639,22 @@ class TrackClassificationSubTab(QWidget):
         self.grp3.setVisible(not checked)
         self.grp_apply_pretrained.setVisible(checked)
 
-    def _on_original_toggled_from_adv(self, checked: bool):
-        """Checkbox in Advanced Config toggled → sync top checkbox + apply mode."""
-        self.chk_use_original_top.blockSignals(True)
-        self.chk_use_original_top.setChecked(checked)
-        self.chk_use_original_top.blockSignals(False)
-        self._apply_original_mode(checked)
-        if checked:
+    def _on_clustering_family_changed(self, *_args):
+        """Top-level method dropdown changed by the user → apply mode + disclaimer."""
+        family = self.combo_clustering_family.currentData()
+        self._apply_clustering_family_mode(family)
+        if family == "feature_based":
             self._show_original_dtw_disclaimer()
 
-    def _on_original_toggled_from_top(self, checked: bool):
-        """Top checkbox toggled (user unchecks from top) → sync adv checkbox + apply mode."""
-        self.chk_use_original.blockSignals(True)
-        self.chk_use_original.setChecked(checked)
-        self.chk_use_original.blockSignals(False)
-        self._apply_original_mode(checked)
-        if checked:
-            self._show_original_dtw_disclaimer()
+    def _on_exact_settings_toggled(self, checked: bool):
+        """'Use exact original BEHAV3D settings' toggled → show/hide the custom picker."""
+        self._feature_picker_frame.setVisible(not checked)
 
     def _apply_clustering_controls_mode(self, *_args):
         """Update visibility of basis/method-specific controls (Linkage vs Bouts
         linkage vs Leiden neighbors/resolution; DTW-only technical controls vs
-        bouts feature toggles)."""
+        bouts feature toggles). Only meaningful in State-based mode; the caller
+        (_apply_clustering_family_mode) handles Feature-based mode itself."""
         is_bouts = self.combo_trajectory_basis.currentText() == "bouts"
         is_leiden = self.combo_clustering_method.currentText() == "leiden"
 
@@ -4628,19 +4669,28 @@ class TrackClassificationSubTab(QWidget):
         self._dtw_technical_frame.setVisible(not is_bouts)
         self._bouts_frame.setVisible(is_bouts)
 
-        if not self.chk_use_original.isChecked():
-            self.btn_run_track.setText(
-                "▶ Run Bout/Proportion Clustering" if is_bouts else "▶ Run Track Clustering"
-            )
+        self.btn_run_track.setText(
+            "▶ Run Bout/Proportion Clustering" if is_bouts else "▶ Run Track Clustering"
+        )
 
-    def _apply_original_mode(self, checked: bool):
-        """Update visibility of UI sections for original vs dtaidistance/bouts mode."""
-        self.chk_use_original_top.setVisible(checked)
-        self.adv1.setVisible(not checked)
-        self._basis_method_frame.setVisible(not checked)
-        self._umap_frame.setVisible(checked)
-        if checked:
-            self.btn_run_track.setText("▶ Run Original BEHAV3D DTW")
+    def _apply_clustering_family_mode(self, family: str):
+        """Update visibility of UI sections for State-based vs Feature-based (legacy) mode."""
+        is_feature_based = family == "feature_based"
+        self._basis_method_frame.setVisible(not is_feature_based)
+        self._umap_frame.setVisible(is_feature_based)
+        self._feature_based_sep.setVisible(is_feature_based)
+        self._feature_based_frame.setVisible(is_feature_based)
+        if is_feature_based:
+            self._n_clusters_frame.setVisible(True)
+            for frame in (
+                self._dtw_linkage_frame, self._bouts_linkage_frame,
+                self._leiden_frame, self._bouts_frame, self._dtw_technical_frame,
+            ):
+                frame.setVisible(False)
+            self._feature_picker_frame.setVisible(
+                not self.chk_use_exact_original_settings.isChecked()
+            )
+            self.btn_run_track.setText("▶ Run Feature-based BEHAV3D Clustering")
         else:
             self._apply_clustering_controls_mode()
 
@@ -4718,13 +4768,14 @@ class TrackClassificationSubTab(QWidget):
             "bouts_log_bout_length":      self.chk_bouts_log_bout_length.isChecked(),
             "bouts_block_scaling":        self.chk_bouts_block_scaling.isChecked(),
             "bouts_drop_redundant":       self.chk_bouts_drop_redundant.isChecked(),
-            "bouts_plot_exemplars":       self.chk_bouts_plot_exemplars.isChecked(),
             "trajectory_trim_mode":       self.combo_trim.currentText(),
             "split_long_tracks":          self.chk_split_long_tracks.isChecked(),
             "parallel":                   self.chk_parallel.isChecked(),
             "save_distance_matrix":       self.chk_save_dist.isChecked(),
             "random_state":               int(self.spin_seed.value()),
-            "use_original":               self.chk_use_original.isChecked(),
+            "clustering_family":          self.combo_clustering_family.currentData(),
+            "use_exact_original_settings": self.chk_use_exact_original_settings.isChecked(),
+            "feature_dtw_selected_columns": self._selected_feature_dtw_columns(),
             "umap_n_neighbors":           int(self.spin_umap_neighbors.value()),
             "umap_min_dist":              float(self.spin_umap_min_dist.value()),
             "rf_n_estimators":            int(self.spin_track_n_est.value()),
@@ -4781,8 +4832,6 @@ class TrackClassificationSubTab(QWidget):
             self.chk_bouts_block_scaling.setChecked(bool(cfg["bouts_block_scaling"]))
         if "bouts_drop_redundant" in cfg:
             self.chk_bouts_drop_redundant.setChecked(bool(cfg["bouts_drop_redundant"]))
-        if "bouts_plot_exemplars" in cfg:
-            self.chk_bouts_plot_exemplars.setChecked(bool(cfg["bouts_plot_exemplars"]))
         self._apply_clustering_controls_mode()
         if "trajectory_trim_mode" in cfg:
             self.combo_trim.setCurrentText(cfg["trajectory_trim_mode"])
@@ -4812,13 +4861,140 @@ class TrackClassificationSubTab(QWidget):
             self.combo_track_max_features.setCurrentText(cfg["rf_max_features"])
         if "rf_n_jobs" in cfg:
             self.spin_track_n_jobs.setValue(int(cfg["rf_n_jobs"]))
-        if "use_original" in cfg:
-            val = bool(cfg["use_original"])
-            for chk in (self.chk_use_original, self.chk_use_original_top):
-                chk.blockSignals(True)
-                chk.setChecked(val)
-                chk.blockSignals(False)
-            self._apply_original_mode(val)
+
+        if "use_exact_original_settings" in cfg:
+            self.chk_use_exact_original_settings.blockSignals(True)
+            self.chk_use_exact_original_settings.setChecked(bool(cfg["use_exact_original_settings"]))
+            self.chk_use_exact_original_settings.blockSignals(False)
+        # feature_dtw_selected_columns is consumed by _populate_feature_dtw_picker
+        # (called separately from _reload), since the picker's checkboxes are
+        # rebuilt from the track-features CSV columns, which may not be available
+        # yet at this point.
+
+        family = cfg.get("clustering_family")
+        if family not in ("state_based", "feature_based") and "use_original" in cfg:
+            # Migrate configs saved before this dropdown existed, when there was
+            # only a single "use original BEHAV3D" boolean toggle.
+            family = "feature_based" if bool(cfg["use_original"]) else "state_based"
+            if family == "feature_based":
+                self.chk_use_exact_original_settings.setChecked(True)
+        if family in ("state_based", "feature_based"):
+            self.combo_clustering_family.blockSignals(True)
+            self.combo_clustering_family.setCurrentIndex(
+                self.combo_clustering_family.findData(family)
+            )
+            self.combo_clustering_family.blockSignals(False)
+            self._apply_clustering_family_mode(family)
+
+    # ── Feature-based (legacy BEHAV3D) custom feature picker ───────────────
+
+    def _feature_dtw_track_features_csv(self, ct: str) -> Optional[Path]:
+        """Combined track-features CSV for `ct`, preferring the filtered variant —
+        the same file `run_tcell_analysis` reads by default."""
+        out = self._out_dir()
+        if not ct or not out:
+            return None
+        base = out / "analysis" / ct / "track_features"
+        csv_path = base / f"BEHAV3D_{ct}_combined_track_features_filtered.csv"
+        if not csv_path.exists():
+            csv_path = base / f"BEHAV3D_{ct}_combined_track_features.csv"
+        return csv_path if csv_path.exists() else None
+
+    def _selected_feature_dtw_columns(self) -> list:
+        return [
+            name for name, cb in getattr(self, "_feature_dtw_checkboxes", {}).items()
+            if cb.isChecked()
+        ]
+
+    def _populate_feature_dtw_picker(self, ct: str):
+        """(Re)build the custom feature picker for the Feature-based (legacy
+        BEHAV3D) method, grouped by category the same way State Classification's
+        own feature picker is (`_populate_dynamic_features`) — except binary
+        columns (contact, active-killing, death, invasiveness) are kept as
+        selectable features here rather than split out, since they are
+        legitimate DTW features for this method."""
+        import pandas as pd
+        from behav3d.widgets.utils import behav3d_calculated_features, excluded_non_behavior_columns
+        from behav3d.core.utils import expand_column_patterns
+        from behav3d.core.column_detection import detect_non_numeric_columns_from_csv
+
+        csv_path = self._feature_dtw_track_features_csv(ct) if ct else None
+        try:
+            mtime = csv_path.stat().st_mtime if csv_path else None
+        except OSError:
+            mtime = None
+        features_key = (ct, str(csv_path) if csv_path else None, mtime)
+        if features_key == getattr(self, "_last_feature_dtw_key", None):
+            return
+        self._last_feature_dtw_key = features_key
+
+        lay = self._feature_dtw_groups_lay
+        while lay.count():
+            child = lay.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        self._feature_dtw_checkboxes = {}
+
+        if not csv_path:
+            lay.addWidget(_make_info_label(
+                "<i>No track-features CSV found for this cell type. "
+                "Run Feature Extraction first.</i>"
+            ))
+            return
+
+        md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
+        cols = list(pd.read_csv(csv_path, nrows=0).columns)
+        excluded = excluded_non_behavior_columns(cols, metadata=md)
+        usable_cols = [c for c in cols if c not in excluded]
+        non_numeric_cols = set(detect_non_numeric_columns_from_csv(Path(csv_path), usable_cols))
+        feat_cols = [c for c in usable_cols if c not in non_numeric_cols]
+
+        cfg = getattr(self.metadata_loader, "behav3d_parameters", {}).get("track_classification", {}).get(ct, {})
+        saved_selection_raw = cfg.get("feature_dtw_selected_columns", None)
+        if saved_selection_raw is not None:
+            saved_selection = set(saved_selection_raw)
+        else:
+            # Default to the original hardcoded feature set, so unchecking
+            # "exact settings" starts from a recognizable baseline.
+            from behav3d.analysis.behavior.track.feature_dtw import (
+                _KINEMATIC_FEATURES, _detect_contact_feature_cols,
+            )
+            saved_selection = set(_KINEMATIC_FEATURES) | set(_detect_contact_feature_cols(feat_cols))
+
+        from copy import deepcopy
+        base_groups = deepcopy(behav3d_calculated_features)
+        matched = set()
+        for gname, patterns in base_groups.items():
+            vals = []
+            for pat in patterns:
+                vals.extend(expand_column_patterns(pat, feat_cols))
+            clean_vals = sorted({x for x in vals if x in feat_cols})
+            if not clean_vals:
+                continue
+            group_sec = CollapsibleSection(gname, expanded=False)
+            group_content = QWidget()
+            grid = QGridLayout(group_content)
+            for i, f in enumerate(clean_vals):
+                cb = QCheckBox(f)
+                cb.setChecked(f in saved_selection)
+                self._feature_dtw_checkboxes[f] = cb
+                grid.addWidget(cb, i // 3, i % 3)
+            group_sec.addWidget(group_content)
+            lay.addWidget(group_sec)
+            matched.update(clean_vals)
+
+        other = sorted([c for c in feat_cols if c not in matched])
+        if other:
+            group_sec = CollapsibleSection("other", expanded=False)
+            group_content = QWidget()
+            grid = QGridLayout(group_content)
+            for i, f in enumerate(other):
+                cb = QCheckBox(f)
+                cb.setChecked(f in saved_selection)
+                self._feature_dtw_checkboxes[f] = cb
+                grid.addWidget(cb, i // 3, i % 3)
+            group_sec.addWidget(group_content)
+            lay.addWidget(group_sec)
 
     # ── Metadata / reload ────────────────────────────────────────────────
 
@@ -4856,6 +5032,7 @@ class TrackClassificationSubTab(QWidget):
             self.le_pretrained_states_path.setText(str(states_path))
 
         self._populate_track_settings(ct)
+        self._populate_feature_dtw_picker(ct)
         self._apply_max_trajectory_size(ct)
         self._check_prerequisites()
         self._update_view_buttons()
@@ -4942,8 +5119,9 @@ class TrackClassificationSubTab(QWidget):
 
     def _track_diagnostics_qc_dirs(self, traj_dir: Optional[Path]) -> list:
         """All possible diagnostics output folders: the shared clustering/
-        folder (dtaidistance and bouts diagnostics both write here), the
-        legacy quality_control/ folder (older dtaidistance runs, before
+        folder (dtaidistance and bouts diagnostics both write here),
+        clustering/raw/ (bouts clustering/diagnostics report+heatmap PDFs),
+        the legacy quality_control/ folder (older dtaidistance runs, before
         diagnostics moved into clustering/), and the original-BEHAV3D
         method's own original_behav3d/ folder (root — Create Diagnostics
         writes there)."""
@@ -4951,6 +5129,7 @@ class TrackClassificationSubTab(QWidget):
             return []
         return [
             traj_dir / "clustering",
+            traj_dir / "clustering" / "raw",
             traj_dir / "quality_control",
             traj_dir / "original_behav3d",
         ]
@@ -5439,8 +5618,8 @@ class TrackClassificationSubTab(QWidget):
     # ── Click handlers ───────────────────────────────────────────────────
 
     def _on_run_cluster(self):
-        """Dispatch to original or dtaidistance based on current mode."""
-        if self.chk_use_original.isChecked():
+        """Dispatch based on the selected trajectory clustering method."""
+        if self.combo_clustering_family.currentData() == "feature_based":
             self._on_run_original()
         else:
             self._on_run_track()
@@ -5485,7 +5664,6 @@ class TrackClassificationSubTab(QWidget):
                 "leiden_resolution": float(self.spin_leiden_resolution.value()),
                 "cluster_key": "ClusterID",
                 "plot_results": True,
-                "plot_exemplars": self.chk_bouts_plot_exemplars.isChecked(),
                 "random_state": int(self.spin_seed.value()),
             }
         else:
@@ -5551,15 +5729,6 @@ class TrackClassificationSubTab(QWidget):
             self._reload()
             self._notify_results()
 
-            # The auto exemplar-overview step below relies on save_dtaidistance_exemplar_overview /
-            # save_dtaidistance_medoid_overview, which need a DTW pairwise distance matrix — not
-            # applicable to a bouts-derived model. The bouts pipeline already writes its own
-            # diagnostics/exemplar PDFs inline (via plot_results/plot_exemplars above).
-            if is_bouts:
-                if on_done_ext:
-                    on_done_ext(r)
-                return
-
             _track_adata = r
             _n_per = int(self.spin_n_per_cluster.value())
             _seed = int(self.spin_seed.value())
@@ -5567,10 +5736,12 @@ class TrackClassificationSubTab(QWidget):
 
             def _run_overview(**kw):
                 from behav3d.analysis.behavior.track.state_dtw import (
+                    FEATURE_ONLY_METHODS,
                     save_dtaidistance_exemplar_overview,
                     save_dtaidistance_medoid_overview,
                 )
                 from behav3d.analysis.behavior.track.utils import _resolve_dtaidistance_paths
+                _method = (_track_adata.uns.get("dtai_trajectory_clustering", {}) or {}).get("method")
                 _raw_dir = _resolve_dtaidistance_paths(str(out), ct)["quality_control_outfolder"] / "raw"
                 _raw_dir.mkdir(parents=True, exist_ok=True)
                 _result = save_dtaidistance_exemplar_overview(
@@ -5582,16 +5753,19 @@ class TrackClassificationSubTab(QWidget):
                     outfolder=_raw_dir,
                     verbose=True,
                 )
-                try:
-                    save_dtaidistance_medoid_overview(
-                        _track_adata,
-                        output_dir=str(out),
-                        cell_type=ct,
-                        outfolder=_raw_dir,
-                        verbose=True,
-                    )
-                except Exception as _exc:
-                    _log(f"⚠ Could not generate medoid overview: {_exc}")
+                # Medoid selection needs a precomputed pairwise DTW distance matrix,
+                # structurally unavailable for feature-based clustering (bouts).
+                if _method not in FEATURE_ONLY_METHODS:
+                    try:
+                        save_dtaidistance_medoid_overview(
+                            _track_adata,
+                            output_dir=str(out),
+                            cell_type=ct,
+                            outfolder=_raw_dir,
+                            verbose=True,
+                        )
+                    except Exception as _exc:
+                        _log(f"⚠ Could not generate medoid overview: {_exc}")
                 return _result
 
             def _overview_done(_):
@@ -5652,15 +5826,27 @@ class TrackClassificationSubTab(QWidget):
         if self._bg.is_running():
             QMessageBox.warning(self, "Busy", "Another operation is running.")
             return
+
+        exact_settings = self.chk_use_exact_original_settings.isChecked()
+        selected_cols = None
+        if not exact_settings:
+            selected_cols = self._selected_feature_dtw_columns()
+            if not selected_cols:
+                QMessageBox.warning(
+                    self, "No features selected",
+                    "Select at least one feature for the DTW distance calculation, "
+                    "or check 'Use exact original BEHAV3D settings'."
+                )
+                return
+
         out = self._out_dir()
-        self._log(f"▶ Running original BEHAV3D feature-based DTW for '{ct}'…")
+        self._log(f"▶ Running feature-based BEHAV3D DTW for '{ct}'…")
         n_clust = int(self.spin_n_clusters.value())
         traj_size = int(self.spin_traj_size.value())
         n_neigh = int(self.spin_umap_neighbors.value())
         min_dist = float(self.spin_umap_min_dist.value())
 
         def _run(**kw):
-            import shutil
             from behav3d.analysis.behavior.track.utils import (
                 _peek_track_outfolder,
                 _resolve_track_paths,
@@ -5678,9 +5864,32 @@ class TrackClassificationSubTab(QWidget):
             _original_subdir_name = str(
                 (_paths.original_behav3d_outfolder / "raw").relative_to(_paths.analysis_outdir)
             )
-            # contact_cols left as None → the preset auto-detects every raw
-            # `*_contact` column (each organoid and each other cell type) and
-            # uses each as its own scaled DTW feature.
+            if exact_settings:
+                # contact_cols left as None → the preset auto-detects every raw
+                # `*_contact` column (each organoid and each other cell type) and
+                # uses each as its own scaled DTW feature.
+                return run_tcell_analysis(
+                    output_dir=str(out) if out else "",
+                    cell_type=ct,
+                    nr_of_clusters=n_clust,
+                    min_track_length=traj_size,
+                    max_track_length=traj_size,
+                    umap_n_neighbors=n_neigh,
+                    umap_minimal_distance=min_dist,
+                    feature_scaling_preset="original_behav3d",
+                    output_subdir_name=_original_subdir_name,
+                )
+            # Custom feature selection: continuous picks get z-normalized the same
+            # way the preset's kinematic features do; binary picks (contact,
+            # active-killing, death, invasiveness) are used as raw 0/1 values,
+            # matching how the preset itself treats contact columns.
+            from behav3d.core.column_detection import detect_binary_columns_from_csv
+            csv_path = self._feature_dtw_track_features_csv(ct)
+            binary_cols = (
+                set(detect_binary_columns_from_csv(csv_path, selected_cols))
+                if csv_path else set()
+            )
+            columns_to_normalize = [c for c in selected_cols if c not in binary_cols]
             return run_tcell_analysis(
                 output_dir=str(out) if out else "",
                 cell_type=ct,
@@ -5689,7 +5898,9 @@ class TrackClassificationSubTab(QWidget):
                 max_track_length=traj_size,
                 umap_n_neighbors=n_neigh,
                 umap_minimal_distance=min_dist,
-                feature_scaling_preset="original_behav3d",
+                feature_scaling_preset=None,
+                columns_to_use=selected_cols,
+                columns_to_normalize=columns_to_normalize,
                 output_subdir_name=_original_subdir_name,
             )
 
@@ -5698,21 +5909,21 @@ class TrackClassificationSubTab(QWidget):
             try:
                 _create_original_behav3d_adata(str(out), ct)
             except Exception as e:
-                self._log(f"⚠ Could not create h5ad from original BEHAV3D results: {e}")
-            self._log(f"✅ Original BEHAV3D clustering done for '{ct}'.")
+                self._log(f"⚠ Could not create h5ad from feature-based BEHAV3D results: {e}")
+            self._log(f"✅ Feature-based BEHAV3D clustering done for '{ct}'.")
             self._persist_track_cfg(ct)
             self._reload()
             self._notify_results()
 
         self._bg.run(
             fn=_run,
-            desc=f"Original BEHAV3D DTW ({ct})…",
+            desc=f"Feature-based BEHAV3D DTW ({ct})…",
             progress_row=self.progress_row,
             buttons=[self.btn_run_track],
             viewer=self.viewer,
             inject_progress=False,
             on_done=_done,
-            on_failed=lambda e: self._log(f"❌ Original BEHAV3D failed: {e}"),
+            on_failed=lambda e: self._log(f"❌ Feature-based BEHAV3D failed: {e}"),
         )
 
     def _on_rename_track(self):
@@ -5771,6 +5982,10 @@ class TrackClassificationSubTab(QWidget):
                 # adata.X is a per-track feature matrix here, not a pairwise DTW
                 # distance matrix - regenerate via the same generator bouts.py
                 # itself uses at clustering time instead of the DTW-only path.
+                # Deliberately write to clustering_outfolder itself, not its
+                # "raw" subfolder - "raw" is reserved for the diagnostics PDF
+                # a full clustering rerun writes, and a rename must not
+                # overwrite that.
                 diag = generate_track_clustering_report_pdfs(
                     adata_tracks=track_adata,
                     outfolder=paths["clustering_outfolder"],
@@ -5816,12 +6031,27 @@ class TrackClassificationSubTab(QWidget):
             # so a failure here doesn't take down the reports above, which
             # already succeeded by this point.
             try:
-                result["exemplar_overview"] = save_dtaidistance_exemplar_overview(
-                    track_adata,
-                    output_dir=str(out) if out else "",
-                    cell_type=ct,
-                    verbose=True,
-                )
+                if method == "bouts_feature_clustering":
+                    # Reuse the same plotting/saving logic bouts.py runs right
+                    # after clustering, instead of the DTW-only reload path
+                    # below - keeps renamed-cluster output looking the same as
+                    # the original (just with the new labels).
+                    from behav3d.analysis.behavior.track.bouts import (
+                        save_bouts_exemplar_overview,
+                    )
+                    result["exemplar_overview"] = save_bouts_exemplar_overview(
+                        track_adata,
+                        output_dir=str(out) if out else "",
+                        cell_type=ct,
+                        verbose=True,
+                    )
+                else:
+                    result["exemplar_overview"] = save_dtaidistance_exemplar_overview(
+                        track_adata,
+                        output_dir=str(out) if out else "",
+                        cell_type=ct,
+                        verbose=True,
+                    )
             except Exception as exc:
                 result["exemplar_overview_error"] = str(exc)
             if method not in FEATURE_ONLY_METHODS:
@@ -6323,6 +6553,10 @@ class TrackClassificationSubTab(QWidget):
                 # adata.X is a per-track feature matrix here, not a pairwise DTW
                 # distance matrix - regenerate via the same generator bouts.py
                 # itself uses at clustering time instead of the DTW-only path.
+                # Deliberately write to clustering_outfolder itself, not its
+                # "raw" subfolder - "raw" is reserved for the diagnostics PDF
+                # a full clustering rerun writes, and a manual regeneration
+                # here must not overwrite that.
                 from behav3d.analysis.behavior.track.visualization.plots.reports import (
                     generate_track_clustering_report_pdfs,
                 )
@@ -6351,12 +6585,26 @@ class TrackClassificationSubTab(QWidget):
             # complete diagnostics/QC output.
             if method != "original_behav3d_feature_dtw":
                 try:
-                    save_dtaidistance_exemplar_overview(
-                        track_adata,
-                        output_dir=str(out) if out else "",
-                        cell_type=ct,
-                        verbose=True,
-                    )
+                    if method == "bouts_feature_clustering":
+                        # Reuse the same plotting/saving logic bouts.py runs
+                        # right after clustering, instead of the DTW-only
+                        # reload path below.
+                        from behav3d.analysis.behavior.track.bouts import (
+                            save_bouts_exemplar_overview,
+                        )
+                        save_bouts_exemplar_overview(
+                            track_adata,
+                            output_dir=str(out) if out else "",
+                            cell_type=ct,
+                            verbose=True,
+                        )
+                    else:
+                        save_dtaidistance_exemplar_overview(
+                            track_adata,
+                            output_dir=str(out) if out else "",
+                            cell_type=ct,
+                            verbose=True,
+                        )
                 except Exception as _exc:
                     print(f"[BEHAV3D] Could not generate exemplar overview: {_exc}")
             # Medoid overview requires a precomputed pairwise DTW distance
@@ -7636,7 +7884,7 @@ class SingleCellTab(QWidget):
             # refresh the "states not found" warning/lock state.
             self.track_tab._check_prerequisites()
             self.track_tab._apply_max_trajectory_size(self._current_cell_type())
-            if self.track_tab.chk_use_original.isChecked():
+            if self.track_tab.combo_clustering_family.currentData() == "feature_based":
                 self.track_tab._show_original_dtw_disclaimer()
 
     # ── Metadata update ──────────────────────────────────────────────────
