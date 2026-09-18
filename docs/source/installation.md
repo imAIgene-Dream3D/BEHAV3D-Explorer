@@ -135,16 +135,17 @@ mamba activate behav3d
 ### Step 3: Install Cellpose and PyTorch
 
 ```bash
-# Cellpose
-pip install cellpose>=3.0
-
-# First remove any preexisting torch installs
+cd /path/to/BEHAV3D
+# Create environment from the yml file
+mamba env create -f environment.yml
+mamba activate behav3d
+# Install Cellpose and ConvPaint
+pip install cellpose>=3.0 napari-convpaint
+# Install PyTorch (choose ONE option based on your system):
+# First remove any preexisting pytorch installations:
 mamba remove pytorch torchvision torchaudio
-
-# Then pick ONE of:
 # CPU only (all platforms):
 mamba install pytorch=2.4.1 torchvision=0.19.1 torchaudio=2.4.1 -c pytorch
-
 # CUDA 12.1 (Windows/Linux with NVIDIA GPU):
 mamba install pytorch=2.4.1 torchvision=0.19.1 torchaudio=2.4.1 pytorch-cuda=12.1 -c pytorch -c nvidia
 ```

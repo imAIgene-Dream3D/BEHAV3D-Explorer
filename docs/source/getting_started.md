@@ -46,6 +46,18 @@ The widget has seven tabs, stacked top to bottom inside the right-hand dock:
 
 At the bottom of the dock widget sits the **🛒 Processing Queue**, a collapsible panel that accepts steps from tabs 3 / 4 / 5 / 6 / 7 and runs them sequentially per sample. See [Processing Queue](plugin_essentials/processing_queue).
 
+## Co-pilot assistant (QueenB)
+
+No setup needed: the **QueenB** chat dock sits next to the BEHAV3D EXPLORER panel and is ready to use as soon as you open the plugin.
+
+- Ask it about any parameter or method — e.g. *"what does contact threshold do?"* or *"which tracking method fits non-overlapping cells?"* — and it explains it in plain language, reading your currently loaded metadata and settings so it doesn't ask you to repeat them.
+- Confirm a suggestion with one click and QueenB fills in the form field(s) for you. It never edits anything without your confirmation.
+- QueenB is available on every tab, so feel free to ask it questions at any point during the tour below.
+
+```{note}
+If the assistant service is briefly unreachable, QueenB falls back to a lighter local mode that can still explain parameter cards, just without live chat or form-filling.
+```
+
 ## Pipeline tour
 
 This is the happy path. Each step links to its full reference page.
