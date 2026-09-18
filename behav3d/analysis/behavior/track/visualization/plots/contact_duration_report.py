@@ -13,6 +13,7 @@ t-test where the pairs are formed by averaging within a user-chosen column (typi
 ``sample_name``) before pairing — mirroring a manual R workflow of
 ``group_by(sample_name, class) |> summarise(mean(...)) |> pivot_wider() |> t.test(paired=TRUE)``.
 """
+import textwrap
 from itertools import combinations
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from behav3d.analysis.behavior.track.contact_grouping import (
     merge_track_contact_features_into_obs,
     compute_track_contact_target_class_features,
     _contact_group_col_name,
+    _contact_class_mean_col_name,
     _contact_class_max_bout_col_name,
 )
 
@@ -90,15 +92,11 @@ def _paired_stats(values_a, values_b):
     return dict(n_a=n, n_b=n, mean_a=mean_a, mean_b=mean_b, t_stat=t_stat, p_value=p_value)
 
 
-def _comparison_row(duration_df, *, label_a, classes_a, label_b, classes_b, test_mode, pairing_col, pairing_col_label=None):
-    """Compute stats plus the actual (timepoints) values tested, for one comparison.
-
-    ``pairing_col`` is the actual dataframe column grouped on (may be an internal composite
-    column when multiple pairing columns were combined); ``pairing_col_label`` is the
-    human-readable name recorded in the output (defaults to ``pairing_col`` itself).
-    """
+def _values_and_stats_for_column(duration_df, value_col, *, classes_a, classes_b, test_mode, pairing_col):
+    """Shared welch/paired value-selection + stats logic for one metric column (``duration_timepoints``
+    or ``duration_fraction``) — factored out of ``_comparison_row`` so both metrics reuse it."""
     if test_mode == "paired":
-        per_unit = duration_df.groupby([pairing_col, "target_class"])["duration_timepoints"].mean()
+        per_unit = duration_df.groupby([pairing_col, "target_class"])[value_col].mean()
         target_level = per_unit.index.get_level_values("target_class")
         side_a = per_unit[target_level.isin(classes_a)].groupby(level=pairing_col).mean()
         side_b = per_unit[target_level.isin(classes_b)].groupby(level=pairing_col).mean()
@@ -107,10 +105,26 @@ def _comparison_row(duration_df, *, label_a, classes_a, label_b, classes_b, test
         values_b = joined["b"].to_numpy()
         stats_row = _paired_stats(values_a, values_b)
     else:
-        values_a = duration_df.loc[duration_df["target_class"].isin(classes_a), "duration_timepoints"].to_numpy()
-        values_b = duration_df.loc[duration_df["target_class"].isin(classes_b), "duration_timepoints"].to_numpy()
+        values_a = duration_df.loc[duration_df["target_class"].isin(classes_a), value_col].to_numpy()
+        values_b = duration_df.loc[duration_df["target_class"].isin(classes_b), value_col].to_numpy()
         stats_row = _welch_stats(values_a, values_b)
+    return values_a, values_b, stats_row
 
+
+def _comparison_row(duration_df, *, label_a, classes_a, label_b, classes_b, test_mode, pairing_col, pairing_col_label=None):
+    """Compute stats plus the actual values tested, for one comparison — both on bout-length
+    (``duration_timepoints``) and on time-in-contact fraction (``duration_fraction``), as two
+    independent statistical tests (fraction is not a unit conversion of bout-length, so it gets
+    its own t-stat/p-value/stars).
+
+    ``pairing_col`` is the actual dataframe column grouped on (may be an internal composite
+    column when multiple pairing columns were combined); ``pairing_col_label`` is the
+    human-readable name recorded in the output (defaults to ``pairing_col`` itself).
+    """
+    values_a, values_b, stats_row = _values_and_stats_for_column(
+        duration_df, "duration_timepoints", classes_a=classes_a, classes_b=classes_b,
+        test_mode=test_mode, pairing_col=pairing_col,
+    )
     diff = (
         stats_row["mean_b"] - stats_row["mean_a"]
         if np.isfinite(stats_row["mean_a"]) and np.isfinite(stats_row["mean_b"])
@@ -126,12 +140,38 @@ def _comparison_row(duration_df, *, label_a, classes_a, label_b, classes_b, test
         values_a=values_a,
         values_b=values_b,
     )
+
+    frac_values_a, frac_values_b, frac_stats = _values_and_stats_for_column(
+        duration_df, "duration_fraction", classes_a=classes_a, classes_b=classes_b,
+        test_mode=test_mode, pairing_col=pairing_col,
+    )
+    fraction_diff = (
+        frac_stats["mean_b"] - frac_stats["mean_a"]
+        if np.isfinite(frac_stats["mean_a"]) and np.isfinite(frac_stats["mean_b"])
+        else float("nan")
+    )
+    stats_row.update(
+        fraction_n_a=frac_stats["n_a"],
+        fraction_n_b=frac_stats["n_b"],
+        fraction_mean_a=frac_stats["mean_a"],
+        fraction_mean_b=frac_stats["mean_b"],
+        fraction_diff=fraction_diff,
+        fraction_t_stat=frac_stats["t_stat"],
+        fraction_p_value=frac_stats["p_value"],
+        fraction_stars=welch_ttest_stars(frac_stats["p_value"]),
+        fraction_values_a=frac_values_a,
+        fraction_values_b=frac_values_b,
+    )
     return stats_row
 
 
 def _draw_pair_box(ax, values_a, values_b, *, label_a, label_b, ylabel, stars, colors):
     data = [np.asarray(values_a, dtype=float), np.asarray(values_b, dtype=float)]
-    bp = ax.boxplot(data, tick_labels=[label_a, label_b], patch_artist=True, widths=0.6, showfliers=False)
+    wrapped_labels = [
+        textwrap.fill(str(label_a), width=12, break_long_words=False),
+        textwrap.fill(str(label_b), width=12, break_long_words=False),
+    ]
+    bp = ax.boxplot(data, tick_labels=wrapped_labels, patch_artist=True, widths=0.8, showfliers=False)
     for patch, label in zip(bp["boxes"], (label_a, label_b)):
         patch.set_facecolor(colors.get(label, "#808080"))
         patch.set_alpha(0.55)
@@ -139,7 +179,7 @@ def _draw_pair_box(ax, values_a, values_b, *, label_a, label_b, ylabel, stars, c
     for i, vals in enumerate(data, start=1):
         if len(vals) == 0:
             continue
-        jitter = (rng.random(len(vals)) - 0.5) * 0.15
+        jitter = (rng.random(len(vals)) - 0.5) * 0.3
         ax.scatter(np.full(len(vals), i) + jitter, vals, s=8, color="black", alpha=0.4, zorder=3)
     ax.set_ylabel(ylabel, fontsize=7)
     ax.tick_params(axis="x", labelsize=6.5)
@@ -166,23 +206,36 @@ def _plot_duration_comparison_page(
     ncols, label_colors, section_label=None, pairing_col_label=None,
 ):
     n = len(page_rows)
-    nrows = int(np.ceil(n / ncols))
     show_minutes = minutes_per_frame is not None
-    fig = plt.figure(figsize=(11.69, 8.27))
-    outer = fig.add_gridspec(nrows=max(1, nrows), ncols=max(1, ncols), hspace=1.0, wspace=0.6, top=0.86, bottom=0.10)
+    n_panels = 3 if show_minutes else 2
+
+    ncols_page = max(1, min(ncols, n))
+    nrows = int(np.ceil(n / ncols_page))
+    panel_w, panel_h = 2.3, 3.0
+    header_h, footer_h = 1.2, 0.4
+    fig_w = max(6.0, panel_w * n_panels * ncols_page)
+    fig_h = header_h + footer_h + panel_h * nrows
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    outer = fig.add_gridspec(
+        nrows=nrows, ncols=ncols_page, hspace=0.9, wspace=0.5,
+        top=1 - header_h / fig_h, bottom=footer_h / fig_h,
+    )
 
     for i, row in enumerate(page_rows):
-        r, c = divmod(i, ncols)
-        inner = outer[r, c].subgridspec(1, 2 if show_minutes else 1, wspace=0.7)
+        r, c = divmod(i, ncols_page)
+        inner = outer[r, c].subgridspec(1, n_panels, wspace=0.5)
         ax_tp = fig.add_subplot(inner[0, 0])
         _draw_pair_box(
             ax_tp, row["values_a"], row["values_b"],
             label_a=row["group_a"], label_b=row["group_b"],
             ylabel="Duration (timepoints)", stars=row["stars"], colors=label_colors,
         )
-        ax_tp.set_title(f"{row['group_a']} vs {row['group_b']}", fontsize=7)
+        ax_tp.set_title(
+            textwrap.fill(f"{row['group_a']} vs {row['group_b']}", width=20), fontsize=7,
+        )
+        next_panel = 1
         if show_minutes:
-            ax_min = fig.add_subplot(inner[0, 1])
+            ax_min = fig.add_subplot(inner[0, next_panel])
             _draw_pair_box(
                 ax_min,
                 np.asarray(row["values_a"], dtype=float) * minutes_per_frame,
@@ -190,13 +243,20 @@ def _plot_duration_comparison_page(
                 label_a=row["group_a"], label_b=row["group_b"],
                 ylabel="Duration (minutes)", stars=row["stars"], colors=label_colors,
             )
+            next_panel += 1
+        ax_frac = fig.add_subplot(inner[0, next_panel])
+        _draw_pair_box(
+            ax_frac, row["fraction_values_a"], row["fraction_values_b"],
+            label_a=row["group_a"], label_b=row["group_b"],
+            ylabel="Fraction of window in contact", stars=row["fraction_stars"], colors=label_colors,
+        )
 
     subtitle = f"contact_col={contact_col}  target={target_cell_type_label}  test={test_mode}"
     if test_mode == "paired":
         subtitle += f"  pairing_col={pairing_col_label or pairing_col}"
     if not show_minutes:
         subtitle += "  (minutes unavailable — no time metadata)"
-    title = f"Contact duration comparison — max sustained contact-bout length by {target_cell_type_label} class"
+    title = f"Contact duration comparison — bout length & contact-time fraction by {target_cell_type_label} class"
     if section_label is not None:
         title += f"\ngroup: {section_label}"
     else:
@@ -271,7 +331,11 @@ def _render_duration_comparison_section(
             "n_a": row["n_a"], "n_b": row["n_b"],
             "mean_a_timepoints": row["mean_a"], "mean_b_timepoints": row["mean_b"],
             "diff_timepoints": row["diff"], "mean_a_minutes": m_a, "mean_b_minutes": m_b,
+            "mean_a_fraction": row["fraction_mean_a"], "mean_b_fraction": row["fraction_mean_b"],
+            "diff_fraction": row["fraction_diff"],
             "t_stat": row["t_stat"], "p_value": row["p_value"], "stars": row["stars"],
+            "t_stat_fraction": row["fraction_t_stat"], "p_value_fraction": row["fraction_p_value"],
+            "stars_fraction": row["fraction_stars"],
             "test_mode": row["test_mode"], "pairing_col": row["pairing_col"],
         })
     return csv_rows, len(pages)
@@ -280,11 +344,23 @@ def _render_duration_comparison_section(
 _LONG_CONTACT_BUCKET_COL = "_long_contact_bucket"
 _LONG_CONTACT_STACK_ORDER = ["short_contact", "long_contact"]
 _LONG_CONTACT_STACK_COLORS = {"short_contact": "#B0B0B0", "long_contact": "#D1495B"}
+_LONG_CONTACT_UNITS = ("percent", "seconds", "minutes", "hours")
+# Minutes represented by one unit of each choice — lets the threshold (always expressed in its
+# own unit, e.g. 5 for "5 minutes" or 30 for "30 seconds") be compared against
+# ``duration_timepoints * minutes_per_frame`` (always in minutes) via a single division.
+_LONG_CONTACT_MINUTES_PER_UNIT = {"seconds": 1.0 / 60.0, "minutes": 1.0, "hours": 60.0}
+_LONG_CONTACT_UNIT_SUFFIX = {"percent": "%", "seconds": "s", "minutes": "min", "hours": "h"}
+
+
+def _format_long_contact_threshold(long_contact_threshold, long_contact_unit):
+    if long_contact_unit == "percent":
+        return f"{long_contact_threshold:g}%"
+    return f"{long_contact_threshold:g} {_LONG_CONTACT_UNIT_SUFFIX[long_contact_unit]}"
 
 
 def _compute_per_sample_long_contact_pct(duration_df, *, sample_col, class_order):
     """Per (sample, class) actually touched, the % of that sample's tracks touching that class
-    whose contact reached ``long_contact_minutes`` — the per-sample distribution boxplotted (one
+    whose contact reached the long-contact threshold — the per-sample distribution boxplotted (one
     box per class) alongside the pooled stacked bar."""
     grouped = (
         duration_df.groupby([sample_col, "target_class"], observed=True)[_LONG_CONTACT_BUCKET_COL]
@@ -296,35 +372,47 @@ def _compute_per_sample_long_contact_pct(duration_df, *, sample_col, class_order
 
 
 def _draw_long_contact_boxplot(ax, per_sample_df, class_order, colors):
-    """One box per class — dots are per-sample % long contact (``_compute_per_sample_long_contact_pct``)."""
+    """One box per class — dots are per-sample % long contact (``_compute_per_sample_long_contact_pct``).
+
+    The y-axis is scaled to the actual spread of the data (with headroom for the jittered dots
+    and "n=" labels) rather than always spanning the full 0-100% range, since real long-contact
+    percentages are often much smaller than 100%.
+    """
     data = [
         per_sample_df.loc[per_sample_df["target_class"] == cls, "pct_long_contact"].to_numpy(dtype=float)
         for cls in class_order
     ]
-    bp = ax.boxplot(data, tick_labels=class_order, patch_artist=True, widths=0.6, showfliers=False)
+    bp = ax.boxplot(data, tick_labels=class_order, patch_artist=True, widths=0.75, showfliers=False)
     for patch, cls in zip(bp["boxes"], class_order):
         patch.set_facecolor(colors.get(cls, "#808080"))
         patch.set_alpha(0.55)
+
+    finite_vals = np.concatenate([v for v in data if len(v)]) if any(len(v) for v in data) else np.array([])
+    y_max = float(finite_vals.max()) if finite_vals.size else 100.0
+    y_min = min(0.0, float(finite_vals.min())) if finite_vals.size else 0.0
+    span = max(y_max - y_min, 1.0)
+
     rng = np.random.default_rng(0)
     for i, vals in enumerate(data, start=1):
         if len(vals) == 0:
             continue
-        jitter = (rng.random(len(vals)) - 0.5) * 0.15
+        jitter = (rng.random(len(vals)) - 0.5) * 0.3
         ax.scatter(np.full(len(vals), i) + jitter, vals, s=10, color="black", alpha=0.5, zorder=3)
-        ax.text(i, 102, f"n={len(vals)}", ha="center", va="bottom", fontsize=6.5, clip_on=False)
+        ax.text(i, y_max + span * 0.05, f"n={len(vals)}", ha="center", va="bottom", fontsize=6.5, clip_on=False)
     ax.set_ylabel("% tracks with long contact", fontsize=8)
-    ax.set_ylim(-5, 112)
+    ax.set_ylim(y_min - span * 0.08, y_max + span * 0.20)
     ax.tick_params(axis="x", labelsize=7, rotation=30)
     ax.tick_params(axis="y", labelsize=7)
 
 
 def _plot_long_contact_percentage_page(
-    counts, per_sample_df, *, class_order, target_cell_type_label, long_contact_minutes, colors, section_label=None,
+    counts, per_sample_df, *, class_order, target_cell_type_label, long_contact_threshold,
+    long_contact_unit, colors, section_label=None,
 ):
     """Two panels: the pooled long-vs-short stacked bar (all touching tracks), and a boxplot of
     each sample's % long contact per class — for tracks (already restricted to tracks that
-    touched that class at all) whose longest contact bout with it reached ``long_contact_minutes``
-    ("long_contact") vs. didn't ("short_contact")."""
+    touched that class at all) whose contact with it reached ``long_contact_threshold`` (expressed
+    in ``long_contact_unit``) ("long_contact") vs. didn't ("short_contact")."""
     props = counts.div(counts.sum(axis=1), axis=0).reindex(columns=_LONG_CONTACT_STACK_ORDER, fill_value=0.0)
     panel_w = max(0.6 * len(class_order), 4.0)
     fig, (ax_bar, ax_box) = plt.subplots(1, 2, figsize=(panel_w * 2, 4.2))
@@ -338,9 +426,10 @@ def _plot_long_contact_percentage_page(
 
     _draw_long_contact_boxplot(ax_box, per_sample_df, class_order, colors)
 
+    threshold_label = _format_long_contact_threshold(long_contact_threshold, long_contact_unit)
     legend_labels = {
-        "long_contact": f"long contact (≥ {long_contact_minutes:g} min)",
-        "short_contact": f"short contact (< {long_contact_minutes:g} min)",
+        "long_contact": f"long contact (≥ {threshold_label})",
+        "short_contact": f"short contact (< {threshold_label})",
     }
     handles = [
         Patch(facecolor=_LONG_CONTACT_STACK_COLORS[s], label=legend_labels[s])
@@ -357,8 +446,8 @@ def _plot_long_contact_percentage_page(
 
 
 def _render_long_contact_percentage_section(
-    pdf, sub_duration_df, *, class_order, target_cell_type_label, long_contact_minutes, sample_col,
-    class_colors=None, section_label=None,
+    pdf, sub_duration_df, *, class_order, target_cell_type_label, long_contact_threshold,
+    long_contact_unit, sample_col, class_colors=None, section_label=None,
 ):
     """Build + render the long-vs-short contact percentage page for one data subset (mirrors
     ``_render_duration_comparison_section``'s pooled/group-split convention). Restricted, per
@@ -394,7 +483,8 @@ def _render_long_contact_percentage_section(
 
     fig = _plot_long_contact_percentage_page(
         counts, per_sample_df, class_order=local_class_order, target_cell_type_label=target_cell_type_label,
-        long_contact_minutes=long_contact_minutes, colors=colors, section_label=section_label,
+        long_contact_threshold=long_contact_threshold, long_contact_unit=long_contact_unit,
+        colors=colors, section_label=section_label,
     )
     pdf.savefig(fig)
     plt.close(fig)
@@ -412,7 +502,8 @@ def _render_long_contact_percentage_section(
             "n_short_contact": n_short,
             "pct_long_contact": (n_long / n_total) if n_total else float("nan"),
             "pct_short_contact": (n_short / n_total) if n_total else float("nan"),
-            "long_contact_minutes": long_contact_minutes,
+            "long_contact_threshold": long_contact_threshold,
+            "long_contact_unit": long_contact_unit,
         })
     return csv_rows, 1
 
@@ -433,7 +524,8 @@ def save_track_contact_duration_comparison(
     test_mode="welch",
     pairing_col=None,
     minutes_per_frame=None,
-    long_contact_minutes=None,
+    long_contact_threshold=None,
+    long_contact_unit="minutes",
     sample_col="sample_name",
     groupby_cols=("sample_name", "TrackID"),
     comparisons_per_page=12,
@@ -463,18 +555,28 @@ def save_track_contact_duration_comparison(
     comparisons involving it. Columns not already in ``adata_tracks.obs`` raise ``KeyError`` (merge
     them in first, e.g. via ``core.metadata.merge_condition_columns_into_obs``).
 
-    ``long_contact_minutes``, when given (requires ``minutes_per_frame``), adds one extra page per
-    section: for tracks in contact with each touched class, the percentage whose longest contact
-    bout with that class reached ``long_contact_minutes`` ("long_contact") vs. didn't
-    ("short_contact") — restricted to tracks that touched that class at all (i.e. long vs. short
-    contact, not vs. no contact) — as a pooled stacked bar plus a boxplot of each ``sample_col``
-    value's own % long contact per class, written to a separate
-    ``contact_long_contact_percentage.csv``.
+    ``long_contact_threshold``, when given, adds one extra page per section: for tracks in contact
+    with each touched class, the percentage whose contact with that class reached
+    ``long_contact_threshold`` ("long_contact") vs. didn't ("short_contact") — restricted to tracks
+    that touched that class at all (i.e. long vs. short contact, not vs. no contact) — as a pooled
+    stacked bar plus a boxplot of each ``sample_col`` value's own % long contact per class, written
+    to a separate ``contact_long_contact_percentage.csv``.
 
-    Writes one combined PDF (``contact_duration_comparison.pdf``, small boxplot pairs — timepoints
-    and minutes side by side when ``minutes_per_frame`` is given — paginated
-    ``comparisons_per_page`` per page, plus the long-contact percentage page(s) when requested)
-    plus a CSV with one row per comparison (a ``page_group`` column marks which section —
+    ``long_contact_unit`` picks what ``long_contact_threshold`` is expressed in and which metric it
+    is compared against:
+
+    - ``"percent"`` — the track's time-in-contact fraction with that class (the proportion of its
+      classified time window spent in contact with it, contiguity-agnostic — see
+      ``compute_track_contact_target_class_features``'s ``{contact_col}_class_mean_fraction``),
+      as a percentage (0-100]. Scale-invariant per track; no time metadata required.
+    - ``"seconds"``/``"minutes"``/``"hours"`` — the longest sustained contact bout with that class
+      (``duration_timepoints``), converted to real time via ``minutes_per_frame`` (required for
+      these units).
+
+    Writes one combined PDF (``contact_duration_comparison.pdf``, small boxplot groups — timepoints,
+    minutes (when ``minutes_per_frame`` is given), and time-in-contact fraction side by side —
+    paginated ``comparisons_per_page`` per page, plus the long-contact percentage page(s) when
+    requested) plus a CSV with one row per comparison (a ``page_group`` column marks which section —
     ``"(all)"`` for the pooled one — each row belongs to), into the same
     ``{out_dir}/contact_analysis/{contact_col}/`` folder used by ``save_track_contact_group_analysis``.
 
@@ -495,18 +597,29 @@ def save_track_contact_duration_comparison(
             raise ValueError("pairing_col is required when test_mode='paired'.")
     pairing_col_label = " + ".join(pairing_cols) if pairing_cols else None
 
-    if long_contact_minutes is not None:
-        long_contact_minutes = float(long_contact_minutes)
-        if long_contact_minutes <= 0:
-            raise ValueError(f"long_contact_minutes must be > 0, got {long_contact_minutes!r}.")
-        if not minutes_per_frame:
+    if long_contact_threshold is not None:
+        long_contact_unit = str(long_contact_unit).strip().lower()
+        if long_contact_unit not in _LONG_CONTACT_UNITS:
             raise ValueError(
-                "long_contact_minutes requires minutes_per_frame (time metadata) to convert "
-                "minutes to timepoints."
+                f"long_contact_unit must be one of {_LONG_CONTACT_UNITS}, got {long_contact_unit!r}."
+            )
+        long_contact_threshold = float(long_contact_threshold)
+        if long_contact_threshold <= 0:
+            raise ValueError(f"long_contact_threshold must be > 0, got {long_contact_threshold!r}.")
+        if long_contact_unit == "percent" and long_contact_threshold > 100.0:
+            raise ValueError(
+                f"long_contact_threshold must be in (0, 100] for long_contact_unit='percent', "
+                f"got {long_contact_threshold!r}."
+            )
+        if long_contact_unit != "percent" and not minutes_per_frame:
+            raise ValueError(
+                f"long_contact_unit={long_contact_unit!r} requires minutes_per_frame (time "
+                f"metadata) to convert contact-bout length to real time."
             )
 
     groupby_cols = [str(c) for c in list(groupby_cols)]
     group_col = _contact_group_col_name(contact_col)
+    mean_col = _contact_class_mean_col_name(contact_col)
     max_bout_col = _contact_class_max_bout_col_name(contact_col)
 
     contact_features = compute_track_contact_features(
@@ -523,7 +636,9 @@ def save_track_contact_duration_comparison(
         contact_group_col=group_col, groupby_cols=groupby_cols, verbose=verbose,
     )
 
-    duration_df = long_target_df.reset_index().rename(columns={max_bout_col: "duration_timepoints"})
+    duration_df = long_target_df.reset_index().rename(
+        columns={max_bout_col: "duration_timepoints", mean_col: "duration_fraction"}
+    )
     duration_df["target_class"] = duration_df["target_class"].astype(str)
 
     group_cols = [str(c) for c in group_cols] if group_cols else []
@@ -550,15 +665,19 @@ def save_track_contact_duration_comparison(
             duration_df["_pairing_composite"] = _make_group_label(duration_df, pairing_cols)
             pairing_col_actual = "_pairing_composite"
 
-    if long_contact_minutes is not None:
+    if long_contact_threshold is not None:
         if sample_col not in duration_df.columns:
             raise KeyError(
                 f"sample_col={sample_col!r} not found — required (as the per-sample boxplot unit) "
-                f"when long_contact_minutes is set."
+                f"when long_contact_threshold is set."
             )
-        long_contact_timepoints = long_contact_minutes / float(minutes_per_frame)
+        if long_contact_unit == "percent":
+            long_contact_value = duration_df["duration_fraction"] * 100.0
+        else:
+            minutes_per_unit = _LONG_CONTACT_MINUTES_PER_UNIT[long_contact_unit]
+            long_contact_value = duration_df["duration_timepoints"] * minutes_per_frame / minutes_per_unit
         duration_df[_LONG_CONTACT_BUCKET_COL] = np.where(
-            duration_df["duration_timepoints"] >= long_contact_timepoints, "long_contact", "short_contact",
+            long_contact_value >= long_contact_threshold, "long_contact", "short_contact",
         )
 
     touched_classes = sorted(
@@ -577,12 +696,14 @@ def save_track_contact_duration_comparison(
 
     csv_columns = [
         "page_group", "group_a", "group_b", "n_a", "n_b", "mean_a_timepoints", "mean_b_timepoints",
-        "diff_timepoints", "mean_a_minutes", "mean_b_minutes", "t_stat", "p_value", "stars",
+        "diff_timepoints", "mean_a_minutes", "mean_b_minutes",
+        "mean_a_fraction", "mean_b_fraction", "diff_fraction",
+        "t_stat", "p_value", "stars", "t_stat_fraction", "p_value_fraction", "stars_fraction",
         "test_mode", "pairing_col",
     ]
     long_csv_columns = [
         "page_group", "target_class", "n_total", "n_long_contact", "n_short_contact",
-        "pct_long_contact", "pct_short_contact", "long_contact_minutes",
+        "pct_long_contact", "pct_short_contact", "long_contact_threshold", "long_contact_unit",
     ]
 
     comparisons_per_page = max(1, int(comparisons_per_page))
@@ -636,12 +757,12 @@ def save_track_contact_duration_comparison(
                 csv_rows.extend(group_rows)
                 total_pages += group_pages
 
-        if long_contact_minutes is not None:
+        if long_contact_threshold is not None:
             long_rows, long_pages = _render_long_contact_percentage_section(
                 pdf, duration_df, class_order=resolved_class_order,
                 target_cell_type_label=target_cell_type_label,
-                long_contact_minutes=long_contact_minutes, sample_col=sample_col,
-                class_colors=class_colors, section_label=None,
+                long_contact_threshold=long_contact_threshold, long_contact_unit=long_contact_unit,
+                sample_col=sample_col, class_colors=class_colors, section_label=None,
             )
             long_csv_rows.extend(long_rows)
             total_pages += long_pages
@@ -653,19 +774,22 @@ def save_track_contact_duration_comparison(
                 long_rows, long_pages = _render_long_contact_percentage_section(
                     pdf, sub_df, class_order=resolved_class_order,
                     target_cell_type_label=target_cell_type_label,
-                    long_contact_minutes=long_contact_minutes, sample_col=sample_col,
-                    class_colors=class_colors, section_label=page_group,
+                    long_contact_threshold=long_contact_threshold, long_contact_unit=long_contact_unit,
+                    sample_col=sample_col, class_colors=class_colors, section_label=page_group,
                 )
                 long_csv_rows.extend(long_rows)
                 total_pages += long_pages
 
     pd.DataFrame(csv_rows, columns=csv_columns).to_csv(csv_path, index=False)
-    if long_contact_minutes is not None:
+    if long_contact_threshold is not None:
         pd.DataFrame(long_csv_rows, columns=long_csv_columns).to_csv(long_contact_csv_path, index=False)
 
     if verbose:
         group_note = f", {len(page_groups)} group page(s) by {group_cols}" if group_cols else ""
-        long_note = f", long_contact_minutes={long_contact_minutes}" if long_contact_minutes is not None else ""
+        long_note = (
+            f", long_contact_threshold={long_contact_threshold} {long_contact_unit}"
+            if long_contact_threshold is not None else ""
+        )
         print(
             f"Saved contact duration comparison ({len(csv_rows)} comparisons, {total_pages} page(s)"
             f"{group_note}, test_mode={test_mode}{long_note}): {pdf_path}"
@@ -684,8 +808,9 @@ def save_track_contact_duration_comparison(
         "pairing_col": pairing_col_label,
         "class_order": resolved_class_order,
         "minutes_per_frame": minutes_per_frame,
-        "long_contact_minutes": long_contact_minutes,
-        "long_contact_csv_path": str(long_contact_csv_path) if long_contact_minutes is not None else None,
+        "long_contact_threshold": long_contact_threshold,
+        "long_contact_unit": long_contact_unit if long_contact_threshold is not None else None,
+        "long_contact_csv_path": str(long_contact_csv_path) if long_contact_threshold is not None else None,
         "group_cols": group_cols,
         "page_groups": [str(g) for g in page_groups],
     }

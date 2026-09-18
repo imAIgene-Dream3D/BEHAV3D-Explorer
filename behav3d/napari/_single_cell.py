@@ -19,7 +19,7 @@ from __future__ import annotations
 import datetime
 import traceback
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import yaml
@@ -4041,6 +4041,16 @@ class TrackClassificationSubTab(QWidget):
             "Tick \"Group conditions\" under Group in X/Y to pool that axis's levels into two "
             "custom groups."
         ))
+        contact_shared_settings_note = _make_info_label(
+            "⚙ The settings below (Contact column, Min. contiguous bout, target classification, "
+            "Group in X/Y, Group per page) are shared: they apply to every analysis button in "
+            "this section, not just the one below them."
+        )
+        contact_shared_settings_note.setStyleSheet(
+            "QLabel { background: #1d3a52; color: #8ecbff; border-radius: 4px; "
+            "padding: 6px 8px; font-size: 11px; }"
+        )
+        g_contact.addWidget(contact_shared_settings_note)
         contact_form = QFormLayout()
         contact_form.setSpacing(3)
         self.combo_contact_col = QComboBox()
@@ -4102,13 +4112,67 @@ class TrackClassificationSubTab(QWidget):
         self.list_contact_group_cols = QListWidget()
         self.list_contact_group_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
         g_contact.addWidget(self.list_contact_group_cols)
-        contact_row = QHBoxLayout()
-        self.btn_contact_analysis = QPushButton("▶ Run Contact-vs-No-Contact Analysis")
-        _style_secondary(self.btn_contact_analysis)
-        contact_row.addWidget(self.btn_contact_analysis, stretch=1)
-        self.btn_view_contact_analysis = _make_view_btn()
-        contact_row.addWidget(self.btn_view_contact_analysis)
-        g_contact.addLayout(contact_row)
+        contact_shared_settings_sep = QFrame()
+        contact_shared_settings_sep.setFrameShape(QFrame.HLine)
+        g_contact.addWidget(contact_shared_settings_sep)
+
+        self.btn_run_all_contact = QPushButton("▶▶ Run All Contact Analyses")
+        self.btn_run_all_contact.setStyleSheet(
+            "background-color: #007bff; color: white; font-weight: bold; "
+            "border-radius: 4px; padding: 10px; font-size: 14px;"
+        )
+        g_contact.addWidget(self.btn_run_all_contact)
+        contact_run_all_sep = QFrame()
+        contact_run_all_sep.setFrameShape(QFrame.HLine)
+        g_contact.addWidget(contact_run_all_sep)
+
+        g_contact.addWidget(QLabel(
+            "Contact rate (per-sample % of tracks in contact, plus per-target-class contact "
+            "fraction if 'Use contact cell classification' is on):"
+        ))
+        contact_rate_row = QHBoxLayout()
+        self.btn_contact_rate = QPushButton("▶ Create Contact Rate Report")
+        _style_secondary(self.btn_contact_rate)
+        contact_rate_row.addWidget(self.btn_contact_rate, stretch=1)
+        self.btn_view_contact_rate = _make_view_btn()
+        contact_rate_row.addWidget(self.btn_view_contact_rate)
+        g_contact.addLayout(contact_rate_row)
+
+        g_contact.addWidget(QLabel(
+            "Contact composition (class composition grid split by contact/no-contact, faceted by "
+            "Group in X/Y/page):"
+        ))
+        contact_composition_row = QHBoxLayout()
+        self.btn_contact_composition = QPushButton("▶ Create Contact Composition Grid")
+        _style_secondary(self.btn_contact_composition)
+        contact_composition_row.addWidget(self.btn_contact_composition, stretch=1)
+        self.btn_view_contact_composition = _make_view_btn()
+        contact_composition_row.addWidget(self.btn_view_contact_composition)
+        g_contact.addLayout(contact_composition_row)
+
+        g_contact.addWidget(QLabel(
+            "Contact condition comparison (Welch's t-test grid of class composition between "
+            "contact/no-contact groups):"
+        ))
+        contact_condition_comparison_row = QHBoxLayout()
+        self.btn_contact_condition_comparison = QPushButton("▶ Create Contact Condition Comparison")
+        _style_secondary(self.btn_contact_condition_comparison)
+        contact_condition_comparison_row.addWidget(self.btn_contact_condition_comparison, stretch=1)
+        self.btn_view_contact_condition_comparison = _make_view_btn()
+        contact_condition_comparison_row.addWidget(self.btn_view_contact_condition_comparison)
+        g_contact.addLayout(contact_condition_comparison_row)
+
+        g_contact.addWidget(QLabel(
+            "Contact cluster heatmap (contact amount per behavioral cluster of the classified "
+            "population itself, heatmaps + per-track distributions):"
+        ))
+        cluster_heatmap_row = QHBoxLayout()
+        self.btn_contact_cluster_heatmap = QPushButton("▶ Create Contact Cluster Heatmap")
+        _style_secondary(self.btn_contact_cluster_heatmap)
+        cluster_heatmap_row.addWidget(self.btn_contact_cluster_heatmap, stretch=1)
+        self.btn_view_contact_cluster_heatmap = _make_view_btn()
+        cluster_heatmap_row.addWidget(self.btn_view_contact_cluster_heatmap)
+        g_contact.addLayout(cluster_heatmap_row)
 
         g_contact.addWidget(QLabel(
             "Contact duration comparison (how long tracks stay in contact with each touched class "
@@ -4141,23 +4205,33 @@ class TrackClassificationSubTab(QWidget):
         self.spin_duration_comparisons_per_page.setValue(12)
         self.spin_duration_comparisons_per_page.setMaximumWidth(100)
         duration_form2.addRow("Comparisons per page:", self.spin_duration_comparisons_per_page)
-        self.spin_long_contact_minutes = QDoubleSpinBox()
-        self.spin_long_contact_minutes.setRange(0.0, 1_000_000.0)
-        self.spin_long_contact_minutes.setDecimals(1)
-        self.spin_long_contact_minutes.setSingleStep(1.0)
-        self.spin_long_contact_minutes.setValue(0.0)
-        self.spin_long_contact_minutes.setSpecialValueText("(off)")
-        self.spin_long_contact_minutes.setSuffix(" min")
-        self.spin_long_contact_minutes.setMaximumWidth(100)
+        self.spin_long_contact_threshold = QDoubleSpinBox()
+        self.spin_long_contact_threshold.setDecimals(1)
+        self.spin_long_contact_threshold.setValue(0.0)
+        self.spin_long_contact_threshold.setSpecialValueText("(off)")
+        self.spin_long_contact_threshold.setMaximumWidth(100)
         duration_form2.addRow("Long contact threshold:", make_help_row(
-            self.spin_long_contact_minutes, "Long contact threshold",
+            self.spin_long_contact_threshold, "Long contact threshold",
             "When set above 0, adds an extra page per group: for tracks in contact with each "
-            "touched class, the percentage with 'long' contact (longest contact bout with that "
-            "class ≥ this many minutes) vs. shorter contact — restricted to tracks that touched "
-            "that class at all (long vs. short contact, not vs. no contact). Requires time metadata "
-            "(frame interval) to convert minutes to timepoints."
+            "touched class, the percentage with 'long' contact — the track's contact with that "
+            "class reached this threshold, in the unit picked below — vs. 'short' contact, "
+            "restricted to tracks that touched that class at all (long vs. short contact, not "
+            "vs. no contact). 'Percent': the track spent at least this % of its classified time "
+            "window in contact with the class (contiguity-agnostic: brief gaps don't reset it; "
+            "no time metadata needed). 'Seconds'/'Minutes'/'Hours': its longest sustained "
+            "contact bout with the class reached this real-time length (requires time metadata)."
         ))
+        self.combo_long_contact_unit = QComboBox()
+        self.combo_long_contact_unit.addItem("Percent of time window", "percent")
+        self.combo_long_contact_unit.addItem("Seconds", "seconds")
+        self.combo_long_contact_unit.addItem("Minutes", "minutes")
+        self.combo_long_contact_unit.addItem("Hours", "hours")
+        self.combo_long_contact_unit.setCurrentIndex(2)  # minutes by default
+        self.combo_long_contact_unit.setMaximumWidth(160)
+        self.combo_long_contact_unit.currentIndexChanged.connect(self._on_long_contact_unit_changed)
+        duration_form2.addRow("Long contact unit:", self.combo_long_contact_unit)
         g_contact.addLayout(duration_form2)
+        self._on_long_contact_unit_changed()
         duration_row = QHBoxLayout()
         self.btn_duration_comparison = QPushButton("▶ Create Contact Duration Comparison")
         _style_secondary(self.btn_duration_comparison)
@@ -4441,17 +4515,26 @@ class TrackClassificationSubTab(QWidget):
         _wire_view_btn(self.btn_view_window_transitions, self._on_view, "window_transitions")
         self.btn_track_condition_comparison.clicked.connect(self._on_track_condition_comparison)
         _wire_view_btn(self.btn_view_track_condition_comparison, self._on_view, "track_condition_comparison")
-        self.btn_contact_analysis.clicked.connect(self._on_contact_analysis)
-        _wire_view_btn(self.btn_view_contact_analysis, self._on_view, "contact_analysis")
+        self.btn_contact_rate.clicked.connect(lambda: self._on_contact_rate_report())
+        _wire_view_btn(self.btn_view_contact_rate, self._on_view, "contact_rate")
+        self.btn_contact_composition.clicked.connect(lambda: self._on_contact_composition_report())
+        _wire_view_btn(self.btn_view_contact_composition, self._on_view, "contact_composition")
+        self.btn_contact_condition_comparison.clicked.connect(lambda: self._on_contact_condition_comparison())
+        _wire_view_btn(
+            self.btn_view_contact_condition_comparison, self._on_view, "contact_condition_comparison"
+        )
+        self.btn_contact_cluster_heatmap.clicked.connect(lambda: self._on_contact_cluster_heatmap())
+        _wire_view_btn(self.btn_view_contact_cluster_heatmap, self._on_view, "contact_cluster_heatmap")
         self.combo_contact_col.currentTextChanged.connect(self._sync_contact_target_class_controls)
         self.chk_use_target_class.stateChanged.connect(self._sync_contact_target_class_controls)
         self.combo_target_class_source.currentTextChanged.connect(self._sync_contact_target_class_controls)
-        self.btn_duration_comparison.clicked.connect(self._on_duration_comparison)
+        self.btn_duration_comparison.clicked.connect(lambda: self._on_duration_comparison())
         _wire_view_btn(self.btn_view_duration_comparison, self._on_view, "contact_duration")
-        self.btn_contact_state_shift.clicked.connect(self._on_contact_state_shift_analysis)
+        self.btn_contact_state_shift.clicked.connect(lambda: self._on_contact_state_shift_analysis())
         _wire_view_btn(self.btn_view_contact_state_shift, self._on_view, "contact_state_shift")
-        self.btn_track_contact_overview.clicked.connect(self._on_track_contact_overview)
+        self.btn_track_contact_overview.clicked.connect(lambda: self._on_track_contact_overview())
         _wire_view_btn(self.btn_view_track_contact_overview, self._on_view, "track_contact_overview")
+        self.btn_run_all_contact.clicked.connect(self._on_run_all_contact_analyses)
         self.btn_browse_pretrained_clf.clicked.connect(self._browse_pretrained_clf)
         self.btn_browse_pretrained_states.clicked.connect(self._browse_pretrained_states)
         self.btn_run_apply_pretrained.clicked.connect(self._on_apply_pretrained)
@@ -5481,10 +5564,17 @@ class TrackClassificationSubTab(QWidget):
         else:
             self.label_target_class_warning.hide()
         contact_cols_present = self.combo_contact_col.count() > 0
-        self.btn_contact_analysis.setEnabled(
+        contact_base_ready = (
             contact_cols_present
             and self._track_adata is not None
             and not (use_target and not available)
+        )
+        self.btn_contact_rate.setEnabled(contact_base_ready)
+        self.btn_contact_composition.setEnabled(contact_base_ready)
+        self.btn_contact_condition_comparison.setEnabled(contact_base_ready)
+        self.btn_run_all_contact.setEnabled(contact_base_ready)
+        self.btn_contact_cluster_heatmap.setEnabled(
+            contact_cols_present and self._track_adata is not None
         )
         # Duration-by-class comparison is meaningless without a target classification to split by.
         self.btn_duration_comparison.setEnabled(
@@ -5498,6 +5588,30 @@ class TrackClassificationSubTab(QWidget):
         is_paired = self.combo_duration_test_mode.currentData() == "paired"
         self.label_duration_pairing_cols.setVisible(is_paired)
         self.list_duration_pairing_cols.setVisible(is_paired)
+
+    def _on_long_contact_unit_changed(self, *_args):
+        unit = self.combo_long_contact_unit.currentData()
+        spin = self.spin_long_contact_threshold
+        if unit == "percent":
+            spin.setRange(0.0, 100.0)
+            spin.setDecimals(1)
+            spin.setSingleStep(5.0)
+            spin.setSuffix(" %")
+        elif unit == "seconds":
+            spin.setRange(0.0, 100000.0)
+            spin.setDecimals(1)
+            spin.setSingleStep(5.0)
+            spin.setSuffix(" s")
+        elif unit == "hours":
+            spin.setRange(0.0, 1000.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.5)
+            spin.setSuffix(" h")
+        else:  # minutes
+            spin.setRange(0.0, 10000.0)
+            spin.setDecimals(1)
+            spin.setSingleStep(1.0)
+            spin.setSuffix(" min")
 
     def _refresh_contact_columns(self):
         import pandas as pd
@@ -5536,9 +5650,11 @@ class TrackClassificationSubTab(QWidget):
                 self.btn_view_exemplars,
                 self.btn_view_diagnostics, self.btn_view_track_proportions,
                 self.btn_view_window_transitions,
-                self.btn_view_track_condition_comparison, self.btn_view_contact_analysis,
+                self.btn_view_track_condition_comparison,
+                self.btn_view_contact_rate, self.btn_view_contact_composition,
+                self.btn_view_contact_condition_comparison,
                 self.btn_view_contact_state_shift, self.btn_view_track_contact_overview,
-                self.btn_view_duration_comparison,
+                self.btn_view_duration_comparison, self.btn_view_contact_cluster_heatmap,
             ):
                 btn.setEnabled(False)
             return
@@ -5577,11 +5693,25 @@ class TrackClassificationSubTab(QWidget):
             )
         )
         contact_dir = traj_dir / "contact_analysis" if traj_dir else None
-        self.btn_view_contact_analysis.setEnabled(
+        self.btn_view_contact_rate.setEnabled(
             bool(
                 contact_dir
                 and contact_dir.exists()
-                and any(contact_dir.glob("*/*.pdf"))
+                and any(contact_dir.glob("*/contact_rate.pdf"))
+            )
+        )
+        self.btn_view_contact_composition.setEnabled(
+            bool(
+                contact_dir
+                and contact_dir.exists()
+                and any(contact_dir.glob("*/contact_composition.pdf"))
+            )
+        )
+        self.btn_view_contact_condition_comparison.setEnabled(
+            bool(
+                contact_dir
+                and contact_dir.exists()
+                and any(contact_dir.glob("*/condition_comparison_*.pdf"))
             )
         )
         self.btn_view_contact_state_shift.setEnabled(
@@ -5603,6 +5733,13 @@ class TrackClassificationSubTab(QWidget):
                 contact_dir
                 and contact_dir.exists()
                 and any(contact_dir.glob("*/contact_duration_comparison.pdf"))
+            )
+        )
+        self.btn_view_contact_cluster_heatmap.setEnabled(
+            bool(
+                contact_dir
+                and contact_dir.exists()
+                and any(contact_dir.glob("*/contact_cluster_heatmap.pdf"))
             )
         )
 
@@ -6870,68 +7007,47 @@ class TrackClassificationSubTab(QWidget):
             on_failed=lambda e: self._log(f"❌ Track condition comparison failed: {e}"),
         )
 
-    def _on_contact_analysis(self):
+    def _contact_warn_or_skip(self, chain_next, title, message):
+        """Report a validation problem: a blocking dialog for a direct button click, or a log
+        line + immediate continuation when running as part of the "Run All" chain."""
+        if callable(chain_next):
+            self._log(f"⏭ Skipping {title}: {message}")
+            chain_next()
+        else:
+            QMessageBox.warning(self, title, message)
+
+    def _on_contact_rate_report(self, chain_next: Optional[Callable[[], None]] = None):
         ct = self._cell_type()
         if not ct:
+            if callable(chain_next):
+                chain_next()
             return
         if self._track_adata is None:
-            QMessageBox.warning(self, "No data", "Run track clustering first.")
+            self._contact_warn_or_skip(chain_next, "No data", "Run track clustering first.")
             return
         if self._bg.is_running():
-            QMessageBox.warning(self, "Busy", "Another operation is running.")
+            self._contact_warn_or_skip(chain_next, "Busy", "Another operation is running.")
             return
         contact_col = self.combo_contact_col.currentText()
         if not contact_col:
-            QMessageBox.warning(self, "Missing selection", "Select a contact column to group tracks by.")
+            self._contact_warn_or_skip(chain_next, "Missing selection", "Select a contact column to group tracks by.")
             return
         min_bout_length = int(self.spin_contact_min_bout.value())
         csv_path = self._track_features_csv_path(ct)
         if not csv_path or not csv_path.exists():
-            QMessageBox.warning(self, "No data", "Track-features CSV not found. Run feature extraction first.")
+            self._contact_warn_or_skip(chain_next, "No data", "Track-features CSV not found. Run feature extraction first.")
             return
         use_target_class = self.chk_use_target_class.isChecked()
         target_available, target_warning = self._target_class_availability()
         if use_target_class and not target_available:
-            QMessageBox.warning(self, "Target classification unavailable", target_warning)
+            self._contact_warn_or_skip(chain_next, "Target classification unavailable", target_warning)
             return
         target_ct = self._contact_target_cell_type() if use_target_class else None
         target_source = self.combo_target_class_source.currentData() if use_target_class else None
         target_state_choice = self.combo_target_state_col.currentText()
         out = self._out_dir()
-        self._log(f"▶ Running contact-vs-no-contact analysis for '{ct}'…")
+        self._log(f"▶ Creating contact rate report for '{ct}'…")
         track_adata = self._track_adata
-        selected_extra_cols = [item.text() for item in self.list_contact_group_cols.selectedItems()]
-        group_x = self.combo_contact_group_x.currentText()
-        group_x = None if group_x in ("", "(none)") else group_x
-        group_y = self.combo_contact_group_y.currentText()
-        group_y = None if group_y in ("", "(none)") else group_y
-        group_x_levels_map = None
-        if self.chk_contact_group_x_conditions.isChecked():
-            if not group_x or not self.group_selector_contact_x.is_configured():
-                QMessageBox.warning(
-                    self, "Missing selection",
-                    "Move at least one Group X level into each group, or untick "
-                    "\"Group conditions\" under Group in X.",
-                )
-                return
-            left = self.group_selector_contact_x.left_items()
-            right = self.group_selector_contact_x.right_items()
-            group_x_levels_map = {lvl: "+".join(left) for lvl in left}
-            group_x_levels_map.update({lvl: "+".join(right) for lvl in right})
-        group_y_levels_map = None
-        if self.chk_contact_group_y_conditions.isChecked():
-            if not group_y or not self.group_selector_contact_y.is_configured():
-                QMessageBox.warning(
-                    self, "Missing selection",
-                    "Move at least one Group Y level into each group, or untick "
-                    "\"Group conditions\" under Group in Y.",
-                )
-                return
-            left = self.group_selector_contact_y.left_items()
-            right = self.group_selector_contact_y.right_items()
-            group_y_levels_map = {lvl: "+".join(left) for lvl in left}
-            group_y_levels_map.update({lvl: "+".join(right) for lvl in right})
-        md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
 
         def _run(**kw):
             import pandas as pd
@@ -6944,7 +7060,154 @@ class TrackClassificationSubTab(QWidget):
             )
             from behav3d.analysis.behavior.track.utils import _resolve_dtaidistance_paths
             from behav3d.analysis.behavior.track.visualization.plots.reports import (
-                save_track_contact_group_analysis,
+                save_track_contact_rate_report,
+            )
+            df_timepoints = pd.read_csv(csv_path)
+            contact_dir = _resolve_dtaidistance_paths(str(out) if out else "", ct)["outfolder"]
+
+            target_class_kwargs = {}
+            if use_target_class:
+                touching_col = touching_column_name(target_ct)
+                if target_source == "track":
+                    adata_target = ad.read_h5ad(str(self._track_adata_path(target_ct)))
+                    target_class_lookup = build_target_class_lookup_from_track_adata(
+                        adata_target, class_col="ClusterID",
+                    )
+                    time_varying = False
+                else:
+                    adata_target = ad.read_h5ad(str(self._state_adata_path(target_ct)))
+                    state_col = (
+                        FULL_STATE_COL if target_state_choice == "full_behavioral_cluster" else target_state_choice
+                    )
+                    target_class_lookup = build_target_class_lookup_from_state_adata(
+                        adata_target, state_col=state_col,
+                    )
+                    time_varying = True
+                target_class_kwargs = dict(
+                    target_class_lookup=target_class_lookup,
+                    touching_col=touching_col,
+                    time_varying=time_varying,
+                    target_cell_type_label=target_ct,
+                )
+
+            return save_track_contact_rate_report(
+                track_adata,
+                df_timepoints,
+                contact_dir,
+                contact_col=contact_col,
+                min_bout_length=min_bout_length,
+                sample_col="sample_name",
+                verbose=True,
+                **target_class_kwargs,
+            )
+
+        def _done(r):
+            self._log(f"✅ Contact rate report done for '{ct}'.")
+            self._update_view_buttons()
+            self._notify_results()
+            if callable(chain_next):
+                chain_next()
+
+        def _failed(e):
+            self._log(f"❌ Contact rate report failed: {e}")
+            if callable(chain_next):
+                chain_next()
+
+        self._bg.run(
+            fn=_run,
+            desc=f"Contact rate report ({ct})…",
+            progress_row=self.progress_row,
+            buttons=[self.btn_contact_rate],
+            viewer=self.viewer,
+            inject_progress=False,
+            on_done=_done,
+            on_failed=_failed,
+        )
+
+    def _on_contact_composition_report(self, chain_next: Optional[Callable[[], None]] = None):
+        ct = self._cell_type()
+        if not ct:
+            if callable(chain_next):
+                chain_next()
+            return
+        if self._track_adata is None:
+            self._contact_warn_or_skip(chain_next, "No data", "Run track clustering first.")
+            return
+        if self._bg.is_running():
+            self._contact_warn_or_skip(chain_next, "Busy", "Another operation is running.")
+            return
+        contact_col = self.combo_contact_col.currentText()
+        if not contact_col:
+            self._contact_warn_or_skip(chain_next, "Missing selection", "Select a contact column to group tracks by.")
+            return
+        min_bout_length = int(self.spin_contact_min_bout.value())
+        csv_path = self._track_features_csv_path(ct)
+        if not csv_path or not csv_path.exists():
+            self._contact_warn_or_skip(chain_next, "No data", "Track-features CSV not found. Run feature extraction first.")
+            return
+        use_target_class = self.chk_use_target_class.isChecked()
+        target_available, target_warning = self._target_class_availability()
+        if use_target_class and not target_available:
+            self._contact_warn_or_skip(chain_next, "Target classification unavailable", target_warning)
+            return
+        target_ct = self._contact_target_cell_type() if use_target_class else None
+        target_source = self.combo_target_class_source.currentData() if use_target_class else None
+        target_state_choice = self.combo_target_state_col.currentText()
+        selected_extra_cols = [item.text() for item in self.list_contact_group_cols.selectedItems()]
+        group_x = self.combo_contact_group_x.currentText()
+        group_x = None if group_x in ("", "(none)") else group_x
+        group_y = self.combo_contact_group_y.currentText()
+        group_y = None if group_y in ("", "(none)") else group_y
+        if not selected_extra_cols and not group_x and not group_y:
+            self._contact_warn_or_skip(
+                chain_next, "Missing selection",
+                "Set a Group in X/Y or select at least one Group-per-page column — the "
+                "composition grid needs something to facet by.",
+            )
+            return
+        group_x_levels_map = None
+        if self.chk_contact_group_x_conditions.isChecked():
+            if not group_x or not self.group_selector_contact_x.is_configured():
+                self._contact_warn_or_skip(
+                    chain_next, "Missing selection",
+                    "Move at least one Group X level into each group, or untick "
+                    "\"Group conditions\" under Group in X.",
+                )
+                return
+            left = self.group_selector_contact_x.left_items()
+            right = self.group_selector_contact_x.right_items()
+            group_x_levels_map = {lvl: "+".join(left) for lvl in left}
+            group_x_levels_map.update({lvl: "+".join(right) for lvl in right})
+        group_y_levels_map = None
+        if self.chk_contact_group_y_conditions.isChecked():
+            if not group_y or not self.group_selector_contact_y.is_configured():
+                self._contact_warn_or_skip(
+                    chain_next, "Missing selection",
+                    "Move at least one Group Y level into each group, or untick "
+                    "\"Group conditions\" under Group in Y.",
+                )
+                return
+            left = self.group_selector_contact_y.left_items()
+            right = self.group_selector_contact_y.right_items()
+            group_y_levels_map = {lvl: "+".join(left) for lvl in left}
+            group_y_levels_map.update({lvl: "+".join(right) for lvl in right})
+        md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
+        out = self._out_dir()
+        self._log(f"▶ Creating contact composition grid for '{ct}'…")
+        track_adata = self._track_adata
+
+        def _run(**kw):
+            import pandas as pd
+            import anndata as ad
+            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+            from behav3d.analysis.behavior.track.contact_grouping import (
+                touching_column_name,
+                build_target_class_lookup_from_state_adata,
+                build_target_class_lookup_from_track_adata,
+            )
+            from behav3d.analysis.behavior.track.utils import _resolve_dtaidistance_paths
+            from behav3d.analysis.behavior.track.visualization.plots.reports import (
+                save_track_contact_composition_report,
             )
             from behav3d.core.metadata import merge_condition_columns_into_obs
             from behav3d.napari._rename_dialog import _track_cluster_col
@@ -6981,13 +7244,12 @@ class TrackClassificationSubTab(QWidget):
                     target_cell_type_label=target_ct,
                 )
 
-            return save_track_contact_group_analysis(
+            return save_track_contact_composition_report(
                 track_adata,
                 df_timepoints,
                 contact_dir,
                 contact_col=contact_col,
                 min_bout_length=min_bout_length,
-                sample_col="sample_name",
                 class_col=cluster_col,
                 extra_group_cols=selected_extra_cols or None,
                 group_x=group_x,
@@ -6998,70 +7260,327 @@ class TrackClassificationSubTab(QWidget):
                 **target_class_kwargs,
             )
 
+        def _done(r):
+            self._log(f"✅ Contact composition grid done for '{ct}'.")
+            self._update_view_buttons()
+            self._notify_results()
+            if callable(chain_next):
+                chain_next()
+
+        def _failed(e):
+            self._log(f"❌ Contact composition grid failed: {e}")
+            if callable(chain_next):
+                chain_next()
+
         self._bg.run(
             fn=_run,
-            desc=f"Contact-vs-no-contact analysis ({ct})…",
+            desc=f"Contact composition grid ({ct})…",
             progress_row=self.progress_row,
-            buttons=[self.btn_contact_analysis],
+            buttons=[self.btn_contact_composition],
             viewer=self.viewer,
             inject_progress=False,
-            on_done=lambda r: (
-                self._log(f"✅ Contact-vs-no-contact analysis done for '{ct}'."),
-                self._update_view_buttons(),
-                self._notify_results(),
-            ),
-            on_failed=lambda e: self._log(f"❌ Contact-vs-no-contact analysis failed: {e}"),
+            on_done=_done,
+            on_failed=_failed,
         )
 
-    def _on_duration_comparison(self):
+    def _on_contact_condition_comparison(self, chain_next: Optional[Callable[[], None]] = None):
         ct = self._cell_type()
         if not ct:
+            if callable(chain_next):
+                chain_next()
             return
         if self._track_adata is None:
-            QMessageBox.warning(self, "No data", "Run track clustering first.")
+            self._contact_warn_or_skip(chain_next, "No data", "Run track clustering first.")
             return
         if self._bg.is_running():
-            QMessageBox.warning(self, "Busy", "Another operation is running.")
+            self._contact_warn_or_skip(chain_next, "Busy", "Another operation is running.")
             return
         contact_col = self.combo_contact_col.currentText()
         if not contact_col:
-            QMessageBox.warning(self, "Missing selection", "Select a contact column to group tracks by.")
+            self._contact_warn_or_skip(chain_next, "Missing selection", "Select a contact column to group tracks by.")
+            return
+        min_bout_length = int(self.spin_contact_min_bout.value())
+        csv_path = self._track_features_csv_path(ct)
+        if not csv_path or not csv_path.exists():
+            self._contact_warn_or_skip(chain_next, "No data", "Track-features CSV not found. Run feature extraction first.")
+            return
+        use_target_class = self.chk_use_target_class.isChecked()
+        target_available, target_warning = self._target_class_availability()
+        if use_target_class and not target_available:
+            self._contact_warn_or_skip(chain_next, "Target classification unavailable", target_warning)
+            return
+        target_ct = self._contact_target_cell_type() if use_target_class else None
+        target_source = self.combo_target_class_source.currentData() if use_target_class else None
+        target_state_choice = self.combo_target_state_col.currentText()
+        selected_extra_cols = [item.text() for item in self.list_contact_group_cols.selectedItems()]
+        group_x = self.combo_contact_group_x.currentText()
+        group_x = None if group_x in ("", "(none)") else group_x
+        group_y = self.combo_contact_group_y.currentText()
+        group_y = None if group_y in ("", "(none)") else group_y
+        group_x_levels_map = None
+        if self.chk_contact_group_x_conditions.isChecked():
+            if not group_x or not self.group_selector_contact_x.is_configured():
+                self._contact_warn_or_skip(
+                    chain_next, "Missing selection",
+                    "Move at least one Group X level into each group, or untick "
+                    "\"Group conditions\" under Group in X.",
+                )
+                return
+            left = self.group_selector_contact_x.left_items()
+            right = self.group_selector_contact_x.right_items()
+            group_x_levels_map = {lvl: "+".join(left) for lvl in left}
+            group_x_levels_map.update({lvl: "+".join(right) for lvl in right})
+        group_y_levels_map = None
+        if self.chk_contact_group_y_conditions.isChecked():
+            if not group_y or not self.group_selector_contact_y.is_configured():
+                self._contact_warn_or_skip(
+                    chain_next, "Missing selection",
+                    "Move at least one Group Y level into each group, or untick "
+                    "\"Group conditions\" under Group in Y.",
+                )
+                return
+            left = self.group_selector_contact_y.left_items()
+            right = self.group_selector_contact_y.right_items()
+            group_y_levels_map = {lvl: "+".join(left) for lvl in left}
+            group_y_levels_map.update({lvl: "+".join(right) for lvl in right})
+        md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
+        out = self._out_dir()
+        self._log(f"▶ Creating contact condition comparison for '{ct}'…")
+        track_adata = self._track_adata
+
+        def _run(**kw):
+            import pandas as pd
+            import anndata as ad
+            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+            from behav3d.analysis.behavior.track.contact_grouping import (
+                touching_column_name,
+                build_target_class_lookup_from_state_adata,
+                build_target_class_lookup_from_track_adata,
+                compute_track_contact_features,
+                merge_track_contact_features_into_obs,
+                compute_track_contact_target_class_features,
+                merge_track_target_class_group_into_obs,
+                _contact_group_col_name,
+                _contact_target_class_group_col_name,
+            )
+            from behav3d.analysis.behavior.track.utils import _resolve_dtaidistance_paths
+            from behav3d.analysis.behavior.track.visualization.plots.reports import (
+                save_track_condition_comparison_report,
+            )
+            from behav3d.core.metadata import merge_condition_columns_into_obs
+            from behav3d.napari._rename_dialog import _track_cluster_col
+            cluster_col = _track_cluster_col(track_adata) or "ClusterID"
+            df_timepoints = pd.read_csv(csv_path)
+            contact_dir = _resolve_dtaidistance_paths(str(out) if out else "", ct)["outfolder"]
+            all_extra_cols = selected_extra_cols + [c for c in (group_x, group_y) if c]
+            cols_to_merge = [c for c in all_extra_cols if c not in track_adata.obs.columns]
+            if cols_to_merge and md is not None:
+                merge_condition_columns_into_obs(track_adata, md, cols_to_merge)
+
+            contact_features = compute_track_contact_features(
+                df_timepoints, track_adata, contact_col=contact_col, min_bout_length=min_bout_length, verbose=True,
+            )
+            merge_track_contact_features_into_obs(
+                track_adata, contact_features, contact_col=contact_col, min_bout_length=min_bout_length,
+            )
+            group_col = _contact_group_col_name(contact_col)
+
+            comparison_kwargs = dict(
+                sample_col="sample_name",
+                class_col=cluster_col,
+                group_x=group_x,
+                group_y=group_y,
+                group_x_levels_map=group_x_levels_map,
+                group_y_levels_map=group_y_levels_map,
+                group_cols=selected_extra_cols or None,
+                verbose=True,
+            )
+            result = {
+                "contact_vs_no_contact": save_track_condition_comparison_report(
+                    track_adata, contact_dir, condition_col=group_col, **comparison_kwargs,
+                ),
+            }
+
+            if use_target_class:
+                touching_col = touching_column_name(target_ct)
+                if target_source == "track":
+                    adata_target = ad.read_h5ad(str(self._track_adata_path(target_ct)))
+                    target_class_lookup = build_target_class_lookup_from_track_adata(
+                        adata_target, class_col="ClusterID",
+                    )
+                    time_varying = False
+                else:
+                    adata_target = ad.read_h5ad(str(self._state_adata_path(target_ct)))
+                    state_col = (
+                        FULL_STATE_COL if target_state_choice == "full_behavioral_cluster" else target_state_choice
+                    )
+                    target_class_lookup = build_target_class_lookup_from_state_adata(
+                        adata_target, state_col=state_col,
+                    )
+                    time_varying = True
+                _long_target_df, target_group_df = compute_track_contact_target_class_features(
+                    df_timepoints, track_adata, target_class_lookup,
+                    contact_col=contact_col, touching_col=touching_col, time_varying=time_varying,
+                    contact_group_col=group_col, verbose=True,
+                )
+                merge_track_target_class_group_into_obs(track_adata, target_group_df, contact_col=contact_col)
+                target_group_col = _contact_target_class_group_col_name(contact_col)
+                result["by_target_class"] = save_track_condition_comparison_report(
+                    track_adata, contact_dir, condition_col=target_group_col, **comparison_kwargs,
+                )
+
+            return result
+
+        def _done(r):
+            self._log(f"✅ Contact condition comparison done for '{ct}'.")
+            self._update_view_buttons()
+            self._notify_results()
+            if callable(chain_next):
+                chain_next()
+
+        def _failed(e):
+            self._log(f"❌ Contact condition comparison failed: {e}")
+            if callable(chain_next):
+                chain_next()
+
+        self._bg.run(
+            fn=_run,
+            desc=f"Contact condition comparison ({ct})…",
+            progress_row=self.progress_row,
+            buttons=[self.btn_contact_condition_comparison],
+            viewer=self.viewer,
+            inject_progress=False,
+            on_done=_done,
+            on_failed=_failed,
+        )
+
+    def _on_contact_cluster_heatmap(self, chain_next: Optional[Callable[[], None]] = None):
+        ct = self._cell_type()
+        if not ct:
+            if callable(chain_next):
+                chain_next()
+            return
+        if self._track_adata is None:
+            self._contact_warn_or_skip(chain_next, "No data", "Run track clustering first.")
+            return
+        if self._bg.is_running():
+            self._contact_warn_or_skip(chain_next, "Busy", "Another operation is running.")
+            return
+        contact_col = self.combo_contact_col.currentText()
+        if not contact_col:
+            self._contact_warn_or_skip(chain_next, "Missing selection", "Select a contact column to group tracks by.")
+            return
+        min_bout_length = int(self.spin_contact_min_bout.value())
+        csv_path = self._track_features_csv_path(ct)
+        if not csv_path or not csv_path.exists():
+            self._contact_warn_or_skip(chain_next, "No data", "Track-features CSV not found. Run feature extraction first.")
+            return
+        out = self._out_dir()
+        self._log(f"▶ Running contact cluster heatmap for '{ct}'…")
+        track_adata = self._track_adata
+        md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
+
+        def _run(**kw):
+            import pandas as pd
+            from behav3d.analysis.behavior.track.utils import _resolve_dtaidistance_paths
+            from behav3d.analysis.behavior.track.visualization.plots.contact_cluster_heatmap import (
+                save_track_contact_cluster_heatmap,
+            )
+            from behav3d.core.utils import minutes_per_frame_from_metadata
+            from behav3d.napari._rename_dialog import _track_cluster_col
+            cluster_col = _track_cluster_col(track_adata) or "ClusterID"
+            df_timepoints = pd.read_csv(csv_path)
+            contact_dir = _resolve_dtaidistance_paths(str(out) if out else "", ct)["outfolder"]
+            minutes_per_frame, minutes_valid = minutes_per_frame_from_metadata(md)
+
+            return save_track_contact_cluster_heatmap(
+                track_adata,
+                df_timepoints,
+                contact_dir,
+                contact_col=contact_col,
+                min_bout_length=min_bout_length,
+                class_col=cluster_col,
+                minutes_per_frame=minutes_per_frame if minutes_valid else None,
+                verbose=True,
+            )
+
+        def _done(r):
+            self._log(f"✅ Contact cluster heatmap done for '{ct}'.")
+            self._update_view_buttons()
+            self._notify_results()
+            if callable(chain_next):
+                chain_next()
+
+        def _failed(e):
+            self._log(f"❌ Contact cluster heatmap failed: {e}")
+            if callable(chain_next):
+                chain_next()
+
+        self._bg.run(
+            fn=_run,
+            desc=f"Contact cluster heatmap ({ct})…",
+            progress_row=self.progress_row,
+            buttons=[self.btn_contact_cluster_heatmap],
+            viewer=self.viewer,
+            inject_progress=False,
+            on_done=_done,
+            on_failed=_failed,
+        )
+
+    def _on_duration_comparison(self, chain_next: Optional[Callable[[], None]] = None):
+        ct = self._cell_type()
+        if not ct:
+            if callable(chain_next):
+                chain_next()
+            return
+        if self._track_adata is None:
+            self._contact_warn_or_skip(chain_next, "No data", "Run track clustering first.")
+            return
+        if self._bg.is_running():
+            self._contact_warn_or_skip(chain_next, "Busy", "Another operation is running.")
+            return
+        contact_col = self.combo_contact_col.currentText()
+        if not contact_col:
+            self._contact_warn_or_skip(chain_next, "Missing selection", "Select a contact column to group tracks by.")
             return
         if not self.chk_use_target_class.isChecked():
-            QMessageBox.warning(
-                self, "Target classification required",
+            self._contact_warn_or_skip(
+                chain_next, "Target classification required",
                 "Enable \"Use contact cell classification\" to compare durations by class.",
             )
             return
         target_available, target_warning = self._target_class_availability()
         if not target_available:
-            QMessageBox.warning(self, "Target classification unavailable", target_warning)
+            self._contact_warn_or_skip(chain_next, "Target classification unavailable", target_warning)
             return
         min_bout_length = int(self.spin_contact_min_bout.value())
         csv_path = self._track_features_csv_path(ct)
         if not csv_path or not csv_path.exists():
-            QMessageBox.warning(self, "No data", "Track-features CSV not found. Run feature extraction first.")
+            self._contact_warn_or_skip(chain_next, "No data", "Track-features CSV not found. Run feature extraction first.")
             return
         test_mode = self.combo_duration_test_mode.currentData()
         pairing_cols = []
         if test_mode == "paired":
             pairing_cols = [item.text() for item in self.list_duration_pairing_cols.selectedItems()]
             if not pairing_cols:
-                QMessageBox.warning(self, "Missing selection", "Select at least one pairing column for the paired t-test.")
-                return
-        long_contact_minutes = self.spin_long_contact_minutes.value()
-        long_contact_minutes = float(long_contact_minutes) if long_contact_minutes > 0 else None
-        md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
-        if long_contact_minutes is not None:
-            from behav3d.core.utils import minutes_per_frame_from_metadata
-            _mpf, _mpf_valid = minutes_per_frame_from_metadata(md)
-            if not _mpf_valid:
-                QMessageBox.warning(
-                    self, "Time metadata unavailable",
-                    "Long contact threshold requires time metadata (frame interval) to convert "
-                    "minutes to timepoints — none is available.",
+                self._contact_warn_or_skip(
+                    chain_next, "Missing selection", "Select at least one pairing column for the paired t-test.",
                 )
                 return
+        from behav3d.core.utils import minutes_per_frame_from_metadata
+        long_contact_threshold_raw = self.spin_long_contact_threshold.value()
+        long_contact_unit = self.combo_long_contact_unit.currentData()
+        long_contact_threshold = float(long_contact_threshold_raw) if long_contact_threshold_raw > 0 else None
+        md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
+        minutes_per_frame, minutes_valid = minutes_per_frame_from_metadata(md)
+        if long_contact_threshold is not None and long_contact_unit != "percent" and not minutes_valid:
+            self._contact_warn_or_skip(
+                chain_next, "Time metadata required",
+                f"Long contact threshold in {long_contact_unit} requires time metadata "
+                f"(time_interval/time_unit) — add it, or switch the unit to 'Percent of time "
+                f"window'.",
+            )
+            return
         comparisons_per_page = int(self.spin_duration_comparisons_per_page.value())
         selected_extra_cols = [item.text() for item in self.list_contact_group_cols.selectedItems()]
         target_ct = self._contact_target_cell_type()
@@ -7128,11 +7647,24 @@ class TrackClassificationSubTab(QWidget):
                 test_mode=test_mode,
                 pairing_col=pairing_cols or None,
                 minutes_per_frame=minutes_per_frame if minutes_valid else None,
-                long_contact_minutes=long_contact_minutes,
+                long_contact_threshold=long_contact_threshold,
+                long_contact_unit=long_contact_unit,
                 comparisons_per_page=comparisons_per_page,
                 group_cols=selected_extra_cols or None,
                 verbose=True,
             )
+
+        def _done(r):
+            self._log(f"✅ Contact duration comparison done for '{ct}' ({r.get('n_comparisons')} comparisons).")
+            self._update_view_buttons()
+            self._notify_results()
+            if callable(chain_next):
+                chain_next()
+
+        def _failed(e):
+            self._log(f"❌ Contact duration comparison failed: {e}")
+            if callable(chain_next):
+                chain_next()
 
         self._bg.run(
             fn=_run,
@@ -7141,38 +7673,36 @@ class TrackClassificationSubTab(QWidget):
             buttons=[self.btn_duration_comparison],
             viewer=self.viewer,
             inject_progress=False,
-            on_done=lambda r: (
-                self._log(f"✅ Contact duration comparison done for '{ct}' ({r.get('n_comparisons')} comparisons)."),
-                self._update_view_buttons(),
-                self._notify_results(),
-            ),
-            on_failed=lambda e: self._log(f"❌ Contact duration comparison failed: {e}"),
+            on_done=_done,
+            on_failed=_failed,
         )
 
-    def _on_contact_state_shift_analysis(self):
+    def _on_contact_state_shift_analysis(self, chain_next: Optional[Callable[[], None]] = None):
         ct = self._cell_type()
         if not ct:
+            if callable(chain_next):
+                chain_next()
             return
         if self._track_adata is None:
-            QMessageBox.warning(self, "No data", "Run track clustering first.")
+            self._contact_warn_or_skip(chain_next, "No data", "Run track clustering first.")
             return
         if self._bg.is_running():
-            QMessageBox.warning(self, "Busy", "Another operation is running.")
+            self._contact_warn_or_skip(chain_next, "Busy", "Another operation is running.")
             return
         contact_col = self.combo_contact_col.currentText()
         if not contact_col:
-            QMessageBox.warning(self, "Missing selection", "Select a contact column to analyze.")
+            self._contact_warn_or_skip(chain_next, "Missing selection", "Select a contact column to analyze.")
             return
         state_adata_path = self._state_adata_path(ct)
         if not state_adata_path or not state_adata_path.exists():
-            QMessageBox.warning(
-                self, "No data",
+            self._contact_warn_or_skip(
+                chain_next, "No data",
                 "Behavioral states h5ad not found. Run State Classification first.",
             )
             return
         csv_path = self._track_features_csv_path(ct)
         if not csv_path or not csv_path.exists():
-            QMessageBox.warning(self, "No data", "Track-features CSV not found. Run feature extraction first.")
+            self._contact_warn_or_skip(chain_next, "No data", "Track-features CSV not found. Run feature extraction first.")
             return
         min_bout_length = int(self.spin_contact_min_bout.value())
         window_mode = self.combo_contact_shift_window_mode.currentText().lower()
@@ -7207,6 +7737,18 @@ class TrackClassificationSubTab(QWidget):
                 verbose=True,
             )
 
+        def _done(r):
+            self._log(f"✅ Contact state-shift analysis done for '{ct}'.")
+            self._update_view_buttons()
+            self._notify_results()
+            if callable(chain_next):
+                chain_next()
+
+        def _failed(e):
+            self._log(f"❌ Contact state-shift analysis failed: {e}")
+            if callable(chain_next):
+                chain_next()
+
         self._bg.run(
             fn=_run,
             desc=f"Contact state-shift analysis ({ct})…",
@@ -7214,38 +7756,36 @@ class TrackClassificationSubTab(QWidget):
             buttons=[self.btn_contact_state_shift],
             viewer=self.viewer,
             inject_progress=False,
-            on_done=lambda r: (
-                self._log(f"✅ Contact state-shift analysis done for '{ct}'."),
-                self._update_view_buttons(),
-                self._notify_results(),
-            ),
-            on_failed=lambda e: self._log(f"❌ Contact state-shift analysis failed: {e}"),
+            on_done=_done,
+            on_failed=_failed,
         )
 
-    def _on_track_contact_overview(self):
+    def _on_track_contact_overview(self, chain_next: Optional[Callable[[], None]] = None):
         ct = self._cell_type()
         if not ct:
+            if callable(chain_next):
+                chain_next()
             return
         if self._track_adata is None:
-            QMessageBox.warning(self, "No data", "Run track clustering first.")
+            self._contact_warn_or_skip(chain_next, "No data", "Run track clustering first.")
             return
         if self._bg.is_running():
-            QMessageBox.warning(self, "Busy", "Another operation is running.")
+            self._contact_warn_or_skip(chain_next, "Busy", "Another operation is running.")
             return
         contact_col = self.combo_contact_col.currentText()
         if not contact_col:
-            QMessageBox.warning(self, "Missing selection", "Select a contact column to analyze.")
+            self._contact_warn_or_skip(chain_next, "Missing selection", "Select a contact column to analyze.")
             return
         state_adata_path = self._state_adata_path(ct)
         if not state_adata_path or not state_adata_path.exists():
-            QMessageBox.warning(
-                self, "No data",
+            self._contact_warn_or_skip(
+                chain_next, "No data",
                 "Behavioral states h5ad not found. Run State Classification first.",
             )
             return
         csv_path = self._track_features_csv_path(ct)
         if not csv_path or not csv_path.exists():
-            QMessageBox.warning(self, "No data", "Track-features CSV not found. Run feature extraction first.")
+            self._contact_warn_or_skip(chain_next, "No data", "Track-features CSV not found. Run feature extraction first.")
             return
         min_bout_length = int(self.spin_contact_min_bout.value())
         state_col_choice = self.combo_contact_shift_state_col.currentText()
@@ -7278,6 +7818,18 @@ class TrackClassificationSubTab(QWidget):
                 verbose=True,
             )
 
+        def _done(r):
+            self._log(f"✅ Track contact overview done for '{ct}'.")
+            self._update_view_buttons()
+            self._notify_results()
+            if callable(chain_next):
+                chain_next()
+
+        def _failed(e):
+            self._log(f"❌ Track contact overview failed: {e}")
+            if callable(chain_next):
+                chain_next()
+
         self._bg.run(
             fn=_run,
             desc=f"Track contact overview ({ct})…",
@@ -7285,13 +7837,32 @@ class TrackClassificationSubTab(QWidget):
             buttons=[self.btn_track_contact_overview],
             viewer=self.viewer,
             inject_progress=False,
-            on_done=lambda r: (
-                self._log(f"✅ Track contact overview done for '{ct}'."),
-                self._update_view_buttons(),
-                self._notify_results(),
-            ),
-            on_failed=lambda e: self._log(f"❌ Track contact overview failed: {e}"),
+            on_done=_done,
+            on_failed=_failed,
         )
+
+    def _on_run_all_contact_analyses(self):
+        if self._bg.is_running():
+            QMessageBox.warning(self, "Busy", "Another operation is running.")
+            return
+        steps = [
+            self._on_contact_rate_report,
+            self._on_contact_composition_report,
+            self._on_contact_condition_comparison,
+            self._on_contact_cluster_heatmap,
+            self._on_duration_comparison,
+            self._on_contact_state_shift_analysis,
+            self._on_track_contact_overview,
+        ]
+        self._log("▶▶ Running all contact analyses…")
+
+        def _run_step(index: int):
+            if index >= len(steps):
+                self._log("✅ Run all contact analyses complete.")
+                return
+            steps[index](chain_next=lambda: _run_step(index + 1))
+
+        _run_step(0)
 
     # ── Backprojection ───────────────────────────────────────────────────
 
@@ -7661,11 +8232,29 @@ class TrackClassificationSubTab(QWidget):
                 (f.stem.replace("condition_comparison_", ""), f)
                 for f in sorted(comparisons_dir.glob("condition_comparison_*.pdf"))
             ]
-        elif kind == "contact_analysis" and traj_dir:
+        elif kind == "contact_rate" and traj_dir:
+            contact_dir = traj_dir / "contact_analysis"
+            candidates = [
+                (f.parent.name, f)
+                for f in sorted(contact_dir.glob("*/contact_rate.pdf"))
+            ]
+        elif kind == "contact_composition" and traj_dir:
+            contact_dir = traj_dir / "contact_analysis"
+            candidates = [
+                (f.parent.name, f)
+                for f in sorted(contact_dir.glob("*/contact_composition.pdf"))
+            ]
+        elif kind == "contact_condition_comparison" and traj_dir:
             contact_dir = traj_dir / "contact_analysis"
             candidates = [
                 (f"{f.parent.name}/{f.stem}", f)
-                for f in sorted(contact_dir.glob("*/*.pdf"))
+                for f in sorted(contact_dir.glob("*/condition_comparison_*.pdf"))
+            ]
+        elif kind == "contact_cluster_heatmap" and traj_dir:
+            contact_dir = traj_dir / "contact_analysis"
+            candidates = [
+                (f.parent.name, f)
+                for f in sorted(contact_dir.glob("*/contact_cluster_heatmap.pdf"))
             ]
         elif kind == "contact_state_shift" and traj_dir:
             contact_dir = traj_dir / "contact_analysis"

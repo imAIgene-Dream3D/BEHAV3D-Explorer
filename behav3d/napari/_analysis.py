@@ -410,6 +410,13 @@ class PopulationDynamicsTab(QWidget):
         self._interaction_labels: dict[str, QLabel] = {}
         self._target_meta: dict[str, dict] = {}
 
+        # Guards against a second Run click while a synchronous analysis
+        # step is already executing on the GUI thread (these run_*_for
+        # calls block the event loop for their duration, so a double-click
+        # would otherwise re-enter the handler and start a second,
+        # overlapping run as soon as the first one returns).
+        self._analysis_busy = False
+
         # Queue button placeholders (wired by ``_widget``)
         self.btn_queue_dd_single = QPushButton("+🛒")
         self.btn_queue_dd_combined = QPushButton("+🛒")
@@ -1831,10 +1838,44 @@ class PopulationDynamicsTab(QWidget):
         except Exception as e:
             self._log(f"Could not show results-folder dialog: {e}")
 
+    # ── Re-entrancy guard ────────────────────────────────────────────────
+    def _try_begin_analysis_run(self) -> bool:
+        """Refuse to start a Run if one is already in flight.
+
+        These Run handlers call into ``run_*_for`` synchronously on the GUI
+        thread, so "in flight" really means "still blocking this method" —
+        but a double-click queues a second call that re-enters here the
+        moment the first one returns, so the flag still needs to be set
+        for the whole duration.
+        """
+        if self._analysis_busy:
+            QMessageBox.warning(
+                self, "Busy",
+                "Another analysis is already running. Please wait for it to finish.",
+            )
+            return False
+        self._analysis_busy = True
+        for btn in (
+            self.btn_run_dd_single, self.btn_run_dd_combined,
+            self.btn_run_ia_single, self.btn_run_ia_combined,
+            self.btn_run_inv, self.btn_run_all,
+        ):
+            btn.setEnabled(False)
+        return True
+
+    def _end_analysis_run(self):
+        """Release the guard and restore each button's real readiness state
+        (data-availability gating), rather than blindly re-enabling them."""
+        self._analysis_busy = False
+        self._refresh_button_states()
+        self._refresh_invasiveness_buttons()
+
     # ── Click handlers ─────────────────────────────────────────────────
     def _on_run_dd_single(self):
         targets = self._selected_targets()
         if not targets:
+            return
+        if not self._try_begin_analysis_run():
             return
         try:
             ok = self.run_death_dynamics_for(targets, interactive=True)
@@ -1847,10 +1888,13 @@ class PopulationDynamicsTab(QWidget):
                 self._offer_open_results_folder(folder, what="Death Dynamics")
         finally:
             self._notify_results_changed()
+            self._end_analysis_run()
 
     def _on_run_dd_combined(self):
         targets = self._selected_targets()
         if len(targets) < 2:
+            return
+        if not self._try_begin_analysis_run():
             return
         try:
             ok = self.run_multi_organoid_death_for(targets, interactive=True)
@@ -1865,11 +1909,14 @@ class PopulationDynamicsTab(QWidget):
                 )
         finally:
             self._notify_results_changed()
+            self._end_analysis_run()
 
     def _on_run_ia_single(self):
         targets = self._selected_targets()
         interactions = self._selected_interactions()
         if not targets or not interactions:
+            return
+        if not self._try_begin_analysis_run():
             return
         self._persist_advanced()
         try:
@@ -1881,11 +1928,14 @@ class PopulationDynamicsTab(QWidget):
             )
         finally:
             self._notify_results_changed()
+            self._end_analysis_run()
 
     def _on_run_ia_combined(self):
         targets = self._selected_targets()
         interactions = self._selected_interactions()
         if not targets or not interactions:
+            return
+        if not self._try_begin_analysis_run():
             return
         self._persist_advanced()
         try:
@@ -1902,6 +1952,7 @@ class PopulationDynamicsTab(QWidget):
             )
         finally:
             self._notify_results_changed()
+            self._end_analysis_run()
 
     def _on_run_all_clicked(self):
         targets = self._selected_targets()
@@ -1909,37 +1960,42 @@ class PopulationDynamicsTab(QWidget):
         if not targets:
             self._log("Select at least one target.")
             return
-        has_dead = _has_dead_channel(self.metadata_loader.metadata)
-        dd_any_ok = False
-        if has_dead:
-            dd_any_ok |= bool(self.run_death_dynamics_for(targets, interactive=True))
-            if len(targets) >= 2:
-                dd_any_ok |= bool(
-                    self.run_multi_organoid_death_for(targets, interactive=True)
+        if not self._try_begin_analysis_run():
+            return
+        try:
+            has_dead = _has_dead_channel(self.metadata_loader.metadata)
+            dd_any_ok = False
+            if has_dead:
+                dd_any_ok |= bool(self.run_death_dynamics_for(targets, interactive=True))
+                if len(targets) >= 2:
+                    dd_any_ok |= bool(
+                        self.run_multi_organoid_death_for(targets, interactive=True)
+                    )
+            if interactions:
+                self._persist_advanced()
+                self.run_interaction_for(
+                    targets,
+                    interactions,
+                    group_by_line_condition=self.check_group_by_lc.isChecked(),
+                    interactive=True,
                 )
-        if interactions:
-            self._persist_advanced()
-            self.run_interaction_for(
-                targets,
-                interactions,
-                group_by_line_condition=self.check_group_by_lc.isChecked(),
-                interactive=True,
-            )
-            self.run_multi_organoid_interaction_for(
-                targets,
-                interactions,
-                time_window_min=int(self.spin_time_window.value()),
-                group_by=self.combo_group_by.currentData() or "organoid_type",
-                annotate_line_condition=self.check_annotate_lc.isChecked(),
-                analysis_period_t=_period_from_t_radios(
-                    self.period_radio_group, self.spin_period_start_t, self.spin_period_end_t,
-                ),
-                interactive=True,
-            )
-        if dd_any_ok:
-            folder = Path(self.metadata_loader.output_dir).expanduser() / "analysis"
-            self._offer_open_results_folder(folder, what="Death Dynamics")
-        self._notify_results_changed()
+                self.run_multi_organoid_interaction_for(
+                    targets,
+                    interactions,
+                    time_window_min=int(self.spin_time_window.value()),
+                    group_by=self.combo_group_by.currentData() or "organoid_type",
+                    annotate_line_condition=self.check_annotate_lc.isChecked(),
+                    analysis_period_t=_period_from_t_radios(
+                        self.period_radio_group, self.spin_period_start_t, self.spin_period_end_t,
+                    ),
+                    interactive=True,
+                )
+            if dd_any_ok:
+                folder = Path(self.metadata_loader.output_dir).expanduser() / "analysis"
+                self._offer_open_results_folder(folder, what="Death Dynamics")
+        finally:
+            self._notify_results_changed()
+            self._end_analysis_run()
 
     # ── Public run methods (called by queue) ───────────────────────────
     def run_death_dynamics_for(
@@ -2328,6 +2384,8 @@ class PopulationDynamicsTab(QWidget):
         targets = self._selected_invasiveness_targets()
         if not immune_list or not targets:
             return
+        if not self._try_begin_analysis_run():
+            return
         try:
             ok = self.run_invasiveness_for(
                 immune_list,
@@ -2350,6 +2408,7 @@ class PopulationDynamicsTab(QWidget):
                 )
         finally:
             self._notify_results_changed()
+            self._end_analysis_run()
 
     def run_invasiveness_for(
         self,

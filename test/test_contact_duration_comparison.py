@@ -167,6 +167,34 @@ def test_welch_mode_pdf_csv_and_group_sizes(tmp_path):
     assert csv["mean_b_minutes"].to_numpy() == pytest.approx(csv["mean_b_timepoints"].to_numpy() * 2.0)
 
 
+def test_main_comparison_includes_fraction_columns_and_stats(tmp_path):
+    adata_tracks = _build_adata_tracks()
+    df_timepoints = _build_df_timepoints()
+
+    result = save_track_contact_duration_comparison(
+        adata_tracks, df_timepoints, tmp_path,
+        test_mode="welch", minutes_per_frame=2.0, verbose=False,
+        **_common_kwargs(),
+    )
+    csv = pd.read_csv(result["csv_path"])
+    for col in [
+        "mean_a_fraction", "mean_b_fraction", "diff_fraction",
+        "t_stat_fraction", "p_value_fraction", "stars_fraction",
+    ]:
+        assert col in csv.columns
+
+    round_vs_elong = _find_row(csv, "round", "elongated")
+    # Every track's classified window is _N_TIMEPOINTS long here, so duration_fraction is a
+    # fixed rescale (1/_N_TIMEPOINTS) of duration_timepoints for every row -- hence
+    # mean_*_fraction == mean_*_timepoints / _N_TIMEPOINTS, and Welch's t-stat/p-value (scale
+    # invariant under a positive constant rescale) match the timepoints test exactly.
+    assert round_vs_elong["mean_a_fraction"] == pytest.approx(round_vs_elong["mean_a_timepoints"] / _N_TIMEPOINTS)
+    assert round_vs_elong["mean_b_fraction"] == pytest.approx(round_vs_elong["mean_b_timepoints"] / _N_TIMEPOINTS)
+    assert round_vs_elong["t_stat_fraction"] == pytest.approx(round_vs_elong["t_stat"])
+    assert round_vs_elong["p_value_fraction"] == pytest.approx(round_vs_elong["p_value"])
+    assert round_vs_elong["stars_fraction"] == round_vs_elong["stars"]
+
+
 def test_paired_mode_drops_incomplete_pairing_units(tmp_path):
     adata_tracks = _build_adata_tracks()
     df_timepoints = _build_df_timepoints()
@@ -195,6 +223,21 @@ def test_paired_mode_drops_incomplete_pairing_units(tmp_path):
     assert round_vs_plastic["n_b"] == 3
 
 
+def test_paired_mode_includes_fraction_columns(tmp_path):
+    adata_tracks = _build_adata_tracks()
+    df_timepoints = _build_df_timepoints()
+
+    result = save_track_contact_duration_comparison(
+        adata_tracks, df_timepoints, tmp_path,
+        test_mode="paired", pairing_col="sample_name", verbose=False,
+        **_common_kwargs(),
+    )
+    csv = pd.read_csv(result["csv_path"])
+    round_vs_elong = _find_row(csv, "round", "elongated")
+    assert round_vs_elong["mean_a_fraction"] == pytest.approx(round_vs_elong["mean_a_timepoints"] / _N_TIMEPOINTS)
+    assert np.isfinite(round_vs_elong["t_stat_fraction"])
+
+
 def test_paired_mode_requires_pairing_col():
     adata_tracks = _build_adata_tracks()
     df_timepoints = _build_df_timepoints()
@@ -219,15 +262,19 @@ def test_long_contact_percentage_splits_long_vs_short(tmp_path):
     adata_tracks = _build_adata_tracks()
     df_timepoints = _build_df_timepoints()
 
-    # minutes_per_frame=1.0, long_contact_minutes=7.0 -> threshold is 7 timepoints.
+    # Every track's classified window is _N_TIMEPOINTS long and each bout is a single contiguous
+    # run starting at t=0, so duration_fraction == bout_length / _N_TIMEPOINTS exactly -- no time
+    # metadata needed.
     # round bouts (2 per sample x 4 samples): s1=[5,7] s2=[6,8] s3=[4,6] s4=[5,7]
-    # -> bouts >= 7: the 7,8,7 from s1/s2/s4's second track = 3 of 8 "long".
+    # -> fraction*100 >= 7/30*100 selects the 7,8,7-timepoint bouts = 3 of 8 "long".
+    long_contact_threshold = 100.0 * 7.0 / _N_TIMEPOINTS
     result = save_track_contact_duration_comparison(
         adata_tracks, df_timepoints, tmp_path,
-        test_mode="welch", minutes_per_frame=1.0, long_contact_minutes=7.0, verbose=False,
-        **_common_kwargs(),
+        test_mode="welch", long_contact_threshold=long_contact_threshold, long_contact_unit="percent",
+        verbose=False, **_common_kwargs(),
     )
-    assert result["long_contact_minutes"] == 7.0
+    assert result["long_contact_threshold"] == pytest.approx(long_contact_threshold)
+    assert result["long_contact_unit"] == "percent"
     assert Path(result["long_contact_csv_path"]).exists()
 
     long_csv = pd.read_csv(result["long_contact_csv_path"])
@@ -238,6 +285,56 @@ def test_long_contact_percentage_splits_long_vs_short(tmp_path):
     assert round_row["n_long_contact"] == 3
     assert round_row["n_short_contact"] == 5
     assert round_row["pct_long_contact"] == pytest.approx(3 / 8)
+    assert round_row["long_contact_threshold"] == pytest.approx(long_contact_threshold)
+    assert round_row["long_contact_unit"] == "percent"
+
+
+def test_long_contact_minutes_uses_bout_length_not_fraction(tmp_path):
+    """With unit='minutes', bucketing uses the longest sustained bout converted via
+    ``minutes_per_frame`` -- not ``duration_fraction`` -- so it requires time metadata."""
+    adata_tracks = _build_adata_tracks()
+    df_timepoints = _build_df_timepoints()
+
+    # minutes_per_frame=2.0 -> round bouts (timepoints [5,7,6,8,4,6,5,7]) become minutes
+    # [10,14,12,16,8,12,10,14]; threshold=13 selects the two 14- and one 16-minute bouts = 3 of 8.
+    result = save_track_contact_duration_comparison(
+        adata_tracks, df_timepoints, tmp_path,
+        test_mode="welch", minutes_per_frame=2.0, long_contact_threshold=13.0,
+        long_contact_unit="minutes", verbose=False, **_common_kwargs(),
+    )
+    long_csv = pd.read_csv(result["long_contact_csv_path"])
+    round_row = long_csv[long_csv["target_class"] == "round"].iloc[0]
+    assert round_row["n_long_contact"] == 3
+    assert round_row["n_short_contact"] == 5
+    assert round_row["long_contact_unit"] == "minutes"
+
+
+def test_long_contact_seconds_and_hours_are_consistent_with_minutes(tmp_path):
+    """Same threshold expressed in seconds/hours should select the same tracks as minutes."""
+
+    def _n_long(threshold, unit, tmp_subdir):
+        result = save_track_contact_duration_comparison(
+            _build_adata_tracks(), _build_df_timepoints(), tmp_path / tmp_subdir,
+            test_mode="welch", minutes_per_frame=2.0, verbose=False,
+            long_contact_threshold=threshold, long_contact_unit=unit,
+            **_common_kwargs(),
+        )
+        long_csv = pd.read_csv(result["long_contact_csv_path"])
+        return int(long_csv[long_csv["target_class"] == "round"].iloc[0]["n_long_contact"])
+
+    assert _n_long(13.0, "minutes", "min") == _n_long(13.0 * 60.0, "seconds", "sec")
+    assert _n_long(13.0, "minutes", "min2") == _n_long(13.0 / 60.0, "hours", "hr")
+
+
+def test_long_contact_non_percent_unit_requires_minutes_per_frame():
+    adata_tracks = _build_adata_tracks()
+    df_timepoints = _build_df_timepoints()
+    with pytest.raises(ValueError, match="minutes_per_frame"):
+        save_track_contact_duration_comparison(
+            adata_tracks, df_timepoints, Path("unused"),
+            test_mode="welch", long_contact_threshold=5.0, long_contact_unit="minutes",
+            minutes_per_frame=None, **_common_kwargs(),
+        )
 
 
 def test_long_contact_per_sample_pct_for_boxplot():
@@ -258,15 +355,49 @@ def test_long_contact_per_sample_pct_for_boxplot():
     assert pct_by_sample == {"s1": 50.0, "s2": 50.0, "s3": 0.0, "s4": 50.0}
 
 
-def test_long_contact_minutes_requires_minutes_per_frame():
+def test_long_contact_percent_threshold_must_be_in_valid_range():
     adata_tracks = _build_adata_tracks()
     df_timepoints = _build_df_timepoints()
-    with pytest.raises(ValueError, match="minutes_per_frame"):
+    with pytest.raises(ValueError, match="long_contact_threshold"):
         save_track_contact_duration_comparison(
             adata_tracks, df_timepoints, Path("unused"),
-            test_mode="welch", minutes_per_frame=None, long_contact_minutes=7.0,
+            test_mode="welch", long_contact_threshold=150.0, long_contact_unit="percent",
             **_common_kwargs(),
         )
+
+
+def test_long_contact_invalid_unit_raises():
+    adata_tracks = _build_adata_tracks()
+    df_timepoints = _build_df_timepoints()
+    with pytest.raises(ValueError, match="long_contact_unit"):
+        save_track_contact_duration_comparison(
+            adata_tracks, df_timepoints, Path("unused"),
+            test_mode="welch", long_contact_threshold=5.0, long_contact_unit="fortnights",
+            **_common_kwargs(),
+        )
+
+
+def test_long_contact_percent_threshold_matches_r_script_semantics(tmp_path):
+    """Mirrors the originating R workflow's ``mean(tcell_contact == "True") > 0.25`` rule: a
+    track is "long_contact" for a class once the *fraction* of its classified window spent
+    touching that class clears the threshold -- independent of bout contiguity/length."""
+    adata_tracks = _build_adata_tracks()
+    df_timepoints = _build_df_timepoints()
+
+    # round bouts (2/sample x 4 samples): s1=[5,7] s2=[6,8] s3=[4,6] s4=[5,7] -> fractions
+    # (bout/_N_TIMEPOINTS): [.167,.233,.200,.267,.133,.200,.167,.233] -- only the
+    # 8-timepoint bout (0.267) clears 0.25 (25%).
+    result = save_track_contact_duration_comparison(
+        adata_tracks, df_timepoints, tmp_path,
+        test_mode="welch", long_contact_threshold=25.0, long_contact_unit="percent", verbose=False,
+        **_common_kwargs(),
+    )
+    long_csv = pd.read_csv(result["long_contact_csv_path"])
+    round_row = long_csv[long_csv["target_class"] == "round"].iloc[0]
+    assert round_row["n_total"] == 8
+    assert round_row["n_long_contact"] == 1
+    assert round_row["n_short_contact"] == 7
+    assert round_row["long_contact_threshold"] == pytest.approx(25.0)
 
 
 def test_paired_mode_multiple_pairing_cols_composite_key(tmp_path):

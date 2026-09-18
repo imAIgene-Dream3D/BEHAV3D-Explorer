@@ -36,7 +36,7 @@ from __future__ import annotations
 import time
 import traceback
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from qtpy.QtCore import QObject, QThread, QTimer, Qt, Signal
 from qtpy.QtWidgets import (
@@ -444,6 +444,7 @@ class _RunState:
     progress_row: Optional[ProgressBarRow]
     finish_delay_ms: int
     viewer: Any = None
+    pending_result: Optional[Tuple[bool, Any]] = None
 
 
 class BackgroundOperation(QObject):
@@ -626,29 +627,21 @@ class BackgroundOperation(QObject):
         st = self._state
         if st is None:
             return
-        cb = st.on_done
-        # Close UI feedback before calling user callback so the callback's
-        # own dialogs / dom updates don't overlap with the activity bar
-        # being torn down.
+        # Close UI feedback now so the callback's own dialogs / view updates
+        # don't overlap with the activity bar being torn down. The user
+        # callback itself is deferred to ``_on_thread_finished`` so that
+        # ``is_running()`` has already flipped False by the time it runs —
+        # see that method's docstring for why.
         self._cleanup_ui()
-        if cb is not None:
-            try:
-                cb(result)
-            except Exception:
-                traceback.print_exc()
+        st.pending_result = (True, result)
 
     # ------------------------------------------------------------------
     def _on_failed(self, error: str) -> None:
         st = self._state
         if st is None:
             return
-        cb = st.on_failed
         self._cleanup_ui()
-        if cb is not None:
-            try:
-                cb(error)
-            except Exception:
-                traceback.print_exc()
+        st.pending_result = (False, error)
 
     # ------------------------------------------------------------------
     def _cleanup_ui(self) -> None:
@@ -688,7 +681,16 @@ class BackgroundOperation(QObject):
         ``QThread`` while the OS thread is still alive — a recipe for
         ``QThread: Destroyed while thread is still running`` and the
         resulting hard crash.
+
+        The user's ``on_done``/``on_failed`` callback is also dispatched
+        from here (after ``self._state`` is cleared) rather than from
+        ``_on_done``/``_on_failed`` directly. Those fire as soon as the
+        worker emits its result, which is *before* this method runs, so
+        calling the user callback there would let a callback that starts
+        another run via ``self._bg.run(...)`` (e.g. a "Run All" chain)
+        observe ``is_running()`` as still ``True`` and self-skip.
         """
+        st = self._state
         self._state = None
         # Also the safest point to reclaim any pyplot figure the backend
         # opened and never closed: the worker is gone, so nothing can be
@@ -701,6 +703,14 @@ class BackgroundOperation(QObject):
             close_leftover_pyplot_figures()
         except Exception:
             pass
+        if st is not None and st.pending_result is not None:
+            ok, payload = st.pending_result
+            cb = st.on_done if ok else st.on_failed
+            if cb is not None:
+                try:
+                    cb(payload)
+                except Exception:
+                    traceback.print_exc()
 
     # ------------------------------------------------------------------
     def wait(self, timeout_ms: int = -1) -> bool:

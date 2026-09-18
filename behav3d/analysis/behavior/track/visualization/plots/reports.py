@@ -1656,6 +1656,285 @@ def save_track_contact_group_analysis(
     return result
 
 
+def save_track_contact_rate_report(
+    adata_tracks,
+    df_timepoints,
+    out_dir,
+    *,
+    contact_col,
+    min_bout_length,
+    sample_col="sample_name",
+    verbose=False,
+    target_class_lookup=None,
+    touching_col=None,
+    time_varying=True,
+    target_class_order=None,
+    target_class_colors=None,
+    target_cell_type_label=None,
+):
+    """Contact-rate proportions per sample (one thin bar per sample, contact vs. no_contact) —
+    plus, when ``target_class_lookup`` is given, a violin of mean contact fraction per touched
+    target class. That violin is the one metric from the old combined contact-analysis bundle
+    that isn't already covered elsewhere: per-cluster contact fraction/duration is covered by
+    ``contact_cluster_heatmap.save_track_contact_cluster_heatmap`` and per-target-class contact
+    *duration* is covered (in more depth) by
+    ``contact_duration_report.save_track_contact_duration_comparison``.
+
+    See ``save_track_contact_group_analysis`` for the shared ``target_class_lookup``/
+    ``touching_col``/``time_varying`` conventions.
+
+    Returns a dict of output artifact paths.
+    """
+    group_col = _contact_group_col_name(contact_col)
+
+    contact_features = compute_track_contact_features(
+        df_timepoints,
+        adata_tracks,
+        contact_col=contact_col,
+        min_bout_length=min_bout_length,
+        verbose=verbose,
+    )
+    merge_track_contact_features_into_obs(
+        adata_tracks,
+        contact_features,
+        contact_col=contact_col,
+        min_bout_length=min_bout_length,
+    )
+
+    use_target_class = target_class_lookup is not None
+    long_target_df = None
+    target_class_mean_col = None
+    resolved_target_class_order = []
+    if use_target_class:
+        if touching_col is None:
+            raise ValueError("touching_col is required when target_class_lookup is given.")
+        long_target_df, _target_group_df = compute_track_contact_target_class_features(
+            df_timepoints,
+            adata_tracks,
+            target_class_lookup,
+            contact_col=contact_col,
+            touching_col=touching_col,
+            time_varying=bool(time_varying),
+            contact_group_col=group_col,
+            verbose=verbose,
+        )
+        target_class_mean_col = _contact_class_mean_col_name(contact_col)
+        target_cell_type_label = target_cell_type_label or contact_col_target_cell_type(contact_col)
+        touched_classes = sorted(
+            long_target_df["target_class"].dropna().astype(str).unique().tolist(), key=_mixed_label_sort_key,
+        )
+        resolved_target_class_order = (
+            [str(c) for c in target_class_order] if target_class_order is not None else touched_classes
+        )
+
+    out_dir = Path(out_dir) / "contact_analysis" / str(contact_col)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_dir = out_dir / "csv"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = out_dir / "contact_rate.pdf"
+
+    with PdfPages(pdf_path) as pdf:
+        contact_rate_by_cluster = save_track_class_proportions_by_sample_plot(
+            adata_tracks,
+            out_dir,
+            sample_col=sample_col,
+            class_col=group_col,
+            group_cols=None,
+            verbose=verbose,
+            pdf_pages=pdf,
+            csv_dir=csv_dir,
+        )
+
+        if use_target_class:
+            resolved_target_class_colors = _normalize_label_color_map(
+                resolved_target_class_order, colors=target_class_colors, cmap_name="tab20",
+            )
+            long_flat = long_target_df.reset_index()
+            fig = plot_feature_box_by_group(
+                long_flat, target_class_mean_col, "target_class",
+                group_order=resolved_target_class_order, colors=resolved_target_class_colors,
+                ylabel=f"Mean fraction of timepoints in contact ({contact_col})",
+                title=f"Mean contact fraction by {target_cell_type_label} class",
+            )
+            pdf.savefig(fig, bbox_inches="tight")
+            plt.close(fig)
+
+    contact_rate_by_cluster["pdf_path"] = str(pdf_path)
+
+    if bool(verbose):
+        print(f"Saved contact rate report for '{contact_col}' to: {pdf_path}")
+
+    return {
+        "contact_col": str(contact_col),
+        "min_bout_length": int(min_bout_length),
+        "group_col": group_col,
+        "pdf_path": str(pdf_path),
+        "csv_dir": str(csv_dir),
+        "contact_rate_by_cluster": contact_rate_by_cluster,
+        "use_target_class": use_target_class,
+    }
+
+
+def save_track_contact_composition_report(
+    adata_tracks,
+    df_timepoints,
+    out_dir,
+    *,
+    contact_col,
+    min_bout_length,
+    class_col="ClusterID",
+    class_order=None,
+    class_colors=None,
+    extra_group_cols=None,
+    group_x=None,
+    group_y=None,
+    group_x_levels_map=None,
+    group_y_levels_map=None,
+    verbose=False,
+    target_class_lookup=None,
+    touching_col=None,
+    time_varying=True,
+    target_class_order=None,
+    target_class_colors=None,
+    target_cell_type_label=None,
+):
+    """``class_col``-on-x-axis grid of contact/no_contact composition, faceted by ``group_x``/
+    ``group_y`` (true 2D grid) with ``extra_group_cols`` paginating into separate grid pages —
+    plus, when ``target_class_lookup`` is given, a second grid stacked by which target class each
+    track touched instead of the plain contact/no_contact split.
+
+    Raises ``ValueError`` if none of ``group_x``/``group_y``/``extra_group_cols`` are set, since
+    the grid has nothing to facet by in that case — use ``save_track_contact_rate_report`` for
+    the plain per-sample contact rate instead.
+
+    Returns a dict of output artifact paths.
+    """
+    extra_group_cols = list(extra_group_cols) if extra_group_cols else []
+    if not extra_group_cols and not group_x and not group_y:
+        raise ValueError(
+            "At least one of extra_group_cols/group_x/group_y is required to build a contact "
+            "composition grid — there is nothing to facet by otherwise."
+        )
+
+    group_col = _contact_group_col_name(contact_col)
+
+    contact_features = compute_track_contact_features(
+        df_timepoints,
+        adata_tracks,
+        contact_col=contact_col,
+        min_bout_length=min_bout_length,
+        verbose=verbose,
+    )
+    merge_track_contact_features_into_obs(
+        adata_tracks,
+        contact_features,
+        contact_col=contact_col,
+        min_bout_length=min_bout_length,
+    )
+
+    use_target_class = target_class_lookup is not None
+    target_group_col = None
+    resolved_target_class_order = []
+    if use_target_class:
+        if touching_col is None:
+            raise ValueError("touching_col is required when target_class_lookup is given.")
+        long_target_df, target_group_df = compute_track_contact_target_class_features(
+            df_timepoints,
+            adata_tracks,
+            target_class_lookup,
+            contact_col=contact_col,
+            touching_col=touching_col,
+            time_varying=bool(time_varying),
+            contact_group_col=group_col,
+            verbose=verbose,
+        )
+        merge_track_target_class_group_into_obs(adata_tracks, target_group_df, contact_col=contact_col)
+        target_group_col = _contact_target_class_group_col_name(contact_col)
+        target_cell_type_label = target_cell_type_label or contact_col_target_cell_type(contact_col)
+        touched_classes = sorted(
+            long_target_df["target_class"].dropna().astype(str).unique().tolist(), key=_mixed_label_sort_key,
+        )
+        resolved_target_class_order = (
+            [str(c) for c in target_class_order] if target_class_order is not None else touched_classes
+        )
+
+    out_dir = Path(out_dir) / "contact_analysis" / str(contact_col)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_dir = out_dir / "csv"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = out_dir / "contact_composition.pdf"
+
+    obs = adata_tracks.obs
+    resolved_class_order = (
+        [str(c) for c in class_order] if class_order is not None
+        else sorted(obs[class_col].dropna().astype(str).unique().tolist(), key=_mixed_label_sort_key)
+    )
+    resolved_class_order = _apply_state_order(resolved_class_order, _get_classification_state_order(adata_tracks, class_col))
+    resolved_colors = dict(class_colors) if class_colors else _get_classification_state_colors(adata_tracks, class_col)
+    resolved_colors = _normalize_label_color_map(resolved_class_order, colors=resolved_colors, cmap_name="tab20")
+
+    with PdfPages(pdf_path) as pdf:
+        cluster_stack_grid = _save_contact_cluster_stack_grid_page(
+            pdf,
+            adata_tracks,
+            class_col=class_col,
+            group_col=group_col,
+            extra_group_cols=extra_group_cols,
+            group_x=group_x,
+            group_y=group_y,
+            group_x_levels_map=group_x_levels_map,
+            group_y_levels_map=group_y_levels_map,
+            class_order=resolved_class_order,
+            csv_dir=csv_dir,
+            verbose=verbose,
+        )
+
+        target_class_composition_grid = None
+        if use_target_class:
+            resolved_target_class_colors = _normalize_label_color_map(
+                resolved_target_class_order, colors=target_class_colors, cmap_name="tab20",
+            )
+            target_stack_order = [_NO_CONTACT_LABEL] + resolved_target_class_order + [_MULTIPLE_CLASSES_LABEL]
+            target_stack_colors = {_NO_CONTACT_LABEL: _CONTACT_STACK_COLORS[_NO_CONTACT_LABEL]}
+            target_stack_colors.update(resolved_target_class_colors)
+            target_stack_colors[_MULTIPLE_CLASSES_LABEL] = "#4C4C4C"
+
+            target_class_composition_grid = _save_contact_cluster_stack_grid_page(
+                pdf,
+                adata_tracks,
+                class_col=class_col,
+                group_col=target_group_col,
+                extra_group_cols=extra_group_cols,
+                group_x=group_x,
+                group_y=group_y,
+                group_x_levels_map=group_x_levels_map,
+                group_y_levels_map=group_y_levels_map,
+                class_order=resolved_class_order,
+                csv_dir=csv_dir,
+                stack_order=target_stack_order,
+                stack_colors=target_stack_colors,
+                title_prefix=f"{target_cell_type_label}-Class Composition",
+                verbose=verbose,
+            )
+
+    if bool(verbose):
+        print(f"Saved contact composition report for '{contact_col}' to: {pdf_path}")
+
+    result = {
+        "contact_col": str(contact_col),
+        "min_bout_length": int(min_bout_length),
+        "group_col": group_col,
+        "extra_group_cols": extra_group_cols,
+        "pdf_path": str(pdf_path),
+        "csv_dir": str(csv_dir),
+        "cluster_stack_grid": cluster_stack_grid,
+        "use_target_class": use_target_class,
+    }
+    if use_target_class:
+        result["target_class_composition_grid"] = target_class_composition_grid
+    return result
+
+
 def generate_track_clustering_report_pdfs(
     adata_tracks,
     outfolder,
