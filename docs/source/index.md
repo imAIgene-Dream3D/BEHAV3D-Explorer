@@ -25,6 +25,8 @@ The **Visualization** and the **Processing Queue** work across the whole pipelin
 The **Analysis** tab is implemented end-to-end: Death Dynamics, Interaction Analysis, and Single Cell (both behavioural-**state** and **track** classification), each Single Cell workflow ending in a **Backprojection** step.
 ```
 
+Navigating so many options can be difficult, but you don't have to figure it out alone: a built-in **Co-pilot assistant (QueenB)** sits next to the panel on every tab, explains what each parameter does, and can fill in the forms for you — see [Getting Started](getting_started) for details.
+
 ## Where to next
 
 ```{grid} 2
