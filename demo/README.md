@@ -1,5 +1,8 @@
 # BEHAV3D Explorer — online demo
 
+> [!IMPORTANT]
+> This demo is a hands-on preview of the BEHAV3D Explorer interface only — it is not meant to run BEHAV3D for real analysis. It's free, but runs on Colab's shared, resource-limited cloud machines (CPU-only, capped RAM and session time). To use BEHAV3D Explorer at full capability, [install it locally](../README.md#installation).
+
 Try the **real** BEHAV3D Explorer GUI in your browser, with no installation, for free, on Google
 Colab. **Part 1** is for anyone who just wants to run it. **Part 2** is the maintainer guide for
 building and hosting the demo from source.
