@@ -20,6 +20,9 @@ There's no one-size-fits-all solution, so BEHAV3D-Explorer is built as a set of 
 
 > [!TIP]
 > ## Try it online, no installation
+>
+> **This is a quick, hands-on preview of the BEHAV3D Explorer interface — not a way to run BEHAV3D itself.** It's free but limited by Colab's shared cloud resources (CPU-only, capped time and RAM). Install it locally for full capability.
+>
 > [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/imAIgene-Dream3D/BEHAV3D-Explorer/blob/main/demo/colab/BEHAV3D_Explorer_Colab.ipynb)
 >
 > Want to look before you install? The badge above opens the **real** BEHAV3D Explorer GUI on a free
