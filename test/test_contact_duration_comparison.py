@@ -144,7 +144,9 @@ def test_welch_mode_pdf_csv_and_group_sizes(tmp_path):
     )
 
     assert result["n_comparisons"] == 6
-    assert result["n_pages"] == 2  # 6 comparisons, 4 per page -> 2 pages
+    # 6 comparisons, 4 per page -> 2 box pages, each followed by its "connected by sample"
+    # companion page -> 4 pages total.
+    assert result["n_pages"] == 4
     assert Path(result["pdf_path"]).exists()
     assert Path(result["csv_path"]).exists()
 
@@ -419,6 +421,85 @@ def test_paired_mode_multiple_pairing_cols_composite_key(tmp_path):
     round_vs_elong = _find_row(csv, "round", "elongated")
     assert round_vs_elong["n_a"] == 4
     assert round_vs_elong["n_b"] == 4
+
+
+def test_connected_page_paired_csv_has_per_sample_rows(tmp_path):
+    """The "connected by sample" companion page always pairs by ``sample_col`` (default
+    "sample_name"), independent of ``test_mode`` -- so even in welch mode, every sample that
+    touched both classes gets a row in the paired CSV."""
+    adata_tracks = _build_adata_tracks()
+    df_timepoints = _build_df_timepoints()
+
+    result = save_track_contact_duration_comparison(
+        adata_tracks, df_timepoints, tmp_path,
+        test_mode="welch", minutes_per_frame=2.0, verbose=False,
+        **_common_kwargs(),
+    )
+    assert Path(result["paired_csv_path"]).exists()
+    paired = pd.read_csv(result["paired_csv_path"])
+    assert set(paired["page_group"]) == {"(all)"}
+
+    round_vs_elong = paired[
+        ((paired["group_a"] == "round") & (paired["group_b"] == "elongated"))
+        | ((paired["group_a"] == "elongated") & (paired["group_b"] == "round"))
+    ]
+    # all 4 samples touched both round and elongated.
+    assert set(round_vs_elong["sample_name"]) == set(_SAMPLES)
+    assert len(round_vs_elong) == 4
+
+    round_vs_plastic = paired[
+        ((paired["group_a"] == "round") & (paired["group_b"] == "plastic"))
+        | ((paired["group_a"] == "plastic") & (paired["group_b"] == "round"))
+    ]
+    # s4 never touched "plastic" -> dropped from the paired join, same as the paired t-test.
+    assert set(round_vs_plastic["sample_name"]) == {"s1", "s2", "s3"}
+
+    row = round_vs_elong[round_vs_elong["sample_name"] == "s1"].iloc[0]
+    lo, hi = (row["mean_a_timepoints"], row["mean_b_timepoints"])
+    # s1 round bouts [5,7] -> mean 6; elongated [9,11] -> mean 10 (order depends on a/b side).
+    assert {round(lo), round(hi)} == {6, 10}
+    assert row["mean_a_minutes"] == pytest.approx(row["mean_a_timepoints"] * 2.0)
+    assert row["mean_b_minutes"] == pytest.approx(row["mean_b_timepoints"] * 2.0)
+
+
+def test_duration_comparison_pages_include_connected_companion(tmp_path):
+    adata_tracks = _build_adata_tracks()
+    df_timepoints = _build_df_timepoints()
+
+    result = save_track_contact_duration_comparison(
+        adata_tracks, df_timepoints, tmp_path,
+        test_mode="welch", comparisons_per_page=6, verbose=False,
+        **_common_kwargs(),
+    )
+    # 6 comparisons all fit on one page -> 1 box page + 1 connected companion page.
+    assert result["n_pages"] == 2
+
+
+def test_long_contact_percentage_pages_and_per_sample_csv(tmp_path):
+    adata_tracks = _build_adata_tracks()
+    df_timepoints = _build_df_timepoints()
+
+    long_contact_threshold = 100.0 * 7.0 / _N_TIMEPOINTS
+    result = save_track_contact_duration_comparison(
+        adata_tracks, df_timepoints, tmp_path,
+        test_mode="welch", long_contact_threshold=long_contact_threshold, long_contact_unit="percent",
+        verbose=False, **_common_kwargs(),
+    )
+    assert Path(result["long_contact_per_sample_csv_path"]).exists()
+    per_sample = pd.read_csv(result["long_contact_per_sample_csv_path"])
+    assert set(per_sample["page_group"]) == {"(all)"}
+    assert set(per_sample.columns) == {"page_group", "sample_name", "target_class", "pct_long_contact"}
+
+    # matches the direct _compute_per_sample_long_contact_pct check in
+    # test_long_contact_per_sample_pct_for_boxplot: 1 of 2 round tracks "long" per sample except
+    # s3 (0 of 2).
+    round_pct = per_sample[per_sample["target_class"] == "round"].set_index("sample_name")["pct_long_contact"]
+    assert round_pct.to_dict() == {"s1": 50.0, "s2": 50.0, "s3": 0.0, "s4": 50.0}
+
+    # 1 box page + 1 connected companion page for the long-contact section, on top of the
+    # duration-comparison section's own 2 pages (1 box + 1 connected, since all 6 comparisons fit
+    # on the default comparisons_per_page).
+    assert result["n_pages"] == 4
 
 
 def test_fewer_than_two_classes_writes_placeholder(tmp_path):
