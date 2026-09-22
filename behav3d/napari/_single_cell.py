@@ -2783,6 +2783,7 @@ class StateClassificationSubTab(QWidget):
             group_x_levels_map = {lvl: "+".join(left) for lvl in left}
             group_x_levels_map.update({lvl: "+".join(right) for lvl in right})
         out = self._out_dir()
+        md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
         self._log(f"▶ Generating condition comparison report for '{ct}'…")
 
         def _run(**kw):
@@ -2797,6 +2798,8 @@ class StateClassificationSubTab(QWidget):
                 save_state_condition_comparison_report,
             )
             from behav3d.analysis.behavior.utils import _sanitize_filename_token
+            from behav3d.core.utils import minutes_per_frame_from_metadata
+            minutes_per_frame, minutes_valid = minutes_per_frame_from_metadata(md)
             adata = ad.read_h5ad(str(full_path))
             state_paths = _resolve_state_paths(out, ct)
             comp_dir = state_paths.state_composition_outdir / "behavior_proportions"
@@ -2816,6 +2819,8 @@ class StateClassificationSubTab(QWidget):
                 condition_groups=condition_groups,
                 state_colors=_get_classification_state_colors(adata, FULL_STATE_COL),
                 state_order=_get_classification_state_order(adata, FULL_STATE_COL),
+                include_over_time=True,
+                minutes_per_frame=minutes_per_frame if minutes_valid else None,
                 verbose=True,
             )
 
@@ -6972,6 +6977,7 @@ class TrackClassificationSubTab(QWidget):
                 save_track_condition_comparison_report,
             )
             from behav3d.core.metadata import merge_condition_columns_into_obs
+            from behav3d.core.utils import minutes_per_frame_from_metadata
             from behav3d.napari._rename_dialog import _track_cluster_col
             cluster_col = _track_cluster_col(track_adata) or "ClusterID"
             comparison_dir = _resolve_dtaidistance_paths(str(out) if out else "", ct)["behavior_comparisons_outfolder"]
@@ -6979,6 +6985,7 @@ class TrackClassificationSubTab(QWidget):
             cols_to_merge = [c for c in all_cols if c not in track_adata.obs.columns]
             if cols_to_merge and md is not None:
                 merge_condition_columns_into_obs(track_adata, md, cols_to_merge)
+            minutes_per_frame, minutes_valid = minutes_per_frame_from_metadata(md)
             return save_track_condition_comparison_report(
                 track_adata,
                 comparison_dir,
@@ -6989,6 +6996,8 @@ class TrackClassificationSubTab(QWidget):
                 group_x=group_x,
                 group_x_levels_map=group_x_levels_map,
                 condition_groups=condition_groups,
+                include_over_time=True,
+                minutes_per_frame=minutes_per_frame if minutes_valid else None,
                 verbose=True,
             )
 

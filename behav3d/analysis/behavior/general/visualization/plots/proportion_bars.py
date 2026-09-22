@@ -744,3 +744,192 @@ def plot_condition_diff_grid_2d(
         merged.to_csv(csv_path, index=False)
 
     return {"pdf_path": out_pdf, "csv_path": csv_path}
+
+
+def _sem(x):
+    """Standard error of the mean; 0.0 (not NaN) when n <= 1, so a condition backed by a
+    single unit at a timepoint still draws a visible mean line with a zero-width ribbon."""
+    x = pd.to_numeric(pd.Series(x), errors="coerce").dropna()
+    n = len(x)
+    return float(x.std(ddof=1) / np.sqrt(n)) if n > 1 else 0.0
+
+
+def build_condition_time_series_raw_table(
+    long_by_unit_df,
+    unit_metadata,
+    *,
+    condition_col,
+    group_cols=None,
+    condition_groups=None,
+    unit_col_name="comparison_unit",
+    time_col="time",
+    minutes_per_frame=None,
+):
+    """Join a per-unit long-form time-series table (as built by
+    ``state_composition._build_relative_plot_data_table(relative_by_unit,
+    label_col_name=unit_col_name)`` — columns ``[unit_col_name, time_col, "state_id",
+    "relative_proportion"]``) with per-unit metadata (indexed by the same unit key,
+    columns including ``condition_col`` + ``group_cols``) into the raw, per-unit,
+    per-timepoint, per-class table exported for the user's own external statistics —
+    no significance test is computed for this view by design.
+
+    If ``condition_groups`` is given, raw ``condition_col`` levels are relabeled to
+    their merged group first (same semantics as ``compute_condition_diff_stats_pairwise``),
+    dropping rows whose level isn't in the mapping — so a user who pools levels for the
+    pairwise diff-bar section sees the same pooled grouping here too.
+
+    Adds a ``time_minutes`` column (``time_col`` * ``minutes_per_frame``) only when
+    ``minutes_per_frame`` is given — its absence signals no time metadata was available.
+    """
+    meta_cols = [condition_col] + [c for c in (group_cols or []) if c in unit_metadata.columns]
+    out = long_by_unit_df.merge(
+        unit_metadata[meta_cols], left_on=unit_col_name, right_index=True, how="left",
+    )
+    if condition_groups:
+        out[condition_col] = out[condition_col].astype(str).map(condition_groups)
+        out = out.dropna(subset=[condition_col])
+    if minutes_per_frame is not None:
+        out["time_minutes"] = out[time_col] * float(minutes_per_frame)
+    return out
+
+
+def compute_condition_time_series_stats(
+    raw_long_df,
+    *,
+    class_order,
+    condition_col,
+    group_cols=None,
+    time_col="time",
+    class_col="state_id",
+    value_col="relative_proportion",
+):
+    """Aggregate raw per-unit rows (from ``build_condition_time_series_raw_table``) to
+    mean/SEM/n per (group label, condition_col level, time_col value, class_col level) —
+    purely descriptive, no significance test (see module design note on
+    ``plot_condition_time_series_grid``).
+
+    Returns columns: group, condition, class, time, time_unit, mean, sem, n. ``mean``/
+    ``sem`` stay in [0, 1] fraction units (same scale as ``relative_proportion``) — a
+    percent conversion is display-only, done by ``plot_condition_time_series_grid``.
+    """
+    class_order = [str(c) for c in list(class_order)]
+    df = raw_long_df.copy()
+    df[class_col] = df[class_col].astype(str)
+    df = df[df[class_col].isin(class_order)]
+    valid_group_cols = [c for c in (group_cols or []) if c in df.columns]
+    df["group"] = _make_group_label(df, valid_group_cols)
+    df["condition"] = df[condition_col].astype(str)
+
+    if len(df) == 0:
+        return pd.DataFrame(columns=["group", "condition", "class", "time", "time_unit", "mean", "sem", "n"])
+
+    g = (
+        df.groupby(["group", "condition", class_col, time_col], observed=True)[value_col]
+        .agg(mean="mean", sem=_sem, n="count")
+        .reset_index()
+        .rename(columns={class_col: "class", time_col: "time"})
+    )
+    g["time_unit"] = "minutes" if time_col == "time_minutes" else "frame"
+    return g.sort_values(["group", "class", "condition", "time"]).reset_index(drop=True)
+
+
+def plot_condition_time_series_grid(
+    stats_df,
+    *,
+    class_order,
+    condition_levels,
+    colors,
+    title,
+    out_pdf,
+    out_csv=None,
+    time_label="Time (frame)",
+    ncols=2,
+    max_rows_per_page=3,
+    figsize_per_panel=(3.6, 2.6),
+    pdf_pages=None,
+    suppress_single_unit_sem=True,
+):
+    """Multi-page PDF: one page (or page-set) per ``stats_df['group']`` section, each a
+    facet grid — one panel per ``class_order`` entry, ``ncols`` columns x up to
+    ``max_rows_per_page`` rows per page (paginated via ``_chunk_list`` when
+    ``class_order`` doesn't fit) — with one mean-%-of-cells line + shaded SE ribbon per
+    ``condition_levels`` entry (any count >= 1, not just 2). Purely descriptive: no
+    significance test is computed here — the caller is expected to have written the
+    underlying per-unit values to a CSV so a significance test can be run externally.
+
+    ``colors`` maps ``condition_levels`` -> color (a distinct palette from cluster/class
+    colors, since those are used elsewhere for bars/stacks).
+    ``suppress_single_unit_sem=True`` hides a condition's ribbon at a timepoint backed by
+    n<=1 units (its SEM is legitimately 0.0 there, not informative) while still drawing
+    its mean line.
+
+    If ``pdf_pages`` (an open ``PdfPages``) is given, pages are appended to it instead of
+    a standalone ``out_pdf`` file being created — same passthrough as
+    ``plot_condition_diff_grid``.
+    """
+    class_order = [str(c) for c in list(class_order)]
+    condition_levels = [str(c) for c in list(condition_levels)]
+    out_pdf = str(out_pdf)
+    panels_per_page = max(1, int(ncols) * int(max_rows_per_page))
+
+    with (nullcontext(pdf_pages) if pdf_pages is not None else PdfPages(out_pdf)) as pdf:
+        if len(class_order) == 0:
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.text(
+                0.5, 0.5, "No classes available for over-time dynamics.",
+                ha="center", va="center", wrap=True,
+            )
+            ax.axis("off")
+            pdf.savefig(fig)
+            plt.close(fig)
+        else:
+            groups = sorted(stats_df["group"].dropna().unique().tolist()) or ["(all)"]
+            for group_label in groups:
+                group_df = stats_df[stats_df["group"] == group_label]
+                for page_classes in _chunk_list(class_order, panels_per_page):
+                    n_panels = len(page_classes)
+                    n_rows = max(1, int(np.ceil(n_panels / ncols)))
+                    fig, axes = plt.subplots(
+                        n_rows, ncols,
+                        figsize=(figsize_per_panel[0] * ncols, figsize_per_panel[1] * n_rows),
+                        squeeze=False,
+                    )
+                    axes_flat = axes.flatten()
+                    for ax, class_name in zip(axes_flat, page_classes):
+                        panel_df = group_df[group_df["class"] == class_name]
+                        for level in condition_levels:
+                            s = panel_df[panel_df["condition"] == level].sort_values("time")
+                            if len(s) == 0:
+                                continue
+                            color = colors.get(level, "#808080")
+                            ax.plot(s["time"], s["mean"] * 100.0, label=level, color=color, linewidth=1.8)
+                            has_ribbon = (not suppress_single_unit_sem) or bool((s["n"] > 1).any())
+                            if has_ribbon:
+                                ax.fill_between(
+                                    s["time"], (s["mean"] - s["sem"]) * 100.0, (s["mean"] + s["sem"]) * 100.0,
+                                    color=color, alpha=0.2, linewidth=0,
+                                )
+                        ax.set_title(class_name, fontsize=9, fontweight="bold")
+                        ax.set_xlabel(time_label, fontsize=8)
+                        ax.set_ylabel("% of cells", fontsize=8)
+                        ax.tick_params(labelsize=7)
+                        ax.spines["top"].set_visible(False)
+                        ax.spines["right"].set_visible(False)
+                    for ax in axes_flat[n_panels:]:
+                        ax.axis("off")
+
+                    handles = [Patch(facecolor=colors.get(lvl, "#808080"), label=lvl) for lvl in condition_levels]
+                    legend_ncol, _, legend_margin_in = legend_layout(len(handles), base_margin_in=0.6)
+                    fig.legend(handles=handles, loc="lower center", ncol=legend_ncol, frameon=False, fontsize=8)
+                    page_title = title if group_label == "(all)" else f"{title} — {group_label}"
+                    fig.suptitle(page_title, fontsize=11, fontweight="bold", y=0.99)
+                    fig_h = figsize_per_panel[1] * n_rows
+                    fig.tight_layout(rect=(0.02, legend_margin_in / fig_h, 0.98, 0.93))
+                    pdf.savefig(fig, bbox_inches="tight")
+                    plt.close(fig)
+
+    csv_path = None
+    if out_csv is not None:
+        csv_path = str(out_csv)
+        stats_df.to_csv(csv_path, index=False)
+    return {"pdf_path": out_pdf, "csv_path": csv_path}

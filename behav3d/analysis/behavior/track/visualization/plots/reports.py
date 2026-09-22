@@ -94,6 +94,10 @@ from behav3d.analysis.behavior.general.visualization.plots.proportion_bars impor
     _make_group_label,
     _chunk_list,
     _wrap_row_label,
+    hash_stable_label_color_map,
+    build_condition_time_series_raw_table,
+    compute_condition_time_series_stats,
+    plot_condition_time_series_grid,
 )
 from behav3d.analysis.behavior.general.visualization.plots.feature_box import (
     plot_feature_box_by_group,
@@ -1217,6 +1221,11 @@ def save_track_condition_comparison_report(
     condition_groups=None,
     class_order=None,
     class_colors=None,
+    include_over_time=False,
+    time_col="position_t",
+    tmin_col="position_t_min",
+    tmax_col="position_t_max",
+    minutes_per_frame=None,
     verbose=False,
     pdf_pages=None,
     csv_dir=None,
@@ -1243,6 +1252,19 @@ def save_track_condition_comparison_report(
     ``group_x_levels_map``/``group_y_levels_map`` : dict[str, str], optional
         Maps raw ``group_x``/``group_y`` levels to merged group labels — when given, that axis
         is pooled into the merged labels instead of showing one row/column per raw level.
+
+    include_over_time : bool, optional
+        When True, appends an extra page (per group_cols section) showing each cluster's
+        prevalence over time, one line + shaded SE ribbon per condition_col level (or merged
+        condition_groups label), expanding each track across its `[tmin_col, tmax_col]` window
+        at raw per-frame resolution. Purely descriptive - no significance test is computed; the
+        underlying per-unit, per-timepoint values are written to a companion CSV so a
+        significance test can be run externally. Silently skipped (with a verbose note) if
+        `tmin_col`/`tmax_col` aren't available.
+
+    minutes_per_frame : float, optional
+        When given (and include_over_time=True), the over-time page's x-axis and raw CSV are
+        converted to minutes; otherwise they stay in raw frame units.
     """
     obs = adata_tracks.obs
     extra_group_cols = [c for c in (group_cols or []) if c in obs.columns]
@@ -1298,6 +1320,48 @@ def save_track_condition_comparison_report(
     metadata_cols = [unit_col, condition_col] + valid_group_cols
     sample_metadata = df[metadata_cols].drop_duplicates(subset=[unit_col]).set_index(unit_col)
 
+    has_time_cols = bool(include_over_time) and tmin_col in obs.columns and tmax_col in obs.columns
+    if bool(include_over_time) and not has_time_cols and bool(verbose):
+        print(f"  Note: '{tmin_col}'/'{tmax_col}' not found in adata_tracks.obs — skipping over-time dynamics page.")
+
+    raw_time_table = None
+    time_series_stats = None
+    if has_time_cols:
+        time_df = df.join(obs[[tmin_col, tmax_col]], how="left").dropna(subset=[tmin_col, tmax_col])
+        if len(time_df) == 0:
+            if bool(verbose):
+                print(f"  Note: no valid {tmin_col}/{tmax_col} rows — skipping over-time dynamics page.")
+        else:
+            expanded_df = _expand_track_windows_to_timepoints(
+                time_df, time_col=time_col, tmin_col=tmin_col, tmax_col=tmax_col,
+            )
+            unit_order = expanded_df[unit_col].drop_duplicates().tolist()
+            relative_by_unit_time, _ = _compute_relative_matrices_by_sample(
+                expanded_df,
+                time_col=time_col,
+                state_col=class_col,
+                sample_col=unit_col,
+                state_order=resolved_class_order,
+                sample_order=unit_order,
+            )
+            raw_long = _build_relative_plot_data_table(relative_by_unit_time, label_col_name="comparison_unit")
+            raw_time_table = build_condition_time_series_raw_table(
+                raw_long,
+                sample_metadata,
+                condition_col=condition_col,
+                group_cols=valid_group_cols,
+                condition_groups=condition_groups,
+                unit_col_name="comparison_unit",
+                minutes_per_frame=minutes_per_frame,
+            )
+            time_series_stats = compute_condition_time_series_stats(
+                raw_time_table,
+                class_order=resolved_class_order,
+                condition_col=condition_col,
+                group_cols=valid_group_cols,
+                time_col=("time_minutes" if minutes_per_frame else "time"),
+            )
+
     resolved_colors = dict(class_colors) if class_colors else _get_classification_state_colors(adata_tracks, class_col)
     resolved_colors = _normalize_label_color_map(resolved_class_order, colors=resolved_colors, cmap_name="tab20")
 
@@ -1308,43 +1372,76 @@ def save_track_condition_comparison_report(
     csv_dir = Path(csv_dir) if csv_dir is not None else out_dir
     csv_dir.mkdir(parents=True, exist_ok=True)
     out_csv = csv_dir / out_pdf.with_suffix(".csv").name
+    raw_csv_path = csv_dir / f"{out_pdf.stem}_over_time_raw.csv"
+    summary_csv_path = csv_dir / f"{out_pdf.stem}_over_time_summary.csv"
+    if raw_time_table is not None:
+        raw_time_table.to_csv(raw_csv_path, index=False)
 
     title = f"{class_col} — {condition_col} pairwise comparison"
     n_condition_levels = sample_metadata[condition_col].astype(str).nunique()
     use_2d_grid = bool(group_x) and bool(group_y) and n_condition_levels == 2 and not condition_groups
 
-    if use_2d_grid:
-        result = plot_condition_diff_grid_2d(
-            per_sample_df,
-            sample_metadata,
-            class_order=resolved_class_order,
-            colors=resolved_colors,
-            condition_col=condition_col,
-            grid_axis_cols=grid_axis_cols,
-            extra_group_cols=extra_group_cols,
-            title=title,
-            out_pdf=out_pdf,
-            out_csv=out_csv,
-            pdf_pages=pdf_pages,
-        )
-    else:
-        diff_stats_by_group = compute_condition_diff_stats_pairwise(
-            per_sample_df,
-            sample_metadata,
-            class_order=resolved_class_order,
-            condition_col=condition_col,
-            group_cols=valid_group_cols,
-            condition_groups=condition_groups,
-        )
-        result = plot_condition_diff_grid(
-            diff_stats_by_group,
-            class_order=resolved_class_order,
-            colors=resolved_colors,
-            title=title,
-            out_pdf=out_pdf,
-            out_csv=out_csv,
-            pdf_pages=pdf_pages,
-        )
+    with (nullcontext(pdf_pages) if pdf_pages is not None else PdfPages(out_pdf)) as pdf:
+        if use_2d_grid:
+            result = plot_condition_diff_grid_2d(
+                per_sample_df,
+                sample_metadata,
+                class_order=resolved_class_order,
+                colors=resolved_colors,
+                condition_col=condition_col,
+                grid_axis_cols=grid_axis_cols,
+                extra_group_cols=extra_group_cols,
+                title=title,
+                out_pdf=out_pdf,
+                out_csv=out_csv,
+                pdf_pages=pdf,
+            )
+        else:
+            diff_stats_by_group = compute_condition_diff_stats_pairwise(
+                per_sample_df,
+                sample_metadata,
+                class_order=resolved_class_order,
+                condition_col=condition_col,
+                group_cols=valid_group_cols,
+                condition_groups=condition_groups,
+            )
+            result = plot_condition_diff_grid(
+                diff_stats_by_group,
+                class_order=resolved_class_order,
+                colors=resolved_colors,
+                title=title,
+                out_pdf=out_pdf,
+                out_csv=out_csv,
+                pdf_pages=pdf,
+            )
+
+        if time_series_stats is not None:
+            condition_levels = sample_metadata[condition_col].astype(str).drop_duplicates().tolist()
+            if condition_groups:
+                condition_levels = list(dict.fromkeys(
+                    condition_groups[lvl] for lvl in condition_levels if lvl in condition_groups
+                ))
+            condition_colors = hash_stable_label_color_map(condition_levels)
+            time_label = "Time (minutes)" if minutes_per_frame else "Time (frame)"
+            ot_title = f"{class_col} — {condition_col} dynamics over time"
+            if minutes_per_frame is None:
+                ot_title += "  (minutes unavailable — no time metadata)"
+            over_time_result = plot_condition_time_series_grid(
+                time_series_stats,
+                class_order=resolved_class_order,
+                condition_levels=condition_levels,
+                colors=condition_colors,
+                title=ot_title,
+                out_pdf=out_pdf,
+                out_csv=summary_csv_path,
+                time_label=time_label,
+                pdf_pages=pdf,
+            )
+            result["over_time_raw_csv_path"] = str(raw_csv_path)
+            result["over_time_summary_csv_path"] = over_time_result["csv_path"]
+        else:
+            result["over_time_raw_csv_path"] = None
+            result["over_time_summary_csv_path"] = None
     if bool(verbose):
         print(f"Saved track condition comparison report: {result['pdf_path']}")
     return result
