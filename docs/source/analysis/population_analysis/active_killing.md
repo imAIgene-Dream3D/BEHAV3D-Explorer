@@ -36,6 +36,8 @@ D_{\text{end}} = D(t + W)
 \Delta D = D_{\text{end}} - D_{\text{start}}
 $$
 
+By default, $D$ is not read as the raw signal but as its **running maximum** up to that timepoint on the target's own track — segmentation is sometimes unstable, so a dead-mask segment can be included in one frame and dropped in the next, making the raw signal dip and recover instead of only rising as the cell actually dies (e.g. raw values `0, 10, 20, 200, 150, 100, 200, 200, 250` are read as `0, 10, 20, 200, 200, 200, 200, 200, 250`). This is controlled by **Persistent death signal**, in the **⚙ Advanced Configuration** section (default ON); turning it off reads the raw, possibly non-monotonic signal.
+
 If the target's track ends before $t + W$, $D_{\text{end}}$ is read at its last available timepoint (no extrapolation). The rise $\Delta D$ is compared to a threshold $\theta$ set by the mode:
 
 $$
@@ -63,6 +65,7 @@ This is repeated for **every touched target at every timepoint of the contact**.
 | **Immune cell type** | first immune type | dropdown | Which effector tracks to analyse. Immune (`im_`) types only — see the note above. |
 | **Observation window** | 5 | 1 – 100 timepoints | How many frames after **each contact timepoint** to look for the signal rise on each touched target. It is applied at every timepoint of the contact, not only at the start. |
 | **Death signal column** | `percentage_dead_mask` | dropdown of `percentage_dead_mask`, `mean_dead_dye`, `nr_dead_mask_pixels` | Which target column is read as the signal. If your `dead_channel` carries a reporter other than a death dye, this is that reporter's column. |
+| **Persistent death signal** (⚙ Advanced Configuration) | ON | checkbox | Reads each target's death signal as a running maximum over its own track before scoring, so a segmentation dropout can't look like the signal falling. Turn off to use the raw signal as-is. |
 | **Killing threshold multiplier** | 1.5 | 0.1 – 20.0 | If absolute mode is off: a target's signal must reach at least `signal_at_this_timepoint × multiplier` by the end of the window to count as killing. Scales with each target's own signal at the timepoint being scored (a signal of exactly 0 is treated as 0.1 to avoid a trivial threshold). |
 | **Use absolute threshold instead of multiplier** | OFF | checkbox | When on, the multiplier is replaced by a fixed value (next field). Recommended together with `nr_dead_mask_pixels`, since a flat pixel-count cutoff is easier to reason about than one on a fraction/intensity scale. |
 | **Absolute threshold** | 0.0 | adapts to the death signal column | Fixed minimum signal increase (only used when "Use absolute threshold" is on). The spinbox range/step follow the selected column — a 0–1 fraction for `percentage_dead_mask`, raw counts/intensity for the others. |

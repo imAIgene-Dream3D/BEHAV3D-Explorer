@@ -399,6 +399,7 @@ _DEFAULT_CONFIG = {
     "active_killing": {
         "observation_window": 5,
         "death_signal_column": "percentage_dead_mask",
+        "persistent_death_signal": True,
         "killing_threshold_multiplier": 1.5,
         "min_contact_duration": 1,
         "contact_column": "contact",

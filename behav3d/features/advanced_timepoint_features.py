@@ -20,6 +20,10 @@ Key concepts:
 - Observation window: N timepoints after EACH contact timepoint to measure death signal change
 - Active killing: Death signal increase (t -> t + window) exceeds either a multiplier of the
   organoid's own signal at t, or a fixed absolute increase, depending on the selected mode
+- Persistent death signal: by default, each target's death signal is read as a running
+  maximum over its own track (segmentation dropout can otherwise make the raw signal dip
+  before recovering, instead of monotonically rising as the cell actually dies); can be
+  disabled via persistent_death_signal=False
 
 -------------------------------------
 --------------- OUTPUT --------------
@@ -218,6 +222,7 @@ def analyze_active_killing_per_timepoint(
     death_signal_column: str = "mean_dead_dye",
     killing_threshold_multiplier: float = 1.5,
     absolute_killing_threshold: Optional[float] = None,
+    persistent_death_signal: bool = True,
 ) -> pd.DataFrame:
     """
     Calculate active killing status for each contact timepoint using a
@@ -263,6 +268,16 @@ def analyze_active_killing_per_timepoint(
     absolute_killing_threshold : float, optional
         If provided, use this flat value as the killing threshold instead of the
         multiplier-based threshold. Useful when organoids start with near-zero signal.
+    persistent_death_signal : bool
+        If True (default), each target's death_signal_column values are first
+        converted to a running (cumulative) maximum over its own timeline,
+        sorted by position_t, before death_at_start/death_at_end are read from
+        them. This absorbs segmentation instability (a dead-mask segment
+        flickering in/out of frame) that would otherwise make the raw signal
+        dip and rise instead of monotonically increasing as a cell dies, e.g.
+        raw values 0, 10, 20, 200, 150, 100, 200, 200, 250 are read as
+        0, 10, 20, 200, 200, 200, 200, 200, 250. Set False to use the raw,
+        possibly non-monotonic signal as-is.
 
     Returns
     -------
@@ -306,9 +321,17 @@ def analyze_active_killing_per_timepoint(
             if target_rows.empty:
                 continue
 
+            death_arr = target_rows[death_signal_column].to_numpy(dtype=float)
+            if persistent_death_signal:
+                # Running max, NaN-safe: a segmentation dropout that transiently
+                # lowers the raw signal (e.g. 0,10,20,200,150,100,200,200,250)
+                # can't be misread as the target "un-dying"
+                # (0,10,20,200,200,200,200,200,250).
+                death_arr = np.fmax.accumulate(death_arr)
+
             target_lookups[target_id_int] = (
                 target_rows["position_t"].to_numpy(),
-                target_rows[death_signal_column].to_numpy(),
+                death_arr,
             )
 
         for t in contact_timepoints:
@@ -470,6 +493,7 @@ def run_active_killing_analysis(
     killing_threshold_multiplier: float = 1.5,
     absolute_killing_threshold: Optional[float] = None,
     contact_column: str = "contact",
+    persistent_death_signal: bool = True,
     save_results: bool = True,
     output_subfolder: str = ""
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict]:
@@ -518,6 +542,13 @@ def run_active_killing_analysis(
         Which per-target contact flag gates a contact event -- ``"contact"`` (default,
         pixel/mask adjacency) or ``"contact_on_distance"`` (respects the µm Contact Threshold
         configured in Feature Extraction). See ``identify_contact_events_global`` for details.
+    persistent_death_signal : bool
+        If True (default), read each target's death_signal_column as a running
+        (cumulative) maximum over its own track timeline before computing the
+        death-signal increase, so a segmentation dropout that transiently lowers
+        the raw signal (e.g. 0,10,20,200,150,100,200,200,250 read as
+        0,10,20,200,200,200,200,200,250) cannot be misread as the target
+        "un-dying". Set False to use the raw signal.
     save_results : bool
         Whether to save results to CSV files
         
@@ -551,7 +582,8 @@ def run_active_killing_analysis(
         print(f"Killing threshold mode: ABSOLUTE ({absolute_killing_threshold})")
     else:
         print(f"Killing threshold mode: MULTIPLIER ({killing_threshold_multiplier}x organoid's own signal at each timepoint)")
-    
+    print(f"Persistent death signal (running max): {'ON' if persistent_death_signal else 'OFF'}")
+
     # Load immune cell tracks. Active Killing always reads the RAW (unfiltered)
     # combined_track_features.csv, never the filtered one -- Filtering, in turn,
     # reads Active Killing's advanced-features CSV as its own input (see
@@ -639,6 +671,7 @@ def run_active_killing_analysis(
         return pd.DataFrame(), pd.DataFrame(), {
             "total_contacts": 0,
             "total_active_killing": 0,
+            "persistent_death_signal": persistent_death_signal,
             "filtering_needs_rerun_for": sorted(stale_filtered_cell_types),
         }
     
@@ -656,8 +689,9 @@ def run_active_killing_analysis(
         death_signal_column=death_signal_column,
         killing_threshold_multiplier=killing_threshold_multiplier,
         absolute_killing_threshold=absolute_killing_threshold,
+        persistent_death_signal=persistent_death_signal,
     )
-    
+
     # Calculate summary statistics
     print(f"{get_current_time()} - Calculating summary statistics...")
     
@@ -689,6 +723,7 @@ def run_active_killing_analysis(
         "killing_threshold_multiplier": killing_threshold_multiplier,
         "absolute_killing_threshold": absolute_killing_threshold,
         "threshold_mode": "absolute" if absolute_killing_threshold is not None else "multiplier",
+        "persistent_death_signal": persistent_death_signal,
         "targeted_organoids_tracked": True,
         "filtering_needs_rerun_for": sorted(stale_filtered_cell_types),
     }
