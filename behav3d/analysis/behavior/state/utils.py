@@ -448,6 +448,31 @@ def _binary_groups_to_label(active_groups: list[str]) -> str:
     return "_and_".join([str(x) for x in active_groups])
 
 
+# ``is_active_killing`` changed meaning with the Active Killing rework (schema
+# 2): it is now true only on the contact timepoint credited with an attributed
+# death event, instead of on every contact timepoint whose organoid's
+# whole-segment death signal rose. Constraints inferred from pre-rework data
+# encode the old co-occurrence pattern and must not be enforced on new data.
+ACTIVE_KILLING_SCHEMA_VERSION = 2
+_ACTIVE_KILLING_BINARY_COLS = {"is_active_killing"}
+
+
+def _check_active_killing_constraint_schema(binary_group_constraints, binary_cols) -> None:
+    if not isinstance(binary_group_constraints, dict):
+        return
+    if not (_ACTIVE_KILLING_BINARY_COLS & {str(c) for c in binary_cols}):
+        return
+    version = int(binary_group_constraints.get("active_killing_schema_version", 1) or 1)
+    if version < ACTIVE_KILLING_SCHEMA_VERSION:
+        raise ValueError(
+            "This state classifier was trained before the Active Killing rework, when "
+            "'is_active_killing' meant something different (every contact timepoint whose "
+            "organoid's death signal rose, rather than the timepoint credited with an "
+            "attributed death event). Its binary-group constraints do not apply to the "
+            "current data. Re-train the state classifier."
+        )
+
+
 def _infer_binary_group_constraints(df: pd.DataFrame, binary_cols: list[str]) -> dict:
     cols = [str(c) for c in list(binary_cols or []) if str(c) in df.columns]
     clean_cols = [_binary_col_to_group_name(c) for c in cols]
@@ -460,6 +485,7 @@ def _infer_binary_group_constraints(df: pd.DataFrame, binary_cols: list[str]) ->
             "allowed_binary_groups": ["no_contact"],
             "forbidden_binary_combinations": {},
             "support_counts": {},
+            "active_killing_schema_version": ACTIVE_KILLING_SCHEMA_VERSION,
         }
 
     support_counts = {name: 0 for name in clean_cols}
@@ -491,6 +517,7 @@ def _infer_binary_group_constraints(df: pd.DataFrame, binary_cols: list[str]) ->
         "allowed_binary_groups": sorted([str(x) for x in allowed_groups], key=_mixed_label_sort_key),
         "forbidden_binary_combinations": _group_forbidden_binary_combinations(forbidden_combinations),
         "support_counts": {str(k): int(v) for k, v in support_counts.items()},
+        "active_killing_schema_version": ACTIVE_KILLING_SCHEMA_VERSION,
     }
 
 
@@ -585,8 +612,18 @@ def _assign_binary_group_labels(
                     )
         return pd.Series(["no_contact"] * len(df), index=df.index, dtype="object")
 
+    missing = [c for c in binary_cols if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Binary grouping columns missing from the data: {missing}. They were used when the "
+            f"state classifier was trained; re-run the step that produces them (e.g. Active "
+            f"Killing for 'is_active_killing') or re-train without them."
+        )
+
     normalized_constraints = None
     if binary_group_constraints is not None:
+        if enforce_binary_group_constraints:
+            _check_active_killing_constraint_schema(binary_group_constraints, binary_cols)
         normalized_constraints = _normalize_binary_group_constraints(binary_group_constraints)
 
     labels = []

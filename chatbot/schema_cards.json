@@ -1,5 +1,45 @@
 [
   {
+    "key": "zarr_conversion",
+    "title": "zarr_conversion",
+    "step": "zarr_conversion",
+    "category": null,
+    "type": "dict",
+    "default": {},
+    "choices": null,
+    "description": "BEHAV3D parameter 'zarr_conversion' (type dict, default {})."
+  },
+  {
+    "key": "timepoint_range.enabled",
+    "title": "enabled",
+    "step": "filtering",
+    "category": null,
+    "type": "bool",
+    "default": false,
+    "choices": null,
+    "description": "Whether to restrict the analysis to an absolute timepoint window before any other filter runs. Global: it applies to every cell type, because cross-cell-type analyses break silently when cell types cover different spans."
+  },
+  {
+    "key": "timepoint_range.start",
+    "title": "start",
+    "step": "filtering",
+    "category": null,
+    "type": "int",
+    "default": 0,
+    "choices": null,
+    "description": "First timepoint to keep (inclusive) when the timepoint-range restriction is enabled."
+  },
+  {
+    "key": "timepoint_range.end",
+    "title": "end",
+    "step": "filtering",
+    "category": null,
+    "type": "int",
+    "default": 0,
+    "choices": null,
+    "description": "Last timepoint to keep (inclusive) when the timepoint-range restriction is enabled."
+  },
+  {
     "key": "seed",
     "title": "seed",
     "step": "general",
@@ -1604,6 +1644,16 @@
     "description": "Re-run and overwrite existing outputs instead of skipping completed samples."
   },
   {
+    "key": "track_filtering.immune.first_timepoint_from_range",
+    "title": "first_timepoint_from_range",
+    "step": "filtering",
+    "category": "immune",
+    "type": "bool",
+    "default": false,
+    "choices": null,
+    "description": "Per cell type. When a timepoint range is active, measure the min-size and dead first-timepoint filters at each track's first timepoint inside the range instead of its first frame of the whole movie. While off, those two filters are disabled."
+  },
+  {
     "key": "track_filtering.immune.exp_duration",
     "title": "exp_duration",
     "step": "filtering",
@@ -1664,6 +1714,16 @@
     "description": "Whether the maximum-track-length filter is active."
   },
   {
+    "key": "track_filtering.organoid.first_timepoint_from_range",
+    "title": "first_timepoint_from_range",
+    "step": "filtering",
+    "category": "organoid",
+    "type": "bool",
+    "default": false,
+    "choices": null,
+    "description": "Per cell type. When a timepoint range is active, measure the min-size and dead first-timepoint filters at each track's first timepoint inside the range instead of its first frame of the whole movie. While off, those two filters are disabled."
+  },
+  {
     "key": "track_filtering.organoid.exp_duration_enabled",
     "title": "exp_duration_enabled",
     "step": "filtering",
@@ -1722,6 +1782,16 @@
     "default": 999999,
     "choices": null,
     "description": "Trim retained tracks to this common length for analyses that require uniform trajectory windows."
+  },
+  {
+    "key": "track_filtering.other.first_timepoint_from_range",
+    "title": "first_timepoint_from_range",
+    "step": "filtering",
+    "category": "other",
+    "type": "bool",
+    "default": false,
+    "choices": null,
+    "description": "Per cell type. When a timepoint range is active, measure the min-size and dead first-timepoint filters at each track's first timepoint inside the range instead of its first frame of the whole movie. While off, those two filters are disabled."
   },
   {
     "key": "track_filtering.other.exp_duration",
@@ -1934,6 +2004,16 @@
     "description": "BEHAV3D parameter 'analysis.immune.dtw_feature_groups_enabled.contact' (type bool, default False)."
   },
   {
+    "key": "analysis.immune.dtw_feature_groups_enabled.active_killing",
+    "title": "active_killing",
+    "step": "analysis",
+    "category": "immune",
+    "type": "bool",
+    "default": false,
+    "choices": null,
+    "description": "BEHAV3D parameter 'analysis.immune.dtw_feature_groups_enabled.active_killing' (type bool, default False)."
+  },
+  {
     "key": "analysis.immune.dtw_features_input",
     "title": "dtw_features_input",
     "step": "analysis",
@@ -2112,6 +2192,16 @@
     "default": false,
     "choices": null,
     "description": "BEHAV3D parameter 'analysis.organoid.dtw_feature_groups_enabled.contact' (type bool, default False)."
+  },
+  {
+    "key": "analysis.organoid.dtw_feature_groups_enabled.active_killing",
+    "title": "active_killing",
+    "step": "analysis",
+    "category": "organoid",
+    "type": "bool",
+    "default": false,
+    "choices": null,
+    "description": "BEHAV3D parameter 'analysis.organoid.dtw_feature_groups_enabled.active_killing' (type bool, default False)."
   },
   {
     "key": "analysis.organoid.dtw_features_input",
@@ -2294,6 +2384,16 @@
     "description": "BEHAV3D parameter 'analysis.other.dtw_feature_groups_enabled.contact' (type bool, default False)."
   },
   {
+    "key": "analysis.other.dtw_feature_groups_enabled.active_killing",
+    "title": "active_killing",
+    "step": "analysis",
+    "category": "other",
+    "type": "bool",
+    "default": false,
+    "choices": null,
+    "description": "BEHAV3D parameter 'analysis.other.dtw_feature_groups_enabled.active_killing' (type bool, default False)."
+  },
+  {
     "key": "analysis.other.dtw_features_input",
     "title": "dtw_features_input",
     "step": "analysis",
@@ -2429,67 +2529,44 @@
     "description": "BEHAV3D parameter 'backprojection.columns_resolved' (type list, default [])."
   },
   {
-    "key": "active_killing.observation_window",
-    "title": "observation_window",
-    "step": "feature_extraction",
-    "category": null,
-    "type": "int",
-    "default": 5,
-    "choices": null,
-    "description": "Timepoints counted forward from contact in which a death-signal increase is assessed. Choose it from the expected biological delay and imaging cadence."
-  },
-  {
-    "key": "active_killing.death_signal_column",
-    "title": "death_signal_column",
-    "step": "feature_extraction",
-    "category": null,
-    "type": "str",
-    "default": "percentage_dead_mask",
-    "choices": [
-      "percentage_dead_mask",
-      "mean_dead_dye"
-    ],
-    "description": "Death or reporter signal. Dead-mask pixel count with an absolute threshold is the general default; percentage assumes comparable target sizes, and mean intensity suits diffuse reporters."
-  },
-  {
-    "key": "active_killing.killing_threshold_multiplier",
-    "title": "killing_threshold_multiplier",
+    "key": "active_killing.target_cell_diameter_um",
+    "title": "target_cell_diameter_um",
     "step": "feature_extraction",
     "category": null,
     "type": "float",
-    "default": 1.5,
+    "default": 10.0,
     "choices": null,
-    "description": "Relative increase over the target's own baseline. Reserve it for a single target line or heterogeneous within-well baselines; it can bias comparisons across target lines."
+    "description": "Diameter of ONE target cell in \u00b5m (not the organoid). Sets the death threshold: a new connected dead-mask patch must reach a quarter of one cell's volume to count as a death event. Check it with 'Preview death patches' on a frame you trust; lower it if real deaths are missed."
   },
   {
-    "key": "active_killing.min_contact_duration",
-    "title": "min_contact_duration",
+    "key": "active_killing.causal_window_min",
+    "title": "causal_window_min",
     "step": "feature_extraction",
     "category": null,
-    "type": "int",
-    "default": 1,
+    "type": "float",
+    "default": 120.0,
     "choices": null,
-    "description": "Minimum effector-target contact timepoints required for active killing. Choose it from biological plausibility and acquisition cadence."
+    "description": "Minutes after an effector's contact within which a death event can still be credited to it. About 120 min for organoid / carcinoma targets (contact-to-apoptosis lag ~1.8 +/- 1.5 h), about 30 min for haematologic targets."
   },
   {
-    "key": "active_killing.use_absolute_threshold",
-    "title": "use_absolute_threshold",
+    "key": "active_killing.attribution_radius_um",
+    "title": "attribution_radius_um",
     "step": "feature_extraction",
     "category": null,
-    "type": "bool",
-    "default": false,
+    "type": "float",
+    "default": 15.0,
     "choices": null,
-    "description": "BEHAV3D parameter 'active_killing.use_absolute_threshold' (type bool, default False)."
+    "description": "Maximum surface-to-surface distance (\u00b5m) between an effector and a death patch for the effector to be a candidate killer. Candidates must also have touched that target (Contact Threshold) within the causal window. Default 15 \u00b5m."
   },
   {
-    "key": "active_killing.absolute_killing_threshold",
-    "title": "absolute_killing_threshold",
+    "key": "active_killing.target_types",
+    "title": "target_types",
     "step": "feature_extraction",
     "category": null,
-    "type": "none",
-    "default": null,
+    "type": "list",
+    "default": [],
     "choices": null,
-    "description": "Fixed signal increase used for active killing. Calibrate a dead-pixel threshold from cell diameter and XY pixel size, then validate visually."
+    "description": "Target cell types (organoids and/or other cell types) whose death events are attributed to the selected effector."
   },
   {
     "key": "active_killing.save_results",
@@ -2500,6 +2577,16 @@
     "default": true,
     "choices": null,
     "description": "BEHAV3D parameter 'active_killing.save_results' (type bool, default True)."
+  },
+  {
+    "key": "active_killing.advanced",
+    "title": "advanced",
+    "step": "feature_extraction",
+    "category": null,
+    "type": "dict",
+    "default": {},
+    "choices": null,
+    "description": "YAML-only overrides of Active Killing's derived values and literature constants (e.g. min_patch_volume_um3, damage_tau_min). Not needed for normal use; any override is recorded in active_killing_run_params.json and breaks comparability with other datasets."
   },
   {
     "key": "death_dynamics.organoid.dead_perc_threshold",
@@ -3172,10 +3259,16 @@
     "type": "list",
     "default": [
       "is_active_killing",
-      "killing_efficiency",
-      "death_signal_increase_*tp"
+      "kill_credit",
+      "cum_kill_credit",
+      "hit_weight_raw",
+      "is_nearest_effector",
+      "distance_to_death_um",
+      "lag_min",
+      "n_cokillers",
+      "attributed_death_volume_um3"
     ],
     "choices": null,
-    "description": "Computed 'active_killing' feature columns produced by BEHAV3D (reference, not user-tunable): is_active_killing, killing_efficiency, death_signal_increase_*tp."
+    "description": "Computed 'active_killing' feature columns produced by BEHAV3D (reference, not user-tunable): is_active_killing, kill_credit, cum_kill_credit, hit_weight_raw, is_nearest_effector, distance_to_death_um, lag_min, n_cokillers, attributed_death_volume_um3."
   }
 ]

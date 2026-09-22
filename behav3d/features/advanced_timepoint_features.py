@@ -1,407 +1,127 @@
 """
 Advanced Feature Extraction for BEHAV3D
 
-This module provides advanced analysis features that go beyond basic track feature extraction.
-It focuses on interaction-based analyses such as active killing detection.
+This module provides analyses that go beyond basic track feature extraction,
+chiefly Active Killing.
 
 -------------------------------------
---------------- FEATURES ------------
+------------ ACTIVE KILLING ---------
 -------------------------------------
 
-### Active Killing Analysis
-Detects when an immune cell (e.g., T cell) makes contact with a target cell (e.g., organoid)
-and subsequently causes an increase in death signal (dead dye/dead mask) above background levels.
+Active Killing attributes **localised death events** to the effector cells
+that plausibly caused them.
 
-Key concepts:
-- Contact event: Continuous period where immune cell touches ANY target cell
-- Total contact duration: Full length of continuous contact (must exceed min_contact_duration)
-- Per-organoid, per-timepoint calculation: Each touched organoid is evaluated independently
-  at every timepoint of the contact (sliding window, not just once at contact start)
-- Observation window: N timepoints after EACH contact timepoint to measure death signal change
-- Active killing: Death signal increase (t -> t + window) exceeds either a multiplier of the
-  organoid's own signal at t, or a fixed absolute increase, depending on the selected mode
+1. Death events (``behav3d.features.death_events``): the nucleation of a
+   connected region of *newly* dead voxels inside one target track, read from
+   the annotated dead mask (never by re-thresholding the raw death channel).
+   No effector data enters detection, so the number of events cannot grow
+   when more effectors are present. Cached per target type under
+   ``analysis/<target>/death_events/``.
+2. Contact events: continuous runs in which one effector touches one specific
+   target (``touching_<type>s``, i.e. the distance contact gate).
+3. Attribution (``behav3d.features.kill_attribution``): each event's one unit
+   of credit is shared among effectors that contacted the target within
+   ``causal_window_min`` before onset and are within ``attribution_radius_um``
+   of the death patch (surface to surface).
 
--------------------------------------
---------------- OUTPUT --------------
--------------------------------------
+Because every event carries exactly one unit of credit in total, total credit
+equals the number of attributed death events: it measures how much dying
+happened, not how many effectors were touching. The previous algorithm gave
+every contacting effector an identical full verdict and inflated with density.
 
-# Per-timepoint features (added to track features CSV)
-- is_active_killing: Boolean, True if this timepoint's contact caused killing
-- death_signal_increase_{N}tp: Death signal change over observation window
-- killing_efficiency: Ratio of actual death signal increase vs the organoid's own threshold
+Outputs (``analysis/<immune>/active_killing/<target|combined>/``)
+- ``kill_candidates_<immune>.csv``: one row per (death event, candidate effector)
+- ``death_events_<immune>.csv``: every death event with its attribution class
+- ``per_effector_killing_<immune>.csv``, ``per_target_death_<immune>.csv``,
+  ``per_sample_killing_<immune>.csv``
+- ``contact_events_<immune>.csv``: one row per (effector, target) contact event
+- ``BEHAV3D_<immune>_advanced_track_features.csv``: the effector per-timepoint
+  table plus the kill columns (credit sits on each effector's last contact
+  frame before the onset)
+- ``active_killing_run_params.json``: schema version + resolved parameters
 
-# Where no contact occurs:
-- is_active_killing = False
-- death_signal_increase = 0.0
-- killing_efficiency = 0.0
-
-# Summary statistics per sample
-- total_contact_events: Number of qualifying contact events (â‰¥ min_duration)
-- active_killing_events: Number of timepoints classified as active killing
-- active_killing_rate: Proportion of contact timepoints with active killing
+Active Killing deliberately scans the full movie from the RAW track features;
+analysis windows are applied where the outputs are read.
 """
 
-import pandas as pd
-from pathlib import Path
+import json
 import time
-from typing import Optional, List, Tuple, Dict, Union
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Tuple, Union
+
 import numpy as np
+import pandas as pd
 
 from behav3d.core.metadata import detect_organoid_types_from_metadata
 from behav3d.core.utils import get_current_time, format_time
 from behav3d.io.images import load_image
 
 
-# If an organoid's death signal is exactly 0 at a given window's start timepoint, a
-# multiplier threshold would be trivially 0 (any nonzero signal would count as active
-# killing). Substitute this small epsilon as the effective starting signal in that case only.
-ZERO_BASELINE_EPSILON = 0.1
+ACTIVE_KILLING_SCHEMA_VERSION = 2
+RUN_PARAMS_FILENAME = "active_killing_run_params.json"
 
-
-_CONTACT_COLUMN_CHOICES = ("contact", "contact_on_distance")
-
-
-def identify_contact_events_global(
-    df_immune_tracks: pd.DataFrame,
-    target_cell_types: List[str],
-    min_contact_duration: int = 1,
-    contact_column: str = "contact"
-) -> pd.DataFrame:
-    """
-    Identify distinct contact events between immune cells and ANY target cell.
-
-    A contact event is defined as a continuous period where an immune cell
-    is in contact with ANY target cell type. The total duration is measured
-    across the entire continuous contact period.
-
-    Parameters
-    ----------
-    df_immune_tracks : pd.DataFrame
-        DataFrame containing immune cell tracks with contact information
-    target_cell_types : List[str]
-        List of target cell types to check for contact (e.g., ['organoid', 'organoid2'])
-    min_contact_duration : int
-        Minimum number of timepoints for a valid contact event
-    contact_column : str
-        Which per-target contact flag gates a contact event: ``"contact"`` (default) uses
-        ``{target_type}_contact``, the pixel/mask-adjacency flag (segments within ~1.73 px),
-        computed independently of any distance setting. ``"contact_on_distance"`` uses
-        ``{target_type}_contact_on_distance``, which respects the real (µm) Contact Threshold
-        configured in Feature Extraction. Either way, target attribution
-        (``touching_{target_type}s``, used to fill ``target_track_ids`` below) is always
-        distance-based, so choosing ``"contact_on_distance"`` makes the event gate consistent
-        with which targets get attributed to it; choosing ``"contact"`` reproduces this
-        function's original, pixel-gated behavior.
-
-    Returns
-    -------
-    df_contact_events : pd.DataFrame
-        DataFrame with one row per contact event (contact with any target)
-    """
-    if contact_column not in _CONTACT_COLUMN_CHOICES:
-        raise ValueError(
-            f"contact_column must be one of {_CONTACT_COLUMN_CHOICES}, got {contact_column!r}"
-        )
-
-    df = df_immune_tracks.copy()
-    df = df.sort_values(by=["sample_name", "TrackID", "position_t"])
-
-    # Create a global contact column (True if contacting ANY target type)
-    contact_columns = [f"{target_type}_{contact_column}" for target_type in target_cell_types]
-    existing_contact_cols = [c for c in contact_columns if c in df.columns]
-
-    if not existing_contact_cols:
-        print(f"  Warning: No '{contact_column}' columns found for target types: {target_cell_types}")
-        return pd.DataFrame()
-
-    # Combine all contact columns
-    df["_any_contact"] = df[existing_contact_cols].any(axis=1)
-
-    # Combine all touching columns
-    touching_columns = [f"touching_{target_type}s" for target_type in target_cell_types]
-    existing_touching_cols = [c for c in touching_columns if c in df.columns]
-    
-    def combine_touching(row):
-        """Combine all touching targets into one string"""
-        all_targets = []
-        for col in existing_touching_cols:
-            val = row.get(col, "")
-            if pd.notna(val) and str(val).strip():
-                all_targets.extend([t.strip() for t in str(val).split(",") if t.strip()])
-        return ",".join(all_targets) if all_targets else ""
-    
-    df["_all_touching"] = df.apply(combine_touching, axis=1)
-    
-    contact_events = []
-    event_id = 0
-    
-    for (sample_name, track_id), group in df.groupby(["sample_name", "TrackID"]):
-        group = group.reset_index(drop=True)
-        
-        in_contact = False
-        contact_start_t = None
-        contact_timepoints = []  # List of timepoints in this contact
-        all_targets = set()
-        
-        for idx, row in group.iterrows():
-            is_contacting = row["_any_contact"]
-            touching_str = row["_all_touching"]
-            
-            # Parse touching targets
-            if pd.notna(touching_str) and str(touching_str).strip():
-                current_touching = set(str(touching_str).split(","))
-            else:
-                current_touching = set()
-            
-            if is_contacting and current_touching:
-                if not in_contact:
-                    # Start of new contact event
-                    in_contact = True
-                    contact_start_t = row["position_t"]
-                    contact_timepoints = [row["position_t"]]
-                    all_targets = current_touching
-                else:
-                    # Continue contact
-                    contact_timepoints.append(row["position_t"])
-                    all_targets.update(current_touching)
-            else:
-                if in_contact:
-                    # End of contact event
-                    contact_end_t = contact_timepoints[-1]
-                    contact_duration = len(contact_timepoints)
-                    
-                    if contact_duration >= min_contact_duration:
-                        event_id += 1
-                        contact_events.append({
-                            "contact_event_id": event_id,
-                            "sample_name": sample_name,
-                            "immune_track_id": track_id,
-                            "target_track_ids": ",".join(sorted([str(t) for t in all_targets])),
-                            "contact_start_t": contact_start_t,
-                            "contact_end_t": contact_end_t,
-                            "contact_duration": contact_duration,
-                            "contact_timepoints": contact_timepoints.copy(),
-                        })
-                    
-                    in_contact = False
-                    contact_start_t = None
-                    contact_timepoints = []
-                    all_targets = set()
-        
-        # Handle contact that extends to end of track
-        if in_contact and contact_timepoints:
-            contact_end_t = contact_timepoints[-1]
-            contact_duration = len(contact_timepoints)
-            
-            if contact_duration >= min_contact_duration:
-                event_id += 1
-                contact_events.append({
-                    "contact_event_id": event_id,
-                    "sample_name": sample_name,
-                    "immune_track_id": track_id,
-                    "target_track_ids": ",".join(sorted([str(t) for t in all_targets])),
-                    "contact_start_t": contact_start_t,
-                    "contact_end_t": contact_end_t,
-                    "contact_duration": contact_duration,
-                    "contact_timepoints": contact_timepoints.copy(),
-                })
-    
-    df_contact_events = pd.DataFrame(contact_events)
-    return df_contact_events
-
-
-def analyze_active_killing_per_timepoint(
-    df_immune_tracks: pd.DataFrame,
-    df_target_tracks: pd.DataFrame,
-    df_contact_events: pd.DataFrame,
-    observation_window: int = 5,
-    death_signal_column: str = "mean_dead_dye",
-    killing_threshold_multiplier: float = 1.5,
-    absolute_killing_threshold: Optional[float] = None,
-) -> pd.DataFrame:
-    """
-    Calculate active killing status for each contact timepoint using a
-    sliding observation window anchored at that timepoint.
-
-    Each touched target organoid is evaluated independently at every
-    timepoint of the contact event (not just once at contact start):
-    1. Get the target's death signal at timepoint t
-    2. Get the target's death signal at t + observation_window
-       (or the last available timepoint on the target's track, if the
-       track ends before then -- this can reach past the contact event's
-       own end)
-    3. Compare the increase to a threshold:
-       - multiplier mode: threshold = death_at_t x (killing_threshold_multiplier - 1)
-         (i.e. active if death_at_t_plus_window >= death_at_t x killing_threshold_multiplier).
-         If death_at_t is exactly 0, ZERO_BASELINE_EPSILON is substituted so the
-         threshold isn't trivially 0.
-       - absolute mode: threshold = absolute_killing_threshold (flat, in death_signal_column units)
-    4. Among all touched targets, the one with the highest efficiency (increase relative to
-       its own threshold) AT THAT TIMEPOINT is reported as the timepoint's representative
-       target/values -- so the representative target can change from one contact timepoint
-       to the next. This is reported whether or not it is active; targeted_track_id is only
-       set when active.
-    5. Each contact timepoint gets its own independently computed row: a long contact can
-       show killing at some timepoints and not others instead of one value broadcast
-       across the whole event.
-
-    Parameters
-    ----------
-    df_immune_tracks : pd.DataFrame
-        DataFrame containing immune cell tracks
-    df_target_tracks : pd.DataFrame
-        DataFrame containing target cell tracks with death signal
-    df_contact_events : pd.DataFrame
-        Contact events from identify_contact_events_global
-    observation_window : int
-        Number of timepoints after each contact timepoint to measure death signal change
-    death_signal_column : str
-        Column in target tracks containing death signal
-    killing_threshold_multiplier : float
-        Multiplier applied to a target's own signal at each timepoint (used when
-        absolute_killing_threshold is None)
-    absolute_killing_threshold : float, optional
-        If provided, use this flat value as the killing threshold instead of the
-        multiplier-based threshold. Useful when organoids start with near-zero signal.
-
-    Returns
-    -------
-    df_killing_per_timepoint : pd.DataFrame
-        DataFrame with one row per (contact_event, timepoint) with killing status
-    """
-    if df_contact_events.empty:
-        return pd.DataFrame()
-
-    # Get max timepoint per sample (to know when the observation window runs past track end)
-    max_timepoints = df_target_tracks.groupby("sample_name")["position_t"].max().to_dict()
-
-    killing_results = []
-
-    for _, event in df_contact_events.iterrows():
-        sample_name = event["sample_name"]
-        immune_track_id = event["immune_track_id"]
-        target_ids = [t.strip() for t in str(event["target_track_ids"]).split(",")]
-        contact_timepoints = event["contact_timepoints"]
-
-        max_t = max_timepoints.get(sample_name, contact_timepoints[-1])
-
-        # Get target tracks for this sample
-        target_mask = df_target_tracks["sample_name"] == sample_name
-        df_targets_sample = df_target_tracks[target_mask]
-
-        # Precompute a sorted (position_t, death_signal) lookup per touched
-        # target once per event, reused across every contact timepoint below
-        # (avoids re-filtering/sorting the target dataframe per timepoint).
-        target_lookups = {}
-        for target_id in target_ids:
-            try:
-                target_id_int = int(float(target_id))
-            except (ValueError, TypeError):
-                target_id_int = target_id
-
-            target_rows = df_targets_sample[
-                df_targets_sample["TrackID"].astype(str) == str(target_id_int)
-            ].sort_values("position_t")
-
-            if target_rows.empty:
-                continue
-
-            target_lookups[target_id_int] = (
-                target_rows["position_t"].to_numpy(),
-                target_rows[death_signal_column].to_numpy(),
-            )
-
-        for t in contact_timepoints:
-            observation_end_t = t + observation_window
-            can_observe = observation_end_t <= max_t
-
-            target_evals = []
-
-            for target_id_int, (pt_arr, death_arr) in target_lookups.items():
-                # Death signal at or before t (mirrors the old exact-match,
-                # else-nearest-before lookup for contact_start_t).
-                start_idx = np.searchsorted(pt_arr, t, side="right") - 1
-                if start_idx < 0:
-                    continue
-                death_at_start = death_arr[start_idx]
-
-                # Death signal at the first frame >= observation_end_t,
-                # falling back to the target's last available frame.
-                end_idx = np.searchsorted(pt_arr, observation_end_t, side="left")
-                if end_idx >= len(pt_arr):
-                    end_idx = len(pt_arr) - 1
-                death_at_end = death_arr[end_idx]
-
-                death_increase = death_at_end - death_at_start
-
-                if absolute_killing_threshold is not None:
-                    threshold_increase = absolute_killing_threshold
-                else:
-                    effective_start = death_at_start if death_at_start != 0 else ZERO_BASELINE_EPSILON
-                    threshold_increase = effective_start * (killing_threshold_multiplier - 1)
-
-                is_active = death_increase > threshold_increase
-                efficiency = death_increase / (threshold_increase + 1e-10) if threshold_increase > 0 else (
-                    1.0 if death_increase > 0 else 0.0
-                )
-
-                target_evals.append({
-                    "target_id": target_id_int,
-                    "death_increase": death_increase,
-                    "threshold_increase": threshold_increase,
-                    "is_active": is_active,
-                    "efficiency": efficiency,
-                })
-
-            # Representative target for this timepoint = highest efficiency
-            # among all targets evaluated at this timepoint.
-            best = max(target_evals, key=lambda d: d["efficiency"]) if target_evals else None
-
-            if best is not None:
-                is_active_killing = best["is_active"]
-                targeted_track_id = best["target_id"] if is_active_killing else None
-                death_signal_increase = best["death_increase"]
-                killing_efficiency = best["efficiency"]
-                killing_threshold_used = best["threshold_increase"]
-            else:
-                is_active_killing = False
-                targeted_track_id = None
-                death_signal_increase = 0.0
-                killing_efficiency = 0.0
-                killing_threshold_used = 0.0
-
-            killing_results.append({
-                "contact_event_id": event["contact_event_id"],
-                "sample_name": sample_name,
-                "immune_track_id": immune_track_id,
-                "position_t": t,
-                "death_signal_increase": death_signal_increase,
-                "is_active_killing": is_active_killing,
-                "killing_efficiency": killing_efficiency,
-                "targeted_track_id": targeted_track_id,
-                "killing_threshold_used": killing_threshold_used,
-                "observation_complete": can_observe,
-            })
-
-    return pd.DataFrame(killing_results)
+# Per-timepoint columns added to the effector feature table (all NA-free).
+KILL_COLUMN_DEFAULTS = {
+    "is_active_killing": False,
+    "kill_credit": 0.0,
+    "cum_kill_credit": 0.0,
+    "hit_weight_raw": 0.0,
+    "is_nearest_effector": False,
+    "death_event_id": -1,
+    "targeted_cell_type": "",
+    "targeted_track_id": -1,
+    "attribution_class": "",
+    "distance_to_death_um": -1.0,
+    "lag_min": -1.0,
+    "n_cokillers": 0,
+    "attributed_death_volume_um3": 0.0,
+    "n_events_credited": 0,
+    "contact_event_id": -1,
+}
 
 
 class StaleDataError(RuntimeError):
     """Raised when a derived CSV predates the raw input it was built from."""
 
 
-def _check_not_stale(derived_path: Path, raw_path: Path, derived_label: str, upstream_label: str) -> None:
+class ActiveKillingInputError(ValueError):
+    """Raised when the inputs cannot support attribution (rather than silently yielding zeros)."""
+
+
+def _newest_mtime(paths: Iterable[Union[str, Path]]) -> Tuple[float, Optional[Path]]:
+    """Newest mtime over existing paths. For a .zarr store, stat the store
+    directory and its array metadata only -- never walk the chunks."""
+    best, which = -1.0, None
+    for p in paths:
+        if p is None:
+            continue
+        p = Path(p)
+        if not p.exists():
+            continue
+        m = p.stat().st_mtime
+        for meta in ("zarr.json", ".zarray"):
+            mp = p / meta
+            if mp.exists():
+                m = max(m, mp.stat().st_mtime)
+        if m > best:
+            best, which = m, p
+    return best, which
+
+
+def _check_not_stale(derived_path: Path, raw_path, derived_label: str, upstream_label: str) -> None:
     """
-    Raise StaleDataError if `raw_path` was modified more recently than
-    `derived_path` — meaning `upstream_label` was rerun after `derived_label`
-    last produced this file, so `derived_path` no longer reflects the current
-    data.
+    Raise StaleDataError if ``raw_path`` (a path or several) was modified more
+    recently than ``derived_path`` -- meaning ``upstream_label`` was rerun after
+    ``derived_label`` last produced this file.
     """
-    if not derived_path.exists() or not raw_path.exists():
+    derived_path = Path(derived_path)
+    if not derived_path.exists():
         return
-    if raw_path.stat().st_mtime > derived_path.stat().st_mtime:
+    paths = [raw_path] if isinstance(raw_path, (str, Path)) else list(raw_path or [])
+    newest, which = _newest_mtime(paths)
+    if which is not None and newest > derived_path.stat().st_mtime:
         raise StaleDataError(
-            f"{derived_path.name} is older than {raw_path.name} — it looks like "
+            f"{derived_path.name} is older than {which.name} — it looks like "
             f"{upstream_label} was rerun after {derived_label} last produced this file. "
             f"The underlying data no longer matches. Re-run {derived_label} to refresh "
             f"it from the current data before continuing."
@@ -428,19 +148,29 @@ def _print_rerun_filtering_warning(stale_filtered_cell_types: set) -> None:
     )
 
 
+def _read_run_params(results_dir: Path) -> Optional[dict]:
+    p = Path(results_dir) / RUN_PARAMS_FILENAME
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
 def find_advanced_features_csv(output_dir: Union[str, Path], cell_type: str) -> Optional[Path]:
     """
     Locate the active-killing advanced-features CSV for a cell type.
 
     run_active_killing_analysis() writes into a per-target subfolder (the
     target cell type name, or "combined" for multi-target runs), so this
-    searches analysis/<cell_type>/active_killing/*/ rather than assuming a
-    flat layout. Falls back to the legacy flat path for older runs. Returns
-    the most recently modified match, or None if none exist.
+    searches analysis/<cell_type>/active_killing/*/. Returns the most recently
+    modified match, or None if none exist.
 
     Raises StaleDataError if the best match predates the cell type's raw
-    combined_track_features.csv, i.e. Feature Extraction was rerun after
-    Active Killing last produced this file.
+    combined_track_features.csv (Feature Extraction was rerun after Active
+    Killing), or was produced by the previous Active Killing algorithm (a
+    different column schema that must not be consumed as if it were current).
     """
     output_dir = Path(output_dir)
     active_killing_dir = output_dir / "analysis" / cell_type / "active_killing"
@@ -456,444 +186,297 @@ def find_advanced_features_csv(output_dir: Union[str, Path], cell_type: str) -> 
     best = max(candidates, key=lambda p: p.stat().st_mtime)
     raw_path = output_dir / "analysis" / cell_type / "track_features" / f"BEHAV3D_{cell_type}_combined_track_features.csv"
     _check_not_stale(best, raw_path, derived_label="Active Killing", upstream_label="Feature Extraction")
+    run_params = _read_run_params(best.parent)
+    if not run_params or int(run_params.get("schema_version", 0)) < ACTIVE_KILLING_SCHEMA_VERSION:
+        raise StaleDataError(
+            f"{best.name} was produced by the previous Active Killing algorithm, whose columns "
+            f"(e.g. killing_efficiency) no longer exist and whose counts inflated with effector "
+            f"density. Re-run Active Killing to regenerate it before continuing."
+        )
+    _check_not_stale(best, run_params.get("upstream_paths", []),
+                     derived_label="Active Killing", upstream_label="Segmentation / Tracking")
     return best
 
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+
+def resolve_active_killing_params(
+    target_cell_diameter_um: float = 10.0,
+    causal_window_min: float = 120.0,
+    attribution_radius_um: float = 15.0,
+    advanced: Optional[dict] = None,
+):
+    """Build (DeathEventParams, AttributionParams) from the three user-facing
+    values plus any ``advanced`` overrides (keys matching either dataclass)."""
+    from dataclasses import fields
+    from behav3d.features.death_events import DeathEventParams
+    from behav3d.features.kill_attribution import AttributionParams
+
+    advanced = dict(advanced or {})
+    dnames = {f.name for f in fields(DeathEventParams)}
+    anames = {f.name for f in fields(AttributionParams)}
+    unknown = sorted(set(advanced) - dnames - anames)
+    if unknown:
+        raise ValueError(f"Unknown active_killing.advanced keys: {unknown}")
+    dp = DeathEventParams(target_cell_diameter_um=float(target_cell_diameter_um),
+                          **{k: v for k, v in advanced.items() if k in dnames and k != "target_cell_diameter_um"})
+    ap = AttributionParams(causal_window_min=float(causal_window_min),
+                           attribution_radius_um=float(attribution_radius_um),
+                           **{k: v for k, v in advanced.items()
+                              if k in anames and k not in ("causal_window_min", "attribution_radius_um")})
+    return dp, ap
+
+
+def _validate_contact_inputs(df_immune: pd.DataFrame, target_cell_types: List[str], immune_cell_type: str) -> None:
+    """Refuse to run on inputs that would silently yield zero attribution."""
+    cols = [f"touching_{t}s" for t in target_cell_types]
+    present = [c for c in cols if c in df_immune.columns]
+    if not present:
+        raise ActiveKillingInputError(
+            f"The {immune_cell_type} track features have no contact columns for "
+            f"{', '.join(target_cell_types)} (expected {', '.join(cols)}). Enable 'contact' in "
+            f"Feature Extraction for {immune_cell_type} and re-run it -- Active Killing needs to "
+            f"know which target each effector touches."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
 
 def run_active_killing_analysis(
     metadata: pd.DataFrame,
     output_dir: Union[str, Path],
     immune_cell_type: str = "tcell",
     target_cell_types: Optional[List[str]] = None,
-    observation_window: int = 5,
-    death_signal_column: str = "mean_dead_dye",
-    min_contact_duration: int = 1,
-    killing_threshold_multiplier: float = 1.5,
-    absolute_killing_threshold: Optional[float] = None,
-    contact_column: str = "contact",
+    target_cell_diameter_um: float = 10.0,
+    causal_window_min: float = 120.0,
+    attribution_radius_um: float = 15.0,
+    advanced: Optional[dict] = None,
     save_results: bool = True,
-    output_subfolder: str = ""
+    output_subfolder: str = "",
+    reuse_death_event_cache: bool = True,
+    progress_cb=None,
+    top_n_killers: int = 5,
+    write_figures: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict]:
     """
-    Run active killing analysis on BEHAV3D processed data.
-    
-    This function analyzes GLOBAL active killing (across all target types combined).
-    It calculates active killing PER TIMEPOINT during qualifying contact events.
-    
-    Algorithm:
-    1. Identify continuous contact events with ANY target cell (across all target types)
-    2. Filter contacts by total duration (must be >= min_contact_duration)
-    3. For each contact event, evaluate every touched target organoid independently at
-       EACH contact timepoint t (sliding window):
-       - Measure that organoid's own death signal increase from t to t + observation_window
-       - Compare to either a multiplier of its signal at t, or a flat absolute increase
-       - Classify as active killing if exceeds threshold; the highest-efficiency touched
-         organoid at that timepoint is reported as the timepoint's target (this can differ
-         from one contact timepoint to the next)
-    
-    Parameters
-    ----------
-    metadata : pd.DataFrame
-        BEHAV3D metadata DataFrame
-    output_dir : str or Path
-        BEHAV3D output directory containing analysis results
-    immune_cell_type : str
-        Type of immune cell (e.g., 'tcell', 'macro', 'nk')
-    target_cell_types : List[str], optional
-        List of target cell types (e.g., ['organoid', 'organoid2']).
-        If None, auto-detects all organoid types from metadata.
-    observation_window : int
-        Timepoints after each contact timepoint to measure death signal
-    death_signal_column : str
-        Column containing death signal in target tracks
-    min_contact_duration : int
-        Minimum TOTAL contact duration (continuous) in timepoints
-    killing_threshold_multiplier : float
-        Multiplier applied to a target organoid's own signal at each timepoint.
-        Used when absolute_killing_threshold is None.
-    absolute_killing_threshold : float, optional
-        If provided, use this flat value as the killing threshold instead of the
-        multiplier-based threshold. Useful when organoids start with near-zero signal.
-        Default is None (uses killing_threshold_multiplier instead).
-    contact_column : str
-        Which per-target contact flag gates a contact event -- ``"contact"`` (default,
-        pixel/mask adjacency) or ``"contact_on_distance"`` (respects the µm Contact Threshold
-        configured in Feature Extraction). See ``identify_contact_events_global`` for details.
-    save_results : bool
-        Whether to save results to CSV files
-        
-    Returns
-    -------
-    df_killing_per_tp : pd.DataFrame
-        Per-timepoint killing analysis for all qualifying contacts
-    df_summary : pd.DataFrame
-        Per-sample summary statistics
-    stats : dict
-        Overall statistics
+    Run Active Killing: detect death events, attribute them to effectors, and
+    write the per-event, per-effector, per-target and per-sample tables.
+
+    Returns ``(df_candidates, df_per_sample, stats)``. ``df_candidates`` has one
+    row per (death event, candidate effector); ``kill_credit`` sums to exactly
+    1 per attributed event.
     """
-    print(f"--------------- Running Active Killing Analysis ---------------")
-    print(f"Immune cell type: {immune_cell_type}")
-    print(f"Algorithm: Global contacts (any target), per-organoid sliding-window evaluation")
+    from behav3d.features.death_events import detect_death_events, resolve_tracks_image_path
+    from behav3d.features.kill_attribution import (
+        attribute_death_events, explode_contacts, identify_contact_events_per_target,
+        per_timepoint_credit, summarize_per_effector, summarize_per_sample, summarize_per_target,
+    )
+
+    print("--------------- Running Active Killing Analysis ---------------")
     start_time = time.time()
-    
     output_dir = Path(output_dir)
-    
-    # Auto-detect target cell types if not provided
     if target_cell_types is None:
         target_cell_types = detect_organoid_types_from_metadata(metadata)
         if not target_cell_types:
             raise ValueError("No organoid types detected in metadata. Please specify target_cell_types.")
-    
-    print(f"Target cell types: {target_cell_types}")
-    print(f"Contact column: {contact_column}")
-    print(f"Observation window: {observation_window} timepoints")
-    print(f"Min contact duration: {min_contact_duration} timepoints")
-    if absolute_killing_threshold is not None:
-        print(f"Killing threshold mode: ABSOLUTE ({absolute_killing_threshold})")
-    else:
-        print(f"Killing threshold mode: MULTIPLIER ({killing_threshold_multiplier}x organoid's own signal at each timepoint)")
-    
-    # Load immune cell tracks. Active Killing always reads the RAW (unfiltered)
-    # combined_track_features.csv, never the filtered one -- Filtering, in turn,
-    # reads Active Killing's advanced-features CSV as its own input (see
-    # find_advanced_features_csv / filter_tracks' df_input_path) so the immune
-    # killing columns survive filtering. If Active Killing preferred the filtered
-    # CSV here, the two steps would each treat the other as their upstream
-    # dependency, and a staleness check on either side could deadlock: Filtering
-    # refusing to run because Active Killing looks stale, and Active Killing
-    # refusing to run because Filtering looks stale. Always starting from raw
-    # breaks that cycle. We track which cell types already have a filtered CSV
-    # so we can tell the caller to re-run Filtering afterwards, since that CSV
-    # was built before this (possibly fresher) Active Killing output existed.
-    stale_filtered_cell_types = set()
+    target_cell_types = list(target_cell_types)
+    dparams, aparams = resolve_active_killing_params(
+        target_cell_diameter_um, causal_window_min, attribution_radius_um, advanced)
+    print(f"Effector: {immune_cell_type} | targets: {target_cell_types}")
+    print(f"Target cell diameter: {dparams.target_cell_diameter_um} µm | causal window: "
+          f"{aparams.causal_window_min} min | attribution radius: {aparams.attribution_radius_um} µm")
 
-    immune_feature_dir = output_dir / "analysis" / immune_cell_type / "track_features"
-    immune_raw_path = immune_feature_dir / f"BEHAV3D_{immune_cell_type}_combined_track_features.csv"
-    immune_filtered_path = immune_feature_dir / f"BEHAV3D_{immune_cell_type}_combined_track_features_filtered.csv"
-    immune_tracks_path = immune_raw_path
+    # RAW (unfiltered) features only: Filtering in turn reads this module's
+    # advanced CSV as its input, so reading the filtered CSV here would make
+    # each step the other's upstream. The zarr masks and the death-event cache
+    # add upstream edges but no cycle -- nothing downstream writes them.
+    stale_filtered = set()
+    immune_dir = output_dir / "analysis" / immune_cell_type / "track_features"
+    immune_raw = immune_dir / f"BEHAV3D_{immune_cell_type}_combined_track_features.csv"
+    if (immune_dir / f"BEHAV3D_{immune_cell_type}_combined_track_features_filtered.csv").exists():
+        stale_filtered.add(immune_cell_type)
+    if not immune_raw.exists():
+        raise FileNotFoundError(f"Could not find immune cell tracks at {immune_raw}")
+    print(f"{get_current_time()} - Loading effector tracks from {immune_raw}")
+    df_immune = pd.read_csv(immune_raw)
+    for col in df_immune.columns:
+        if col.startswith("touching_"):
+            df_immune[col] = df_immune[col].fillna("").astype(str)
+    _validate_contact_inputs(df_immune, target_cell_types, immune_cell_type)
 
-    if immune_filtered_path.exists():
-        stale_filtered_cell_types.add(immune_cell_type)
-
-    if not immune_tracks_path.exists():
-        raise FileNotFoundError(f"Could not find immune cell tracks at {immune_tracks_path}")
-
-    print(f"{get_current_time()} - Loading immune cell tracks from {immune_tracks_path}")
-    df_immune_tracks = pd.read_csv(immune_tracks_path)
-
-    # Load and combine ALL target cell tracks
-    all_target_tracks = []
-
-    for target_type in target_cell_types:
-        target_feature_dir = output_dir / "analysis" / target_type / "track_features"
-        target_raw_path = target_feature_dir / f"BEHAV3D_{target_type}_combined_track_features.csv"
-        target_filtered_path = target_feature_dir / f"BEHAV3D_{target_type}_combined_track_features_filtered.csv"
-        target_tracks_path = target_raw_path
-
-        if target_filtered_path.exists():
-            stale_filtered_cell_types.add(target_type)
-
-        if target_tracks_path.exists():
-            print(f"{get_current_time()} - Loading {target_type} tracks from {target_tracks_path}")
-            df_target = pd.read_csv(target_tracks_path)
-            df_target["_target_cell_type"] = target_type
-            all_target_tracks.append(df_target)
-        else:
-            print(f"{get_current_time()} - Warning: {target_type} tracks not found at {target_tracks_path}")
-    
-    if not all_target_tracks:
-        raise FileNotFoundError(f"Could not find any target cell tracks for types: {target_cell_types}")
-    
-    # Combine all target tracks
-    df_target_tracks = pd.concat(all_target_tracks, ignore_index=True)
-    print(f"{get_current_time()} - Combined {len(df_target_tracks)} target cell track rows")
-
-    # Identify GLOBAL contact events (contact with ANY target type)
-    print(f"{get_current_time()} - Identifying global contact events...")
-    df_contact_events = identify_contact_events_global(
-        df_immune_tracks=df_immune_tracks,
-        target_cell_types=target_cell_types,
-        min_contact_duration=min_contact_duration,
-        contact_column=contact_column
-    )
-    
-    if df_contact_events.empty:
-        print(f"{get_current_time()} - No qualifying contact events found (duration >= {min_contact_duration})")
-        # Still create advanced features with all zeros
-        df_advanced = create_advanced_features_csv(
-            df_immune_tracks=df_immune_tracks,
-            df_killing_per_timepoint=pd.DataFrame(),
-            observation_window=observation_window,
+    # Samples that actually have this effector.
+    md = metadata.copy()
+    immune_paths = {}
+    for _, row in md.iterrows():
+        p = resolve_tracks_image_path(row, immune_cell_type)
+        if p is not None and p.exists():
+            immune_paths[str(row["sample_name"])] = str(p)
+    md = md[md["sample_name"].astype(str).isin(set(df_immune["sample_name"].astype(str)))]
+    df_immune = df_immune[df_immune["sample_name"].astype(str).isin(set(md["sample_name"].astype(str)))]
+    if df_immune.empty:
+        raise ActiveKillingInputError(
+            f"None of the samples in the {immune_cell_type} track features appear in the metadata, "
+            f"so there are no masks to read death events from."
         )
-        
-        if save_results:
-            if output_subfolder:
-                results_dir = output_dir / "analysis" / immune_cell_type / "active_killing" / output_subfolder
-            else:
-                results_dir = output_dir / "analysis" / immune_cell_type / "active_killing"
-            results_dir.mkdir(parents=True, exist_ok=True)
-            advanced_features_path = results_dir / f"BEHAV3D_{immune_cell_type}_advanced_track_features.csv"
-            df_advanced.to_csv(advanced_features_path, index=False)
-            print(f"{get_current_time()} - Advanced features saved to {advanced_features_path}")
-            _print_rerun_filtering_warning(stale_filtered_cell_types)
 
-        return pd.DataFrame(), pd.DataFrame(), {
-            "total_contacts": 0,
-            "total_active_killing": 0,
-            "filtering_needs_rerun_for": sorted(stale_filtered_cell_types),
-        }
-    
-    n_events = len(df_contact_events)
-    n_timepoints = sum(len(e) for e in df_contact_events["contact_timepoints"])
-    print(f"{get_current_time()} - Found {n_events} qualifying contact events ({n_timepoints} total contact timepoints)")
-    
-    # Analyze active killing PER TIMEPOINT
-    print(f"{get_current_time()} - Analyzing active killing per timepoint...")
-    df_killing_per_tp = analyze_active_killing_per_timepoint(
-        df_immune_tracks=df_immune_tracks,
-        df_target_tracks=df_target_tracks,
-        df_contact_events=df_contact_events,
-        observation_window=observation_window,
-        death_signal_column=death_signal_column,
-        killing_threshold_multiplier=killing_threshold_multiplier,
-        absolute_killing_threshold=absolute_killing_threshold,
+    print(f"{get_current_time()} - Death events (cached per target type)...")
+    df_events, df_ts, patches, sample_info = detect_death_events(
+        md, output_dir, target_cell_types, dparams, reuse_cache=reuse_death_event_cache,
+        progress_cb=progress_cb,
     )
-    
-    # Calculate summary statistics
-    print(f"{get_current_time()} - Calculating summary statistics...")
-    
-    if not df_killing_per_tp.empty:
-        df_summary = df_killing_per_tp.groupby("sample_name").agg(
-            total_contact_timepoints=("position_t", "count"),
-            active_killing_timepoints=("is_active_killing", "sum"),
-            mean_death_signal_increase=("death_signal_increase", "mean"),
-            median_death_signal_increase=("death_signal_increase", "median"),
-            mean_killing_efficiency=("killing_efficiency", "mean"),
-            n_contact_events=("contact_event_id", "nunique"),
-        ).reset_index()
-        
-        df_summary["active_killing_rate"] = (
-            df_summary["active_killing_timepoints"] / df_summary["total_contact_timepoints"]
+
+    contacts = explode_contacts(df_immune, target_cell_types)
+    df_contact_events, contacts = identify_contact_events_per_target(contacts)
+    print(f"{get_current_time()} - {len(df_events)} death events, {len(df_contact_events)} contact events")
+    if contacts.empty:
+        raise ActiveKillingInputError(
+            f"No {immune_cell_type} row touches any of {', '.join(target_cell_types)} "
+            f"(every touching_* entry is empty). Check the Contact Threshold used in Feature "
+            f"Extraction -- with no contacts nothing can be attributed, and reporting "
+            f"'0 attributed, 100% background death' would look like a result."
         )
-    else:
-        df_summary = pd.DataFrame()
-    
-    # Overall statistics
+
+    df_cand, df_events_annot = attribute_death_events(
+        df_events, contacts, patches, df_ts, immune_type=immune_cell_type,
+        immune_tracks_paths=immune_paths, sample_info=sample_info, params=aparams,
+    )
+    df_eff = summarize_per_effector(df_cand, df_immune, df_contact_events, sample_info)
+    df_tgt = summarize_per_target(df_events_annot, df_cand, df_ts, df_contact_events, sample_info)
+    df_smp = summarize_per_sample(df_events_annot, df_cand, df_eff, df_tgt, df_contact_events, df_ts,
+                                  sample_info, aparams)
+
+    n_att = int(df_events_annot["attribution_class"].isin(["exclusive", "shared"]).sum()) if not df_events_annot.empty else 0
+    n_counted = int((df_events_annot["attribution_class"] != "excluded_border").sum()) if not df_events_annot.empty else 0
     stats = {
-        "total_contact_events": n_events,
-        "total_contact_timepoints": len(df_killing_per_tp) if not df_killing_per_tp.empty else 0,
-        "total_active_killing_timepoints": int(df_killing_per_tp["is_active_killing"].sum()) if not df_killing_per_tp.empty else 0,
-        "overall_killing_rate": df_killing_per_tp["is_active_killing"].mean() if not df_killing_per_tp.empty else 0.0,
-        "observation_window": observation_window,
-        "min_contact_duration": min_contact_duration,
-        "contact_column": contact_column,
-        "killing_threshold_multiplier": killing_threshold_multiplier,
-        "absolute_killing_threshold": absolute_killing_threshold,
-        "threshold_mode": "absolute" if absolute_killing_threshold is not None else "multiplier",
-        "targeted_organoids_tracked": True,
-        "filtering_needs_rerun_for": sorted(stale_filtered_cell_types),
+        "schema_version": ACTIVE_KILLING_SCHEMA_VERSION,
+        "n_death_events": n_counted,
+        "n_attributed": n_att,
+        "n_unattributed": int((df_events_annot.get("attribution_class", pd.Series(dtype=str)) == "unattributed").sum()),
+        "n_contact_events": int(len(df_contact_events)),
+        "total_kill_credit": float(df_cand["kill_credit"].sum()) if not df_cand.empty else 0.0,
+        # Kept as the key both panels print; now the headline conversion rate.
+        "overall_killing_rate": (n_att / len(df_contact_events)) if len(df_contact_events) else 0.0,
+        "conversion_rate": (n_att / len(df_contact_events)) if len(df_contact_events) else float("nan"),
+        "target_cell_diameter_um": float(dparams.target_cell_diameter_um),
+        "causal_window_min": float(aparams.causal_window_min),
+        "attribution_radius_um": float(aparams.attribution_radius_um),
+        "filtering_needs_rerun_for": sorted(stale_filtered),
     }
-    
-    print(f"{get_current_time()} - Active killing analysis complete:")
-    print(f"    Total qualifying contact events: {stats['total_contact_events']}")
-    print(f"    Total contact timepoints analyzed: {stats['total_contact_timepoints']}")
-    print(f"    Active killing timepoints: {stats['total_active_killing_timepoints']}")
-    print(f"    Overall killing rate: {stats['overall_killing_rate']:.2%}")
-    
-    # Save results
+    print(f"{get_current_time()} - Active Killing: {n_att}/{n_counted} death events attributed, "
+          f"conversion rate {stats['conversion_rate']:.3f}, total credit {stats['total_kill_credit']:.2f}")
+
     if save_results:
+        results_dir = output_dir / "analysis" / immune_cell_type / "active_killing"
         if output_subfolder:
-            results_dir = output_dir / "analysis" / immune_cell_type / "active_killing" / output_subfolder
-        else:
-            results_dir = output_dir / "analysis" / immune_cell_type / "active_killing"
+            results_dir = results_dir / output_subfolder
         results_dir.mkdir(parents=True, exist_ok=True)
-        
-        if not df_killing_per_tp.empty:
-            killing_events_path = results_dir / f"active_killing_per_timepoint_{immune_cell_type}.csv"
-            summary_path = results_dir / f"active_killing_summary_{immune_cell_type}.csv"
-            contact_events_path = results_dir / f"contact_events_{immune_cell_type}.csv"
-            
-            df_killing_per_tp.to_csv(killing_events_path, index=False)
-            df_summary.to_csv(summary_path, index=False)
-            df_contact_events.drop(columns=["contact_timepoints"]).to_csv(contact_events_path, index=False)
-            
-            print(f"{get_current_time()} - Results saved to {results_dir}")
-        
-        # Create and save advanced features CSV
-        print(f"{get_current_time()} - Creating advanced features CSV...")
-        df_advanced = create_advanced_features_csv(
-            df_immune_tracks=df_immune_tracks,
-            df_killing_per_timepoint=df_killing_per_tp,
-            observation_window=observation_window,
-        )
-        
-        advanced_features_path = results_dir / f"BEHAV3D_{immune_cell_type}_advanced_track_features.csv"
-        df_advanced.to_csv(advanced_features_path, index=False)
-        print(f"{get_current_time()} - Advanced features saved to {advanced_features_path}")
-        
-        # Print summary of new columns
-        n_killing_contacts = df_advanced["is_active_killing"].sum()
-        print(f"    Rows with active killing: {n_killing_contacts}")
+        df_cand.to_csv(results_dir / f"kill_candidates_{immune_cell_type}.csv", index=False)
+        df_events_annot.to_csv(results_dir / f"death_events_{immune_cell_type}.csv", index=False)
+        df_eff.to_csv(results_dir / f"per_effector_killing_{immune_cell_type}.csv", index=False)
+        df_tgt.to_csv(results_dir / f"per_target_death_{immune_cell_type}.csv", index=False)
+        df_smp.to_csv(results_dir / f"per_sample_killing_{immune_cell_type}.csv", index=False)
+        df_contact_events.to_csv(results_dir / f"contact_events_{immune_cell_type}.csv", index=False)
+        df_adv = create_advanced_features_csv(df_immune, df_cand, contacts)
+        df_adv.to_csv(results_dir / f"BEHAV3D_{immune_cell_type}_advanced_track_features.csv", index=False)
+        upstream = sorted({*immune_paths.values(), *[
+            str(p) for _, r in md.iterrows() for p in [resolve_tracks_image_path(r, t) for t in target_cell_types]
+            if p is not None and p.exists()]})
+        from dataclasses import asdict
+        run_params = {
+            "schema_version": ACTIVE_KILLING_SCHEMA_VERSION,
+            "immune_cell_type": immune_cell_type,
+            "target_cell_types": target_cell_types,
+            "death_event_params": asdict(dparams),
+            "attribution_params": asdict(aparams),
+            "advanced_overrides": dict(advanced or {}),
+            "upstream_paths": upstream,
+            "computed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        (results_dir / RUN_PARAMS_FILENAME).write_text(json.dumps(run_params, indent=2, default=str), encoding="utf-8")
+        print(f"{get_current_time()} - Results saved to {results_dir}")
+        if write_figures:
+            lc_col = f"im_{immune_cell_type}_line_condition"
+            cond = (dict(zip(md["sample_name"].astype(str), md[lc_col].astype(str)))
+                    if lc_col in md.columns else None)
+            try:
+                from behav3d.analysis.killing_figures import write_active_killing_figures
+                figs = write_active_killing_figures(results_dir, immune_cell_type, top_n=top_n_killers,
+                                                    condition_map=cond)
+                stats["figures"] = {k: str(v) for k, v in figs.items()}
+                print(f"{get_current_time()} - {len(figs)} figures saved to {results_dir / 'plots'}")
+            except Exception as exc:
+                # The tables above are complete and valid; a plotting failure
+                # must not discard them, but it must not pass silently either.
+                import traceback
+                traceback.print_exc()
+                stats["figures_error"] = f"{type(exc).__name__}: {exc}"
+                print(f"{get_current_time()} - ERROR: Active Killing figures failed ({exc}); "
+                      f"the result tables in {results_dir} are unaffected.")
+        _print_rerun_filtering_warning(stale_filtered)
 
-        _print_rerun_filtering_warning(stale_filtered_cell_types)
-
-    end_time = time.time()
-    h, m, s = format_time(start_time, end_time)
+    h, m, s = format_time(start_time, time.time())
     print(f"### DONE - elapsed time: {h}:{m:02}:{s:02}\n")
-    
-    return df_killing_per_tp, df_summary, stats
+    return df_cand, df_smp, stats
 
 
 def create_advanced_features_csv(
     df_immune_tracks: pd.DataFrame,
-    df_killing_per_timepoint: pd.DataFrame,
-    observation_window: int = 5,
+    df_candidates: pd.DataFrame,
+    df_contacts: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
-    Create an advanced features CSV that enriches the original immune cell track 
-    features with GLOBAL per-timepoint active killing information.
-    
-    This function adds killing information for each timepoint:
-    - is_active_killing: Boolean (True if active killing at this timepoint)
-    - death_signal_increase_{N}tp: Death signal change over observation window
-    - killing_efficiency: Ratio of actual death signal increase vs the targeted
-      organoid's own threshold (its signal at that timepoint, scaled by the multiplier,
-      or the flat absolute threshold)
-    
-    NO NAs: Where no contact occurs, is_active_killing=False and numeric values=0.0
-    
-    Parameters
-    ----------
-    df_immune_tracks : pd.DataFrame
-        Original immune cell track features (per-timepoint data)
-    df_killing_per_timepoint : pd.DataFrame
-        Output from analyze_active_killing_per_timepoint
-    observation_window : int
-        Observation window size (for column naming)
-        
-    Returns
-    -------
-    df_advanced : pd.DataFrame
-        Enhanced track features with killing information (NO NAs)
+    Merge the kill columns onto the effector per-timepoint feature table.
+
+    Credit sits on each effector's last contact frame before a death event's
+    onset (a row that always exists), so the per-timepoint ``kill_credit``
+    sums to the same total as the candidate table. Every raw column is passed
+    through unchanged, and no column is left NA (defaults in
+    ``KILL_COLUMN_DEFAULTS``).
     """
+    from behav3d.features.kill_attribution import per_timepoint_credit
+
     df = df_immune_tracks.copy()
-    
-    # Create suffix with observation window size
-    window_suffix = f"_{observation_window}tp"
-    
-    # Initialize columns with default values (NO NAs)
-    df["is_active_killing"] = False
-    df["killing_efficiency"] = 0.0
-    df[f"death_signal_increase{window_suffix}"] = 0.0
-    df["targeted_track_id"] = -1
-    df["contact_event_id"] = -1
-    
-    if df_killing_per_timepoint.empty:
-        print("No killing events to merge - returning original features with zero killing columns")
-        return df
-    
-    # Create a lookup key for merging (vectorized approach)
-    df["_merge_key"] = (
-        df["sample_name"].astype(str) + "_" + 
-        df["TrackID"].astype(str) + "_" + 
-        df["position_t"].astype(str)
-    )
-    
-    df_killing_per_timepoint = df_killing_per_timepoint.copy()
-    df_killing_per_timepoint["_merge_key"] = (
-        df_killing_per_timepoint["sample_name"].astype(str) + "_" + 
-        df_killing_per_timepoint["immune_track_id"].astype(str) + "_" + 
-        df_killing_per_timepoint["position_t"].astype(str)
-    )
-    
-    # Handle potential duplicates (same immune cell, same timepoint, multiple contact events)
-    # Keep last to match original loop behavior which would overwrite with later values
-    df_killing_deduped = df_killing_per_timepoint.drop_duplicates(
-        subset=["_merge_key"], keep="last"
-    )
-    
-    # Create indexed Series for vectorized lookup
-    killing_indexed = df_killing_deduped.set_index("_merge_key")[
-        ["is_active_killing", "killing_efficiency", "death_signal_increase", "targeted_track_id", "contact_event_id"]
-    ]
-    
-    # Vectorized assignment using reindex - matches df's merge keys to killing data
-    matched_values = killing_indexed.reindex(df["_merge_key"])
-    
-    # Update columns - use where/fillna to preserve defaults for non-matches
-    df["is_active_killing"] = matched_values["is_active_killing"].fillna(False).astype(bool).values
-    df["killing_efficiency"] = matched_values["killing_efficiency"].fillna(0.0).values
-    df[f"death_signal_increase{window_suffix}"] = matched_values["death_signal_increase"].fillna(0.0).values
-    df["targeted_track_id"] = matched_values["targeted_track_id"].fillna(-1).values
-    df["contact_event_id"] = matched_values["contact_event_id"].fillna(-1).astype(int).values
-    
-    # Clean up merge key
-    df.drop(columns=["_merge_key"], inplace=True)
-    
+    for col, default in KILL_COLUMN_DEFAULTS.items():
+        df[col] = default
+    key = ["sample_name", "TrackID", "position_t"]
+    df["_order"] = np.arange(len(df))
+
+    if df_contacts is not None and not df_contacts.empty:
+        ce = (df_contacts.sort_values("contact_event_id")
+              .drop_duplicates(["sample_name", "immune_track_id", "position_t"])
+              .rename(columns={"immune_track_id": "TrackID"})[key + ["contact_event_id"]])
+        df = df.drop(columns="contact_event_id").merge(ce, on=key, how="left")
+        df["contact_event_id"] = df["contact_event_id"].fillna(-1).astype(np.int64)
+
+    pt = per_timepoint_credit(df_candidates)
+    if not pt.empty:
+        cols = [c for c in pt.columns if c not in key]
+        df = df.drop(columns=cols).merge(pt, on=key, how="left")
+        for col in cols:
+            df[col] = df[col].fillna(KILL_COLUMN_DEFAULTS.get(col, 0))
+        # The credited contact event, where known, takes precedence.
+        if df_contacts is not None and not df_candidates.empty:
+            cred = df_candidates.sort_values("kill_credit", ascending=False).drop_duplicates(
+                ["sample_name", "immune_track_id", "last_contact_t"]).rename(
+                columns={"immune_track_id": "TrackID", "last_contact_t": "position_t"})[key + ["contact_event_id"]]
+            df = df.merge(cred.rename(columns={"contact_event_id": "_ce"}), on=key, how="left")
+            df["contact_event_id"] = np.where(df["_ce"].notna(), df["_ce"], df["contact_event_id"]).astype(np.int64)
+            df = df.drop(columns="_ce")
+
+    df = df.sort_values("_order").drop(columns="_order").reset_index(drop=True)
+    df["is_active_killing"] = df["kill_credit"].astype(float) > 0
+    df["is_nearest_effector"] = df["is_nearest_effector"].astype(bool)
+    for col in ("death_event_id", "targeted_track_id", "n_cokillers", "n_events_credited", "contact_event_id"):
+        df[col] = df[col].astype(np.int64)
+    df["targeted_cell_type"] = df["targeted_cell_type"].astype(str)
+    df["attribution_class"] = df["attribution_class"].astype(str)
+    df["cum_kill_credit"] = (df.sort_values(key).groupby(["sample_name", "TrackID"])["kill_credit"]
+                             .cumsum().reindex(df.index))
     return df
-
-
-def calculate_killing_dynamics_over_time(
-    df_killing_per_timepoint: pd.DataFrame,
-    df_immune_tracks: pd.DataFrame,
-    time_bins: Optional[List[int]] = None,
-    time_column: str = "position_t"
-) -> pd.DataFrame:
-    """
-    Calculate how active killing rate changes over the course of the experiment.
-    
-    Parameters
-    ----------
-    df_killing_per_timepoint : pd.DataFrame
-        Output from analyze_active_killing_per_timepoint
-    df_immune_tracks : pd.DataFrame
-        Immune cell tracks for time reference
-    time_bins : List[int], optional
-        Custom time bin edges. If None, uses quartiles of experiment duration.
-    time_column : str
-        Column to use for time binning
-        
-    Returns
-    -------
-    df_dynamics : pd.DataFrame
-        Killing statistics per time bin
-    """
-    if df_killing_per_timepoint.empty:
-        return pd.DataFrame()
-    
-    if time_bins is None:
-        # Quartiles of the OBSERVED span, not of [0, max]: the analysis may be
-        # restricted to a timepoint window that does not start at 0, in which
-        # case fixed 0-based edges leave the leading bins empty (and pd.cut is
-        # left-open, so the very first timepoint would fall outside them).
-        min_t = int(df_immune_tracks["position_t"].min())
-        max_t = int(df_immune_tracks["position_t"].max())
-        span = max(max_t - min_t, 1)
-        time_bins = [
-            min_t - 1,
-            min_t + span // 4,
-            min_t + span // 2,
-            min_t + 3 * span // 4,
-            max_t + 1,
-        ]
-    
-    df = df_killing_per_timepoint.copy()
-    df["time_bin"] = pd.cut(
-        df[time_column], 
-        bins=time_bins, 
-        labels=[f"{time_bins[i]}-{time_bins[i+1]}" for i in range(len(time_bins)-1)]
-    )
-    
-    df_dynamics = df.groupby(["sample_name", "time_bin"]).agg(
-        n_contact_timepoints=("position_t", "count"),
-        n_active_killing=("is_active_killing", "sum"),
-        mean_death_increase=("death_signal_increase", "mean"),
-    ).reset_index()
-    
-    df_dynamics["killing_rate"] = df_dynamics["n_active_killing"] / df_dynamics["n_contact_timepoints"]
-    
-    return df_dynamics
-
-
 
 
 def calculate_invasiveness_single_timepoint(args):

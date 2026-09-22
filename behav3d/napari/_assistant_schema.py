@@ -72,7 +72,6 @@ CHOICES: dict[str, list] = {
         "ZYX", "CYX", "TYX", "YX",
     ],
     "labels_mode": ["same_for_all", "per_sample"],
-    "death_signal_column": ["percentage_dead_mask", "mean_dead_dye"],
 }
 
 # ---------------------------------------------------------------------------
@@ -156,11 +155,11 @@ _DESCRIPTIONS: dict[str, str] = {
     "trajectory_trim_mode": "Whether trajectory clustering keeps the first or last requested timepoints. This duplicates optional trimming in Filtering.",
     "behavioral_trajectory_size": "Trajectory window size for clustering; it cannot exceed the track trim length set in Filtering.",
     # active killing
-    "observation_window": "Timepoints counted forward from contact in which a death-signal increase is assessed. Choose it from the expected biological delay and imaging cadence.",
-    "death_signal_column": "Death or reporter signal. Dead-mask pixel count with an absolute threshold is the general default; percentage assumes comparable target sizes, and mean intensity suits diffuse reporters.",
-    "killing_threshold_multiplier": "Relative increase over the target's own baseline. Reserve it for a single target line or heterogeneous within-well baselines; it can bias comparisons across target lines.",
-    "min_contact_duration": "Minimum effector-target contact timepoints required for active killing. Choose it from biological plausibility and acquisition cadence.",
-    "absolute_killing_threshold": "Fixed signal increase used for active killing. Calibrate a dead-pixel threshold from cell diameter and XY pixel size, then validate visually.",
+    "target_cell_diameter_um": "Diameter of ONE target cell in µm (not the organoid). Sets the death threshold: a new connected dead-mask patch must reach a quarter of one cell's volume to count as a death event. Check it with 'Preview death patches' on a frame you trust; lower it if real deaths are missed.",
+    "causal_window_min": "Minutes after an effector's contact within which a death event can still be credited to it. About 120 min for organoid / carcinoma targets (contact-to-apoptosis lag ~1.8 +/- 1.5 h), about 30 min for haematologic targets.",
+    "attribution_radius_um": "Maximum surface-to-surface distance (µm) between an effector and a death patch for the effector to be a candidate killer. Candidates must also have touched that target (Contact Threshold) within the causal window. Default 15 µm.",
+    "advanced": "YAML-only overrides of Active Killing's derived values and literature constants (e.g. min_patch_volume_um3, damage_tau_min). Not needed for normal use; any override is recorded in active_killing_run_params.json and breaks comparability with other datasets.",
+    "target_types": "Target cell types (organoids and/or other cell types) whose death events are attributed to the selected effector.",
     # behavioral state classification
     "hmm_n_states_mode": "Use a fixed HMM state count for routine analysis; automatic selection has not performed well.",
     "hmm_feature_smoothing_window": "Feature smoothing window. Usually match the rolling feature window; use 1 for true single-frame events.",

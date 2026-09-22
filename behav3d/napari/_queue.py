@@ -925,15 +925,14 @@ class ProcessingQueuePanel(QWidget):
                 immune_type = self._pending_active_killing_params.get("immune_type")
             if not immune_type:
                 return True
+            # Active Killing reads only the RAW feature CSV (never the filtered
+            # one) plus the dead-mask / tracked-label zarrs, which the run
+            # itself validates with an actionable message.
             feat_csv = (
                 out_dir / "analysis" / immune_type / "track_features" /
                 f"BEHAV3D_{immune_type}_combined_track_features.csv"
             )
-            filtered_csv = (
-                out_dir / "analysis" / immune_type / "track_features" /
-                f"BEHAV3D_{immune_type}_combined_track_features_filtered.csv"
-            )
-            return not (feat_csv.exists() or filtered_csv.exists())
+            return not feat_csv.exists()
 
         return False
 

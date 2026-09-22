@@ -89,12 +89,10 @@ _LEAF_LABELS = {
     "umap_min_dist": "UMAP minimum distance",
     "umap_n_neighbors": "UMAP neighbors",
     "nr_of_clusters": "number of clusters",
-    "observation_window": "observation window",
-    "death_signal_column": "death-signal column",
-    "killing_threshold_multiplier": "killing threshold multiplier",
-    "min_contact_duration": "minimum contact duration",
-    "use_absolute_threshold": "use absolute killing threshold",
-    "absolute_killing_threshold": "absolute killing threshold",
+    "target_cell_diameter_um": "target cell diameter",
+    "min_patch_volume_um3": "minimum death-patch volume",
+    "causal_window_min": "causal window",
+    "attribution_radius_um": "attribution radius",
     "save_results": "save results",
 }
 

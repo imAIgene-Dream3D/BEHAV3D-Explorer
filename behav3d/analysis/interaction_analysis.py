@@ -26,8 +26,8 @@ import seaborn as sns
 def _norm_track_id(value) -> str:
     """Canonical string form of a track id.
 
-    ``contact_events_*.csv`` writes ``target_track_ids`` through a float
-    round-trip, so an id can arrive as ``"1.0"`` while the track-feature
+    CSV round-trips can write a track id through a float, so an id can
+    arrive as ``"1.0"`` while the track-feature
     tables hold ``"1"``. These are joined as plain strings, so without
     normalising, every float-formatted id silently fails to match and the
     row is dropped as ``organoid_type == "unknown"``. Strip the redundant
@@ -1431,17 +1431,12 @@ def run_multi_organoid_interaction_comparison(
     )
     has_killing_data = not df_contact_events.empty
     if has_killing_data:
-        _n_ev = df_contact_events["contact_event_id"].nunique()
-        _n_targeted = int(df_contact_events["has_active_killing"].sum())
-        _n_kill_events = (
-            df_contact_events.loc[
-                df_contact_events["has_active_killing"],
-                "contact_event_id",
-            ].nunique()
-        )
+        _n_ev = len(df_contact_events)
+        _n_kill_events = int(df_contact_events["has_attributed_kill"].sum())
+        _credit = float(df_contact_events["kill_credit"].sum())
         print(f"   Active killing data loaded: {_n_ev} contact events "
-              f"({_n_kill_events} with active killing, "
-              f"{_n_targeted} targeted organoid hits)")
+              f"({_n_kill_events} with an attributed kill, "
+              f"{_credit:.2f} kill credit in total)")
     else:
         print("   \u2139\ufe0f  No active killing data found \u2014 "
               "panels C & D require running Active Killing analysis first")
@@ -2147,11 +2142,11 @@ def _resolve_active_killing_csv_paths(
     Locate active-killing CSVs under ``active_killing/`` or a target subfolder.
 
     Active killing writes to ``active_killing/<target>/`` (or ``combined/`` when
-    multiple targets are selected). Legacy runs used a flat ``active_killing/``
-    layout. Returns ``(events_path, killing_path)``; either may be ``None``.
+    multiple targets are selected). Returns ``(contact_events_path,
+    kill_candidates_path)``; either may be ``None``.
     """
     events_name = f"contact_events_{im_type}.csv"
-    killing_name = f"active_killing_per_timepoint_{im_type}.csv"
+    killing_name = f"kill_candidates_{im_type}.csv"
 
     flat_events = ak_dir / events_name
     if flat_events.exists():
@@ -2199,181 +2194,103 @@ def _load_active_killing_data(
     line_condition_map: dict = None,
 ) -> pd.DataFrame:
     """
-    Load contact events from active-killing CSVs and link each event to
-    its target organoid type (and fate, when ``track_summary`` is given).
+    Load Active Killing contact events and the kill credit each one earned.
 
-    For each immune type whose active-killing output exists, reads
-    ``contact_events_{im}.csv`` and ``active_killing_per_timepoint_{im}.csv``,
-    determines which events contain active killing, and explodes the
-    ``target_track_ids`` field so that each row represents one
-    (contact_event \u00d7 target_organoid) pair.
+    ``contact_events_{im}.csv`` already has one row per (effector, target)
+    contact event with its ``organoid_type``, so no exploding or organoid-type
+    lookup is needed. ``kill_candidates_{im}.csv`` has one row per (death event,
+    candidate effector) with ``kill_credit`` and the ``contact_event_id`` it was
+    credited to. Each attributed death event carries one unit of credit in
+    total, so summing credit never double counts co-contacting effectors.
 
     Parameters
     ----------
     track_summary : pd.DataFrame, optional
-        Per-organoid summary with columns ``sample_name``, ``TrackID`` and
-        ``fate`` (``"Live"`` / ``"Dying"``). When provided, the returned
-        DataFrame gains a ``fate`` column per (event, target-organoid) row
-        used by the dashboard panels to split by fate. When missing, ``fate``
-        defaults to ``"Live"`` so downstream plotting still works.
+        Per-organoid summary with ``sample_name``, ``TrackID`` and ``fate``
+        (``"Live"`` / ``"Dying"``). Note that fate is the whole-organoid death
+        call, independent of attributed kills (localised events): an organoid
+        can be "Live" and still have attributed kills. Missing -> ``"Live"``.
     period_bounds : dict, optional
-        ``{sample_name: (t_start, t_end)}`` inclusive ``position_t`` bounds for
-        the absolute analysis window. When given, contact events that *overlap*
-        their sample's bounds are kept and ``contact_duration`` is recomputed as
-        the number of timepoints inside the window only (not the full event
-        length). Per-timepoint killing is counted only within those bounds.
-        Samples not present in the dict have no timepoints in the window and
-        are dropped. ``None`` (default) means no window restriction.
+        ``{sample_name: (t_start, t_end)}`` inclusive ``position_t`` bounds.
+        Contact events overlapping the window are kept with their duration
+        clipped to it; kill credit is counted only for death events whose
+        **onset** falls inside the window (Active Killing scans the full
+        movie; the window is applied here, where its outputs are read).
     line_condition_map : dict, optional
-        ``{sample_name: line_condition}``. When given, the returned DataFrame
-        gains a ``line_condition`` column (per sample) so the dashboard can
-        group by line condition instead of organoid type.
+        ``{sample_name: line_condition}`` for grouping by line condition.
 
     Returns
     -------
     pd.DataFrame
-        Columns: contact_event_id, sample_name, immune_track_id,
-        immune_type, target_track_id, organoid_type, contact_duration,
-        has_active_killing, n_killing_tp, fate.
-        Empty DataFrame if no active-killing data is found.
+        Columns: contact_event_id, sample_name, immune_track_id, immune_type,
+        target_track_id, organoid_type, line_condition, fate,
+        contact_duration, has_attributed_kill, kill_credit,
+        n_attributed_events. Empty if no Active Killing output is found.
     """
-    # Build (sample_name, TrackID-str) -> organoid_type lookup
-    track_type_map: dict = {}
-    for org_type in organoid_types:
-        csv_path = (
-            output_dir / "analysis" / org_type / "track_features"
-            / f"BEHAV3D_{org_type}_combined_track_features_filtered.csv"
-        )
-        if not csv_path.exists():
-            continue
-        df_org = pd.read_csv(csv_path, usecols=["sample_name", "TrackID"])
-        for _, row in (
-            df_org[["sample_name", "TrackID"]].drop_duplicates().iterrows()
-        ):
-            key = (str(row["sample_name"]), _norm_track_id(row["TrackID"]))
-            track_type_map.setdefault(key, org_type)
-
+    organoid_types = list(organoid_types or [])
     all_events: list = []
 
     for im_type in immune_types:
         ak_dir = output_dir / "analysis" / im_type / "active_killing"
-        events_path, killing_path = _resolve_active_killing_csv_paths(
+        events_path, cand_path = _resolve_active_killing_csv_paths(
             ak_dir, im_type, organoid_types=organoid_types,
         )
-
         if events_path is None or not events_path.exists():
             continue
-
         df_ev = pd.read_csv(events_path)
-        if df_ev.empty:
+        required = {"contact_event_id", "sample_name", "immune_track_id",
+                    "organoid_type", "target_track_id", "contact_duration"}
+        if df_ev.empty or not required.issubset(df_ev.columns):
+            # Output of the previous algorithm (per-effector "any target"
+            # events with a target_track_ids list) is not readable as-is.
+            if not df_ev.empty:
+                print(f"   \u26a0\ufe0f  {events_path.name} was written by the previous Active "
+                      f"Killing algorithm; re-run Active Killing for {im_type}.")
             continue
+        df_ev = df_ev.copy()
         df_ev["immune_type"] = im_type
-
-        # Absolute analysis window: keep overlapping events and clip duration
-        # to timepoints inside the per-sample bounds.
+        if organoid_types:
+            df_ev = df_ev[df_ev["organoid_type"].isin(organoid_types)]
         if period_bounds is not None:
             df_ev = _clip_contact_events_to_period(df_ev, period_bounds)
-            if df_ev.empty:
-                continue
-
-        # Per-target active-killing attribution from the per-timepoint CSV.
-        #
-        # ``advanced_timepoint_features.analyze_active_killing_per_timepoint``
-        # writes ``targeted_track_id`` only on timepoints where
-        # ``is_active_killing=True`` (it is the specific organoid whose
-        # death signal increase triggered the classification; see
-        # behav3d/features/advanced_timepoint_features.py line 343). So
-        # each killing timepoint is attributable to exactly one target.
-        per_target_kill = None
-        if killing_path is not None and killing_path.exists():
-            df_tp = pd.read_csv(killing_path)
-            required_cols = {
-                "is_active_killing", "contact_event_id", "sample_name",
-                "targeted_track_id",
-            }
-            if not df_tp.empty and required_cols.issubset(df_tp.columns):
-                # Restrict killing timepoints to the analysis window so the
-                # killing-efficiency numerator only counts kills inside it.
-                if period_bounds is not None and "position_t" in df_tp.columns:
-                    df_tp = df_tp[
-                        df_tp.apply(
-                            lambda r: _in_bounds(
-                                period_bounds, r["sample_name"], r["position_t"],
-                            ),
-                            axis=1,
-                        )
-                    ].copy()
-                kill_mask = df_tp["is_active_killing"].astype(bool)
-                df_tp_kill = df_tp.loc[
-                    kill_mask
-                    & df_tp["targeted_track_id"].notna(),
-                    ["contact_event_id", "sample_name",
-                     "targeted_track_id"],
-                ].copy()
-                if not df_tp_kill.empty:
-                    df_tp_kill["targeted_track_id"] = (
-                        df_tp_kill["targeted_track_id"]
-                        .astype(float).astype("Int64").astype(str)
-                        .map(_norm_track_id)
-                    )
-                    per_target_kill = (
-                        df_tp_kill.groupby(
-                            ["sample_name", "contact_event_id",
-                             "targeted_track_id"],
-                        ).size().rename("n_killing_tp").reset_index()
-                    )
-
-        # Explode target_track_ids -> one row per (event, target organoid)
-        if "target_track_ids" not in df_ev.columns:
+        if df_ev.empty:
             continue
-        df_ev["_targets"] = (
-            df_ev["target_track_ids"].astype(str).str.split(",")
-        )
-        df_ex = df_ev.explode("_targets")
-        df_ex["target_track_id"] = df_ex["_targets"].map(_norm_track_id)
-        df_ex = df_ex[
-            df_ex["target_track_id"].ne("")
-            & df_ex["target_track_id"].ne("nan")
-        ]
 
-        # Attach per-target killing (True only for the actual targeted
-        # organoid, not for co-contacted organoids during the same event).
-        df_ex["sample_name"] = df_ex["sample_name"].astype(str)
-        df_ex["target_track_id"] = df_ex["target_track_id"].astype(str)
-        if per_target_kill is not None and not per_target_kill.empty:
-            df_ex = df_ex.merge(
-                per_target_kill.rename(
-                    columns={"targeted_track_id": "target_track_id"},
-                ),
-                on=["sample_name", "contact_event_id", "target_track_id"],
-                how="left",
-            )
+        credit = None
+        if cand_path is not None and cand_path.exists():
+            df_c = pd.read_csv(cand_path)
+            if not df_c.empty and {"contact_event_id", "kill_credit", "sample_name"}.issubset(df_c.columns):
+                if period_bounds is not None and "t_onset" in df_c.columns:
+                    keep = [
+                        _in_bounds(period_bounds, sn, t)
+                        for sn, t in zip(df_c["sample_name"], df_c["t_onset"])
+                    ]
+                    df_c = df_c[keep]
+                if not df_c.empty:
+                    credit = (
+                        df_c.groupby(["sample_name", "contact_event_id"])
+                        .agg(kill_credit=("kill_credit", "sum"),
+                             n_attributed_events=("death_event_id", "nunique"))
+                        .reset_index()
+                    )
+        df_ev["sample_name"] = df_ev["sample_name"].astype(str)
+        if credit is not None:
+            credit["sample_name"] = credit["sample_name"].astype(str)
+            df_ev = df_ev.merge(credit, on=["sample_name", "contact_event_id"], how="left")
         else:
-            df_ex["n_killing_tp"] = np.nan
-        df_ex["n_killing_tp"] = (
-            df_ex["n_killing_tp"].fillna(0).astype(int)
-        )
-        df_ex["has_active_killing"] = df_ex["n_killing_tp"] > 0
-
-        # Map to organoid type
-        df_ex["organoid_type"] = [
-            track_type_map.get(
-                (str(sn), str(tid)), "unknown"
-            )
-            for sn, tid in zip(df_ex["sample_name"], df_ex["target_track_id"])
-        ]
-        df_ex = df_ex[df_ex["organoid_type"] != "unknown"]
-
-        all_events.append(df_ex)
+            df_ev["kill_credit"] = np.nan
+            df_ev["n_attributed_events"] = np.nan
+        df_ev["kill_credit"] = df_ev["kill_credit"].fillna(0.0).astype(float)
+        df_ev["n_attributed_events"] = df_ev["n_attributed_events"].fillna(0).astype(int)
+        df_ev["has_attributed_kill"] = df_ev["kill_credit"] > 0
+        df_ev["target_track_id"] = df_ev["target_track_id"].map(_norm_track_id)
+        all_events.append(df_ev)
 
     if not all_events:
         return pd.DataFrame()
 
     df_all = pd.concat(all_events, ignore_index=True)
 
-    # Attach fate of the target organoid from track_summary when available.
-    # Default to "Live" for any organoid missing from track_summary (e.g. when
-    # death data is not present) so downstream grouping still works.
     if (
         track_summary is not None
         and not track_summary.empty
@@ -2382,10 +2299,8 @@ def _load_active_killing_data(
         ts = track_summary[["sample_name", "TrackID", "fate"]].copy()
         ts["sample_name"] = ts["sample_name"].astype(str)
         ts["TrackID"] = ts["TrackID"].map(_norm_track_id)
-        df_all["sample_name"] = df_all["sample_name"].astype(str)
-        df_all["target_track_id"] = df_all["target_track_id"].astype(str)
         df_all = df_all.merge(
-            ts.rename(columns={"TrackID": "target_track_id"}),
+            ts.rename(columns={"TrackID": "target_track_id"}).drop_duplicates(["sample_name", "target_track_id"]),
             on=["sample_name", "target_track_id"],
             how="left",
         )
@@ -2393,8 +2308,6 @@ def _load_active_killing_data(
     else:
         df_all["fate"] = "Live"
 
-    # Attach immune line condition (per sample) when requested, so the
-    # dashboard can group by line_condition instead of organoid type.
     if line_condition_map:
         df_all["line_condition"] = (
             df_all["sample_name"].astype(str)
@@ -2405,7 +2318,7 @@ def _load_active_killing_data(
     keep = [
         "contact_event_id", "sample_name", "immune_track_id", "immune_type",
         "target_track_id", "organoid_type", "line_condition", "fate",
-        "contact_duration", "has_active_killing", "n_killing_tp",
+        "contact_duration", "has_attributed_kill", "kill_credit", "n_attributed_events",
     ]
     return df_all[[c for c in keep if c in df_all.columns]]
 
@@ -2443,7 +2356,7 @@ _GROUP_SEP = " | "
 # semantic colour appears everywhere:
 #   - fate: dead = red, live = green (full-strength for box edges, strips, bars)
 #   - fate (light): for violin fills behind the per-fate dot clouds
-#   - killing status: purple = active killing event, blue = non-killing event
+#   - killing status: purple = contact event with an attributed kill, blue = without
 _FATE_COLORS = {"Dying": "#E53935", "Live": "#43A047"}
 _FATE_COLORS_LIGHT = {"Dying": "#EF9A9A", "Live": "#A5D6A7"}
 _KILLING_COLORS = {
@@ -2511,18 +2424,19 @@ def plot_interaction_overview_dashboard(
     lc_maps: dict = None,
 ):
     """
-    Active-killing dashboard: two panels derived from the per-event / per-
-    timepoint active-killing CSVs written by ``advanced_timepoint_features``
-    (``contact_events_{im}.csv`` and ``active_killing_per_timepoint_{im}.csv``).
+    Active-killing dashboard: two panels derived from the Active Killing
+    CSVs written by ``advanced_timepoint_features``
+    (``contact_events_{im}.csv`` and ``kill_candidates_{im}.csv``).
 
     Panels
     ------
-    Left  -- Contact Event Duration per (primary x fate); one point
-             per immune-cell <-> organoid contact event, colored by whether
-             that event actively killed the targeted organoid.
-    Right -- Active Killing Efficiency per (primary x fate); for each
-             (primary, fate) group, the % of its contact events that
-             actively killed the targeted organoid.
+    Top    -- Contact Event Duration per (primary x fate); one point per
+              effector <-> target contact event, colored by whether that
+              event was credited with an attributed death event.
+    Bottom -- Attributed kills per (primary x fate); for each group, the %
+              of its contact events credited with an attributed kill, with
+              the total kill credit annotated (density-independent: each
+              death event carries one unit of credit in total).
 
     ``group_by`` mirrors the violin / before-death curve:
     ``"organoid_type"`` keeps organoid types separate on the x-axis;
@@ -2585,7 +2499,7 @@ def plot_interaction_overview_dashboard(
 
     # Dynamic group count drives figure width: 2 x N_present_org_types.
     # Panels are now stacked vertically (contact duration on top as the
-    # main view, active-killing efficiency as a smaller sub-panel below),
+    # main view, attributed kills as a smaller sub-panel below),
     # so the figure no longer needs to stretch horizontally to fit two
     # side-by-side panels.
     n_groups = max(2 * len(org_types), 4)
@@ -2634,12 +2548,11 @@ def _panel_contact_duration(
     """
     Contact Event Duration panel.
 
-    Each point = one immune-cell <-> organoid contact event (as written to
-    ``contact_events_{im}.csv`` by the active-killing feature step). Points
-    are grouped on the x-axis by (primary, fate of the contacted
-    organoid) and colored by whether that event actively killed the
-    targeted organoid. x-axis scales dynamically to ``2 * len(org_types)``
-    slots; fate order is Dead then Live per group.
+    Each point = one effector <-> target contact event (as written to
+    ``contact_events_{im}.csv`` by Active Killing). Points are grouped on the
+    x-axis by (primary, fate of the contacted organoid) and colored by whether
+    that event was credited with an attributed death event. x-axis scales
+    dynamically to ``2 * len(org_types)`` slots; fate order is Dead then Live.
     """
     _style_dashboard_ax(ax)
 
@@ -2670,7 +2583,7 @@ def _panel_contact_duration(
         ax.set_title(panel_title, fontsize=13, fontweight="semibold", pad=10)
         return
 
-    df["killing_label"] = df["has_active_killing"].map(
+    df["killing_label"] = df["has_attributed_kill"].map(
         {True: "Active killing event", False: "Non-killing event"},
     )
     df["group"] = [
@@ -2794,13 +2707,13 @@ def _panel_contact_duration(
             [0], [0], marker="o", linestyle="", markersize=7,
             markerfacecolor=kill_color["Active killing event"],
             markeredgecolor="white", markeredgewidth=0.5,
-            label="Active killing event (left)",
+            label="Contact with an attributed kill (left)",
         ),
         plt.Line2D(
             [0], [0], marker="o", linestyle="", markersize=7,
             markerfacecolor=kill_color["Non-killing event"],
             markeredgecolor="white", markeredgewidth=0.5,
-            label="Non-killing event (right)",
+            label="No attributed kill (right)",
         ),
     ]
     if use_lc_markers:
@@ -2841,19 +2754,24 @@ def _panel_killing_proportion(
     primary_label: str = "organoid",
 ):
     """
-    Active Killing Efficiency panel.
+    Attributed-kills panel.
 
-    One bar per (organoid_type, fate): the percentage of that group's
-    contact events that actively killed the targeted organoid. Numerator
-    and denominator count contact events (not organoids, not immune cells);
-    killing attribution uses the per-target ``targeted_track_id`` column of
-    ``active_killing_per_timepoint_{im}.csv``. Aggregates across all
-    selected immune types (per-immune breakdown already lives in
-    ``active_killing_summary_{im}.csv``).
+    One bar per (organoid_type, fate): the percentage of that group's contact
+    events that were credited with at least one attributed death event
+    (``kill_candidates_{im}.csv``). Numerator and denominator both count
+    contact events, one per (effector, target) pair. Each bar is also
+    annotated with the total kill credit, which is density-independent: each
+    death event carries exactly one unit of credit shared among the effectors
+    that caused it, so adding bystanders never raises it. Aggregates across
+    all selected immune types (per-effector and per-sample numbers live in
+    ``per_effector_killing_{im}.csv`` / ``per_sample_killing_{im}.csv``).
+
+    Fate is the whole-organoid death call and is independent of attributed
+    kills (localised events), so "Live" organoids can carry attributed kills.
     """
     _style_dashboard_ax(ax)
 
-    panel_title = f"Active killing efficiency per {primary_label} fate"
+    panel_title = f"Attributed kills per {primary_label} fate"
 
     if df_contact_events.empty:
         ax.text(
@@ -2877,16 +2795,15 @@ def _panel_killing_proportion(
         ax.set_title(panel_title, fontsize=13, fontweight="semibold", pad=10)
         return
 
-    # Aggregate across all selected immune types. ``has_active_killing`` is
-    # per (event, target) thanks to the per-target attribution done in
-    # _load_active_killing_data, so summing gives the number of contact
-    # events that killed this specific targeted organoid without double
-    # counting co-contacted organoids.
+    # Aggregate across all selected immune types. Contact events are per
+    # (effector, target) pair and credit is shared per death event, so
+    # neither the count nor the credit double counts co-contacting cells.
     summary = (
         df.groupby(["organoid_type", "fate"])
           .agg(
               n_events=("contact_event_id", "count"),
-              n_killing=("has_active_killing", "sum"),
+              n_killing=("has_attributed_kill", "sum"),
+              credit=("kill_credit", "sum"),
           )
           .reset_index()
     )
@@ -2902,6 +2819,7 @@ def _panel_killing_proportion(
     vals = []
     n_events_list = []
     n_kill_list = []
+    credit_list = []
     colors = []
     for (org, fate) in group_pairs:
         row = summary[
@@ -2911,10 +2829,12 @@ def _panel_killing_proportion(
             vals.append(float(row["killing_pct"].iloc[0]))
             n_events_list.append(int(row["n_events"].iloc[0]))
             n_kill_list.append(int(row["n_killing"].iloc[0]))
+            credit_list.append(float(row["credit"].iloc[0]))
         else:
             vals.append(0.0)
             n_events_list.append(0)
             n_kill_list.append(0)
+            credit_list.append(0.0)
         colors.append(_FATE_COLORS[fate])
 
     bar_w = 0.6
@@ -2923,9 +2843,9 @@ def _panel_killing_proportion(
         linewidth=0.8, alpha=0.88,
     )
 
-    # Annotate each bar with killing_events / total_events.
-    for xi, v, ne, nk in zip(x, vals, n_events_list, n_kill_list):
-        txt = f"{nk}/{ne} events" if ne > 0 else "0/0 events"
+    # Annotate each bar with credited/total events and the total kill credit.
+    for xi, v, ne, nk, cr in zip(x, vals, n_events_list, n_kill_list, credit_list):
+        txt = f"{nk}/{ne} events\n{cr:.1f} kill credit" if ne > 0 else "0/0 events"
         ax.text(
             xi, v + 1.2, txt,
             ha="center", va="bottom", fontsize=8.5,
@@ -2956,7 +2876,7 @@ def _panel_killing_proportion(
         f"{primary_label.capitalize()} / fate", fontsize=11, labelpad=8,
     )
     ax.set_ylabel(
-        "Contact events that actively killed (%)",
+        "Contact events with an attributed kill (%)",
         fontsize=11, labelpad=8,
     )
     ax.set_title(panel_title, fontsize=13, fontweight="semibold", pad=10)

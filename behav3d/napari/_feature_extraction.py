@@ -2328,222 +2328,53 @@ def _render_killing_event_gifs(
     output_dir,
     immune_type,
     target_types,
-    observation_window,
-    df_killing,
     n_top=5,
     log_fn=None,
 ):
-    """Render the top-N active-killing events as animated GIFs.
+    """Render the top-N killers' largest attributed death events as GIFs.
 
-    Ported from the notebook gallery (``behav3d/widgets/analysis.py``). For each
-    of the top-N immune cells (ranked by number of active-killing timepoints) a
-    cropped maximum-intensity-projection movie is built around the killing event
-    — grayscale raw signal, with the dead mask overlaid in red and the active
-    immune cell in purple, one frame per timepoint — and written to
-    ``analysis/<immune>/active_killing/<subfolder>/gallery/<sample>/``.
-
-    Reads the canonical output zarrs (raw ``<sample>.zarr``, tracked immune
-    ``<sample>_<immune>_tracked.zarr`` and ``<sample>_mask_dead.zarr``), the same
-    path scheme every napari tab uses.  Returns the list of written GIF paths.
+    Thin wrapper over :func:`behav3d.analysis.killing_figures.render_killing_event_gifs`
+    (shared with the notebook gallery), resolving the results subfolder the
+    same way the run does.
     """
-    from PIL import Image as PILImage, ImageDraw
-    from behav3d.io.images import load_image
-
-    def _log(msg):
-        if log_fn is not None:
-            log_fn(msg)
-
-    output_dir = Path(output_dir)
-    df = df_killing.copy()
-    if "TrackID" in df.columns and "immune_track_id" not in df.columns:
-        df["immune_track_id"] = df["TrackID"]
-    for _old, _new in (
-        ("centroid-0", "position_z"),
-        ("centroid-1", "position_y"),
-        ("centroid-2", "position_x"),
-    ):
-        if _old in df.columns and _new not in df.columns:
-            df[_new] = df[_old]
-
-    if "is_active_killing" not in df.columns:
-        return []
-    df_active = df[df["is_active_killing"] == True].copy()
-    if df_active.empty:
-        return []
+    from behav3d.analysis.killing_figures import render_killing_event_gifs
 
     subfolder = (
         "combined" if len(target_types) > 1
         else (target_types[0] if target_types else immune_type)
     )
-
-    # Top-N killers *per sample* (matches the notebook gallery, which shows the
-    # top-N most active immune cells for each sample rather than an overall
-    # top-N across all samples pooled together).
-    top_killers = (
-        df_active.groupby(["sample_name", "immune_track_id"])
-        .size()
-        .groupby(level="sample_name", group_keys=False)
-        .nlargest(int(n_top))
+    results_dir = Path(output_dir) / "analysis" / immune_type / "active_killing" / subfolder
+    return render_killing_event_gifs(
+        metadata, output_dir, immune_type, results_dir, top_n=int(n_top), log_fn=log_fn,
     )
 
-    def _mat(a):
-        if a is None:
-            return None
-        if hasattr(a, "compute"):
-            a = a.compute()
-        return np.asarray(a)
 
-    written = []
-    for (sample_name, track_id), _count in top_killers.items():
-        try:
-            rows = df_active[
-                (df_active["sample_name"] == sample_name)
-                & (df_active["immune_track_id"] == track_id)
-            ]
-            if rows.empty:
-                continue
-            # Feature the killer's *best* event by killing_efficiency (matches
-            # the notebook gallery); fall back to earliest timepoint if the
-            # efficiency column is unavailable.
-            if "killing_efficiency" in rows.columns:
-                event_row = rows.sort_values(
-                    "killing_efficiency", ascending=False
-                ).iloc[0]
-            else:
-                event_row = rows.sort_values("position_t").iloc[0]
-            t_id = int(track_id)
-            t_start = int(event_row["position_t"])
-            t_end = t_start + (2 * int(observation_window))
-
-            md_match = metadata[metadata["sample_name"] == sample_name]
-            if md_match.empty:
-                continue
-            md_row = md_match.iloc[0]
-            res_xy = float(md_row.get("pixel_distance_xy", 1.0))
-            res_z = float(md_row.get("pixel_distance_z", 1.0))
-
-            img_dir = Path(output_dir, "images", sample_name)
-            raw_path = img_dir / f"{sample_name}.zarr"
-            immune_path = img_dir / f"{sample_name}_{immune_type}_tracked.zarr"
-            dead_path = img_dir / f"{sample_name}_mask_dead.zarr"
-
-            cz = int(event_row["position_z"] / res_z)
-            cy = int(event_row["position_y"] / res_xy)
-            cx = int(event_row["position_x"] / res_xy)
-            win = 60
-
-            def _load_tp(path, tp):
-                if not Path(path).exists():
-                    return None
-                try:
-                    img = load_image(path)
-                    if tp >= img.shape[0]:
-                        return None
-                    return img[tp]
-                except Exception:
-                    return None
-
-            def _crop(img):
-                if img is None:
-                    return None
-                try:
-                    y, x = img.shape[-2], img.shape[-1]
-                    y1, y2 = max(0, cy - win), min(y, cy + win)
-                    x1, x2 = max(0, cx - win), min(x, cx + win)
-                    return img[..., y1:y2, x1:x2]
-                except Exception:
-                    return None
-
-            def _mip(t):
-                c_raw = _mat(_crop(_load_tp(raw_path, t)))
-                if c_raw is None:
-                    return None
-                c_mt = _mat(_crop(_load_tp(immune_path, t)))
-                c_md = _mat(_crop(_load_tp(dead_path, t)))
-
-                if c_raw.ndim == 4:            # (C, Z, Y, X)
-                    mip_gray = np.max(np.max(c_raw, axis=0), axis=0).astype(np.float32)
-                else:                          # (Z, Y, X)
-                    mip_gray = np.max(c_raw, axis=0).astype(np.float32)
-                p1, p99 = np.percentile(mip_gray, [1, 99])
-                mip_gray = np.clip((mip_gray - p1) / (p99 - p1 + 1e-10), 0, 1)
-
-                mip_dead = (
-                    np.max(c_md > 0, axis=0) if c_md is not None
-                    else np.zeros_like(mip_gray)
-                )
-                mip_active = (
-                    np.max(c_mt == t_id, axis=0) if c_mt is not None
-                    else np.zeros_like(mip_gray)
-                )
-
-                rgb = np.stack([mip_gray, mip_gray, mip_gray], axis=-1)
-                a_red, a_pur = 0.3, 0.5
-                rgb[mip_dead > 0, 0] = rgb[mip_dead > 0, 0] * (1 - a_red) + a_red
-                rgb[mip_dead > 0, 1] = rgb[mip_dead > 0, 1] * (1 - a_red)
-                rgb[mip_dead > 0, 2] = rgb[mip_dead > 0, 2] * (1 - a_red)
-                rgb[mip_active > 0, 0] = rgb[mip_active > 0, 0] * (1 - a_pur) + a_pur
-                rgb[mip_active > 0, 1] = rgb[mip_active > 0, 1] * (1 - a_pur)
-                rgb[mip_active > 0, 2] = rgb[mip_active > 0, 2] * (1 - a_pur) + a_pur
-                return np.clip(rgb * 255, 0, 255).astype(np.uint8)
-
-            max_t = t_end
-            try:
-                max_t = int(
-                    df_killing[df_killing["sample_name"] == sample_name]["position_t"].max()
-                )
-            except Exception:
-                pass
-
-            frames = []
-            for t in range(t_start, min(t_end, max_t) + 1):
-                arr = _mip(t)
-                if arr is None:
-                    continue
-                pil = PILImage.fromarray(arr)
-                draw = ImageDraw.Draw(pil)
-                w = pil.size[0]
-                draw.text((w - 49, 6), f"T={t}", fill="black")
-                draw.text((w - 50, 5), f"T={t}", fill="white")
-                frames.append(pil)
-
-            if not frames:
-                continue
-
-            gallery_dir = Path(
-                output_dir, "analysis", immune_type, "active_killing",
-                subfolder, "gallery", sample_name,
-            )
-            gallery_dir.mkdir(parents=True, exist_ok=True)
-            gif_path = gallery_dir / f"killing_event_{sample_name}_T{t_id}_start{t_start}.gif"
-            frames[0].save(
-                gif_path, save_all=True, append_images=frames[1:],
-                duration=200, loop=0,
-            )
-            written.append(gif_path)
-            _log(f"  ✓ {gif_path.name}")
-        except Exception as _e:  # pragma: no cover - defensive, per-event
-            _log(f"  ⚠️ Skipped a killing event ({sample_name} #{track_id}): {_e}")
-            continue
-
-    return written
+def _derived_min_patch_volume_um3(diameter_um: float) -> float:
+    """Default size floor: a quarter of one cell's volume (dye may fill a dying cell only partly)."""
+    import math
+    return 0.25 * (4.0 / 3.0) * math.pi * (float(diameter_um) / 2.0) ** 3
 
 
 class ActiveKillingPanel(QWidget):
     """
-    Extended analysis: Active Killing Analysis for immune cell types only.
+    Extended analysis: Active Killing for immune (effector) cell types.
 
-    Runs AFTER baseline feature extraction (requires the combined_track_features
-    CSV to be present for the chosen immune type).  Detects functional killing
-    events by comparing the death-signal change in target (organoid) cells after
-    immune-cell contact to a per-sample background death rate.
+    Detects localised **death events** -- new, connected patches in the
+    annotated dead mask inside a target track -- and attributes each one's
+    single unit of killing credit to the effectors that touched that target
+    within the causal window and sit within the attribution radius of the
+    patch. Total credit equals the number of attributed death events, so it
+    does not inflate with effector density.
+
+    Runs AFTER baseline feature extraction (needs the effector's
+    combined_track_features CSV with contact columns) and needs the dead mask
+    and tracked-label zarrs.
 
     Output
     ------
-    CSVs  -> analysis/<immune>/active_killing/
-    Plots -> analysis/<immune>/active_killing/plots/
-    Viewer-> Top-N active killers shown as coloured Points layers (ALL killing
-              timepoints per killer, one layer per cell).
+    CSVs + figures -> analysis/<immune>/active_killing/<target|combined>/
+    Viewer         -> the top-N killers as Points layers at their credited
+                      timepoints (size = credit), and a death-patch preview.
     """
 
     _LAYER_PREFIX = "[Active Killing]"
@@ -2564,7 +2395,6 @@ class ActiveKillingPanel(QWidget):
         self.viewer = viewer
         self.log = log_callback or (lambda m: None)
         self._queue_callback = queue_callback
-        # Background-execution infrastructure.
         self.tab_progress_row = tab_progress_row
         from behav3d.core.metadata import (
             detect_organoid_types_from_metadata,
@@ -2576,11 +2406,12 @@ class ActiveKillingPanel(QWidget):
             if md is not None else []
         )
         self._bg = BackgroundOperation(self)
-        # Restore previously-saved settings (if any) from behav3d_parameters.yml
-        # so values survive across napari sessions instead of resetting to
-        # hard-coded defaults every time this panel is (re)built.
+        from behav3d.widgets.utils import migrate_active_killing_config
         saved_params = getattr(self.metadata_loader, "behav3d_parameters", None) or {}
-        self._saved_cfg = dict(saved_params.get("active_killing", {}) or {})
+        self._saved_cfg = migrate_active_killing_config(
+            dict(saved_params.get("active_killing", {}) or {}), log_fn=self.log,
+        )
+        self._syncing_volume = False
         self._init_ui()
 
     # ── UI ──────────────────────────────────────────────────────────────────
@@ -2590,17 +2421,57 @@ class ActiveKillingPanel(QWidget):
         layout.setSpacing(6)
 
         desc = QLabel(
-            "Detects functional killing events: for each immune\u2013target contact, "
-            "checks whether that target organoid's OWN death signal rises enough "
-            "after contact (vs its signal at contact start) to count as a kill.\n"
-            "\u26a0\ufe0f  Run baseline feature extraction for the immune type FIRST."
+            "Finds NEW death patches in the dead mask inside each target and gives each "
+            "one exactly one unit of killing credit, shared among the effectors that "
+            "touched that target shortly before and sit next to the patch. Total credit "
+            "= number of attributed death events, so it does not grow with effector density.\n"
+            "⚠️  Needs the effector's feature CSV (with contact), the dead mask and "
+            "the tracked target labels."
         )
         desc.setWordWrap(True)
         desc.setMinimumWidth(0)
         desc.setStyleSheet("color: #90A4AE; font-size: 10px; padding: 2px 0;")
-        layout.addWidget(desc)
+        desc_row = make_help_row(
+            desc,
+            "Active Killing - How It Works",
+            "1. DEATH EVENTS (per target, no immune data involved)\n"
+            "A death event is the appearance of a NEW connected patch in the\n"
+            "annotated dead mask inside one tracked target - roughly one cell\n"
+            "dying. Death is read from the dead mask only; the raw death channel\n"
+            "is never re-thresholded. A patch that keeps growing, dims and comes\n"
+            "back, or merges with another is still ONE event, and death already\n"
+            "present when a target first appears is not new. Detection is cached\n"
+            "per target type and reused until its inputs change.\n\n"
+            "2. CANDIDATES\n"
+            "An effector is a candidate killer of an event if it touched that\n"
+            "target (Feature Extraction's Contact Threshold) within the causal\n"
+            "window before the death, AND its surface is within the attribution\n"
+            "radius of the death patch.\n\n"
+            "3. CREDIT\n"
+            "Each event carries exactly ONE unit of credit, shared among its\n"
+            "candidates (longer, more recent and closer contacts earn more).\n"
+            "An event with no candidate is 'unattributed' (background) death.\n"
+            "So total credit = number of attributed deaths: extra bystander\n"
+            "effectors split a kill, they never add one.\n\n"
+            "PREREQUISITES\n"
+            " - Feature Extraction for the immune type, with Contact enabled\n"
+            " - Dead-mask segmentation and tracked labels for the targets\n\n"
+            "SUGGESTED ORDER\n"
+            " 1. Set the target cell diameter and check it with 'Preview death\n"
+            "    patches'.\n"
+            " 2. Set the causal window for your target biology.\n"
+            " 3. Run Active Killing.\n"
+            " 4. Optionally 'Calibrate radius & validate', then re-run.\n\n"
+            "ADVANCED\n"
+            "Derived values and literature constants (e.g. damage_tau_min,\n"
+            "hit_cap, patch_link_radius_um) are not in the GUI. Override them\n"
+            "in behav3d_parameters.yml under active_killing.advanced; any\n"
+            "override is recorded in active_killing_run_params.json.\n\n"
+            "Outputs of the previous algorithm are not comparable and are\n"
+            "refused downstream until Active Killing is re-run.",
+        )
+        layout.addLayout(desc_row)
 
-        # ── Immune cell type selector ──────────────────────────────────────
         imm_row = QHBoxLayout()
         imm_row.addWidget(QLabel("Immune cell type:"))
         self.immune_combo = QComboBox()
@@ -2612,9 +2483,17 @@ class ActiveKillingPanel(QWidget):
             self.immune_combo.setEnabled(False)
         self.immune_combo.currentTextChanged.connect(self._validate)
         imm_row.addWidget(self.immune_combo, stretch=1)
+        imm_row.addWidget(HelpButton(
+            "Immune Cell Type",
+            "The effector population whose cells can be credited with kills.\n\n"
+            "Its feature CSV must contain the contact column 'touching_{target}s'\n"
+            "(which targets each effector touches), so run Feature Extraction\n"
+            "for it with Contact enabled first.\n\n"
+            "Results go to analysis/<immune>/active_killing/. Run once per\n"
+            "immune type; the cached death events are shared between them.",
+        ))
         layout.addLayout(imm_row)
 
-        # ── Target cell type selector ──────────────────────────────────────
         target_row = QHBoxLayout()
         target_row.addWidget(QLabel("Target cell types:"))
         self.target_list = QListWidget()
@@ -2632,6 +2511,15 @@ class ActiveKillingPanel(QWidget):
             self.target_list.setEnabled(False)
         self.target_list.itemSelectionChanged.connect(self._validate)
         target_row.addWidget(self.target_list, stretch=1)
+        target_row.addWidget(HelpButton(
+            "Target Cell Types",
+            "The cell types whose deaths are searched for and attributed\n"
+            "(organoids and other non-immune types from the metadata).\n\n"
+            "Each selected target needs its tracked labels and the dead mask.\n"
+            "Death events are detected per target type. Results go to a folder\n"
+            "named after the target, or 'combined' when several are selected.\n\n"
+            "Death-patch preview uses the first selected target.",
+        ), alignment=Qt.AlignTop)
         layout.addLayout(target_row)
 
         self.validation_label = QLabel("")
@@ -2640,181 +2528,223 @@ class ActiveKillingPanel(QWidget):
         self.validation_label.setStyleSheet("font-size: 10px;")
         layout.addWidget(self.validation_label)
 
-        # ── Parameters form ────────────────────────────────────────────────
+        # ── Parameters: the only three analysis choices ─────────────────────
         params_group = QGroupBox("Parameters")
         params_form = QFormLayout(params_group)
         params_form.setContentsMargins(6, 6, 6, 6)
         params_form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
 
-        self.spin_obs_window = QSpinBox()
-        self.spin_obs_window.setRange(1, 100)
-        self.spin_obs_window.setValue(int(self._saved_cfg.get("observation_window", 5)))
-        self.spin_obs_window.setMaximumWidth(70)
+        adv = dict(self._saved_cfg.get("advanced") or {})
+        self.spin_cell_diameter = QDoubleSpinBox()
+        self.spin_cell_diameter.setRange(1.0, 200.0)
+        self.spin_cell_diameter.setDecimals(1)
+        self.spin_cell_diameter.setSingleStep(0.5)
+        self.spin_cell_diameter.setSuffix(" µm")
+        self.spin_cell_diameter.setMaximumWidth(100)
+        self.spin_cell_diameter.setValue(float(self._saved_cfg.get("target_cell_diameter_um", 10.0)))
         params_form.addRow(
-            "Observation window (tp):",
+            "Target cell diameter:",
             make_help_row(
-                self.spin_obs_window,
-                "Observation Window",
-                "How many timepoints after contact starts to measure the touched\n"
-                "target's death-signal rise: its signal at (contact start + window)\n"
-                "minus its signal at contact start. Measured separately for each\n"
-                "touched target organoid.\n\n"
-                "If the window runs past the end of the timelapse, the last\n"
-                "available frame is used (no extrapolation).",
+                self.spin_cell_diameter,
+                "Target Cell Diameter",
+                "Diameter of ONE target cell (not the organoid). This sets the death\n"
+                "threshold: a new dead patch must reach a quarter of one cell's volume,\n"
+                "0.25 x (4/3)pi(d/2)^3, to count as a death event (dye may fill a dying\n"
+                "cell only partly). It also sets how close two dead fragments must be\n"
+                "to count as the same dying cell.\n\n"
+                "Check it with 'Preview death patches' on a frame you trust: the patches\n"
+                "it accepts should be cells you agree are dying. Lower it if real deaths\n"
+                "are missed; raise it if specks are counted.",
             ),
         )
 
-        self.death_signal_combo = QComboBox()
-        self.death_signal_combo.addItems(
-            ["percentage_dead_mask", "mean_dead_dye", "nr_dead_mask_pixels"]
+        self.spin_min_patch_volume = QDoubleSpinBox()
+        self.spin_min_patch_volume.setRange(0.1, 1.0e7)
+        self.spin_min_patch_volume.setDecimals(1)
+        self.spin_min_patch_volume.setSuffix(" µm³")
+        self.spin_min_patch_volume.setMaximumWidth(120)
+        override = adv.get("min_patch_volume_um3")
+        self.spin_min_patch_volume.setValue(
+            float(override) if override is not None
+            else _derived_min_patch_volume_um3(self.spin_cell_diameter.value())
         )
-        self.death_signal_combo.setCurrentText(
-            self._saved_cfg.get("death_signal_column", "percentage_dead_mask")
-        )
-        self.death_signal_combo.setMaximumWidth(220)
-        self.death_signal_combo.currentTextChanged.connect(lambda _: self._update_abs_hint())
+        self._volume_overridden = override is not None
         params_form.addRow(
-            "Death signal column:",
+            "  = min death patch:",
             make_help_row(
-                self.death_signal_combo,
-                "Death Signal Column",
-                "Which target-cell column is read as the death signal:\n\n"
-                "  percentage_dead_mask  - % of dead-mask pixels in the segment\n"
-                "  mean_dead_dye         - mean dead-dye channel intensity\n"
-                "  nr_dead_mask_pixels   - raw count of dead-mask pixels\n\n"
-                "Switching this changes the units of the Absolute Threshold below,\n"
-                "so re-check that value. For an absolute threshold, nr_dead_mask_pixels\n"
-                "is recommended - a flat pixel count is easiest to reason about.",
+                self.spin_min_patch_volume,
+                "Minimum Death-Patch Volume",
+                "The same threshold as the diameter above, in volume. Filled in from\n"
+                "the diameter (10 µm -> ~131 µm³); type a value here to set the\n"
+                "threshold directly instead. Changing the diameter afterwards\n"
+                "recomputes it.\n\n"
+                "The hint below converts it to voxels for this dataset. Below ~20\n"
+                "voxels the threshold is weaker than mask noise; above ~5000 only\n"
+                "catastrophic death is detected.\n\n"
+                "This is the successor of the old absolute death-signal threshold, but\n"
+                "measured on one connected NEW dead patch instead of the whole\n"
+                "organoid's dead-pixel count.",
+            ),
+        )
+        self.spin_cell_diameter.valueChanged.connect(self._on_diameter_changed)
+        self.spin_min_patch_volume.valueChanged.connect(self._on_volume_edited)
+
+        self.spin_causal_window = QDoubleSpinBox()
+        self.spin_causal_window.setRange(1.0, 1440.0)
+        self.spin_causal_window.setDecimals(0)
+        self.spin_causal_window.setSingleStep(10.0)
+        self.spin_causal_window.setSuffix(" min")
+        self.spin_causal_window.setMaximumWidth(110)
+        self.spin_causal_window.setValue(float(self._saved_cfg.get("causal_window_min", 120.0)))
+        self.spin_causal_window.valueChanged.connect(lambda _: self._update_param_hints())
+        params_form.addRow(
+            "Causal window:",
+            make_help_row(
+                self.spin_causal_window,
+                "Causal Window",
+                "How long after a contact a death can still be credited to it.\n\n"
+                "Contact-to-apoptosis lags are long for solid tumours (1.8 +/- 1.5 h\n"
+                "reported for melanoma) and short for haematologic targets (5-25 min):\n"
+                "~120 min for organoids / carcinoma, ~30 min for haematologic targets.\n\n"
+                "Inside the window, credit still favours recent contact: contact time\n"
+                "is weighted by exp(-lag / 82 min), from the published ~57 min\n"
+                "half-life of sublethal damage.\n\n"
+                "Given in minutes on purpose - the frame equivalent (shown below)\n"
+                "depends on your imaging interval.",
             ),
         )
 
-        self.spin_threshold_mult = QDoubleSpinBox()
-        self.spin_threshold_mult.setRange(0.1, 20.0)
-        self.spin_threshold_mult.setSingleStep(0.1)
-        self.spin_threshold_mult.setDecimals(2)
-        self.spin_threshold_mult.setValue(float(self._saved_cfg.get("killing_threshold_multiplier", 1.5)))
-        self.spin_threshold_mult.setMaximumWidth(90)
+        self.spin_attr_radius = QDoubleSpinBox()
+        self.spin_attr_radius.setRange(0.5, 200.0)
+        self.spin_attr_radius.setDecimals(1)
+        self.spin_attr_radius.setSingleStep(0.5)
+        self.spin_attr_radius.setSuffix(" µm")
+        self.spin_attr_radius.setMaximumWidth(100)
+        self.spin_attr_radius.setValue(float(self._saved_cfg.get("attribution_radius_um", 15.0)))
+        self.spin_attr_radius.valueChanged.connect(lambda _: self._update_param_hints())
         params_form.addRow(
-            "Killing threshold multiplier:",
+            "Attribution radius:",
             make_help_row(
-                self.spin_threshold_mult,
-                "Killing Threshold Multiplier",
-                "Sets the kill threshold as a multiple of each touched target's OWN\n"
-                "death signal at contact start (no sample-wide or cross-organoid\n"
-                "averaging).\n\n"
-                "Active killing when, by the end of the observation window, the\n"
-                "target's signal exceeds  signal_at_contact_start x multiplier.\n\n"
-                "Default 1.5  ->  signal must grow past 150% of its value at contact.\n\n"
-                "If the signal is exactly 0 at contact start, 0.1 is used in its place\n"
-                "so the threshold isn't trivially 0 (which would flag any rise).\n\n"
-                "Ignored when 'Use absolute threshold' is checked.",
+                self.spin_attr_radius,
+                "Attribution Radius",
+                "Maximum surface-to-surface distance between an effector and a death\n"
+                "patch for the effector to be a candidate killer. Candidates must ALSO\n"
+                "have touched that target (Feature Extraction's Contact Threshold)\n"
+                "within the causal window.\n\n"
+                "Default 15 µm (effector radius + one target cell + segmentation error).\n"
+                "Closer candidates get a larger share: credit is weighted by\n"
+                "exp(-distance / (radius / 3)).\n\n"
+                "Rather than guessing, use 'Calibrate radius & validate' below: it\n"
+                "measures how often an effector would sit this close to a death by\n"
+                "chance, and fills in the largest radius with an FDR <= 5%.\n\n"
+                "This is not the Contact Threshold: that one decides whether an\n"
+                "effector touches the target at all; this one whether it is next to\n"
+                "this particular dead patch. The hint below warns when they differ\n"
+                "by more than 2x.",
             ),
         )
 
-        abs_threshold_row = QHBoxLayout()
-        self.check_abs_threshold = QCheckBox("Use absolute threshold")
-        self.check_abs_threshold.stateChanged.connect(self._on_abs_toggle)
-        abs_threshold_row.addWidget(self.check_abs_threshold)
-        abs_threshold_row.addWidget(HelpButton(
-            "Use Absolute Threshold",
-            "Decide killing with the fixed 'Absolute threshold' below instead of "
-            "the multiplier (signal_at_contact_start x multiplier).\n\n"
-            "Best when targets tend to start near-zero death signal, where the "
-            "multiplier becomes over-sensitive to tiny changes.\n\n"
-            "Generally recommended with 2 or more target lines that have different "
-            "baseline death rates - there the multiplier's fold-change is unfair.\n\n"
-            "Unchecked = the Killing Threshold Multiplier is used and this field "
-            "is disabled.",
+        self.param_hint_label = QLabel("")
+        self.param_hint_label.setWordWrap(True)
+        self.param_hint_label.setMinimumWidth(0)
+        self.param_hint_label.setStyleSheet("color: #90A4AE; font-size: 10px;")
+        params_form.addRow("", self.param_hint_label)
+
+        self.btn_calibrate = QPushButton("\U0001f4cf  Calibrate radius && validate")
+        self.btn_calibrate.setStyleSheet(
+            "QPushButton { background: #37474F; color: white; padding: 4px 10px; "
+            "border-radius: 3px; font-size: 11px; } QPushButton:hover { background: #546E7A; }"
+        )
+        self.btn_calibrate.setToolTip(
+            "Optional, slower check of the attribution itself (run after one Active Killing run):\n\n"
+            " - Density invariance: re-attributes on random subsets of effector tracks.\n"
+            "   Death events and credit per death must not change; the previous\n"
+            "   algorithm's verdicts per death grow with effector density.\n"
+            " - Radius calibration: rotates each death patch inside its organoid to see\n"
+            "   how often an effector would be nearby by chance, and picks the largest\n"
+            "   radius with an empirical FDR <= 5%. If none, it says so instead.\n\n"
+            "Writes .../active_killing/<target>/validation/. A calibrated radius is\n"
+            "applied to the field above and saved."
+        )
+        self.btn_calibrate.clicked.connect(self._on_calibrate_clicked)
+        self.calibration_label = QLabel(self._calibration_text())
+        self.calibration_label.setWordWrap(True)
+        self.calibration_label.setStyleSheet("color: #90A4AE; font-size: 10px;")
+        cal_box = QWidget()
+        cal_row = QVBoxLayout(cal_box)
+        cal_row.setContentsMargins(0, 0, 0, 0)
+        cal_row.addLayout(make_help_row(
+            self.btn_calibrate,
+            "Calibrate Radius & Validate",
+            "Optional, slower check that attribution means something in THIS\n"
+            "dataset. Run it after one Active Killing run, with the same settings.\n\n"
+            "Radius calibration (FDR): each death patch is rotated to random\n"
+            "positions inside its own target, keeping its size, depth and the\n"
+            "effectors exactly as they are. How often an effector still lands\n"
+            "within r of the rotated patch is the chance rate. The empirical FDR\n"
+            "at r is (chance + 1) / (observed + 1), and the calibrated radius is\n"
+            "the largest r with FDR <= 5%.\n\n"
+            "If no radius reaches 5%, nothing is applied and the read-out below\n"
+            "gives the best FDR and where it was reached: attribution cannot be\n"
+            "told apart from chance at that effector density. With few death\n"
+            "events the FDR cannot fall below 1 / (N + 1).\n\n"
+            "Density invariance: re-attributes on random subsets of effector\n"
+            "tracks. Death events and credit per attributed death must stay the\n"
+            "same; the previous algorithm's verdicts per death grow with density.\n\n"
+            "Writes .../active_killing/<target>/validation/. A calibrated radius\n"
+            "is put in the field above and saved; re-run Active Killing to use it.",
         ))
-        abs_threshold_row.addStretch()
-        params_form.addRow("", abs_threshold_row)
+        cal_row.addWidget(self.calibration_label)
+        params_form.addRow("", cal_box)
 
-        self.abs_hint_label = QLabel("")
-        self.abs_hint_label.setWordWrap(True)
-        self.abs_hint_label.setStyleSheet("color: #8a6d00; font-size: 10px;")
-        self.abs_hint_label.setVisible(False)
-        params_form.addRow("", self.abs_hint_label)
-
-        self.spin_abs_threshold = QDoubleSpinBox()
-        # Range/decimals/step are set per selected death signal column in
-        # _update_abs_hint (percentage_dead_mask is a 0.0-1.0 fraction, the
-        # others are unbounded-ish raw counts/intensities).
-        self.spin_abs_threshold.setValue(0.0)
-        self.spin_abs_threshold.setMaximumWidth(100)
-        self.spin_abs_threshold.setEnabled(False)
-        params_form.addRow(
-            "Absolute threshold:",
-            make_help_row(
-                self.spin_abs_threshold,
-                "Absolute Killing Threshold",
-                "Fixed minimum death-signal rise (in the Death Signal Column's\n"
-                "units, from contact start to the end of the observation window)\n"
-                "needed to count as a kill.\n\n"
-                "Only used when 'Use absolute threshold' is checked; it then fully\n"
-                "replaces the multiplier.\n\n"
-                "Best for targets that start near-zero death signal. Tip: pair with\n"
-                "nr_dead_mask_pixels - a flat pixel count is easiest to set.",
-            ),
-        )
-
-        self.spin_min_contact = QSpinBox()
-        self.spin_min_contact.setRange(1, 50)
-        self.spin_min_contact.setValue(int(self._saved_cfg.get("min_contact_duration", 1)))
-        self.spin_min_contact.setMaximumWidth(70)
-        params_form.addRow(
-            "Min contact duration (tp):",
-            make_help_row(
-                self.spin_min_contact,
-                "Minimum Contact Duration",
-                "Minimum number of consecutive timepoints an immune cell must remain\n"
-                "in contact with a target cell for the event to qualify.\n\n"
-                "Default: 1 (all contacts are included).",
-            ),
-        )
-
-        self.contact_column_combo = QComboBox()
-        self.contact_column_combo.addItems(["contact", "contact_on_distance"])
-        self.contact_column_combo.setCurrentText(
-            self._saved_cfg.get("contact_column", "contact")
-        )
-        self.contact_column_combo.setMaximumWidth(220)
-        self.contact_column_combo.currentTextChanged.connect(lambda _: self._validate())
-        params_form.addRow(
-            "Contact column:",
-            make_help_row(
-                self.contact_column_combo,
-                "Contact Column",
-                "Which per-target-type column decides when a contact event starts/ends:\n\n"
-                "  contact              - pixel/mask adjacency (segments within ~1.73 px).\n"
-                "                         Ignores the Contact Threshold set in Feature\n"
-                "                         Extraction. This is the original behavior.\n"
-                "  contact_on_distance  - real (µm) distance-based contact, using the\n"
-                "                         Contact Threshold configured in Feature\n"
-                "                         Extraction. Matches the distance-based matching\n"
-                "                         already used to identify which target was touched.\n\n"
-                "Only affects the contact-event gate (start/end/duration); which touched\n"
-                "target is evaluated for killing is unaffected by this setting.",
-            ),
-        )
         layout.addWidget(params_group)
 
         # ── Viewer preview ─────────────────────────────────────────────────
-        viewer_group = QGroupBox("Viewer Preview — Top Active Killers")
+        viewer_group = QGroupBox("Viewer Preview")
         viewer_form = QFormLayout(viewer_group)
         viewer_form.setContentsMargins(6, 6, 6, 6)
+
+        self.btn_preview_patches = QPushButton("\U0001f50d  Preview death patches (current frame)")
+        self.btn_preview_patches.setStyleSheet(
+            "QPushButton { background: #37474F; color: white; padding: 5px 10px; "
+            "border-radius: 3px; font-size: 11px; } "
+            "QPushButton:hover { background: #546E7A; }"
+        )
+        self.btn_preview_patches.setToolTip(
+            "Adds the candidate NEW death patches at the viewer's current frame as a\n"
+            "labels layer, and logs each patch's volume and whether it passes the\n"
+            "death threshold. Use it to check the target cell diameter.\n\n"
+            "Approximation: compares with the previous frame only (the analysis uses\n"
+            "the whole history), so a patch still growing may appear here."
+        )
+        self.btn_preview_patches.clicked.connect(self._on_preview_patches_clicked)
+        viewer_form.addRow("", make_help_row(
+            self.btn_preview_patches,
+            "Preview Death Patches",
+            "The quickest way to set the target cell diameter.\n\n"
+            "Adds the candidate NEW death patches at the viewer's current frame\n"
+            "as a labels layer, and logs each patch's volume and whether it passes\n"
+            "the death threshold. Move to a frame where you know cells are dying,\n"
+            "click, and check that the accepted patches are the cells you would\n"
+            "call dying. Change the diameter and click again to compare.\n\n"
+            "Uses the first sample in the metadata and the first selected target.\n\n"
+            "Approximation: it compares with the previous frame only, while the\n"
+            "analysis uses the whole history, so a patch that is still growing\n"
+            "can appear here without being a new event in the run.",
+        ))
 
         self.spin_top_n = QSpinBox()
         self.spin_top_n.setRange(1, 50)
         self.spin_top_n.setValue(5)
         self.spin_top_n.setMaximumWidth(70)
         viewer_form.addRow(
-            "Top-N killers to display:",
+            "Top-N killers:",
             make_help_row(
                 self.spin_top_n,
-                "Top-N Active Killers",
-                "Number of top-ranking immune cells (by total active-killing timepoints)\n"
-                "to visualise in the napari viewer.  Each cell gets a colour-coded Points\n"
-                "layer containing ALL its active-killing timepoints.",
+                "Top-N Killers",
+                "Number of top effectors (by attributed kill credit) used for the\n"
+                "viewer points, the killing GIFs and the swimmer plot - one shared\n"
+                "ranking, so all three show the same cells.",
             ),
         )
 
@@ -2825,13 +2755,21 @@ class ActiveKillingPanel(QWidget):
             "QPushButton:hover { background: #546E7A; }"
         )
         self.btn_load_viewer.setToolTip(
-            "Loads the top-N most active immune cells as separate colour-coded\n"
-            "Points layers in the napari viewer.\n\n"
-            "Each layer shows ALL timepoints where that cell was actively killing.\n"
+            "Loads the top-N killers as colour-coded Points layers at every timepoint\n"
+            "credited with an attributed death event (point size = credit).\n"
             "Requires Active Killing Analysis to have been run at least once."
         )
         self.btn_load_viewer.clicked.connect(self._on_load_viewer_clicked)
-        viewer_form.addRow("", self.btn_load_viewer)
+        viewer_form.addRow("", make_help_row(
+            self.btn_load_viewer,
+            "Load Top Killers in Viewer",
+            "Adds one Points layer per top-N killer (ranked by attributed kill\n"
+            "credit), placed at every timepoint where that effector was credited\n"
+            "with a death. Point size = credit, so a shared kill shows smaller.\n\n"
+            "Credit sits on the effector's last contact frame before the death\n"
+            "onset, so the point marks where it was, not where the patch appears.\n\n"
+            "Needs a completed Active Killing run for the selected immune type.",
+        ))
 
         self.btn_export_gifs = QPushButton("\U0001f39e  Export Killing GIFs")
         self.btn_export_gifs.setStyleSheet(
@@ -2840,21 +2778,28 @@ class ActiveKillingPanel(QWidget):
             "QPushButton:hover { background: #546E7A; }"
         )
         self.btn_export_gifs.setToolTip(
-            "Render the top-N active-killing events as animated GIFs (cropped 3D\n"
-            "max-projection movies: raw signal, dead mask in red, active immune\n"
-            "cell in purple).\n\n"
-            "Saved to analysis/<immune>/active_killing/<target>/gallery/<sample>/.\n"
-            "Requires Active Killing Analysis to have been run at least once."
+            "One GIF per top-N killer, centred on its largest attributed death event:\n"
+            "raw signal, dead mask in red, the attributed death patch in yellow and\n"
+            "the killer in purple, from its last contact to after the death onset.\n\n"
+            "Saved to analysis/<immune>/active_killing/<target>/gallery/<sample>/."
         )
         self.btn_export_gifs.clicked.connect(self._on_export_gifs_clicked)
-        viewer_form.addRow("", self.btn_export_gifs)
+        viewer_form.addRow("", make_help_row(
+            self.btn_export_gifs,
+            "Export Killing GIFs",
+            "Writes one GIF per top-N killer, centred on its largest attributed\n"
+            "death event, from its last contact to after the death onset.\n\n"
+            "Colours: raw signal in grey, dead mask in red, the attributed death\n"
+            "patch in yellow, the killer in purple.\n\n"
+            "Uses the same top-N ranking as the viewer points and the swimmer\n"
+            "plot. Saved to analysis/<immune>/active_killing/<target>/gallery/\n"
+            "<sample>/. Needs a completed Active Killing run.",
+        ))
         layout.addWidget(viewer_group)
 
-        # ── Run button ─────────────────────────────────────────────────────
         action_row = QHBoxLayout()
         action_row.setSpacing(6)
-
-        self.btn_run = QPushButton("\u25b6  Run Active Killing Analysis")
+        self.btn_run = QPushButton("▶  Run Active Killing Analysis")
         self.btn_run.setStyleSheet(
             "background-color: #c0392b; color: white; font-weight: bold; "
             "border-radius: 4px; padding: 8px; font-size: 13px;"
@@ -2873,74 +2818,146 @@ class ActiveKillingPanel(QWidget):
         )
         self.btn_queue.clicked.connect(self._on_queue_clicked)
         action_row.addWidget(self.btn_queue)
-
         layout.addLayout(action_row)
         layout.addStretch()
 
-        # Restore the absolute-threshold checkbox/value last, since toggling it
-        # depends on self.spin_abs_threshold / self.spin_threshold_mult / the
-        # death-signal column above already existing.
-        self.check_abs_threshold.setChecked(bool(self._saved_cfg.get("use_absolute_threshold", False)))
-        saved_abs = self._saved_cfg.get("absolute_killing_threshold")
-        if saved_abs is not None:
-            self.spin_abs_threshold.setValue(min(float(saved_abs), self.spin_abs_threshold.maximum()))
-
         self._validate()
-        self._update_abs_hint()
+        self._update_param_hints()
 
-    # ── Helpers ──────────────────────────────────────────────────────────────
-    def _on_abs_toggle(self, state):
-        enabled = (state == Qt.Checked)
-        self.spin_abs_threshold.setEnabled(enabled)
-        self.spin_threshold_mult.setEnabled(not enabled)
-        self._update_abs_hint()
+    # ── Parameter helpers ────────────────────────────────────────────────────
+    def _on_diameter_changed(self, value):
+        if not self._volume_overridden:
+            self._syncing_volume = True
+            try:
+                self.spin_min_patch_volume.setValue(_derived_min_patch_volume_um3(value))
+            finally:
+                self._syncing_volume = False
+        self._update_param_hints()
 
-    def _update_abs_hint(self):
-        """Keep the Absolute threshold spinbox's range/step matched to the selected
-        death signal's units, and show a non-blocking recommendation to use
-        nr_dead_mask_pixels with an absolute threshold."""
-        using_absolute = self.check_abs_threshold.isChecked()
-        column = self.death_signal_combo.currentText()
+    def _on_volume_edited(self, value):
+        if self._syncing_volume:
+            return
+        derived = _derived_min_patch_volume_um3(self.spin_cell_diameter.value())
+        self._volume_overridden = abs(float(value) - derived) > 0.05
+        self._update_param_hints()
 
-        old_value = self.spin_abs_threshold.value()
-        if column == "percentage_dead_mask":
-            # percentage_dead_mask is a fraction (0.0-1.0), not a 0-100 percent -
-            # see calculate_death()'s scale note in timepoint_features.py.
-            self.spin_abs_threshold.setRange(0.0, 1.0)
-            self.spin_abs_threshold.setDecimals(4)
-            self.spin_abs_threshold.setSingleStep(0.001)
-        elif column == "nr_dead_mask_pixels":
-            # Raw pixel count - integer valued, can be large for 3D segments.
-            self.spin_abs_threshold.setRange(0.0, 100000.0)
-            self.spin_abs_threshold.setDecimals(0)
-            self.spin_abs_threshold.setSingleStep(1)
-        else:  # mean_dead_dye - raw intensity, scale depends on image bit depth
-            self.spin_abs_threshold.setRange(0.0, 100000.0)
-            self.spin_abs_threshold.setDecimals(4)
-            self.spin_abs_threshold.setSingleStep(0.01)
-        self.spin_abs_threshold.setValue(min(old_value, self.spin_abs_threshold.maximum()))
+    def _voxel_and_frame(self):
+        from behav3d.core.utils import minutes_per_frame_from_metadata, resolution_from_metadata
+        md = getattr(self.metadata_loader, "metadata", None)
+        xy, z, ok_res = resolution_from_metadata(md)
+        mpf, ok_t = minutes_per_frame_from_metadata(md)
+        return (xy, z, ok_res), (mpf, ok_t)
 
-        wrong_column = column != "nr_dead_mask_pixels"
-        if using_absolute and wrong_column:
-            self.abs_hint_label.setText(
-                "💡 Recommended: use nr_dead_mask_pixels as the death signal when using "
-                "an absolute threshold - a flat pixel-count cutoff is easier to reason "
-                "about than one expressed in a fraction or intensity scale."
+    def _update_param_hints(self):
+        import math
+        (xy, z, ok_res), (mpf, ok_t) = self._voxel_and_frame()
+        parts = []
+        vol = float(self.spin_min_patch_volume.value())
+        if ok_res:
+            n_vox = vol / (xy * xy * z)
+            txt = f"Death threshold ≈ {vol:.0f} µm³ ≈ {n_vox:.0f} voxels"
+            if n_vox < 20:
+                txt += " ⚠️ below ~20 voxels the threshold is weaker than mask noise"
+            elif n_vox > 5000:
+                txt += " ⚠️ above ~5000 voxels only catastrophic death is detected"
+            if z / xy > 4:
+                txt += f" (z/xy = {z / xy:.1f}: z sensitivity is coarser)"
+            parts.append(txt)
+        if self._volume_overridden:
+            parts.append("Death threshold set directly (overrides the diameter).")
+        if ok_t and mpf > 0:
+            parts.append(f"Causal window = {math.ceil(self.spin_causal_window.value() / mpf):.0f} frames "
+                         f"at {mpf:g} min/frame")
+        ct = self._contact_threshold_um()
+        r = float(self.spin_attr_radius.value())
+        if ct is not None and ct > 0 and (r / ct > 2 or ct / r > 2):
+            parts.append(
+                f"ℹ️ Contact Threshold (Feature Extraction) is {ct:g} µm vs radius {r:g} µm: "
+                "candidates must satisfy both, so the smaller one limits who can be credited."
             )
-            self.abs_hint_label.setVisible(True)
-        else:
-            self.abs_hint_label.setVisible(False)
+        self.param_hint_label.setText("\n".join(parts))
 
+    def _calibration_text(self) -> str:
+        cal = self._saved_cfg.get("calibration") or {}
+        if not cal:
+            return "Radius not calibrated (default / user-set)."
+        if cal.get("calibrated_radius_um") is None:
+            best, at = cal.get("best_fdr"), cal.get("radius_at_best_fdr_um")
+            best_txt = f"best FDR {best:.3f} at {at:g} µm" if best is not None and at is not None else "no estimate"
+            return (f"Last calibration: no radius reached FDR <= {cal.get('alpha', 0.05):g} "
+                    f"({best_txt}, {cal.get('n_informative_events')} events); nothing applied.")
+        return (f"Calibrated: {cal['calibrated_radius_um']:g} \u00b5m, empirical FDR "
+                f"{cal.get('fdr_at_radius', float('nan')):.3f} ({cal.get('n_informative_events')} events).")
+
+    def _on_calibrate_clicked(self):
+        """Run density-invariance + FDR radius calibration in the background."""
+        self._validate()
+        if not self.btn_run.isEnabled():
+            return
+        if self._bg.is_running():
+            self.log("\u26a0\ufe0f An operation is already in progress.")
+            return
+        immune = self._get_immune_type()
+        targets = self._get_selected_targets()
+        params = self._collect_params()
+        md = self.metadata_loader.metadata
+        out_dir = self.metadata_loader.output_dir
+
+        def _do(progress_cb=None):
+            from behav3d.analysis.killing_validation import run_killing_validation
+            return run_killing_validation(
+                md, out_dir, immune, targets,
+                target_cell_diameter_um=params["target_cell_diameter_um"],
+                causal_window_min=params["causal_window_min"],
+                attribution_radius_um=params["attribution_radius_um"],
+                advanced=params.get("advanced") or None, log_fn=self.log,
+            )
+
+        def _on_done(res):
+            self.btn_calibrate.setText("\U0001f4cf  Calibrate radius && validate")
+            record = {k: res.get(k) for k in (
+                "calibrated_radius_um", "fdr_at_radius", "alpha", "best_fdr", "radius_at_best_fdr_um",
+                "fdr_floor", "n_informative_events", "requested_radius_um")}
+            params_all = self.metadata_loader.behav3d_parameters
+            if params_all is not None:
+                params_all.setdefault("active_killing", {})["calibration"] = record
+            self._saved_cfg["calibration"] = record
+            if res.get("calibrated_radius_um") is not None:
+                self.spin_attr_radius.setValue(float(res["calibrated_radius_um"]))
+                self.log(f"\u2705 Attribution radius calibrated to {res['calibrated_radius_um']:g} \u00b5m "
+                         f"(empirical FDR {res['fdr_at_radius']:.3f}); re-run Active Killing to apply it.")
+            self._persist()
+            self.calibration_label.setText(self._calibration_text())
+            self.log(f"Validation outputs: {res['paths']['dir']}")
+
+        def _on_failed(err):
+            self.btn_calibrate.setText("\U0001f4cf  Calibrate radius && validate")
+            self.log(f"\u274c Calibration failed: {err}")
+
+        self.btn_calibrate.setText("\u23f3 Calibrating\u2026")
+        self._bg.run(
+            fn=_do, desc=f"Active Killing calibration \u2014 {immune}\u2026",
+            progress_row=self.tab_progress_row, buttons=[self.btn_calibrate, self.btn_run],
+            viewer=self.viewer, on_done=_on_done, on_failed=_on_failed,
+            inject_progress=False, indeterminate=True,
+        )
+
+    def _contact_threshold_um(self):
+        params = getattr(self.metadata_loader, "behav3d_parameters", None) or {}
+        try:
+            v = params.get("features", {}).get("immune", {}).get("contact_threshold")
+            return float(v) if v is not None else None
+        except Exception:
+            return None
+
+    # ── Small helpers ────────────────────────────────────────────────────────
     def _get_immune_type(self) -> str:
         return self.immune_combo.currentText()
 
     def _feature_csv_path(self, immune_type: str) -> Path:
+        # Active Killing always reads the RAW (unfiltered) features.
         out = Path(self.metadata_loader.output_dir)
-        feat_dir = out / "analysis" / immune_type / "track_features"
-        filtered = feat_dir / f"BEHAV3D_{immune_type}_combined_track_features_filtered.csv"
-        return filtered if filtered.exists() else (
-            feat_dir / f"BEHAV3D_{immune_type}_combined_track_features.csv"
-        )
+        return out / "analysis" / immune_type / "track_features" / f"BEHAV3D_{immune_type}_combined_track_features.csv"
 
     def _get_selected_targets(self) -> list:
         if not self.target_list.isEnabled():
@@ -2958,10 +2975,7 @@ class ActiveKillingPanel(QWidget):
 
     def get_queue_params(self) -> dict:
         """Snapshot the current Active Killing analysis settings for the queue."""
-        return {
-            "immune_type": self._get_immune_type(),
-            **self._collect_params(),
-        }
+        return {"immune_type": self._get_immune_type(), **self._collect_params()}
 
     def _on_queue_clicked(self):
         if self._queue_callback is None:
@@ -2973,103 +2987,82 @@ class ActiveKillingPanel(QWidget):
         self._persist()
         self._queue_callback()
 
+    def _set_invalid(self, text):
+        self.validation_label.setText(text)
+        self.validation_label.setStyleSheet("color: #E57373; font-size: 10px;")
+        self.btn_run.setEnabled(False)
+        if hasattr(self, "btn_queue"):
+            self.btn_queue.setEnabled(False)
+
     def _validate(self):
         immune = self._get_immune_type()
         targets = self._get_selected_targets()
-        
         if not immune or "(no immune" in immune:
-            self.validation_label.setText("\u26a0\ufe0f No immune cell types detected in metadata.")
-            self.validation_label.setStyleSheet("color: #E57373; font-size: 10px;")
-            self.btn_run.setEnabled(False)
-            if hasattr(self, "btn_queue"):
-                self.btn_queue.setEnabled(False)
-            return
-            
+            return self._set_invalid("⚠️ No immune cell types detected in metadata.")
         if not targets:
-            self.validation_label.setText("\u26a0\ufe0f No target cell types selected.")
-            self.validation_label.setStyleSheet("color: #E57373; font-size: 10px;")
-            self.btn_run.setEnabled(False)
-            if hasattr(self, "btn_queue"):
-                self.btn_queue.setEnabled(False)
-            return
-            
+            return self._set_invalid("⚠️ No target cell types selected.")
         csv = self._feature_csv_path(immune)
         if not csv.exists():
-            self.validation_label.setText(
-                f"\u26a0\ufe0f {immune} feature CSV not found \u2014 run feature extraction first.\n"
-                f"Expected: .../analysis/{immune}/track_features/"
-                f"BEHAV3D_{immune}_combined_track_features.csv"
+            return self._set_invalid(
+                f"⚠️ {immune} feature CSV not found — run feature extraction first.\n"
+                f"Expected: .../analysis/{immune}/track_features/{csv.name}"
             )
-            self.validation_label.setStyleSheet("color: #E57373; font-size: 10px;")
-            self.btn_run.setEnabled(False)
-            if hasattr(self, "btn_queue"):
-                self.btn_queue.setEnabled(self._queue_callback is not None and False)
-            return
-
-        contact_column = self.contact_column_combo.currentText()
-        expected_cols = {f"{t}_{contact_column}" for t in targets}
         try:
             header_cols = set(pd.read_csv(csv, nrows=0).columns)
         except Exception:
             header_cols = None
-        if header_cols is not None and not (expected_cols & header_cols):
-            self.validation_label.setText(
-                f"\u26a0\ufe0f No '{contact_column}' column found for {', '.join(targets)} in "
-                f"{csv.name}.\n"
-                + (
-                    "Re-run Feature Extraction with the Contact Threshold enabled to produce "
-                    "'_contact_on_distance' columns, or switch Contact column back to 'contact'."
-                    if contact_column == "contact_on_distance" else
-                    "Re-run Feature Extraction to produce '_contact' columns."
-                )
+        expected = {f"touching_{t}s" for t in targets}
+        if header_cols is not None and not (expected & header_cols):
+            return self._set_invalid(
+                f"⚠️ {csv.name} has no contact columns for {', '.join(targets)} "
+                f"(expected {', '.join(sorted(expected))}). Enable 'contact' in Feature "
+                f"Extraction for {immune} and re-run it."
             )
-            self.validation_label.setStyleSheet("color: #E57373; font-size: 10px;")
-            self.btn_run.setEnabled(False)
-            if hasattr(self, "btn_queue"):
-                self.btn_queue.setEnabled(self._queue_callback is not None and False)
-        else:
-            self.validation_label.setText(f"\u2713 Ready  \u2014  using: {csv.name}")
-            self.validation_label.setStyleSheet("color: #66BB6A; font-size: 10px;")
-            self.btn_run.setEnabled(True)
-            if hasattr(self, "btn_queue"):
-                self.btn_queue.setEnabled(self._queue_callback is not None)
+        md = getattr(self.metadata_loader, "metadata", None)
+        if md is not None and len(md):
+            from behav3d.features.death_events import resolve_dead_mask_path
+            missing = [str(r["sample_name"]) for _, r in md.iterrows()
+                       if resolve_dead_mask_path(r, self.metadata_loader.output_dir)[0] is None]
+            if len(missing) == len(md):
+                return self._set_invalid(
+                    "⚠️ No dead mask found for any sample. Active Killing reads death from "
+                    "the annotated dead mask — run dead-mask segmentation first."
+                )
+        self.validation_label.setText(f"✓ Ready  —  using: {csv.name}")
+        self.validation_label.setStyleSheet("color: #66BB6A; font-size: 10px;")
+        self.btn_run.setEnabled(True)
+        if hasattr(self, "btn_queue"):
+            self.btn_queue.setEnabled(self._queue_callback is not None)
 
     def _collect_params(self) -> dict:
+        advanced = dict(self._saved_cfg.get("advanced") or {})
+        if self._volume_overridden:
+            advanced["min_patch_volume_um3"] = float(self.spin_min_patch_volume.value())
+        else:
+            advanced.pop("min_patch_volume_um3", None)
         return {
-            "observation_window": int(self.spin_obs_window.value()),
-            "death_signal_column": self.death_signal_combo.currentText(),
-            "killing_threshold_multiplier": float(self.spin_threshold_mult.value()),
-            # Persist the checkbox state alongside the value. ``_persist()``
-            # merges this dict into the saved config, and the checkbox is
-            # restored from ``use_absolute_threshold`` - so without this key a
-            # stale ``false`` would survive every save and silently switch a
-            # run configured for the absolute threshold back to the relative
-            # multiplier on the next reload.
-            "use_absolute_threshold": self.check_abs_threshold.isChecked(),
-            "absolute_killing_threshold": (
-                float(self.spin_abs_threshold.value())
-                if self.check_abs_threshold.isChecked() else None
-            ),
-            "min_contact_duration": int(self.spin_min_contact.value()),
-            "contact_column": self.contact_column_combo.currentText(),
-            "target_types": self._get_selected_targets()
+            "target_cell_diameter_um": float(self.spin_cell_diameter.value()),
+            "causal_window_min": float(self.spin_causal_window.value()),
+            "attribution_radius_um": float(self.spin_attr_radius.value()),
+            "advanced": advanced,
+            "target_types": self._get_selected_targets(),
         }
 
     def _persist(self):
-        """Write the current Active Killing settings into behav3d_parameters
-        and save to YAML, so they survive across napari sessions."""
+        """Write the current Active Killing settings into behav3d_parameters.yml."""
         params = self.metadata_loader.behav3d_parameters
         if params is None:
             return
-        params.setdefault("active_killing", {}).update(self._collect_params())
-        self._saved_cfg = dict(params["active_killing"])
-
+        from behav3d.widgets.utils import migrate_active_killing_config
+        cfg = migrate_active_killing_config(dict(params.get("active_killing", {}) or {}), log_fn=None)
+        cfg.update(self._collect_params())
+        params["active_killing"] = cfg
+        self._saved_cfg = dict(cfg)
         out_dir = self.metadata_loader.output_dir
         if out_dir:
-            params_path = Path(out_dir) / "behav3d_parameters.yml"
             try:
-                with open(params_path, "w") as f:
-                    yaml.safe_dump(params, f, sort_keys=False)
+                from behav3d.io.parameters import save_params
+                save_params(params, out_dir)
             except Exception as e:
                 self.log(f"Warning: Could not save Active Killing parameters: {e}")
 
@@ -3089,313 +3082,129 @@ class ActiveKillingPanel(QWidget):
             self.immune_combo.setEnabled(False)
         self.immune_combo.blockSignals(False)
         self._validate()
+        self._update_param_hints()
 
     # ── Run ──────────────────────────────────────────────────────────────────
+    def _run_all_targets(self, immune, targets, params, progress_cb=None):
+        """Run per target (and combined when >1 target); returns (stats, last_subfolder)."""
+        from behav3d.features.advanced_timepoint_features import run_active_killing_analysis
+
+        md = self.metadata_loader.metadata
+        output_dir_str = str(self.metadata_loader.output_dir)
+        jobs = [([t], t) for t in targets]
+        if len(targets) > 1:
+            jobs.append((list(targets), "combined"))
+        stats = {}
+        for i, (t_list, subfolder) in enumerate(jobs):
+            self.log(f"--- Active Killing: {immune} vs {', '.join(t_list)} -> {subfolder}/ ---")
+
+            def _cb(done, total, label, _i=i):
+                # The progress signal is (int, int, str): report per-mille.
+                if progress_cb is not None:
+                    frac = (_i + float(done) / max(float(total), 1.0)) / len(jobs)
+                    progress_cb(int(round(1000 * min(max(frac, 0.0), 1.0))), 1000, str(label))
+
+            _, _, stats = run_active_killing_analysis(
+                metadata=md, output_dir=output_dir_str, immune_cell_type=immune, target_cell_types=t_list,
+                target_cell_diameter_um=params["target_cell_diameter_um"],
+                causal_window_min=params["causal_window_min"],
+                attribution_radius_um=params["attribution_radius_um"],
+                advanced=params.get("advanced") or None, save_results=True, output_subfolder=subfolder,
+                progress_cb=_cb, top_n_killers=int(self.spin_top_n.value()),
+            )
+        return stats, jobs[-1][1]
+
+    def _report(self, stats, results_dir, interactive=True):
+        n_att = int(stats["n_attributed"])
+        n_ev = int(stats["n_death_events"])
+        conv = stats["conversion_rate"]
+        conv_txt = f"{conv:.2f}" if conv == conv else "n/a"
+        self.log(
+            f"✅ Active Killing complete — {n_att}/{n_ev} death events attributed, "
+            f"conversion rate {conv_txt} (attributed deaths per contact event), "
+            f"{stats['total_kill_credit']:.2f} kill credit."
+        )
+        if stats.get("figures_error"):
+            self.log(f"⚠️ Figures failed: {stats['figures_error']} (result tables are complete).")
+        stale_filtered = stats.get("filtering_needs_rerun_for") or []
+        if stale_filtered:
+            self.log(
+                f"⚠️ Re-run Filtering for {', '.join(stale_filtered)} — its filtered CSV "
+                "was built before this run and doesn't include these results yet."
+            )
+        if interactive:
+            self._offer_open_folder(results_dir, stale_filtered_cell_types=stale_filtered)
+
     def _on_run_clicked(self):
-        """Run Active Killing Analysis in the background (indeterminate)."""
+        """Run Active Killing in the background with a per-frame progress bar."""
         self._validate()
         if not self.btn_run.isEnabled():
             return
         if self._bg.is_running():
-            self.log("\u26a0\ufe0f An active killing run is already in progress.")
+            self.log("⚠️ An active killing run is already in progress.")
             return
-
-        from behav3d.features.advanced_timepoint_features import run_active_killing_analysis
-
-        # Persist + snapshot widget state before running.
         self._persist()
         immune = self._get_immune_type()
         targets = self._get_selected_targets()
         params = self._collect_params()
-        md = self.metadata_loader.metadata
-
-        self.btn_run.setText("\u23f3 Running\u2026")
+        self.btn_run.setText("⏳ Running…")
         self.log(
-            f"\u25b6 Active Killing Analysis: {immune} vs {targets}  "
-            f"(window={params['observation_window']}, "
-            f"signal={params['death_signal_column']}, "
-            f"multiplier={params['killing_threshold_multiplier']}, "
-            f"contact_column={params['contact_column']})\u2026"
+            f"▶ Active Killing: {immune} vs {targets}  (cell diameter "
+            f"{params['target_cell_diameter_um']:g} µm, causal window {params['causal_window_min']:g} min, "
+            f"radius {params['attribution_radius_um']:g} µm)…"
         )
 
-        output_dir_str = str(self.metadata_loader.output_dir)
-
-        def _do_active_killing(progress_cb=None):
-            def run_for_targets(t_list, subfolder):
-                return run_active_killing_analysis(
-                    metadata=md,
-                    output_dir=output_dir_str,
-                    immune_cell_type=immune,
-                    target_cell_types=t_list,
-                    observation_window=params["observation_window"],
-                    death_signal_column=params["death_signal_column"],
-                    killing_threshold_multiplier=params["killing_threshold_multiplier"],
-                    absolute_killing_threshold=params.get("absolute_killing_threshold"),
-                    min_contact_duration=params["min_contact_duration"],
-                    contact_column=params["contact_column"],
-                    save_results=True,
-                    output_subfolder=subfolder
-                )
-
-            plot_jobs = []
-            df_killing, df_summary, stats = None, None, None
-            for t in targets:
-                self.log(f"--- Running independent analysis for target: {t} ---")
-                df_killing, df_summary, stats = run_for_targets([t], t)
-                plot_jobs.append((t, df_killing))
-
-            if len(targets) > 1:
-                self.log("--- Running combined analysis for all selected targets ---")
-                combined_subfolder = "combined"
-                df_killing, df_summary, stats = run_for_targets(targets, combined_subfolder)
-                plot_jobs.append((combined_subfolder, df_killing))
-            else:
-                combined_subfolder = targets[0]
-
-            return (plot_jobs, stats, combined_subfolder)
+        def _do(progress_cb=None):
+            return self._run_all_targets(immune, targets, params, progress_cb=progress_cb)
 
         def _on_done(result):
-            plot_jobs, stats, subfolder = result
-            for job_subfolder, job_df_killing in plot_jobs:
-                job_results_dir = self._active_killing_dir(immune) / job_subfolder
-                self._save_plots(job_df_killing, immune, job_results_dir)
-            results_dir = self._active_killing_dir(immune) / subfolder
-            n_active = int(stats.get("total_active_killing_timepoints", 0))
-            rate = stats.get("overall_killing_rate", 0.0)
-            stale_filtered = stats.get("filtering_needs_rerun_for") or []
-            self.log(
-                f"\u2705 Active Killing Analysis complete \u2014 "
-                f"{n_active} active killing timepoints ({rate:.1%} of contact timepoints)."
-            )
-            if stale_filtered:
-                self.log(
-                    f"\u26a0\ufe0f Re-run Filtering for {', '.join(stale_filtered)} \u2014 its filtered CSV "
-                    "was built before this run and doesn't include these results yet."
-                )
-            self.btn_run.setText("\u25b6  Run Active Killing Analysis")
-            self._offer_open_folder(results_dir, stale_filtered_cell_types=stale_filtered)
+            stats, subfolder = result
+            self.btn_run.setText("▶  Run Active Killing Analysis")
+            self._report(stats, self._active_killing_dir(immune) / subfolder, interactive=True)
+            notify_results_changed(self)
 
         def _on_failed(err: str):
-            self.log(f"\u274c Active Killing Analysis error: {err}")
-            self.btn_run.setText("\u25b6  Run Active Killing Analysis")
+            self.log(f"❌ Active Killing Analysis error: {err}")
+            self.btn_run.setText("▶  Run Active Killing Analysis")
 
         self._bg.run(
-            fn=_do_active_killing,
-            desc=f"Active Killing \u2014 {immune}\u2026",
+            fn=_do,
+            desc=f"Active Killing — {immune}…",
             progress_row=self.tab_progress_row,
             buttons=[self.btn_run],
             viewer=self.viewer,
             on_done=_on_done,
             on_failed=_on_failed,
-            inject_progress=False,
-            indeterminate=True,
+            inject_progress=True,
+            indeterminate=False,
         )
 
-    # ── Plot saving ───────────────────────────────────────────────────────────
-    def _save_plots(self, df_killing, immune: str, results_dir: Path):
-        """Save per-sample 4-panel kinetics plots + combined efficiency plot.
-        Output layout mirrors the notebook ActiveKillingPanel exactly."""
-        import matplotlib.pyplot as plt
-
-        if df_killing is None or df_killing.empty:
-            self.log("  \u2139\ufe0f No killing events \u2014 plots skipped.")
-            return
-
-        # Normalise column names
-        if "TrackID" in df_killing.columns and "immune_track_id" not in df_killing.columns:
-            df_killing = df_killing.copy()
-            df_killing["immune_track_id"] = df_killing["TrackID"]
-
-        try:
-            import seaborn as sns
-            _has_sns = True
-        except ImportError:
-            _has_sns = False
-
-        df_active_all = df_killing[df_killing["is_active_killing"]].copy()
-        
-        # 1. Per-sample kinetics (4 plots each)
-        samples = df_killing["sample_name"].unique()
-        for sample_name in samples:
-            df_sample_all = df_killing[df_killing["sample_name"] == sample_name]
-            df_sample_active = df_sample_all[df_sample_all["is_active_killing"]].copy()
-            
-            fig, axes = plt.subplots(2, 2, figsize=(16, 10))
-            axes = axes.flatten()
-            
-            # Plot 1: Efficiency Distribution (Per Sample)
-            if not df_sample_active.empty and "killing_efficiency" in df_sample_active.columns:
-                if _has_sns:
-                    sns.histplot(df_sample_active["killing_efficiency"], kde=True, ax=axes[0], color='red')
-                else:
-                    axes[0].hist(df_sample_active["killing_efficiency"].dropna(), bins=20, color="red", alpha=0.8)
-            axes[0].set_title("1. Killing Efficiency Distribution", fontsize=14, fontweight='bold')
-            axes[0].set_xlabel("Efficiency Score (signal increase / expected background)")
-            axes[0].set_ylabel("Active Killing Events")
-            
-            # Plot 2: Smoothed Kinetics
-            if "position_t" in df_sample_all.columns:
-                temp_counts = df_sample_active.groupby("position_t").size()
-                if not temp_counts.empty:
-                    max_t = int(df_sample_all["position_t"].max())
-                    full_t = pd.Series(0, index=range(max_t + 1))
-                    full_t.update(temp_counts)
-                    window = max(5, max_t // 20)
-                    smoothed = full_t.rolling(window=window, center=True).mean()
-                    
-                    axes[1].plot(full_t.index, full_t.values, color='darkred', alpha=0.2, label='Raw Counts')
-                    axes[1].plot(smoothed.index, smoothed.values, color='red', linewidth=2, label='Kinetics Trend')
-                    axes[1].fill_between(smoothed.index, 0, smoothed.values, color='red', alpha=0.1)
-                    axes[1].set_title("2. Killing Intensity (Smoothed)", fontsize=14, fontweight='bold')
-                    axes[1].set_xlabel("Timepoint")
-                    axes[1].set_ylabel("Events / Timepoint")
-                    axes[1].legend()
-
-                # Plot 3: Cumulative Progress
-                if not temp_counts.empty:
-                    cumulative = full_t.cumsum()
-                    axes[2].plot(cumulative.index, cumulative.values, color='darkblue', linewidth=3)
-                    axes[2].fill_between(cumulative.index, 0, cumulative.values, color='blue', alpha=0.1)
-                    axes[2].set_title("3. Cumulative Killing Progress", fontsize=14, fontweight='bold')
-                    axes[2].set_xlabel("Timepoint")
-                    axes[2].set_ylabel("Cumulative Sum of Active Killing Events")
-                    axes[2].grid(True, linestyle='--', alpha=0.6)
-
-            # Plot 4: Distribution of active killing events per cell
-            if not df_sample_active.empty:
-                events_per_cell = df_sample_active.groupby("immune_track_id").size()
-                max_events = int(events_per_cell.max())
-                counts_per_bin = events_per_cell.value_counts().reindex(range(1, max_events + 1), fill_value=0)
-                axes[3].bar(counts_per_bin.index, counts_per_bin.values, color='red', edgecolor='black', alpha=0.8)
-                axes[3].set_xticks(range(1, max_events + 1))
-                axes[3].set_title("4. Distribution of Killing Events per Cell", fontsize=14, fontweight='bold')
-                axes[3].set_xlabel("Number of Active Killing Events")
-                axes[3].set_ylabel("Number of Cells")
-                axes[3].grid(True, axis='y', linestyle='--', alpha=0.6)
-            else:
-                axes[3].set_title("4. Distribution of Killing Events per Cell", fontsize=14, fontweight='bold')
-                axes[3].set_xlabel("Number of Active Killing Events")
-                axes[3].set_ylabel("Number of Cells")
-
-            plt.tight_layout()
-            sample_plot_dir = results_dir / "plots" / sample_name
-            sample_plot_dir.mkdir(parents=True, exist_ok=True)
-            plot_path = sample_plot_dir / f"killing_kinetics_summary_{sample_name}.png"
-            plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-            plt.close(fig)
-            try:
-                self.log(f"  📊 Saved: {plot_path.relative_to(Path(self.metadata_loader.output_dir))}")
-            except ValueError:
-                self.log(f"  📊 Saved: {plot_path}")
-
-        # 2. Combined Killing Efficiency Distribution
-        if not df_active_all.empty and "killing_efficiency" in df_active_all.columns:
-            fig, ax = plt.subplots(figsize=(10, 6))
-            if _has_sns:
-                sns.histplot(df_active_all["killing_efficiency"], kde=True, ax=ax, color="purple")
-            else:
-                ax.hist(df_active_all["killing_efficiency"].dropna(), bins=20, color="purple", alpha=0.8)
-            ax.set_title("Combined Killing Efficiency Distribution", fontsize=16, fontweight="bold")
-            ax.set_xlabel("Efficiency Score (signal increase / expected background)")
-            ax.set_ylabel("Active Killing Events")
-            combined_dir = results_dir / "plots"
-            combined_dir.mkdir(parents=True, exist_ok=True)
-            combined_path = combined_dir / "combined_killing_efficiency_distribution.png"
-            plt.savefig(combined_path, dpi=150, bbox_inches="tight")
-            plt.close(fig)
-            try:
-                self.log(f"  📊 Saved: {combined_path.relative_to(Path(self.metadata_loader.output_dir))}")
-            except ValueError:
-                self.log(f"  📊 Saved: {combined_path}")
-
     def run_analysis(self, interactive: bool = True, extra_callbacks=None):
-        """Synchronous Active Killing analysis used by the processing queue.
+        """Synchronous Active Killing used by the processing queue.
 
-        Kept blocking on purpose: the queue iterates steps serially and
-        relies on each step completing before moving on.  GUI button
-        clicks go through :meth:`_on_run_clicked` instead, which routes
-        through ``BackgroundOperation`` for napari responsiveness.
-
-        ``extra_callbacks`` is the queue's chaining hook fired once the
-        synchronous analysis finishes.
+        Kept blocking on purpose: the queue iterates steps serially and relies
+        on each step completing before moving on. ``extra_callbacks`` is the
+        queue's chaining hook fired once the analysis finishes.
         """
         self._validate()
         if not self.btn_run.isEnabled():
             fire_extra_callback(extra_callbacks, "on_failed", "run button disabled")
             return
-
-        from behav3d.features.advanced_timepoint_features import run_active_killing_analysis
-
         immune = self._get_immune_type()
         params = self._collect_params()
-        md = self.metadata_loader.metadata
-        targets = params.get("target_types", self.target_types)
+        targets = params.get("target_types") or self.target_types
         if not targets:
-            self.log("⚠️ No organoid target types detected — cannot run active killing analysis.")
-            fire_extra_callback(extra_callbacks, "on_failed", "no organoid target types")
+            self.log("⚠️ No target types detected — cannot run active killing analysis.")
+            fire_extra_callback(extra_callbacks, "on_failed", "no target types")
             return
-
         self.btn_run.setEnabled(False)
         self.btn_run.setText("⏳ Running…")
         if hasattr(self, "btn_queue"):
             self.btn_queue.setEnabled(False)
         try:
-            self.log(
-                f"▶ Active Killing Analysis: {immune} vs {targets}  "
-                f"(window={params['observation_window']}, "
-                f"signal={params['death_signal_column']}, "
-                f"multiplier={params['killing_threshold_multiplier']}, "
-                f"contact_column={params['contact_column']})…"
-            )
-
-            output_dir_str = str(self.metadata_loader.output_dir)
-            df_killing, df_summary, stats = None, None, None
-
-            def run_for_targets(t_list, subfolder):
-                return run_active_killing_analysis(
-                    metadata=md,
-                    output_dir=output_dir_str,
-                    immune_cell_type=immune,
-                    target_cell_types=t_list,
-                    observation_window=params["observation_window"],
-                    death_signal_column=params["death_signal_column"],
-                    killing_threshold_multiplier=params["killing_threshold_multiplier"],
-                    absolute_killing_threshold=params.get("absolute_killing_threshold"),
-                    min_contact_duration=params["min_contact_duration"],
-                    contact_column=params["contact_column"],
-                    save_results=True,
-                    output_subfolder=subfolder
-                )
-            
-            for t in targets:
-                self.log(f"--- Running independent analysis for target: {t} ---")
-                df_killing, df_summary, stats = run_for_targets([t], t)
-                self._save_plots(df_killing, immune, self._active_killing_dir(immune) / t)
-
-            if len(targets) > 1:
-                self.log("--- Running combined analysis for all selected targets ---")
-                combined_subfolder = "combined"
-                df_killing, df_summary, stats = run_for_targets(targets, combined_subfolder)
-                self._save_plots(df_killing, immune, self._active_killing_dir(immune) / combined_subfolder)
-            else:
-                combined_subfolder = targets[0]
-
-            results_dir = self._active_killing_dir(immune) / combined_subfolder
-            n_active = int(stats.get("total_active_killing_timepoints", 0))
-            rate = stats.get("overall_killing_rate", 0.0)
-            stale_filtered = stats.get("filtering_needs_rerun_for") or []
-            self.log(
-                f"✅ Active Killing Analysis complete — "
-                f"{n_active} active killing timepoints ({rate:.1%} of contact timepoints)."
-            )
-            if stale_filtered:
-                self.log(
-                    f"⚠️ Re-run Filtering for {', '.join(stale_filtered)} — its filtered CSV "
-                    "was built before this run and doesn't include these results yet."
-                )
-            if interactive:
-                self._offer_open_folder(results_dir, stale_filtered_cell_types=stale_filtered)
-            fire_extra_callback(extra_callbacks, "on_done", (df_killing, df_summary, stats, combined_subfolder))
+            stats, subfolder = self._run_all_targets(immune, targets, params)
+            self._report(stats, self._active_killing_dir(immune) / subfolder, interactive=interactive)
+            fire_extra_callback(extra_callbacks, "on_done", (None, None, stats, subfolder))
         except Exception as e:
             import traceback as _tb
             _tb.print_exc()
@@ -3410,23 +3219,17 @@ class ActiveKillingPanel(QWidget):
 
     # ── Folder open popup ──────────────────────────────────────────────────────
     def _offer_open_folder(self, results_dir: Path, stale_filtered_cell_types=None):
-        """Show a modal dialog offering to open the output folder in the OS file manager.
-
-        Active Killing always reads the unfiltered track features, so any
-        filtered CSV for ``stale_filtered_cell_types`` was built before this
-        run and doesn't include these results yet -- surface that here so
-        the reminder isn't buried in the log.
-        """
+        """Offer to open the output folder in the OS file manager."""
         box = QMessageBox(self)
         box.setWindowTitle("Active Killing Analysis Complete")
         text = (
-            "\u2705  Active Killing Analysis finished!\n\n"
+            "✅  Active Killing Analysis finished!\n\n"
             f"Outputs saved to:\n{results_dir}\n\n"
         )
         if stale_filtered_cell_types:
             text += (
-                "\u26a0\ufe0f Re-run Filtering for "
-                f"{', '.join(sorted(stale_filtered_cell_types))} \u2014 its filtered CSV "
+                "⚠️ Re-run Filtering for "
+                f"{', '.join(sorted(stale_filtered_cell_types))} — its filtered CSV "
                 "was built before this run and doesn't include these results yet.\n\n"
             )
         text += "Open output folder in file manager?"
@@ -3447,201 +3250,177 @@ class ActiveKillingPanel(QWidget):
             except Exception as e:
                 self.log(f"Could not open folder: {e}")
 
-    # ── Viewer loading ────────────────────────────────────────────────────────
-    def _on_load_viewer_clicked(self):
-        """Load top-N active killers as colour-coded Points layers in the napari viewer.
+    # ── Viewer ─────────────────────────────────────────────────────────────────
+    def _results_dir_for_viewer(self, immune):
+        targets = self._get_selected_targets()
+        sub = "combined" if len(targets) > 1 else (targets[0] if targets else None)
+        base = self._active_killing_dir(immune)
+        if sub and (base / sub).exists():
+            return base / sub
+        found = sorted(base.glob(f"*/per_effector_killing_{immune}.csv"), key=lambda p: p.stat().st_mtime)
+        return found[-1].parent if found else None
 
-        Each killer gets its own layer containing ALL timepoints where it was
-        actively killing (is_active_killing == True), coloured by rank order.
-        """
+    def _on_preview_patches_clicked(self):
+        """Show candidate new-death patches at the current viewer frame."""
         if self.viewer is None:
-            self.log("\u26a0\ufe0f No viewer available.")
+            self.log("⚠️ No viewer available.")
             return
+        md = getattr(self.metadata_loader, "metadata", None)
+        targets = self._get_selected_targets()
+        if md is None or not len(md) or not targets:
+            self.log("⚠️ Load metadata and select a target type first.")
+            return
+        from behav3d.core.metadata import resolve_immune_track_paths_for_sample
+        from behav3d.features.death_events import (
+            DeathEventParams, preview_new_death_patches, resolve_dead_mask_path,
+            resolve_tracks_image_path, voxel_spacing_from_sample)
+        try:
+            t = int(self.viewer.dims.current_step[0]) if self.viewer.dims.ndim >= 4 else 0
+        except Exception:
+            t = 0
+        row = md.iloc[0]
+        target = targets[0]
+        tpath = resolve_tracks_image_path(row, target)
+        dpath, tried = resolve_dead_mask_path(row, self.metadata_loader.output_dir)
+        if tpath is None or not tpath.exists() or dpath is None:
+            self.log(f"⚠️ Preview needs the tracked {target} labels and the dead mask for "
+                     f"{row['sample_name']} (dead mask tried: {tried}).")
+            return
+        immune_paths = {k: v for k, v in resolve_immune_track_paths_for_sample(row).items()
+                        if Path(v).exists() and k != target}
+        adv = self._collect_params()["advanced"]
+        dparams = DeathEventParams(
+            target_cell_diameter_um=float(self.spin_cell_diameter.value()),
+            **{k: v for k, v in adv.items() if k in DeathEventParams.__dataclass_fields__
+               and k != "target_cell_diameter_um"},
+        )
+        spacing = voxel_spacing_from_sample(row)
+        try:
+            labels, table = preview_new_death_patches(
+                target_tracks_path=tpath, dead_mask_path=dpath, immune_tracks_paths=immune_paths,
+                t=t, voxel_spacing=spacing, params=dparams)
+        except Exception as e:
+            self.log(f"❌ Death-patch preview failed: {e}")
+            return
+        name = f"{self._LAYER_PREFIX} death patches t={t}"
+        for layer in [l for l in list(self.viewer.layers) if l.name.startswith(f"{self._LAYER_PREFIX} death patches")]:
+            try:
+                self.viewer.layers.remove(layer)
+            except Exception:
+                pass
+        keep = labels.copy()
+        if not table.empty:
+            fail = table.loc[~table["passes_floor"], "patch"].to_numpy()
+            keep[np.isin(keep, fail)] = 0
+        self.viewer.add_labels(keep, name=name, scale=spacing, opacity=0.8)
+        n_pass = int(table["passes_floor"].sum()) if not table.empty else 0
+        self.log(f"\U0001f50d {row['sample_name']} · {target} · t={t}: {len(table)} candidate new-death "
+                 f"patches, {n_pass} pass the {dparams.resolved(spacing).min_patch_volume_um3:.0f} µm³ "
+                 f"threshold (shown).")
+        for _, r in table.sort_values("volume_um3", ascending=False).head(15).iterrows():
+            mark = "✓" if r["passes_floor"] else "✗ below threshold"
+            self.log(f"   patch {int(r['patch'])}: target #{int(r['target_track_id'])}, "
+                     f"{r['volume_um3']:.0f} µm³ {mark}")
 
+    def _on_load_viewer_clicked(self):
+        """Load the top-N killers as Points layers at their credited timepoints (size = credit)."""
+        if self.viewer is None:
+            self.log("⚠️ No viewer available.")
+            return
         immune = self._get_immune_type()
         if not immune or "(no immune" in immune:
-            self.log("\u26a0\ufe0f No immune type selected.")
+            self.log("⚠️ No immune type selected.")
             return
-
-        from behav3d.features.advanced_timepoint_features import (
-            find_advanced_features_csv,
-        )
-        advanced_path = find_advanced_features_csv(
-            self.metadata_loader.output_dir, immune
-        )
-        if advanced_path is None or not Path(advanced_path).exists():
-            self.log(
-                "\u26a0\ufe0f No active-killing results found \u2014 run Active "
-                "Killing Analysis first."
-            )
+        from behav3d.features.advanced_timepoint_features import find_advanced_features_csv
+        from behav3d.features.kill_attribution import rank_top_killers
+        try:
+            advanced_path = find_advanced_features_csv(self.metadata_loader.output_dir, immune)
+        except Exception as e:
+            self.log(f"⚠️ {e}")
             return
-
+        results_dir = self._results_dir_for_viewer(immune)
+        if advanced_path is None or results_dir is None:
+            self.log("⚠️ No active-killing results found — run Active Killing Analysis first.")
+            return
         try:
             df = pd.read_csv(advanced_path)
-
-            # Normalise TrackID -> immune_track_id
-            if "TrackID" in df.columns and "immune_track_id" not in df.columns:
-                df["immune_track_id"] = df["TrackID"]
-
-            # Normalise centroid-* -> position_*
-            for old, new in [
-                ("centroid-0", "position_z"),
-                ("centroid-1", "position_y"),
-                ("centroid-2", "position_x"),
-            ]:
-                if old in df.columns and new not in df.columns:
-                    df[new] = df[old]
-
-            df_active = df[df["is_active_killing"] == True].copy()
-            if df_active.empty:
-                self.log("\u2139\ufe0f No active killing events found \u2014 nothing to display.")
+            eff = pd.read_csv(results_dir / f"per_effector_killing_{immune}.csv")
+            top = rank_top_killers(eff, int(self.spin_top_n.value()))
+            if top.empty:
+                self.log("ℹ️ No attributed kills — nothing to display.")
                 return
-
-            # Remove previous active killing layers
-            to_remove = [
-                l for l in list(self.viewer.layers)
-                if l.name.startswith(self._LAYER_PREFIX)
-            ]
-            for l in to_remove:
+            for l in [l for l in list(self.viewer.layers) if l.name.startswith(self._LAYER_PREFIX)
+                      and "death patches" not in l.name]:
                 try:
                     self.viewer.layers.remove(l)
                 except Exception:
                     pass
-
-            # Rank by total active-killing timepoints across all samples
-            n_top = int(self.spin_top_n.value())
-            top_killers = (
-                df_active.groupby(["sample_name", "immune_track_id"])
-                .size()
-                .sort_values(ascending=False)
-                .head(n_top)
-            )
-
-            # Distinct palette for up to 8 top killers (cycles after that)
             _palette = [
-                [1.00, 0.18, 0.18, 0.90],  # red
-                [1.00, 0.55, 0.00, 0.90],  # orange
-                [0.93, 0.83, 0.00, 0.90],  # yellow
-                [0.13, 0.70, 0.27, 0.90],  # green
-                [0.13, 0.47, 0.90, 0.90],  # blue
-                [0.60, 0.13, 0.90, 0.90],  # purple
-                [0.90, 0.13, 0.54, 0.90],  # pink
-                [0.00, 0.84, 0.84, 0.90],  # cyan
+                [1.00, 0.18, 0.18, 0.90], [1.00, 0.55, 0.00, 0.90], [0.93, 0.83, 0.00, 0.90],
+                [0.13, 0.70, 0.27, 0.90], [0.13, 0.47, 0.90, 0.90], [0.60, 0.13, 0.90, 0.90],
+                [0.90, 0.13, 0.54, 0.90], [0.00, 0.84, 0.84, 0.90],
             ]
-
+            killing = df[df["is_active_killing"].astype(bool)]
             n_loaded = 0
-            for i, ((sample_name, track_id), count) in enumerate(top_killers.items()):
-                mask = (
-                    (df_active["sample_name"] == sample_name)
-                    & (df_active["immune_track_id"] == track_id)
-                )
-                rows = df_active[mask].sort_values("position_t")
-                coords = [
-                    [
-                        float(r.get("position_t", 0)),
-                        float(r.get("position_z", 0)),
-                        float(r.get("position_y", 0)),
-                        float(r.get("position_x", 0)),
-                    ]
-                    for _, r in rows.iterrows()
-                ]
-                if not coords:
+            for i, (_, k) in enumerate(top.iterrows()):
+                rows = killing[(killing["sample_name"].astype(str) == str(k["sample_name"]))
+                               & (killing["TrackID"] == k["immune_track_id"])].sort_values("position_t")
+                if rows.empty:
                     continue
-                color = _palette[i % len(_palette)]
-                layer_name = (
-                    f"{self._LAYER_PREFIX} {immune} #{track_id} "
-                    f"({sample_name}, {count} events)"
-                )
+                coords = rows[["position_t", "position_z", "position_y", "position_x"]].to_numpy(dtype=float)
+                sizes = 6 + 10 * rows["kill_credit"].to_numpy(dtype=float)
                 self.viewer.add_points(
-                    np.array(coords),
-                    name=layer_name,
-                    face_color=[color],
-                    size=8,
-                    symbol="disc",
-                    opacity=0.85,
-                    out_of_slice_display=True,
+                    coords,
+                    name=(f"{self._LAYER_PREFIX} {immune} #{int(k['immune_track_id'])} "
+                          f"({k['sample_name']}, {float(k['kills_attributed']):.2f} kill credit)"),
+                    face_color=[_palette[i % len(_palette)]], size=sizes, symbol="disc",
+                    opacity=0.85, out_of_slice_display=True,
                 )
                 n_loaded += 1
-
-            self.log(
-                f"\u2705 Loaded {n_loaded} top active killer(s) as Points layers. "
-                "Each layer = ALL killing timepoints for that immune cell."
-            )
-
+            self.log(f"✅ Loaded {n_loaded} top killer(s); points mark credited timepoints, size = credit.")
         except Exception as e:
             import traceback as _tb
             _tb.print_exc()
-            self.log(f"\u274c Error loading top killers in viewer: {e}")
+            self.log(f"❌ Error loading top killers in viewer: {e}")
 
     def _on_export_gifs_clicked(self):
-        """Render the top-N active-killing events as animated GIFs (background)."""
+        """Render the top-N killers' largest attributed death events as GIFs (background)."""
         if self._bg.is_running():
-            self.log("\u26a0\ufe0f An operation is already in progress.")
+            self.log("⚠️ An operation is already in progress.")
             return
         immune = self._get_immune_type()
         if not immune or "(no immune" in immune:
-            self.log("\u26a0\ufe0f No immune type selected.")
+            self.log("⚠️ No immune type selected.")
             return
-
-        from behav3d.features.advanced_timepoint_features import (
-            find_advanced_features_csv,
-        )
-        advanced_path = find_advanced_features_csv(
-            self.metadata_loader.output_dir, immune
-        )
-        if advanced_path is None or not Path(advanced_path).exists():
-            self.log(
-                "\u26a0\ufe0f No active-killing results found \u2014 run Active "
-                "Killing Analysis first."
-            )
-            return
-        try:
-            df_killing = pd.read_csv(advanced_path)
-        except Exception as e:
-            self.log(f"\u274c Could not read active-killing results: {e}")
-            return
-
         metadata = self.metadata_loader.metadata
         output_dir = self.metadata_loader.output_dir
         targets = self._get_selected_targets()
-        obs_window = int(self.spin_obs_window.value())
         n_top = int(self.spin_top_n.value())
 
         def _do_export(progress_cb=None):
             return _render_killing_event_gifs(
-                metadata=metadata,
-                output_dir=output_dir,
-                immune_type=immune,
-                target_types=targets,
-                observation_window=obs_window,
-                df_killing=df_killing,
-                n_top=n_top,
-                log_fn=self.log,
+                metadata=metadata, output_dir=output_dir, immune_type=immune,
+                target_types=targets, n_top=n_top, log_fn=self.log,
             )
 
         def _on_done(paths):
             self.btn_export_gifs.setText("\U0001f39e  Export Killing GIFs")
             if paths:
-                self.log(
-                    f"\u2705 Wrote {len(paths)} killing GIF(s) to the gallery folder."
-                )
+                self.log(f"✅ Wrote {len(paths)} killing GIF(s) to the gallery folder.")
                 try:
                     self._offer_open_folder(Path(paths[0]).parent.parent)
                 except Exception:
                     pass
             else:
-                self.log(
-                    "\u2139\ufe0f No killing GIFs produced (no active-killing "
-                    "events, or the required images are missing)."
-                )
+                self.log("ℹ️ No killing GIFs produced (no attributed kills, or the images are missing).")
 
         def _on_failed(err):
             self.btn_export_gifs.setText("\U0001f39e  Export Killing GIFs")
-            self.log(f"\u274c Killing GIF export error: {err}")
+            self.log(f"❌ Killing GIF export error: {err}")
 
         self._bg.run(
             fn=_do_export,
-            desc=f"Killing GIFs \u2014 {immune}\u2026",
+            desc=f"Killing GIFs — {immune}…",
             progress_row=self.tab_progress_row,
             buttons=[self.btn_export_gifs],
             viewer=self.viewer,
@@ -3652,8 +3431,6 @@ class ActiveKillingPanel(QWidget):
         )
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# FeatureExtractionTab - main tab with per-cell-type sub-tabs
 # ═══════════════════════════════════════════════════════════════════════════
 class FeatureExtractionTab(QWidget):
     def __init__(self, viewer=None, metadata_loader=None, parent=None):

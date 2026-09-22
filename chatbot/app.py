@@ -60,8 +60,8 @@ _RESEARCHER_LABELS = {
     "nr_dead_mask_pixels": "dead-mask pixel count",
     "percentage_dead_mask": "dead-mask percentage",
     "mean_dead_dye": "mean dead-dye intensity",
-    "killing_efficiency": "killing efficiency",
-    "is_active_killing": "active-killing flag",
+    "kill_credit": "kill credit",
+    "is_active_killing": "credited-kill flag",
     "{target}_invasiveness_perc": "target invasiveness percentage",
     "recommend_edt": "EDT recommendation",
     "save_metadata": "Save Metadata",
@@ -359,10 +359,12 @@ def analysis_intent_clarification(
     route = _analysis_intent_route(messages)
     if route == "clarify_killing_threshold":
         return (
-            "Two different thresholds could apply here. Do you mean the **signal "
-            "increase that counts as a killing event** in Active Killing, or the "
-            "**contact distance that decides when two objects count as touching** in "
-            "Feature Extraction? Tell me which one and I will open the right panel."
+            "Several thresholds could apply here. Do you mean the **death threshold** "
+            "in Active Killing (the minimum NEW dead-patch size, set by the target cell "
+            "diameter), the **attribution radius** (how close an effector must be to a "
+            "death patch to be credited), or the **contact distance that decides when two "
+            "objects count as touching** in Feature Extraction? Tell me which one and I "
+            "will open the right panel."
         )
     if route == "clarify_death":
         if not any(phrase in latest for phrase in (
@@ -912,7 +914,7 @@ def analysis_navigation_action(context: dict, messages: list[dict]) -> dict | No
         (("interaction analysis", "contact counts", "contact comparison"),
          "interaction", "Interaction Analysis"),
         (("invasiveness analysis",), "invasiveness", "Invasiveness Analysis"),
-        (("active killing", "signal increase that counts as a killing event"),
+        (("active killing", "death event", "kill credit"),
          "active_killing", "Active Killing"),
         (("behavioral state", "behavioural state"), "behavioral_state", "Behavioral State"),
         (("state trajectory", "trajectory analysis"), "state_trajectory", "State Trajectory"),
@@ -2893,55 +2895,22 @@ def _one_cell_death_requirement(text: str) -> bool:
     ))
 
 
-def _one_cell_threshold_estimate(
-    context: dict, text: str,
-) -> tuple[int, str] | None:
-    """Estimate one full stained cell in image pixels/voxels from live spacing."""
-    diameter = _number_from_proposal(text, (
+def _stated_cell_diameter_um(text: str) -> float | None:
+    return _number_from_proposal(text, (
         r"(\d+(?:\.\d+)?)\s*(?:µm|um|micromet(?:er|re)s?)\s+"
-        r"(?:cell|object)\s+diameter",
+        r"(?:target\s+)?(?:cell|object)\s+diameter",
         r"(?:cell|object)\s+diameter[^\d]{0,20}(\d+(?:\.\d+)?)\s*"
         r"(?:µm|um|micromet(?:er|re)s?)",
-    )) or 10.0
-    records = (context.get("metadata", {}) or {}).get("records", []) or []
-    xy_values = set()
-    z_values = set()
-    valid_xy = 0
-    valid_z = 0
-    for record in records:
-        try:
-            xy = float(record.get("pixel_distance_xy"))
-        except (TypeError, ValueError):
-            xy = 0
-        try:
-            z = float(record.get("pixel_distance_z"))
-        except (TypeError, ValueError):
-            z = 0
-        if xy > 0:
-            xy_values.add(round(xy, 9))
-            valid_xy += 1
-        if z > 0:
-            z_values.add(round(z, 9))
-            valid_z += 1
-    if valid_xy != len(records) or len(xy_values) != 1:
-        return None
-    if valid_z not in {0, len(records)}:
-        return None
-    xy = next(iter(xy_values))
-    if len(z_values) == 1:
-        z = next(iter(z_values))
-        count = max(1, int(round((math.pi / 6.0 * diameter ** 3) / (xy ** 2 * z))))
-        basis = (
-            f"a {diameter:g} µm spherical cell at {xy:g} µm XY and {z:g} µm Z "
-            "sampling"
-        )
-    else:
-        count = max(1, int(round(math.pi * (diameter / 2.0) ** 2 / xy ** 2)))
-        basis = (
-            f"a {diameter:g} µm cell cross-section at {xy:g} µm per XY pixel; "
-            "Z spacing is unavailable, so this is a 2D estimate"
-        )
-    return count, basis
+        r"(?:cells?|objects?)\s+(?:are|of)\s+(?:about|around|approximately|roughly)?\s*"
+        r"(\d+(?:\.\d+)?)\s*(?:µm|um|micromet(?:er|re)s?)",
+    ))
+
+
+def _stated_attribution_radius_um(text: str) -> float | None:
+    return _number_from_proposal(text, (
+        r"(?:attribution\s+)?radius[^\d]{0,20}(\d+(?:\.\d+)?)\s*(?:µm|um|micromet(?:er|re)s?)",
+        r"within\s+(\d+(?:\.\d+)?)\s*(?:µm|um|micromet(?:er|re)s?)\s+of\s+the\s+(?:death|dying|patch)",
+    ))
 
 
 def active_killing_confirmation_action(
@@ -2964,101 +2933,42 @@ def active_killing_confirmation_action(
         return None
 
     controls = _visible_control_map(context)
-    expected: dict[str, object] = {}
     by_suffix = {
         suffix: controls.get(f"features.active_killing.{suffix}")
         for suffix in (
-            "target_types", "observation_window", "death_signal",
-            "use_absolute_threshold", "absolute_threshold",
-            "minimum_contact_duration",
+            "target_types", "target_cell_diameter_um", "causal_window_min",
+            "attribution_radius_um",
         )
     }
+    expected: dict[str, object] = {}
     previous_lower = previous.lower()
     target_control = by_suffix["target_types"]
     if target_control is not None:
-        marked_target = re.search(
-            r"target for this run:\s*\*\*([^*]+)\*\*",
-            previous,
-            re.IGNORECASE,
-        )
-        if marked_target:
-            marked = marked_target.group(1).strip().lower()
-            selected_targets = [
-                str(choice) for choice in (target_control.get("choices") or [])
-                if re.search(
-                    rf"(?<!\w){re.escape(str(choice).lower())}(?!\w)", marked
-                )
-            ]
-        else:
-            selected_targets = [
-                str(choice) for choice in (target_control.get("choices") or [])
-                if re.search(
-                    rf"\b{re.escape(str(choice).lower())}\b", previous_lower
-                )
-            ]
+        marked_target = re.search(r"target for this run:\s*\*\*([^*]+)\*\*", previous, re.IGNORECASE)
+        haystack = marked_target.group(1).strip().lower() if marked_target else previous_lower
+        selected_targets = [
+            str(choice) for choice in (target_control.get("choices") or [])
+            if re.search(rf"(?<!\w){re.escape(str(choice).lower())}(?!\w)", haystack)
+        ]
         if selected_targets:
             expected["target_types"] = selected_targets
 
-    for label in (
-        "Dead-mask pixel count", "Dead-mask percentage",
-        "Mean dead-dye intensity",
+    for suffix, pattern in (
+        ("target_cell_diameter_um", r"target cell diameter[^\d]{0,20}(\d+(?:\.\d+)?)\s*(?:µm|um)"),
+        ("causal_window_min", r"causal window[^\d]{0,20}(\d+(?:\.\d+)?)\s*min"),
+        ("attribution_radius_um", r"attribution radius[^\d]{0,20}(\d+(?:\.\d+)?)\s*(?:µm|um)"),
     ):
-        if label.lower() in previous_lower:
-            expected["death_signal"] = label
-            break
+        value = _number_from_proposal(previous, (pattern,))
+        if value is not None and value > 0:
+            expected[suffix] = value
 
-    absolute_mode = "absolute threshold" in previous_lower
-    if absolute_mode:
-        expected["use_absolute_threshold"] = True
-        absolute_value = _number_from_proposal(previous, (
-            r"absolute (?:signal-increase )?threshold[^\d]{0,50}"
-            r"(\d+(?:\.\d+)?)\s*(?:dead[- ]mask |dead )?(?:pixels|voxels)",
-            r"minimum rise[^\d]{0,30}(\d+(?:\.\d+)?)\s*"
-            r"(?:dead[- ]mask |dead )?(?:pixels|voxels)",
-            r"(\d+(?:\.\d+)?)\s*(?:dead[- ]mask |dead )?(?:pixels|voxels)"
-            r"[^\n.]{0,35}(?:minimum|threshold|rise)",
-        ))
-        if absolute_value is None or absolute_value <= 0:
-            return {
-                "text": (
-                    "I have not applied a partial Active Killing setup. The agreed "
-                    "absolute-threshold mode still needs a positive minimum "
-                    "dead-mask pixel increase. Tell me that value, then I can propose "
-                    "the threshold, signal, timing, contact duration, and targets "
-                    "together."
-                ),
-                "calls": [],
-            }
-        expected["absolute_threshold"] = absolute_value
-
-    observation = _number_from_proposal(previous, (
-        r"observation window[^\d]{0,45}(\d+(?:\.\d+)?)\s*"
-        r"(?:timepoints?|frames?|tp)\b",
-        r"currently[^\n.]{0,25}(\d+(?:\.\d+)?)\s*"
-        r"(?:timepoints?|frames?|tp)\b",
-    ))
-    if observation is not None:
-        expected["observation_window"] = int(round(observation))
-    minimum_contact = _number_from_proposal(previous, (
-        r"(?:minimum|min\.?) contact duration[^\d]{0,45}"
-        r"(\d+(?:\.\d+)?)\s*(?:timepoints?|frames?|tp)\b",
-    ))
-    if minimum_contact is not None:
-        expected["minimum_contact_duration"] = int(round(minimum_contact))
-
-    calls = []
-    for suffix, value in expected.items():
-        control = by_suffix.get(suffix)
-        if control is not None:
-            calls.append({
-                "name": "set_ui_value",
-                "arguments": {"control_id": control["id"], "value": value},
-            })
+    calls = [
+        {"name": "set_ui_value", "arguments": {"control_id": by_suffix[s]["id"], "value": v}}
+        for s, v in expected.items() if by_suffix.get(s) is not None
+    ]
     if not calls:
         return None
-    targets = expected.get("target_types") or (
-        target_control.get("value") if target_control else []
-    )
+    targets = expected.get("target_types") or (target_control.get("value") if target_control else [])
     target_text = ", ".join(str(value) for value in targets) or "the selected targets"
     scope_text = (
         "This is one independent target run; configure the other target in a "
@@ -3099,34 +3009,6 @@ def active_killing_readiness_summary(
     )
     issues = list(state.get("setup_issues") or [])
     setup_text = _active_killing_user_text(messages)
-    if _one_cell_death_requirement(setup_text):
-        anchor = _active_killing_anchor(messages) or 0
-        assistant_text = " ".join(
-            str(message.get("content") or "").lower()
-            for message in messages[anchor:]
-            if message.get("role") == "assistant"
-        )
-        explicit_user_threshold = bool(re.search(
-            r"absolute (?:signal-increase )?threshold[^\d]{0,30}"
-            r"\d+(?:\.\d+)?\s*(?:dead[- ]mask |dead )?(?:pixels|voxels)",
-            setup_text,
-            re.IGNORECASE,
-        ))
-        calibrated = "one-cell calibration" in assistant_text or explicit_user_threshold
-        try:
-            positive_threshold = float(state.get("absolute_threshold") or 0) > 0
-        except (TypeError, ValueError):
-            positive_threshold = False
-        if not (
-            calibrated
-            and state.get("uses_absolute_threshold")
-            and str(state.get("death_signal") or "").lower() == "dead-mask pixel count"
-            and positive_threshold
-        ):
-            issues.append(
-                "The requirement that at least one cell dies has not yet been "
-                "translated into a calibrated positive dead-mask pixel increase."
-            )
     if (
         any(phrase in setup_text.lower() for phrase in (
             "independently", "separately", "no combined", "without combined",
@@ -3145,15 +3027,13 @@ def active_killing_readiness_summary(
             "contain every required value."
         )
     targets = ", ".join(state.get("target_cell_types") or []) or "none"
-    observation = state.get("observation_window")
-    observation_unit = "timepoint" if observation == 1 else "timepoints"
-    minimum_contact = state.get("minimum_contact_duration")
-    contact_unit = "timepoint" if minimum_contact == 1 else "timepoints"
     return (
         "Active Killing is **ready** in the live controls: effector "
-        f"**{state.get('effector_cell_type')}**, targets **{targets}**, observation "
-        f"window **{observation} {observation_unit}**, and minimum "
-        f"contact **{minimum_contact} {contact_unit}**. "
+        f"**{state.get('effector_cell_type')}**, targets **{targets}**, target cell "
+        f"diameter **{state.get('target_cell_diameter_um')} µm** (death threshold "
+        f"**{float(state.get('min_death_patch_volume_um3') or 0):.0f} µm³**), causal window "
+        f"**{state.get('causal_window_min')} min**, attribution radius "
+        f"**{state.get('attribution_radius_um')} µm**. "
         + (
             "This is one independent target run."
             if len(state.get("target_cell_types") or []) == 1 else
@@ -3187,7 +3067,7 @@ def active_killing_action(context: dict, messages: list[dict]) -> dict | None:
         return {
             "text": (
                 "Opening **Active Killing** in Feature Extraction, where its "
-                "contact-associated signal settings are configured."
+                "death-event and attribution settings are configured."
             ),
             "calls": [{
                 "name": "open_analysis_view",
@@ -3221,9 +3101,7 @@ def active_killing_action(context: dict, messages: list[dict]) -> dict | None:
         if target_match:
             targets = [
                 value.strip()
-                for value in re.split(
-                    r"\s*(?:,|&|\band\b)\s*", target_match.group(1)
-                )
+                for value in re.split(r"\s*(?:,|&|\band\b)\s*", target_match.group(1))
                 if value.strip()
             ]
     if not targets:
@@ -3268,95 +3146,52 @@ def active_killing_action(context: dict, messages: list[dict]) -> dict | None:
             }
         targets = latest_targets
 
-    duration_minutes = _active_killing_duration_minutes(setup_text)
-    if duration_minutes is None:
+    causal_window = _active_killing_duration_minutes(setup_text)
+    if causal_window is None:
         return {
             "text": (
-                "How long after contact should the target's signal be checked? Give "
-                "the expected delay in minutes; I will convert it using the loaded "
-                "frame interval."
-            ),
-            "calls": [],
-        }
-    interval_info = _active_killing_interval_minutes(context)
-    if interval_info is None:
-        return {
-            "text": (
-                "I cannot convert that delay reliably because the loaded samples do "
-                "not have one consistent, valid time interval and unit. Confirm the "
-                "acquisition cadence before I change the observation window."
-            ),
-            "calls": [],
-        }
-    interval_minutes, interval_label = interval_info
-    exact_window = duration_minutes / interval_minutes
-    window = max(1, int(math.ceil(exact_window - 1e-12)))
-
-    absolute_threshold = _number_from_proposal(setup_text, (
-        r"absolute (?:signal-increase )?threshold[^\d]{0,30}"
-        r"(\d+(?:\.\d+)?)\s*(?:dead[- ]mask |dead )?(?:pixels|voxels)",
-        r"minimum (?:dead[- ]mask )?(?:pixel|voxel) increase[^\d]{0,20}"
-        r"(\d+(?:\.\d+)?)",
-    ))
-    calibration_text = ""
-    if absolute_threshold is None and _one_cell_death_requirement(setup_text):
-        estimate = _one_cell_threshold_estimate(context, setup_text)
-        if estimate is None:
-            return {
-                "text": (
-                    "Your requirement that at least one cell dies belongs to the "
-                    "Active Killing **signal-increase threshold**, not Minimum contact "
-                    "duration. I need one consistent XY pixel size, and preferably Z "
-                    "spacing, to translate a cell-sized death signal into pixels."
-                ),
-                "calls": [],
-            }
-        absolute_threshold, basis = estimate
-        calibration_text = (
-            f" **One-cell calibration:** using {basis}, one fully stained cell is "
-            f"approximately **{absolute_threshold:g} dead-mask pixels/voxels**. This "
-            "is a starting estimate and must be checked against a trusted death-mask "
-            "preview because partial staining changes the count."
-        )
-    if absolute_threshold is None or absolute_threshold <= 0:
-        return {
-            "text": (
-                f"The {duration_minutes:g}-minute delay converts to **{window} "
-                f"timepoints** at {interval_label} per frame. I still need the "
-                "positive dead-mask pixel increase that should count as a killing "
-                "event; it is separate from the contact-distance threshold."
+                "How long after a contact can a death still be credited to it? Give it "
+                "in minutes: about **120 min** for organoid / carcinoma targets "
+                "(contact-to-apoptosis lags of ~1.8 +/- 1.5 h have been reported for "
+                "melanoma) or about **30 min** for haematologic targets."
             ),
             "calls": [],
         }
 
-    minimum_contact = _number_from_proposal(setup_text, (
-        r"(?:minimum|min\.?|at least)\s+contact(?: duration)?[^\d]{0,25}"
-        r"(\d+(?:\.\d+)?)\s*(?:timepoints?|frames?|tp)\b",
-    ))
-    if minimum_contact is None:
-        contact_control = by_id.get("features.active_killing.minimum_contact_duration")
-        minimum_contact = (
-            contact_control.get("value") if contact_control is not None else 1
+    def _live(control_id, default):
+        control = by_id.get(control_id)
+        try:
+            return float(control.get("value")) if control is not None else default
+        except (TypeError, ValueError):
+            return default
+
+    diameter = _stated_cell_diameter_um(setup_text)
+    diameter_note = ""
+    if diameter is None:
+        diameter = _live("features.active_killing.target_cell_diameter_um", 10.0)
+        diameter_note = (
+            f" I kept the current target cell diameter (**{diameter:g} µm**); tell me the "
+            "real diameter of one target cell if it differs."
         )
-    minimum_contact = max(1, int(round(float(minimum_contact or 1))))
+    radius = _stated_attribution_radius_um(setup_text) or _live(
+        "features.active_killing.attribution_radius_um", 15.0)
+    death_floor = 0.25 * (4.0 / 3.0) * math.pi * (diameter / 2.0) ** 3
+    one_cell_text = ""
+    if _one_cell_death_requirement(setup_text):
+        one_cell_text = (
+            " Your requirement that at least one cell dies is exactly what the target cell "
+            "diameter encodes: a death event needs a NEW connected dead patch of at least a "
+            f"quarter of one cell's volume (**≈{death_floor:.0f} µm³**)."
+        )
 
     expected = {
         "features.active_killing.target_types": targets,
-        "features.active_killing.observation_window": window,
-        "features.active_killing.death_signal": "Dead-mask pixel count",
-        "features.active_killing.use_absolute_threshold": True,
-        "features.active_killing.absolute_threshold": absolute_threshold,
+        "features.active_killing.target_cell_diameter_um": diameter,
+        "features.active_killing.causal_window_min": causal_window,
+        "features.active_killing.attribution_radius_um": radius,
     }
-    if "features.active_killing.minimum_contact_duration" in by_id:
-        expected["features.active_killing.minimum_contact_duration"] = minimum_contact
     if not set(expected).issubset(by_id):
         return None
-    rounding_text = ""
-    if abs(exact_window - round(exact_window)) > 1e-9:
-        rounding_text = (
-            f" I rounded up from {exact_window:.2f} frames so the window does not end "
-            "before the stated delay."
-        )
     scope_text = (
         "This configures one independent target run and does not request a pooled result."
         if len(targets) == 1 and independent_only else
@@ -3365,21 +3200,25 @@ def active_killing_action(context: dict, messages: list[dict]) -> dict | None:
         if len(targets) > 1 else
         "This is one independent target run."
     )
-    contact_unit = "timepoint" if minimum_contact == 1 else "timepoints"
+    interval = _active_killing_interval_minutes(context)
+    frames_text = ""
+    if interval is not None:
+        frames = int(math.ceil(causal_window / interval[0] - 1e-12))
+        frames_text = f" ({frames} frames at {interval[1]} per frame)"
     return {
         "text": (
             "**Active Killing proposal**\n\n"
             "I am proposing these values from the stated targets and timing:\n"
             f"- Target for this run: **{', '.join(targets)}**\n"
-            f"- Observation window: **{window} timepoints** "
-            f"({duration_minutes:g} minutes at {interval_label} per frame)\n"
-            "- Signal: **Dead-mask pixel count**\n"
-            f"- Absolute signal-increase threshold: **{absolute_threshold:g} "
-            "dead-mask pixels/voxels**\n"
-            f"- Minimum contact duration: **{minimum_contact} {contact_unit}**; this means "
-            "contact must last that many frames and does not mean that many cells die.\n\n"
-            f"{scope_text}{rounding_text}{calibration_text} The action cards below "
-            "require your confirmation."
+            f"- Target cell diameter: **{diameter:g} µm** -> death threshold "
+            f"**≈{death_floor:.0f} µm³** of new dead volume\n"
+            f"- Causal window: **{causal_window:g} min**{frames_text}\n"
+            f"- Attribution radius: **{radius:g} µm** (surface to surface, effector to death patch)\n\n"
+            "Each death event carries one unit of killing credit, shared among the effectors "
+            "that touched that target within the window and sit within the radius.\n\n"
+            f"{scope_text}{one_cell_text}{diameter_note} Check the diameter with **Preview "
+            "death patches** on a frame you trust. The action cards below require your "
+            "confirmation."
         ),
         "calls": [
             {
@@ -3707,8 +3546,8 @@ def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict])
         "- Field names in LIVE CONTEXT are internal only. In every visible response say 'XY pixel "
         "size' instead of pixel_distance_xy, 'timepoint' instead of position_t, and 'sample' "
         "instead of sample_name. Say 'dead-mask percentage', 'mean dead-dye intensity', "
-        "'dead-mask pixel count', and 'killing efficiency' instead of percentage_dead_mask, "
-        "mean_dead_dye, nr_dead_mask_pixels, and killing_efficiency. Call summarize_track_counts "
+        "'dead-mask pixel count', and 'kill credit' instead of percentage_dead_mask, "
+        "mean_dead_dye, nr_dead_mask_pixels, and kill_credit. Call summarize_track_counts "
         "the 'track-count preview' and recommend_edt the 'EDT recommendation'. Never expose an "
         "internal tool/action name, even when quoting experiment reference notes. These translations "
         "remain mandatory when quoting or summarizing metadata or saved configurations.\n"
@@ -3933,26 +3772,26 @@ def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict])
         "produces an independent analysis for each selected target and an additional pooled analysis when "
         "more than one is selected. When the researcher asks for a target comparison, ask whether they want "
         "independent-only runs or the independent outputs plus that pooled result. For independent-only "
-        "results, configure one target per run and ask which target to start with. Derive Observation "
-        "window and Minimum contact "
-        "duration from the biological timescale and metadata time interval. Prefer dead-mask pixel count with "
-        "an absolute threshold by default; calibrate that threshold from cell size and XY pixel size. Do not "
-        "reuse a 20-30 pixel example blindly. Use relative multipliers only in the limited baseline contexts "
-        "described in the guidance. In study-design explanations, call the contacting object the effector "
+        "results, configure one target per run and ask which target to start with. Active Killing "
+        "detects death events (NEW connected patches in the annotated dead mask inside a target) and gives "
+        "each one exactly one unit of kill credit, shared among the effectors that touched that target "
+        "within the causal window and lie within the attribution radius of the patch; total credit equals "
+        "the number of attributed death events, so it never inflates with effector density. It has three "
+        "settings: target cell diameter (µm, one target cell, not the organoid; it sets the death threshold "
+        "as a quarter of one cell's volume), causal window (minutes; ~120 for organoid/carcinoma targets, ~30 "
+        "for haematologic ones) and attribution radius (µm). There is no death-signal column, multiplier, "
+        "absolute threshold, observation window or minimum contact duration any more; if a researcher asks "
+        "for one, explain what replaced it. A statement that at least one cell dies is expressed by the "
+        "target cell diameter; recommend checking it with Preview death patches on a trusted frame. "
+        "In study-design explanations, call the contacting object the effector "
         "and the contacted object carrying the measured signal the target, but only after the researcher or "
         "experiment reference establishes those roles. Never infer them from biological names or UI categories. "
-        "A statement that at least one cell dies defines the required death-signal increase, not a one-frame "
-        "Minimum contact duration. Preserve it across follow-up turns and calibrate a dead-mask pixel-count "
-        "threshold from cell size and live XY/Z sampling before calling the setup ready. An accepted "
-        "multi-parameter setup must propose every agreed value in the same response: targets, "
-        "death signal, threshold mode and value, observation window, and minimum contact duration. Never "
-        "apply only the mode checkbox while leaving an agreed absolute threshold at 0. The dependent "
-        "threshold controls remain editable when inactive; read their active flag rather than omitting them. "
-        "Do not say the setup is ready until the live Active Killing state reports setup_ready true. "
+        "An accepted multi-parameter setup must propose every agreed value in the same response: targets, "
+        "target cell diameter, causal window and attribution radius. "
+"Do not say the setup is ready until the live Active Killing state reports setup_ready true. "
         "When an experiment reference defines Active Killing settings, say the reference 'defines' or "
         "'describes' them, never 'you have configured' or 'already configured' unless live controls/results "
-        "prove that. Preserve a stated one-frame minimum exactly; do not replace it with a generic 1-3-frame "
-        "range or call another range typical.\n"
+        "prove that.\n"
         "- Filtering must be run even when all filters are disabled because it creates the downstream CSV and "
         "interpolates missing timepoints.\n"
         "- Minimum track length and common output track length may validly be equal: the minimum removes "

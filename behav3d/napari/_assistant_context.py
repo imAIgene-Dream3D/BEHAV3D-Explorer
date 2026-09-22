@@ -267,7 +267,18 @@ def _compact_experiment_config(config: dict) -> dict:
     if not isinstance(active_killing, dict) and isinstance(filtering, dict):
         active_killing = filtering.get("active_killing")
     if isinstance(active_killing, dict):
-        summary["active_killing"] = {
+        ak_summary = {
+            key: _json_value(active_killing[key])
+            for key in (
+                "target_cell_diameter_um", "causal_window_min",
+                "attribution_radius_um", "target_types", "advanced",
+            )
+            if key in active_killing
+        }
+        # Historical / reference configurations may predate the death-event
+        # rework. Keep what they recorded, but label it so it is never read as
+        # a setting of the current algorithm.
+        legacy = {
             key: _json_value(active_killing[key])
             for key in (
                 "observation_window", "death_signal_column",
@@ -276,6 +287,9 @@ def _compact_experiment_config(config: dict) -> dict:
             )
             if key in active_killing
         }
+        if legacy:
+            ak_summary["legacy_settings_previous_algorithm"] = legacy
+        summary["active_killing"] = ak_summary
     death_dynamics = config.get("death_dynamics")
     if isinstance(death_dynamics, dict):
         summary["death_dynamics"] = _json_value(death_dynamics)
@@ -1131,50 +1145,36 @@ def _feature_extraction_state(main_widget) -> dict:
             lambda: [str(item.text()) for item in target_list.selectedItems()],
             [],
         ) or []
-    use_absolute = bool(_widget_value(
-        getattr(active, "check_abs_threshold", None)
-    ))
-    absolute_threshold = _widget_value(
-        getattr(active, "spin_abs_threshold", None)
-    )
-    observation_window = _widget_value(
-        getattr(active, "spin_obs_window", None)
-    )
-    minimum_contact = _widget_value(
-        getattr(active, "spin_min_contact", None)
-    )
+    diameter = _widget_value(getattr(active, "spin_cell_diameter", None))
+    min_patch = _widget_value(getattr(active, "spin_min_patch_volume", None))
+    causal_window = _widget_value(getattr(active, "spin_causal_window", None))
+    radius = _widget_value(getattr(active, "spin_attr_radius", None))
     effector = _widget_value(getattr(active, "immune_combo", None))
     issues = []
     if not effector or str(effector).startswith("(no immune"):
         issues.append("Select an immune effector cell type.")
     if not targets:
         issues.append("Select at least one target cell type.")
-    if use_absolute:
+    for label, value in (("Target cell diameter", diameter), ("Causal window", causal_window),
+                         ("Attribution radius", radius)):
         try:
-            if float(absolute_threshold) <= 0:
-                issues.append(
-                    "Absolute signal-increase threshold must be greater than 0."
-                )
+            if value is not None and float(value) <= 0:
+                issues.append(f"{label} must be greater than 0.")
         except (TypeError, ValueError):
-            issues.append("Set a valid absolute signal-increase threshold.")
+            issues.append(f"Set a valid {label.lower()}.")
+    validation = _safe(lambda: str(getattr(active, "validation_label").text()), "") or ""
+    if validation.startswith("⚠"):
+        issues.append(validation.lstrip("⚠️ ").strip())
     return {
         "active_killing_open": expanded,
         "active_killing": {
             "effector_cell_type": effector,
             "target_cell_types": targets,
-            "observation_window": observation_window,
-            "death_signal": _widget_value(
-                getattr(active, "death_signal_combo", None)
-            ),
-            "uses_absolute_threshold": use_absolute,
-            "absolute_threshold": absolute_threshold,
-            "threshold_multiplier": _widget_value(
-                getattr(active, "spin_threshold_mult", None)
-            ),
-            "minimum_contact_duration": minimum_contact,
-            "contact_column": _widget_value(
-                getattr(active, "contact_column_combo", None)
-            ),
+            "target_cell_diameter_um": diameter,
+            "min_death_patch_volume_um3": min_patch,
+            "death_threshold_set_directly": bool(getattr(active, "_volume_overridden", False)),
+            "causal_window_min": causal_window,
+            "attribution_radius_um": radius,
             "setup_ready": not issues,
             "setup_issues": issues,
         },

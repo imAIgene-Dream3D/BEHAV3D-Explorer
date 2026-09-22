@@ -7,16 +7,16 @@
 | [💀 Death Dynamics](death_dynamics) | How, and how fast, does a signal rise across each target population over the movie? | 📊 Analysis → 👥 Population Dynamics, Step 1 |
 | [🤝 Interaction Analysis](interaction_analysis.md) | How do contacts between targets and effectors relate to that signal, and to effector behaviour? | 📊 Analysis → 👥 Population Dynamics, Step 2 |
 | [🫳 Invasiveness Analysis](invasiveness) | How deeply does an effector engage the target's surface, from the *effector's* perspective? | 📊 Analysis → 👥 Population Dynamics, Step 3 |
-| [🎯 Active Killing](active_killing) | Which *individual* effectors are associated with a signal rise in the target they touched? | 🧪 Feature Extraction tab |
+| [🎯 Active Killing](active_killing) | Which *individual* effectors caused each localised death event in the targets they touched — with one unit of credit per death, so counts do not grow with effector density? | 🧪 Feature Extraction tab |
 
 ```{note}
-**Why Active Killing is configured somewhere else.** Conceptually it belongs with the three analyses above — it is about targets, effectors and contact. Mechanically it has to run during [Feature Extraction](../feature_extraction), because it needs the per-timepoint contact and signal columns while they are being computed, and it writes extra columns back into the effector's own feature table. So you configure and run it there, and interpret it here.
+**Why Active Killing is configured somewhere else.** Conceptually it belongs with the three analyses above — it is about targets, effectors and contact. Mechanically it runs from [Feature Extraction](../feature_extraction), because it needs the effector's per-timepoint contact columns plus the dead mask and tracked label images, and it writes extra columns back into the effector's own feature table. So you configure and run it there, and interpret it here.
 ```
 
 The first three steps read the **filtered** per-timepoint feature tables produced by the [Filtering](../filtering.md) tab, so you must run Feature Extraction and Filtering for every cell type involved before anything here will turn on.
 
 ```{important}
-**These analyses are not restricted to cell death.** What they actually compute is the rise of a per-object signal — across a population over time (Death Dynamics), and in association with contact (Active Killing, configured in Feature Extraction). Cell death measured with a dye is the original and canonical use, which is why the controls are named after it.
+**These analyses are not restricted to cell death.** What they actually compute is the rise of a per-object signal — across a population over time (Death Dynamics), and as new localised patches attributed to contacting effectors (Active Killing, configured in Feature Extraction). Cell death measured with a dye is the original and canonical use, which is why the controls are named after it.
 
 To use them with **any reporter that switches on** — a differentiation marker, an activation reporter, a stress or damage signal — declare that reporter's channel as `dead_channel` in [Data Preparation](../../data_preparation). Everything downstream then works unchanged; read "dead" as "the signal has risen past your threshold".
 

@@ -274,19 +274,19 @@ def test_api_streaming_text_sanitizes_split_internal_names():
     )
     assert visible == "Use "
     visible2, pending = app.split_researcher_stream_buffer(
-        pending + "dead_mask and killing_"
+        pending + "dead_mask and kill_"
     )
     visible3, pending = app.split_researcher_stream_buffer(
-        pending + "efficiency now."
+        pending + "credit now."
     )
     visible4, pending = app.split_researcher_stream_buffer(pending, final=True)
     assert visible2 + visible3 + visible4 == (
-        "dead-mask percentage and killing efficiency now."
+        "dead-mask percentage and kill credit now."
     )
     assert pending == ""
     assert app.researcher_facing_text(
-        "Use `percentage_dead_mask` and `killing_efficiency`."
-    ) == "Use dead-mask percentage and killing efficiency."
+        "Use `percentage_dead_mask` and `kill_credit`."
+    ) == "Use dead-mask percentage and kill credit."
     assert app.researcher_facing_text(
         "Use time_interval with time_unit."
     ) == "Use time interval with time unit."
@@ -799,7 +799,8 @@ def test_analysis_intent_resolver_clarifies_overlapping_death_contact_requests()
             "What threshold should I use for killing after contact?"
         )}],
     )
-    assert "signal increase" in threshold
+    assert "death threshold" in threshold
+    assert "attribution radius" in threshold
     assert "contact distance" in threshold
 
     death = app.analysis_intent_clarification(
@@ -1104,36 +1105,37 @@ def test_tracking_radius_is_calculated_from_speed_and_cadence():
     assert "20% margin" in result["text"]
 
 
-def test_active_killing_action_is_cadence_grounded_and_explicitly_proposed():
+_AK_SUFFIXES = (
+    "target_types", "target_cell_diameter_um", "causal_window_min", "attribution_radius_um",
+)
+
+
+def _ak_controls(**values):
+    defaults = {
+        "target_types": {"value": [], "choices": ["organoid1"]},
+        "target_cell_diameter_um": {"value": 10.0},
+        "causal_window_min": {"value": 120.0},
+        "attribution_radius_um": {"value": 15.0},
+    }
+    defaults.update(values)
+    return [
+        {"id": f"features.active_killing.{suffix}", "visible": True, "enabled": True, **defaults[suffix]}
+        for suffix in _AK_SUFFIXES
+    ]
+
+
+def test_active_killing_action_proposes_minutes_diameter_and_radius():
     import app
 
-    controls = [
-        {
-            "id": control_id,
-            "visible": True,
-            "enabled": True,
-        }
-        for control_id in (
-            "features.active_killing.target_types",
-            "features.active_killing.observation_window",
-            "features.active_killing.death_signal",
-            "features.active_killing.use_absolute_threshold",
-            "features.active_killing.absolute_threshold",
-            "features.active_killing.minimum_contact_duration",
-        )
-    ]
     result = app.active_killing_action(
         {
             "current_step": "feature_extraction",
-            "metadata": {"records": [{
-                "time_interval": 2, "time_unit": "min",
-            }]},
-            "ui_state": {"controls": controls},
+            "metadata": {"records": [{"time_interval": 2, "time_unit": "min"}]},
+            "ui_state": {"controls": _ak_controls()},
         },
         [{"role": "user", "content": (
             "Configure active killing for tcell against organoid1 only. "
-            "I expect killing within 10 minutes. "
-            "Use an absolute threshold of 30 dead pixels."
+            "I expect killing within 10 minutes. The targets have an 8 µm cell diameter."
         )}],
     )
     values = {
@@ -1141,77 +1143,47 @@ def test_active_killing_action_is_cadence_grounded_and_explicitly_proposed():
         for call in result["calls"]
     }
     assert values["features.active_killing.target_types"] == ["organoid1"]
-    assert values["features.active_killing.observation_window"] == 5
-    assert values["features.active_killing.death_signal"] == "Dead-mask pixel count"
-    assert values["features.active_killing.use_absolute_threshold"] is True
-    assert values["features.active_killing.absolute_threshold"] == 30
+    # The causal window is given in minutes, so it is passed through, not converted.
+    assert values["features.active_killing.causal_window_min"] == 10
+    assert values["features.active_killing.target_cell_diameter_um"] == 8
+    assert values["features.active_killing.attribution_radius_um"] == 15
+    assert "5 frames at 2 min per frame" in result["text"]
+    assert "one unit of killing credit" in result["text"]
     assert "proposing" in result["text"]
     assert "require your confirmation" in result["text"]
 
 
-def test_active_killing_action_refuses_incomplete_absolute_mode():
+def test_active_killing_action_asks_for_the_causal_window_in_minutes():
     import app
 
     result = app.active_killing_action(
         {
             "current_step": "feature_extraction",
-            "metadata": {"records": [{
-                "time_interval": 2, "time_unit": "min",
-            }]},
-            "ui_state": {"controls": [{
-                "id": "features.active_killing.target_types",
-                "visible": True,
-                "enabled": True,
-                "choices": ["mdo"],
-            }]},
+            "ui_state": {"controls": _ak_controls(target_types={"value": [], "choices": ["mdo"]})},
         },
-        [{"role": "user", "content": (
-            "Configure active killing against mdo only within 10 minutes."
-        )}],
+        [{"role": "user", "content": "Configure active killing against mdo only."}],
     )
     assert result["calls"] == []
-    assert "positive dead-mask pixel increase" in result["text"]
-    assert "contact-distance threshold" in result["text"]
+    assert "in minutes" in result["text"]
+    assert "120 min" in result["text"] and "30 min" in result["text"]
 
 
 def test_active_killing_acceptance_proposes_every_agreed_field():
     import app
 
-    controls = []
-    specs = {
-        "target_types": {
-            "value": ["27t", "mdo"], "choices": ["27t", "mdo"],
-        },
-        "observation_window": {"value": 5},
-        "death_signal": {
-            "value": "Dead-mask percentage",
-            "choices": [
-                "Dead-mask percentage", "Mean dead-dye intensity",
-                "Dead-mask pixel count",
-            ],
-        },
-        "use_absolute_threshold": {"value": False},
-        "absolute_threshold": {"value": 0.0, "active": False},
-        "minimum_contact_duration": {"value": 1},
-    }
-    for suffix, values in specs.items():
-        controls.append({
-            "id": f"features.active_killing.{suffix}",
-            "visible": True,
-            "enabled": True,
-            **values,
-        })
     result = app.active_killing_confirmation_action(
         {
             "current_step": "feature_extraction",
-            "ui_state": {"controls": controls},
+            "ui_state": {"controls": _ak_controls(
+                target_types={"value": ["27t", "mdo"], "choices": ["27t", "mdo"]})},
         },
         [
             {"role": "assistant", "content": (
-                "Active Killing configuration for tcell against 27t and mdo: "
-                "Death signal: Dead-mask pixel count. Absolute threshold: "
-                "30 dead pixels. Observation window: 5 timepoints. "
-                "Minimum contact duration: 1 frame."
+                "**Active Killing proposal**\n"
+                "- Target for this run: **27t, mdo**\n"
+                "- Target cell diameter: **8 µm** -> death threshold **≈67 µm³**\n"
+                "- Causal window: **30 min**\n"
+                "- Attribution radius: **12 µm**"
             )},
             {"role": "user", "content": "Ok, these settings seem ok"},
         ],
@@ -1221,17 +1193,15 @@ def test_active_killing_acceptance_proposes_every_agreed_field():
         for call in result["calls"]
     }
     assert values["features.active_killing.target_types"] == ["27t", "mdo"]
-    assert values["features.active_killing.death_signal"] == "Dead-mask pixel count"
-    assert values["features.active_killing.use_absolute_threshold"] is True
-    assert values["features.active_killing.absolute_threshold"] == 30
-    assert values["features.active_killing.observation_window"] == 5
-    assert values["features.active_killing.minimum_contact_duration"] == 1
+    assert values["features.active_killing.target_cell_diameter_um"] == 8
+    assert values["features.active_killing.causal_window_min"] == 30
+    assert values["features.active_killing.attribution_radius_um"] == 12
     assert "complete agreed Active Killing setup" in result["text"]
     assert "independently" in result["text"]
     assert "not ready until every action card" in result["text"]
 
 
-def test_active_killing_readiness_rejects_zero_absolute_threshold():
+def test_active_killing_readiness_reports_live_setup_issues():
     import app
 
     summary = app.active_killing_readiness_summary(
@@ -1239,9 +1209,7 @@ def test_active_killing_readiness_rejects_zero_absolute_threshold():
             "current_step": "feature_extraction",
             "feature_extraction": {"active_killing": {
                 "setup_ready": False,
-                "setup_issues": [
-                    "Absolute signal-increase threshold must be greater than 0."
-                ],
+                "setup_issues": ["No dead mask found for any sample."],
             }},
         },
         [
@@ -1250,50 +1218,25 @@ def test_active_killing_readiness_rejects_zero_absolute_threshold():
         ],
     )
     assert "not ready yet" in summary
-    assert "greater than 0" in summary
-
-
-def _active_killing_feedback_context():
-    controls = []
-    specs = {
-        "target_types": {"value": ["27T", "MDO"], "choices": ["27T", "MDO"]},
-        "observation_window": {"value": 5},
-        "death_signal": {"value": "Dead-mask percentage"},
-        "use_absolute_threshold": {"value": False},
-        "absolute_threshold": {"value": 0.0},
-        "minimum_contact_duration": {"value": 1},
-    }
-    for suffix, values in specs.items():
-        controls.append({
-            "id": f"features.active_killing.{suffix}",
-            "visible": True,
-            "enabled": True,
-            **values,
-        })
-    return {
-        "current_step": "feature_extraction",
-        "metadata": {"records": [{
-            "time_interval": 2,
-            "time_unit": "min",
-            "pixel_distance_xy": 1.7,
-            "pixel_distance_z": 4.0,
-        }]},
-        "ui_state": {"controls": controls},
-    }
+    assert "No dead mask" in summary
 
 
 def test_active_killing_feedback_prompt_preserves_scope_timing_and_one_cell_rule():
     import app
 
+    context = {
+        "current_step": "feature_extraction",
+        "metadata": {"records": [{"time_interval": 2, "time_unit": "min",
+                                  "pixel_distance_xy": 1.7, "pixel_distance_z": 4.0}]},
+        "ui_state": {"controls": _ak_controls(
+            target_types={"value": ["27T", "MDO"], "choices": ["27T", "MDO"]})},
+    }
     request = (
         "Set up the analysis to compare the rate of T cells actively killing MDO "
         "versus 27T. The targets die around 30 minutes after the initial contact, "
         "and I want to know if at least one cell dies after contact."
     )
-    context = _active_killing_feedback_context()
-    first = app.active_killing_action(
-        context, [{"role": "user", "content": request}],
-    )
+    first = app.active_killing_action(context, [{"role": "user", "content": request}])
     assert first["calls"] == []
     assert "independent-only" in first["text"]
     assert "pooled" in first["text"]
@@ -1309,13 +1252,13 @@ def test_active_killing_feedback_prompt_preserves_scope_timing_and_one_cell_rule
         for call in proposal["calls"]
     }
     assert values["features.active_killing.target_types"] == ["MDO"]
-    assert values["features.active_killing.observation_window"] == 15
-    assert values["features.active_killing.death_signal"] == "Dead-mask pixel count"
-    assert values["features.active_killing.use_absolute_threshold"] is True
-    assert values["features.active_killing.absolute_threshold"] == 45
-    assert values["features.active_killing.minimum_contact_duration"] == 1
-    assert "one-cell calibration" in proposal["text"].lower()
-    assert "does not mean that many cells die" in proposal["text"]
+    assert values["features.active_killing.causal_window_min"] == 30
+    assert values["features.active_killing.target_cell_diameter_um"] == 10
+    # "At least one cell dies" is expressed by the target cell diameter, not by a
+    # contact duration or a separate pixel threshold.
+    assert "at least one cell dies" in proposal["text"]
+    assert "quarter of one cell" in proposal["text"]
+    assert "Preview" in proposal["text"]
     assert "independent target run" in proposal["text"]
 
     ready_messages = messages + [
@@ -1332,46 +1275,43 @@ def test_active_killing_feedback_prompt_preserves_scope_timing_and_one_cell_rule
                 "setup_issues": [],
                 "effector_cell_type": "T cells",
                 "target_cell_types": ["MDO"],
-                "observation_window": 15,
-                "death_signal": "Dead-mask pixel count",
-                "uses_absolute_threshold": True,
-                "absolute_threshold": 45,
-                "minimum_contact_duration": 1,
+                "target_cell_diameter_um": 10.0,
+                "min_death_patch_volume_um3": 130.9,
+                "causal_window_min": 30.0,
+                "attribution_radius_um": 15.0,
             }},
         },
         ready_messages,
     )
     assert "**ready**" in ready
+    assert "131 µm³" in ready
     assert "one independent target run" in ready
+    assert "minimum contact" not in ready.lower()
 
 
-def test_active_killing_readiness_remembers_unresolved_one_cell_requirement():
+def test_active_killing_readiness_is_deterministic_and_never_mentions_contact_duration():
     import app
 
     context = {
-            "current_step": "feature_extraction",
-            "feature_extraction": {"active_killing": {
-                "setup_ready": True,
-                "setup_issues": [],
-                "effector_cell_type": "T cells",
-                "target_cell_types": ["MDO"],
-                "observation_window": 15,
-                "death_signal": "Dead-mask percentage",
-                "uses_absolute_threshold": False,
-                "absolute_threshold": 0,
-                "minimum_contact_duration": 1,
-            }},
-        }
+        "current_step": "feature_extraction",
+        "feature_extraction": {"active_killing": {
+            "setup_ready": True,
+            "setup_issues": [],
+            "effector_cell_type": "T cells",
+            "target_cell_types": ["MDO"],
+            "target_cell_diameter_um": 10.0,
+            "min_death_patch_volume_um3": 130.9,
+            "causal_window_min": 120.0,
+            "attribution_radius_um": 15.0,
+        }},
+    }
     messages = [
-            {"role": "user", "content": (
-                "Set up Active Killing. I need at least one cell to die after contact."
-            )},
-            {"role": "assistant", "content": "I changed the observation window."},
-            {"role": "user", "content": "Is it ready?"},
-        ]
+        {"role": "user", "content": "Set up Active Killing. I need at least one cell to die after contact."},
+        {"role": "assistant", "content": "I changed the causal window."},
+        {"role": "user", "content": "Is it ready?"},
+    ]
     summary = app.active_killing_readiness_summary(context, messages)
-    assert "not ready yet" in summary
-    assert "at least one cell dies" in summary
+    assert "**ready**" in summary
     assert "minimum contact" not in summary.lower()
     deterministic = app.deterministic_turn_response(context, messages, [])
     assert deterministic["text"] == summary
@@ -2871,10 +2811,12 @@ def test_experiment_reference_discovers_calcium_and_compacts_historical_settings
         "edt_threshold": 2.5,
         "segment_size_min": 12,
     }
-    assert settings["active_killing"] == {
+    # A reference predating the death-event rework keeps its settings, labelled
+    # so they are never read as settings of the current algorithm.
+    assert settings["active_killing"] == {"legacy_settings_previous_algorithm": {
         "observation_window": 7,
         "killing_threshold_multiplier": 2,
-    }
+    }}
     assert settings["state_classification"]["by_cell_type"]["tcell"] == {
         "n_states": 3,
         "selected_features": ["speed", "displacement"],
@@ -3013,7 +2955,8 @@ def test_prompt_encodes_pi_feedback_scenarios():
     assert "Intensity and Contact are required for every cell type" in sp
     assert "never suggest dropping it from a population" in sp
     assert "automatically produces an independent analysis" in sp
-    assert "Never apply only the mode checkbox" in sp
+    assert "There is no death-signal column" in sp
+    assert "one unit of kill credit" in sp
     assert "setup_ready true" in sp
     assert "enumerate all movement choices" in sp
     assert "currently selected speed and net displacement" in sp
@@ -3494,7 +3437,7 @@ def test_live_registry_covers_filtering_and_hmm_controls():
     assert controls[states]["visible"] is True
 
 
-def test_active_killing_registry_keeps_dependent_threshold_editable():
+def test_active_killing_registry_exposes_the_three_parameters():
     from types import SimpleNamespace
     active = SimpleNamespace(
         immune_combo=_FakeCombo(["tcell"]),
@@ -3502,14 +3445,10 @@ def test_active_killing_registry_keeps_dependent_threshold_editable():
             ["organoid1", "organoid2"],
             selected=["organoid1", "organoid2"],
         ),
-        spin_obs_window=_FakeSpin(5),
-        death_signal_combo=_FakeCombo([
-            "percentage_dead_mask", "mean_dead_dye", "nr_dead_mask_pixels",
-        ]),
-        check_abs_threshold=_FakeCheck(False),
-        spin_threshold_mult=_FakeSpin(1.5),
-        spin_abs_threshold=_FakeSpin(25.0),
-        spin_min_contact=_FakeSpin(1),
+        spin_cell_diameter=_FakeSpin(10.0),
+        spin_min_patch_volume=_FakeSpin(130.9),
+        spin_causal_window=_FakeSpin(120.0),
+        spin_attr_radius=_FakeSpin(15.0),
         spin_top_n=_FakeSpin(10),
     )
     main = SimpleNamespace(feature_extraction_tab=SimpleNamespace(
@@ -3519,24 +3458,21 @@ def test_active_killing_registry_keeps_dependent_threshold_editable():
     ))
     controls = {item["id"]: item for item in control_registry(main)}
     target_id = "features.active_killing.target_types"
-    signal_id = "features.active_killing.death_signal"
     assert controls[target_id]["visible"] is True
     assert controls[target_id]["value"] == ["organoid1", "organoid2"]
-    assert controls[signal_id]["value"] == "Dead-mask percentage"
-    assert controls[signal_id]["choices"] == [
-        "Dead-mask percentage", "Mean dead-dye intensity", "Dead-mask pixel count",
-    ]
-    assert apply_set_ui_value(main, signal_id, "Dead-mask pixel count")
-    assert active.death_signal_combo.currentText() == "nr_dead_mask_pixels"
+    for suffix, unit in (("target_cell_diameter_um", "µm"), ("causal_window_min", "min"),
+                         ("attribution_radius_um", "µm"), ("min_patch_volume_um3", "µm³")):
+        control = controls[f"features.active_killing.{suffix}"]
+        assert control["visible"] is True
+        assert control["unit"] == unit
+    # The deleted controls must not be offered to the model any more.
+    for gone in ("death_signal", "observation_window", "absolute_threshold",
+                 "threshold_multiplier", "use_absolute_threshold", "minimum_contact_duration",
+                 "contact_column"):
+        assert f"features.active_killing.{gone}" not in controls
+    assert apply_set_ui_value(main, "features.active_killing.causal_window_min", 30.0)
+    assert active.spin_causal_window.value() == 30.0
     assert apply_set_ui_value(main, target_id, ["organoid2"])
-    threshold = controls["features.active_killing.absolute_threshold"]
-    assert threshold["visible"] is True
-    assert threshold["enabled"] is True
-    assert threshold["active"] is False
-    assert apply_set_ui_value(
-        main, "features.active_killing.absolute_threshold", 30.0
-    )
-    assert active.spin_abs_threshold.value() == 30.0
     assert active_cell_type(main, "feature_extraction") == "tcell"
     assert [item.text() for item in active.target_list.selectedItems()] == ["organoid2"]
 
@@ -3544,17 +3480,22 @@ def test_active_killing_registry_keeps_dependent_threshold_editable():
 def test_feature_context_reports_active_killing_setup_readiness():
     from types import SimpleNamespace
 
+    class _Label:
+        def __init__(self, text):
+            self._text = text
+
+        def text(self):
+            return self._text
+
     active = SimpleNamespace(
         immune_combo=_FakeCombo(["tcell"]),
         target_list=_FakeList(["27t", "mdo"], selected=["27t", "mdo"]),
-        spin_obs_window=_FakeSpin(5),
-        death_signal_combo=_FakeCombo([
-            "percentage_dead_mask", "mean_dead_dye", "nr_dead_mask_pixels",
-        ], 2),
-        check_abs_threshold=_FakeCheck(True),
-        spin_threshold_mult=_FakeSpin(1.5),
-        spin_abs_threshold=_FakeSpin(0.0),
-        spin_min_contact=_FakeSpin(1),
+        spin_cell_diameter=_FakeSpin(10.0),
+        spin_min_patch_volume=_FakeSpin(130.9),
+        spin_causal_window=_FakeSpin(0.0),
+        spin_attr_radius=_FakeSpin(15.0),
+        validation_label=_Label("✓ Ready"),
+        _volume_overridden=False,
     )
     main = SimpleNamespace(feature_extraction_tab=SimpleNamespace(
         active_killing_panel=active,
@@ -3562,11 +3503,17 @@ def test_feature_context_reports_active_killing_setup_readiness():
     ))
     state = _feature_extraction_state(main)["active_killing"]
     assert state["setup_ready"] is False
-    assert "greater than 0" in state["setup_issues"][0]
-    active.spin_abs_threshold.setValue(30.0)
+    assert "Causal window must be greater than 0" in state["setup_issues"][0]
+    active.spin_causal_window.setValue(120.0)
     state = _feature_extraction_state(main)["active_killing"]
     assert state["setup_ready"] is True
     assert state["setup_issues"] == []
+    assert state["min_death_patch_volume_um3"] == 130.9
+    # A validation problem shown in the panel (e.g. no dead mask) blocks readiness.
+    active.validation_label = _Label("⚠️ No dead mask found for any sample.")
+    state = _feature_extraction_state(main)["active_killing"]
+    assert state["setup_ready"] is False
+    assert any("No dead mask" in issue for issue in state["setup_issues"])
 
 
 def test_feature_registry_marks_and_preserves_mandatory_groups():
@@ -3722,12 +3669,12 @@ def test_streamed_assistant_text_uses_researcher_facing_labels():
     text = researcher_facing_text(
         "pixel_distance_xy is 0.5; position_t is 10 for sample_name and TrackID. "
         "Use summarize_track_counts with nr_dead_mask_pixels, percentage_dead_mask, "
-        "mean_dead_dye, and killing_efficiency."
+        "mean_dead_dye, and kill_credit."
     )
     assert text == (
         "XY pixel size is 0.5; timepoint is 10 for sample name and track ID. "
         "Use track-count preview with dead-mask pixel count, dead-mask percentage, "
-        "mean dead-dye intensity, and killing efficiency."
+        "mean dead-dye intensity, and kill credit."
     )
 
 

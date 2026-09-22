@@ -55,7 +55,7 @@ The **Before-death window** and the **Temporal Range** are two separate controls
 
 - A **violin comparison** of interaction metrics across the groups.
 - **If death data is present:** **cumulative-to-death curves** (contact accumulation aligned to each target's time of death).
-- **If active-killing data is present:** an **active-killing dashboard** summarising killing-related metrics.
+- **If active-killing data is present:** an **active-killing dashboard**. The top panel shows one point per effector–target contact event and its duration, coloured by whether it was credited with an attributed death event; the bottom panel shows, per target group and fate, the percentage of contact events with an attributed kill, annotated with the total kill credit (one unit per death event, so it does not grow with effector density). The Temporal Range counts a kill when its death **onset** falls inside the range. Organoid fate (Live / Dying) is the whole-organoid death call and is independent of attributed kills, so a "Live" organoid can carry attributed kills. Requires [Active Killing](active_killing) outputs from the current algorithm; outputs of the previous algorithm are skipped with a request to re-run.
 
 ### Which CSV backs which plot
 

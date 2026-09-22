@@ -655,33 +655,17 @@ def _load_active_killing_data(
     raw_img_shape: tuple
 ) -> dict:
     """
-    Load active killing data and create a time-varying labels layer.
-    
+    Load Active Killing results as time-varying napari layers.
+
     Returns a dict with:
-    - 'Active_Killing': labels layer showing cells only when actively killing
-    - 'Killing_Efficiency': image layer with killing efficiency values
-    
-    The labels layer will show:
-    - TrackID for cells that are actively killing at that timepoint
-    - 0 for all other pixels
-    
-    Parameters
-    ----------
-    output_dir : str
-        BEHAV3D output directory
-    cell_type : str
-        Cell type (e.g., 'tcell')
-    sample_name : str
-        Sample name to filter data
-    track_img : np.ndarray
-        Track image (t, z, y, x) with TrackIDs
-    raw_img_shape : tuple
-        Shape of raw image for tiling
-        
-    Returns
-    -------
-    dict
-        Dictionary with 'Active_Killing' and optionally 'Killing_Efficiency' layers
+    - 'Active_Killing': labels layer with the effector's TrackID on the
+      timepoints where it was credited with an attributed death event (its
+      last contact frame before the event's onset), 0 elsewhere.
+    - 'Kill_Credit': image layer with that timepoint's kill credit (0-1; the
+      credit of one death event is shared among the effectors that caused it).
+    - 'Death_Events': labels layer painting every death event's onset patch
+      with its death_event_id, from its onset frame on.
+    - 'Targeted_IDs': ``{t: [target TrackIDs]}`` for the target highlight.
     """
     from behav3d.features.advanced_timepoint_features import find_advanced_features_csv
 
@@ -692,104 +676,118 @@ def _load_active_killing_data(
     if advanced_features_path is None:
         print(f"  Active killing data not found for cell type '{cell_type}' in {output_dir}")
         return result
-    
+
     print(f"  Loading active killing data from {advanced_features_path}")
-    df_active_killing = pd.read_csv(advanced_features_path)
-    df_active_killing = df_active_killing[df_active_killing["sample_name"] == sample_name]
-    
-    if df_active_killing.empty:
+    df_ak = pd.read_csv(advanced_features_path)
+    df_ak = df_ak[df_ak["sample_name"] == sample_name]
+
+    if df_ak.empty:
         print(f"  No active killing data found for sample {sample_name}")
         return result
-    
-    # Check if we have the required columns
-    if "is_active_killing" not in df_active_killing.columns:
-        print(f"  'is_active_killing' column not found in advanced features")
+
+    if "is_active_killing" not in df_ak.columns or "kill_credit" not in df_ak.columns:
+        print(f"  Kill columns not found in advanced features")
         return result
-    
-    # Get the timepoints where killing is active
-    killing_timepoints = df_active_killing[df_active_killing["is_active_killing"] == True]
-    n_killing_events = len(killing_timepoints)
-    n_killing_tracks = killing_timepoints["TrackID"].nunique() if n_killing_events > 0 else 0
-    print(f"  Found {n_killing_events} active killing timepoints across {n_killing_tracks} tracks")
-    
-    if n_killing_events == 0:
-        return result
-    
-    # Create time-varying active killing mask
-    # track_img shape: (t, 1, z, y, x) after expand_dims or (t, z, y, x) before
+
+    killing_timepoints = df_ak[df_ak["is_active_killing"].astype(bool)]
+    n_rows = len(killing_timepoints)
+    n_tracks = killing_timepoints["TrackID"].nunique() if n_rows > 0 else 0
+    print(f"  Found {n_rows} credited timepoints across {n_tracks} tracks "
+          f"({float(killing_timepoints['kill_credit'].sum()):.2f} kill credit)")
+
     if track_img.ndim == 5:
         t_dim, _, z_dim, y_dim, x_dim = track_img.shape
     else:
         t_dim, z_dim, y_dim, x_dim = track_img.shape
-    
-    # Initialize arrays for active killing labels, efficiency, and targeted organoids
+
     active_killing_labels = np.zeros((t_dim, 1, z_dim, y_dim, x_dim), dtype=np.uint16)
-    killing_efficiency_img = np.zeros((t_dim, 1, z_dim, y_dim, x_dim), dtype=np.float32)
-    targeted_organoid_labels = np.zeros((t_dim, 1, z_dim, y_dim, x_dim), dtype=np.uint16)
-    
-    # Check if targeted_track_id is available
-    has_targeted_id = "targeted_track_id" in df_active_killing.columns
-    
-    # Process each timepoint
-    print(f"  Creating active killing and targeted organoid visualization...")
+    kill_credit_img = np.zeros((t_dim, 1, z_dim, y_dim, x_dim), dtype=np.float32)
+
     track_img_np = np.asarray(track_img)
     if track_img_np.ndim == 4:
         track_img_np = np.expand_dims(track_img_np, axis=1)
-    
-    # Get efficiency column (could be killing_efficiency or we calculate from threshold)
-    efficiency_col = "killing_efficiency" if "killing_efficiency" in df_active_killing.columns else None
-    
-    unique_timepoints = killing_timepoints["position_t"].unique()
-    for t in tqdm(unique_timepoints, desc="  Processing timepoints"):
+
+    for t in tqdm(killing_timepoints["position_t"].unique(), desc="  Processing timepoints"):
         t = int(t)
         if t >= t_dim:
             continue
-        
-        # Get tracks that are actively killing at this timepoint
-        killing_tracks_at_t = killing_timepoints[killing_timepoints["position_t"] == t]
-        
-        for _, row in killing_tracks_at_t.iterrows():
+        for _, row in killing_timepoints[killing_timepoints["position_t"] == t].iterrows():
             track_id = int(row["TrackID"])
-            efficiency = float(row[efficiency_col]) if efficiency_col else 1.0
-            
-            # Create mask for this track at this timepoint
             track_mask = track_img_np[t] == track_id
-            
-            # Set the active killing labels
             active_killing_labels[t][track_mask] = track_id
-            
-            # Set the killing efficiency value
-            killing_efficiency_img[t][track_mask] = efficiency
-            
-            # Identify targeted organoid
-            if has_targeted_id and pd.notna(row["targeted_track_id"]):
-                targeted_id = int(row["targeted_track_id"])
-                # We need the organoid mask. Since we don't have it here, we'll store the ID
-                # and the view_napari function can use it if we provide the organoid layer.
-                # BETTER: let's modify the result to include the targeted IDs per timepoint.
-                if "Targeted_IDs" not in result: result["Targeted_IDs"] = {}
-                result["Targeted_IDs"][t] = result.get("Targeted_IDs", {}).get(t, []) + [targeted_id]
+            kill_credit_img[t][track_mask] = float(row["kill_credit"])
+            # -1 is the "no target" sentinel (the column is NA-free), so a
+            # pd.notna() guard alone would treat it as a real target id.
+            targeted = row.get("targeted_track_id", -1)
+            if pd.notna(targeted) and int(targeted) > 0:
+                result.setdefault("Targeted_IDs", {}).setdefault(t, []).append(int(targeted))
 
-    # Convert to dask arrays and tile for channel dimension if needed
+    death_events = _load_death_event_patches(Path(advanced_features_path).parent, cell_type, sample_name,
+                                             (t_dim, z_dim, y_dim, x_dim))
+
     n_channels = raw_img_shape[-4]
-    active_killing_labels = da.from_array(active_killing_labels)
-    active_killing_labels = da.tile(active_killing_labels, (1, n_channels, 1, 1, 1))
-    
-    killing_efficiency_img = da.from_array(killing_efficiency_img)
-    killing_efficiency_img = da.tile(killing_efficiency_img, (1, n_channels, 1, 1, 1))
-    
-    result["Active_Killing"] = {
-        "img": active_killing_labels,
-        "type": "label"
-    }
-    
-    result["Killing_Efficiency"] = {
-        "img": killing_efficiency_img,
-        "type": "image"
-    }
-    
+    if n_rows > 0:
+        result["Active_Killing"] = {
+            "img": da.tile(da.from_array(active_killing_labels), (1, n_channels, 1, 1, 1)),
+            "type": "label",
+        }
+        result["Kill_Credit"] = {
+            "img": da.tile(da.from_array(kill_credit_img), (1, n_channels, 1, 1, 1)),
+            "type": "image",
+        }
+    if death_events is not None:
+        result["Death_Events"] = {
+            "img": da.tile(da.from_array(death_events), (1, n_channels, 1, 1, 1)),
+            "type": "label",
+        }
     print(f"  Active killing layers created successfully")
     return result
+
+
+def _load_death_event_patches(results_dir: Path, cell_type: str, sample_name: str, shape: tuple):
+    """Rasterise every death event's onset patch (label = death_event_id), from onset on.
+
+    Reads ``death_events_<immune>.csv`` next to the advanced CSV for the event
+    list and the per-target death-event cache for the patch voxels. Returns a
+    ``(T, 1, Z, Y, X)`` uint16 array, or None when nothing is available.
+    """
+    from behav3d.features.death_events import death_events_dir, load_death_patches
+
+    ev_path = Path(results_dir) / f"death_events_{cell_type}.csv"
+    if not ev_path.exists():
+        return None
+    df_ev = pd.read_csv(ev_path)
+    if df_ev.empty:
+        return None
+    df_ev = df_ev[df_ev["sample_name"].astype(str) == str(sample_name)]
+    if df_ev.empty:
+        return None
+    # results_dir is <output_dir>/analysis/<immune>/active_killing[/<target>]
+    output_dir = next((q.parent for q in Path(results_dir).parents if q.name == "analysis"), None)
+    t_dim, z_dim, y_dim, x_dim = shape
+    out = np.zeros((t_dim, 1, z_dim, y_dim, x_dim), dtype=np.uint16)
+    painted = 0
+    for otype, g in df_ev.groupby("organoid_type"):
+        cache = None
+        for base in [output_dir] if output_dir is not None else []:
+            cand = death_events_dir(base, otype) / f"{sample_name}_death_patches.npz"
+            if cand.exists():
+                cache = cand
+        if cache is None:
+            continue
+        patches = load_death_patches(cache)
+        for _, e in g.iterrows():
+            coords = patches.get(int(e["death_event_id"]))
+            if coords is None or len(coords) == 0:
+                continue
+            keep = np.all((coords >= 0) & (coords < np.array([z_dim, y_dim, x_dim])), axis=1)
+            c = coords[keep]
+            t0 = int(e["t_onset"])
+            if t0 >= t_dim:
+                continue
+            out[t0:, 0, c[:, 0], c[:, 1], c[:, 2]] = int(e["death_event_id"])
+            painted += 1
+    return out if painted else None
 
 
 def backproject_mean_features_behav3d(
@@ -1426,7 +1424,8 @@ def view_napari(
     Visualize backprojection in napari.
     
     Highlights:
-    - Active_Killing: bright red outlines when cells are actively killing
+    - Active_Killing: outlines on effectors credited with an attributed death event
+    - Death_Events: the onset patch of every death event
     - Targeted_Organoids: pulsing or distinct color for targets
     - Individual features selectable via UI dropdown
     """
@@ -1509,11 +1508,13 @@ def view_napari(
                 layer.contour = 2
                 layer.visible = True
 
-            elif k == "Killing_Efficiency":
-                img_np = np.asarray(v["img"])
-                valid_vals = img_np[(img_np != 0) & np.isfinite(img_np)]
-                vmax = np.percentile(valid_vals, 98) if valid_vals.size > 0 else 1
-                layer = viewer.add_image(v["img"], name=k, scale=elsize, colormap='hot', contrast_limits=[0, float(vmax)], opacity=0.8, visible=False)
+            elif k == "Kill_Credit":
+                # Credit is a share of one death event, so 0-1 is the natural range.
+                layer = viewer.add_image(v["img"], name=k, scale=elsize, colormap='hot', contrast_limits=[0, 1.0], opacity=0.8, visible=False)
+
+            elif k == "Death_Events":
+                layer = viewer.add_labels(v["img"], name="Death events", scale=elsize, opacity=0.7)
+                layer.visible = True
 
             elif v["type"] == "label":
                 viewer.add_labels(v["img"], name=k, scale=elsize, visible=(k == "ClusterID"))

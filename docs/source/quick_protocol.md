@@ -97,7 +97,7 @@ Computes, for every cell at every timepoint, the features every later analysis r
 
 1. Per sub-tab: confirm the feature families → set **Contact Threshold** (µm) → set **Dead mask % threshold** (preview it with **👁 Preview Dead Threshold**).
 2. **Run** per cell type, or batch all cell types.
-3. **Active Killing** (optional, immune only): an **extra feature-extraction step** run from this tab that adds killing columns to the immune feature table (`is_active_killing`, `killing_efficiency`, `targeted_track_id`, …). Its meaning and parameters are documented with the analyses → [Active Killing](analysis/population_analysis/active_killing).
+3. **Active Killing** (optional, immune only): an **extra step** run from this tab that detects new death patches in the dead mask and attributes each one's single unit of kill credit to the effectors that caused it, adding kill columns to the immune feature table (`kill_credit`, `cum_kill_credit`, `is_active_killing`, `targeted_track_id`, …). Its meaning and parameters are documented with the analyses → [Active Killing](analysis/population_analysis/active_killing).
 
 **Key knobs:**
 
@@ -120,7 +120,7 @@ Computes, for every cell at every timepoint, the features every later analysis r
 | **[Death Dynamics](analysis/population_analysis/death_dynamics)** | how a target signal rises across each population over time |
 | **[Interaction Analysis](analysis/population_analysis/interaction_analysis)** | effector–target contact and interaction over the movie |
 | **[Invasiveness](analysis/population_analysis/invasiveness)** | how much of an immune cell's surface is embedded in a structure |
-| **[Active Killing](analysis/population_analysis/active_killing)** | contact-associated signal rise attributed to individual effectors *(configured in Feature Extraction)* |
+| **[Active Killing](analysis/population_analysis/active_killing)** | localised death events attributed to the effectors that caused them, one unit of credit per death *(configured in Feature Extraction)* |
 
 **Single Cell** (📊 → 🧬) — per-cell behaviour:
 
@@ -134,5 +134,5 @@ Both Single Cell workflows end in a **Backprojection** step that paints the resu
 **Key knobs:**
 
 - **Filtering:** minimum track length, plus experiment-duration coverage, dead-at-start, and minimum-size cutoffs.
-- **Active Killing:** *observation window* (frames after each contact timepoint to look for the signal rise), *threshold* (a multiplier of the target's own signal, or a fixed absolute rise), and *minimum contact duration*.
+- **Active Killing:** *target cell diameter* (sets the death threshold — check it with **Preview death patches**), *causal window* (minutes after contact in which a death can be credited; ~120 min for organoids, ~30 min for haematologic targets), and *attribution radius* (µm from the death patch; can be calibrated).
 - **State / Track Classification:** the number of behavioural **states** / trajectory **clusters** to fit.

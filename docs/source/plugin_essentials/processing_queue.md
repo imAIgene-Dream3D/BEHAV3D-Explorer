@@ -23,7 +23,7 @@ The queue:
 | ☠ Dead Mask (Otsu) | Segmentation | Compute the Otsu dead-cell mask |
 | 📍 Batch Tracking | Tracking | Batch tracking across cell types |
 | 🧪 Feature Extraction | Feature Extraction | Compute per-track features |
-| 🔥 Active Killing | Feature Extraction | Detect immune-cell killing events |
+| 🔥 Active Killing | Feature Extraction (effector, with contact), dead mask, tracked targets | Attribute death events to effectors |
 | 🧹 Filtering | Filtering | Track-length / dead-at-t0 / experiment-duration filters |
 | 💀 Death Dynamics | Analysis | Per-target death-dynamics analysis |
 | 💀 Combined Death Dynamics | Analysis | Cross-sample death-dynamics comparison |

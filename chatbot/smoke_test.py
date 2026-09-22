@@ -1176,81 +1176,45 @@ def _reporter_propagation_case() -> dict:
     }
 
 
-def _active_killing_case() -> dict:
-    controls = [
-        _control(
-            "features.active_killing.target_types",
-            "Active Killing: Target cell type",
-            ["organoid1", "organoid2"],
-            choices=["organoid1", "organoid2"],
-            method="Active Killing",
-            cell_type="tcell",
-        ),
-        _control(
-            "features.active_killing.observation_window",
-            "Active Killing: Observation window",
-            3,
-            unit="timepoints",
-            method="Active Killing",
-            cell_type="tcell",
-        ),
-        _control(
-            "features.active_killing.death_signal",
-            "Active Killing: Death or reporter signal",
-            "Dead-mask percentage",
-            choices=[
-                "Dead-mask percentage", "Mean dead-dye intensity",
-                "Dead-mask pixel count",
-            ],
-            method="Active Killing",
-            cell_type="tcell",
-        ),
-        _control(
-            "features.active_killing.use_absolute_threshold",
-            "Active Killing: Use an absolute signal-increase threshold",
-            False,
-            method="Active Killing",
-            cell_type="tcell",
-        ),
-        _control(
-            "features.active_killing.absolute_threshold",
-            "Active Killing: Absolute signal-increase threshold",
-            0.0,
-            unit="pixels",
-            method="Active Killing",
-            cell_type="tcell",
-            active=False,
-        ),
+def _ak_controls(targets, choices, cell_type):
+    """Live controls of the death-event Active Killing panel."""
+    return [
+        _control("features.active_killing.target_types", "Active Killing: Target cell type",
+                 targets, choices=choices, method="Active Killing", cell_type=cell_type),
+        _control("features.active_killing.target_cell_diameter_um", "Active Killing: Target cell diameter",
+                 10.0, unit="µm", method="Active Killing", cell_type=cell_type),
+        _control("features.active_killing.causal_window_min", "Active Killing: Causal window",
+                 120.0, unit="min", method="Active Killing", cell_type=cell_type),
+        _control("features.active_killing.attribution_radius_um", "Active Killing: Attribution radius",
+                 15.0, unit="µm", method="Active Killing", cell_type=cell_type),
     ]
+
+
+def _active_killing_case() -> dict:
     metadata = {
         "loaded": True,
         "records": [{
-            "sample_name": "Movie1",
-            "pixel_distance_xy": 0.5,
-            "pixel_distance_z": 2.0,
-            "time_interval": 2,
-            "time_unit": "min",
+            "sample_name": "Movie1", "pixel_distance_xy": 0.5, "pixel_distance_z": 2.0,
+            "time_interval": 2, "time_unit": "min",
         }],
         "validation": [],
     }
     return {
-        "name": "active_killing_uses_cadence",
+        "name": "active_killing_proposes_minutes_and_diameter",
         "messages": [{
             "role": "user",
             "content": (
                 "Configure active killing for tcell against organoid1 only. I expect "
-                "killing within 10 minutes and images are every 2 minutes. Use an "
-                "absolute threshold of 30 dead pixels."
+                "killing within 10 minutes and the targets have an 8 µm cell diameter."
             ),
         }],
         "context": _context(
-            "feature_extraction", controls, metadata=metadata,
-            active_cell_type="tcell",
+            "feature_extraction", _ak_controls(["organoid1", "organoid2"], ["organoid1", "organoid2"], "tcell"),
+            metadata=metadata, active_cell_type="tcell",
             feature_extraction={"active_killing_open": True},
         ),
         "check": _check_active_killing,
     }
-
 
 def _ambiguous_killing_threshold_case() -> dict:
     return {
@@ -1286,59 +1250,6 @@ def _general_tool_overview_case() -> dict:
 
 
 def _active_killing_feedback_case() -> dict:
-    controls = [
-        _control(
-            "features.active_killing.target_types",
-            "Active Killing: Target cell type",
-            ["27T", "MDO"],
-            choices=["27T", "MDO"],
-            method="Active Killing",
-            cell_type="T cells",
-        ),
-        _control(
-            "features.active_killing.observation_window",
-            "Active Killing: Observation window",
-            5,
-            unit="timepoints",
-            method="Active Killing",
-            cell_type="T cells",
-        ),
-        _control(
-            "features.active_killing.death_signal",
-            "Active Killing: Death or reporter signal",
-            "Dead-mask percentage",
-            choices=[
-                "Dead-mask percentage", "Mean dead-dye intensity",
-                "Dead-mask pixel count",
-            ],
-            method="Active Killing",
-            cell_type="T cells",
-        ),
-        _control(
-            "features.active_killing.use_absolute_threshold",
-            "Active Killing: Use an absolute signal-increase threshold",
-            False,
-            method="Active Killing",
-            cell_type="T cells",
-        ),
-        _control(
-            "features.active_killing.absolute_threshold",
-            "Active Killing: Absolute signal-increase threshold",
-            0.0,
-            unit="pixels",
-            method="Active Killing",
-            cell_type="T cells",
-            active=False,
-        ),
-        _control(
-            "features.active_killing.minimum_contact_duration",
-            "Active Killing: Minimum contact duration",
-            1,
-            unit="timepoints",
-            method="Active Killing",
-            cell_type="T cells",
-        ),
-    ]
     request = (
         "Set up the analysis to compare the rate of cells actively killing MDO "
         "versus 27T. Targets die around 30 minutes after the initial contact, and "
@@ -1347,11 +1258,8 @@ def _active_killing_feedback_case() -> dict:
     metadata = {
         "loaded": True,
         "records": [{
-            "sample_name": "Movie1",
-            "pixel_distance_xy": 1.7,
-            "pixel_distance_z": 4.0,
-            "time_interval": 2,
-            "time_unit": "min",
+            "sample_name": "Movie1", "pixel_distance_xy": 1.7, "pixel_distance_z": 4.0,
+            "time_interval": 2, "time_unit": "min",
         }],
         "validation": [],
     }
@@ -1366,41 +1274,38 @@ def _active_killing_feedback_case() -> dict:
             {"role": "user", "content": "Run them independently; start with MDO."},
         ],
         "context": _context(
-            "feature_extraction", controls, metadata=metadata,
-            active_cell_type="T cells",
+            "feature_extraction", _ak_controls(["27T", "MDO"], ["27T", "MDO"], "T cells"),
+            metadata=metadata, active_cell_type="T cells",
             feature_extraction={"active_killing_open": True},
         ),
         "check": _check_active_killing_feedback,
     }
 
-
 def _active_killing_one_cell_not_ready_case() -> dict:
     return {
-        "name": "active_killing_one_cell_requirement_blocks_readiness",
+        "name": "active_killing_readiness_reports_live_state",
         "messages": [
             {"role": "user", "content": (
                 "Set up Active Killing. I need at least one cell to die after contact."
             )},
-            {"role": "assistant", "content": "I changed the observation window."},
+            {"role": "assistant", "content": "I changed the causal window."},
             {"role": "user", "content": "Is it ready?"},
         ],
         "context": _context(
             "feature_extraction", [], active_cell_type="T cells",
             feature_extraction={"active_killing": {
-                "setup_ready": True,
-                "setup_issues": [],
+                "setup_ready": False,
+                "setup_issues": ["No dead mask found for any sample."],
                 "effector_cell_type": "T cells",
                 "target_cell_types": ["MDO"],
-                "observation_window": 15,
-                "death_signal": "Dead-mask percentage",
-                "uses_absolute_threshold": False,
-                "absolute_threshold": 0,
-                "minimum_contact_duration": 1,
+                "target_cell_diameter_um": 10.0,
+                "min_death_patch_volume_um3": 130.9,
+                "causal_window_min": 120.0,
+                "attribution_radius_um": 15.0,
             }},
         ),
         "check": _check_active_killing_one_cell_not_ready,
     }
-
 
 def _feature_group_dead_dye_case() -> dict:
     choices = [
@@ -1429,86 +1334,31 @@ def _feature_group_dead_dye_case() -> dict:
 
 
 def _active_killing_complete_acceptance_case() -> dict:
-    controls = [
-        _control(
-            "features.active_killing.target_types",
-            "Active Killing: Target cell type",
-            ["27t", "mdo"],
-            choices=["27t", "mdo"],
-            method="Active Killing",
-            cell_type="tcell",
-        ),
-        _control(
-            "features.active_killing.observation_window",
-            "Active Killing: Observation window",
-            5,
-            unit="timepoints",
-            method="Active Killing",
-            cell_type="tcell",
-        ),
-        _control(
-            "features.active_killing.death_signal",
-            "Active Killing: Death or reporter signal",
-            "Dead-mask percentage",
-            choices=[
-                "Dead-mask percentage", "Mean dead-dye intensity",
-                "Dead-mask pixel count",
-            ],
-            method="Active Killing",
-            cell_type="tcell",
-        ),
-        _control(
-            "features.active_killing.use_absolute_threshold",
-            "Active Killing: Use an absolute signal-increase threshold",
-            False,
-            method="Active Killing",
-            cell_type="tcell",
-        ),
-        _control(
-            "features.active_killing.absolute_threshold",
-            "Active Killing: Absolute signal-increase threshold",
-            0.0,
-            unit="pixels",
-            method="Active Killing",
-            cell_type="tcell",
-            active=False,
-        ),
-        _control(
-            "features.active_killing.minimum_contact_duration",
-            "Active Killing: Minimum contact duration",
-            1,
-            unit="timepoints",
-            method="Active Killing",
-            cell_type="tcell",
-        ),
-    ]
     return {
         "name": "active_killing_accepts_complete_setup",
         "messages": [
             {
                 "role": "assistant",
                 "content": (
-                    "Active Killing configuration for tcell against 27t and mdo: "
-                    "Death signal: Dead-mask pixel count. Absolute threshold: "
-                    "30 dead pixels. Observation window: 5 timepoints. "
-                    "Minimum contact duration: 1 frame."
+                    "**Active Killing proposal**\n"
+                    "- Target for this run: **27t, mdo**\n"
+                    "- Target cell diameter: **8 µm** -> death threshold **≈67 µm³**\n"
+                    "- Causal window: **30 min**\n"
+                    "- Attribution radius: **12 µm**"
                 ),
             },
             {"role": "user", "content": "Ok, these settings seem ok"},
         ],
         "context": _context(
-            "feature_extraction", controls, active_cell_type="tcell",
+            "feature_extraction", _ak_controls(["27t", "mdo"], ["27t", "mdo"], "tcell"),
+            active_cell_type="tcell",
             feature_extraction={
                 "active_killing_open": True,
-                "active_killing": {
-                    "setup_ready": True,
-                    "setup_issues": [],
-                },
+                "active_killing": {"setup_ready": True, "setup_issues": []},
             },
         ),
         "check": _check_active_killing_complete_acceptance,
     }
-
 
 def _hmm_movement_controls() -> list[dict]:
     prefix = "analysis.state_classification.tcell."
@@ -3121,33 +2971,33 @@ def _check_active_killing(result: dict) -> list[str]:
     changed = _changed_values(result)
     expected = {
         "features.active_killing.target_types": ["organoid1"],
-        "features.active_killing.observation_window": 5,
-        "features.active_killing.death_signal": "Dead-mask pixel count",
-        "features.active_killing.use_absolute_threshold": True,
-        "features.active_killing.absolute_threshold": 30,
+        "features.active_killing.causal_window_min": 10,
+        "features.active_killing.target_cell_diameter_um": 8,
+        "features.active_killing.attribution_radius_um": 15,
     }
     errors = []
     for control_id, value in expected.items():
         if changed.get(control_id) != value:
-            errors.append(
-                f"{control_id} was {changed.get(control_id)!r}, expected {value!r}"
-            )
+            errors.append(f"{control_id} was {changed.get(control_id)!r}, expected {value!r}")
     text = result["text"].lower()
     if any(name in text for name in (
-        "nr_dead_mask_pixels", "percentage_dead_mask", "mean_dead_dye",
+        "nr_dead_mask_pixels", "percentage_dead_mask", "mean_dead_dye", "kill_credit",
     )):
         errors.append("exposed an internal Active Killing column name")
+    if any(phrase in text for phrase in (
+        "observation window", "absolute threshold", "multiplier", "minimum contact duration",
+    )):
+        errors.append("proposed a parameter that no longer exists")
     if any(phrase in text for phrase in (
         "i've set", "i have set", "changes are applied", "changes were applied",
     )):
         errors.append("claimed proposed Active Killing changes were already applied")
     return errors
 
-
 def _check_ambiguous_killing_threshold(result: dict) -> list[str]:
     text = result["text"].lower()
     errors = []
-    for phrase in ("signal increase", "active killing", "contact distance", "feature extraction"):
+    for phrase in ("death threshold", "attribution radius", "contact distance", "feature extraction"):
         if phrase not in text:
             errors.append(f"missing threshold clarification: {phrase}")
     if "0 µm means strict" in text:
@@ -3155,7 +3005,6 @@ def _check_ambiguous_killing_threshold(result: dict) -> list[str]:
     if result["calls"]:
         errors.append("navigated or changed a value before the user chose a threshold")
     return errors
-
 
 def _check_ambiguous_contact_analysis(result: dict) -> list[str]:
     text = result["text"].lower()
@@ -3189,42 +3038,32 @@ def _check_active_killing_feedback(result: dict) -> list[str]:
     changed = _changed_values(result)
     expected = {
         "features.active_killing.target_types": ["MDO"],
-        "features.active_killing.observation_window": 15,
-        "features.active_killing.death_signal": "Dead-mask pixel count",
-        "features.active_killing.use_absolute_threshold": True,
-        "features.active_killing.absolute_threshold": 45,
-        "features.active_killing.minimum_contact_duration": 1,
+        "features.active_killing.causal_window_min": 30,
+        "features.active_killing.target_cell_diameter_um": 10,
     }
     errors = []
     for control_id, value in expected.items():
         if changed.get(control_id) != value:
-            errors.append(
-                f"{control_id} was {changed.get(control_id)!r}, expected {value!r}"
-            )
+            errors.append(f"{control_id} was {changed.get(control_id)!r}, expected {value!r}")
     text = result["text"].lower()
-    for phrase in (
-        "one-cell calibration", "30 minutes", "15 timepoints",
-        "does not mean that many cells die", "independent target run",
-    ):
+    for phrase in ("at least one cell dies", "quarter of one cell", "30 min", "independent target run"):
         if phrase not in text:
             errors.append(f"lost Active Killing constraint: {phrase}")
-    if "contact distance 0" in text:
-        errors.append("returned unrelated contact-distance guidance")
+    if "contact distance 0" in text or "minimum contact duration" in text:
+        errors.append("returned guidance for a parameter the analysis no longer uses")
     return errors
-
 
 def _check_active_killing_one_cell_not_ready(result: dict) -> list[str]:
     text = result["text"].lower()
     errors = []
-    for phrase in ("not ready yet", "at least one cell dies", "dead-mask pixel increase"):
+    for phrase in ("not ready yet", "no dead mask"):
         if phrase not in text:
-            errors.append(f"missing unresolved readiness requirement: {phrase}")
+            errors.append(f"missing live readiness issue: {phrase}")
     if "active killing is **ready**" in text:
-        errors.append("claimed readiness before calibrating the one-cell requirement")
+        errors.append("claimed readiness while the live state reports an issue")
     if result["calls"]:
         errors.append("changed the setup during a readiness check")
     return errors
-
 
 def _check_feature_group_dead_dye(result: dict) -> list[str]:
     text = result["text"].lower()
@@ -3246,18 +3085,14 @@ def _check_active_killing_complete_acceptance(result: dict) -> list[str]:
     changed = _changed_values(result)
     expected = {
         "features.active_killing.target_types": ["27t", "mdo"],
-        "features.active_killing.observation_window": 5,
-        "features.active_killing.death_signal": "Dead-mask pixel count",
-        "features.active_killing.use_absolute_threshold": True,
-        "features.active_killing.absolute_threshold": 30,
-        "features.active_killing.minimum_contact_duration": 1,
+        "features.active_killing.target_cell_diameter_um": 8,
+        "features.active_killing.causal_window_min": 30,
+        "features.active_killing.attribution_radius_um": 12,
     }
     errors = []
     for control_id, value in expected.items():
         if changed.get(control_id) != value:
-            errors.append(
-                f"{control_id} was {changed.get(control_id)!r}, expected {value!r}"
-            )
+            errors.append(f"{control_id} was {changed.get(control_id)!r}, expected {value!r}")
     text = result["text"].lower()
     for phrase in (
         "complete agreed active killing setup",
@@ -3268,7 +3103,6 @@ def _check_active_killing_complete_acceptance(result: dict) -> list[str]:
         if phrase not in text:
             errors.append(f"missing setup-completeness guidance: {phrase}")
     return errors
-
 
 def _check_hmm_movement_options(result: dict) -> list[str]:
     text = result["text"].lower()
@@ -3435,7 +3269,7 @@ def _check_safety_profiling_context(result: dict) -> list[str]:
     if not any(word in text for word in ("exploratory", "descriptive", "small")):
         errors.append("omitted the small-sample interpretation caveat")
     if any(name in text for name in (
-        "percentage_dead_mask", "killing_efficiency", "is_active_killing",
+        "percentage_dead_mask", "kill_credit", "is_active_killing",
     )):
         errors.append("exposed an internal analysis column name")
     if re.search(r"(?:one\s+)?target type\s*(?:is|=|:|\()\s*teg\b", plain):

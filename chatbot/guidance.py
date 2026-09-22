@@ -228,22 +228,30 @@ GUIDANCE_CARDS = {
         "When a researcher asks to compare targets, ask whether they want independent-only runs or those "
         "independent outputs plus the pooled result. For independent-only results, configure one target per "
         "run and ask which target to start with. "
-        "Observation window counts forward from contact and must "
-        "be calibrated to expected killing delay and the metadata time interval, not copied as a "
-        "universal number. Dead-mask pixel count with an absolute increase threshold is the general "
-        "default. Percentage is reasonable only when target sizes are comparable; mean dye intensity "
-        "is useful for diffuse reporters or when no dead-mask segmentation exists. A multiplier is "
-        "reserved for a single target line or heterogeneous baselines within one imaging unit and can be "
-        "biased across target lines with different baselines. Calibrate an absolute dead-mask voxel "
-        "threshold from cell size and XY and Z sampling, then inspect it visually; do not reuse 20-30 "
-        "pixels blindly. Absolute-threshold mode is incomplete while its value is 0. When the user "
-        "accepts a proposed setup, include targets, signal, threshold mode and value, observation "
-        "window, and minimum contact duration in one proposal. A request that at least one cell dies is "
-        "a signal-increase calibration requirement; it is never a one-timepoint minimum contact duration. "
-        "Preserve that requirement across follow-up turns and do not call the setup ready until it maps to "
-        "a positive calibrated dead-mask pixel-count threshold. Minimum contact duration must reflect "
-        "imaging cadence and plausible biology. The module detects a contact-associated rise in a "
-        "selected target signal; call it killing only when that signal is biologically validated as death. "
+        "The unit of analysis is the death event: the nucleation of a NEW connected patch in the annotated "
+        "dead mask inside one target. Death is read from the dead mask, never by re-thresholding the raw "
+        "death channel. Growth of a patch, re-brightening and merges are never new events, and death "
+        "already present when a target is first seen is not new. Each death event carries exactly one unit "
+        "of kill credit in total, shared among the effectors that touched that target within the causal "
+        "window before the onset and lie within the attribution radius of the patch (surface to surface); "
+        "a longer, closer-in-time and nearer contact earns a larger share. Total credit therefore equals the "
+        "number of attributed death events and cannot inflate with effector density; the previous algorithm, "
+        "which credited every contacting effector with an identical full verdict, did. "
+        "Three settings: target cell diameter (µm of ONE target cell; it sets the death threshold, a quarter "
+        "of one cell's volume, and should be checked with Preview death patches on a trusted frame), causal "
+        "window (minutes after contact; ~120 min for organoid/carcinoma targets, ~30 min for haematologic "
+        "ones) and attribution radius (µm; default 15). Derived values and literature constants can be "
+        "overridden only in the parameters YAML (active_killing.advanced) and every override is recorded. "
+        "There is no death-signal column, multiplier, absolute threshold, observation window or minimum "
+        "contact duration any more: the absolute threshold became the death-patch size threshold, the "
+        "multiplier's baseline problem is removed by counting only new dead voxels, and brief contacts earn "
+        "a proportionally small share instead of being cut off. "
+        "Headline readout: conversion rate = attributed death events per contact event (individual contacts "
+        "are usually non-lethal; values near 1 suggest the thresholds are too loose). Death events without a "
+        "candidate are unattributed (background) death, reported separately; unattributed is a lower bound "
+        "on immune-independent death, not proof of it. The attribution funnel shows where events drop out. "
+        "Organoid fate (Live/Dying) is the whole-organoid death call and is independent of attributed kills. "
+        "Call it killing only when the dead mask is biologically validated as death. "
         "Derive effector and target roles from the experiment, never from population names or UI categories."
     ),
     "filtering": (
@@ -282,11 +290,12 @@ GUIDANCE_CARDS = {
         "violin shows the distribution across individual targets, split by target fate when a validated "
         "switch-on signal is available. The cumulative-to-transition curve includes only targets that "
         "switch state and aligns their mean cumulative contacts to the transition time, with the band "
-        "showing the standard error. In the Interaction--Active Killing dashboard, the left panel shows "
-        "one point per contact event and its duration; color distinguishes events with and without a "
-        "validated contact-associated target-signal rise. The right panel reports the percentage of "
-        "contact events classified that way for each target group and fate. 'Dead' and 'alive' labels "
-        "are biological only when the configured signal has been validated as death."
+        "showing the standard error. In the Interaction--Active Killing dashboard, the top panel shows "
+        "one point per effector-target contact event and its duration; color distinguishes events that "
+        "were and were not credited with an attributed death event. The bottom panel reports the percentage "
+        "of contact events with an attributed kill for each target group and fate, annotated with the total "
+        "kill credit. Fate is the whole-organoid death call and is independent of attributed kills. 'Dead' "
+        "and 'alive' labels are biological only when the configured signal has been validated as death."
     ),
     "hmm": (
         "For Behavioral State, always read and state the live selected cell type before giving setup or "
@@ -372,8 +381,8 @@ def select_guidance_cards(
         "convpaint": ("convpaint", "vgg16", "dinov2", "dask"),
         "cellpose_sam": ("cellpose-sam", "cellpose sam", "cpsam", "zero-shot"),
         "active_killing": (
-            "active killing", "observation window", "top killers",
-            "killing threshold", "effector",
+            "active killing", "death event", "kill credit", "attribution",
+            "top killers", "serial killer", "causal window", "effector",
         ),
         "hmm": (
             "hmm", "behavioral state", "behavioural state", "state selection",

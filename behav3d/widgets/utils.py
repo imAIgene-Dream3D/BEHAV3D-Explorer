@@ -332,6 +332,7 @@ _DEFAULT_CONFIG = {
                 "intensity": False,
                 "death": False,
                 "contact": False,
+                "active_killing": False,
             },
             'dtw_features_input': [],
             "dtw_features_resolved": [],
@@ -354,6 +355,7 @@ _DEFAULT_CONFIG = {
                 "intensity": False,
                 "death": False,
                 "contact": False,
+                "active_killing": False,
             },
             'dtw_features_input': [],
             "dtw_features_resolved": [],
@@ -376,6 +378,7 @@ _DEFAULT_CONFIG = {
                 "intensity": False,
                 "death": False,
                 "contact": False,
+                "active_killing": False,
             },
             'dtw_features_input': [],
             "dtw_features_resolved": [],
@@ -397,14 +400,15 @@ _DEFAULT_CONFIG = {
         "columns_resolved": [],
     },
     "active_killing": {
-        "observation_window": 5,
-        "death_signal_column": "percentage_dead_mask",
-        "killing_threshold_multiplier": 1.5,
-        "min_contact_duration": 1,
-        "contact_column": "contact",
-        "use_absolute_threshold": False,
-        "absolute_killing_threshold": None,
+        # Death events are read from the annotated dead mask and attributed to
+        # effectors by proximity. Only these three are analysis choices; every
+        # derived value / literature constant lives in "advanced" (YAML only).
+        "target_cell_diameter_um": 10.0,
+        "causal_window_min": 120.0,
+        "attribution_radius_um": 15.0,
+        "target_types": [],
         "save_results": True,
+        "advanced": {},
     },
     "death_dynamics": {
         "organoid": {
@@ -506,9 +510,78 @@ behav3d_calculated_features = {
         "*_invasiveness", "*_invasiveness_perc", "any_org_invasiveness", "any_org_invasiveness_perc",
     ],
     "active_killing": [
-        "is_active_killing", "killing_efficiency", "death_signal_increase_*tp",
+        "is_active_killing", "kill_credit", "cum_kill_credit", "hit_weight_raw",
+        "is_nearest_effector", "distance_to_death_um", "lag_min", "n_cokillers",
+        "attributed_death_volume_um3",
     ],
 }
+
+
+_ID_LIKE_COLUMNS = {
+    "TrackID", "sub_TrackID", "segment_id", "lineage_id", "origin_TrackID",
+    "targeted_track_id", "contact_event_id", "death_event_id", "n_events_credited",
+}
+
+# Keys removed from ``active_killing`` by the death-event rework. They are
+# dropped (with a log line naming each) when an old parameters file is loaded,
+# so nobody is left believing a threshold still applies.
+_DELETED_ACTIVE_KILLING_KEYS = (
+    "observation_window", "death_signal_column", "killing_threshold_multiplier",
+    "min_contact_duration", "contact_column", "use_absolute_threshold",
+    "absolute_killing_threshold",
+)
+
+# Columns that no longer exist; stale selections naming them are dropped from
+# persisted feature lists (expand_column_patterns passes unknown names through
+# verbatim, so they would otherwise fail deep inside DTW/HMM).
+_DELETED_ACTIVE_KILLING_COLUMNS = (
+    "killing_efficiency", "death_signal_increase_*tp", "killing_threshold_used", "observation_complete",
+)
+
+
+def _is_deleted_ak_column(name) -> bool:
+    import fnmatch
+    n = str(name)
+    base = n[len("mean_"):] if n.startswith("mean_") else n
+    return any(fnmatch.fnmatch(base, pat) or base == pat for pat in _DELETED_ACTIVE_KILLING_COLUMNS) or \
+        base.startswith("death_signal_increase_")
+
+
+def migrate_active_killing_config(cfg, log_fn=print):
+    """Bring an ``active_killing`` config dict up to the death-event schema.
+
+    Deleted keys are removed with a log line naming each (their concepts no
+    longer exist, so they are not translated). Missing keys are filled from
+    the defaults; unknown keys pass through untouched.
+    """
+    if not isinstance(cfg, dict):
+        cfg = {}
+    out = dict(cfg)
+    dropped = [k for k in _DELETED_ACTIVE_KILLING_KEYS if k in out]
+    for k in dropped:
+        out.pop(k, None)
+    if dropped and log_fn is not None:
+        log_fn(
+            "Active Killing: ignoring settings from the previous algorithm that no longer apply "
+            f"(death is now read from the dead mask and attributed per death event): {', '.join(dropped)}"
+        )
+    for k, v in _DEFAULT_CONFIG["active_killing"].items():
+        out.setdefault(k, deepcopy(v))
+    if not isinstance(out.get("advanced"), dict):
+        out["advanced"] = {}
+    return out
+
+
+def drop_deleted_active_killing_columns(names, log_fn=print, context=""):
+    """Remove persisted feature selections that name deleted Active Killing columns."""
+    if not names:
+        return names
+    kept = [n for n in names if not _is_deleted_ak_column(n)]
+    gone = [n for n in names if _is_deleted_ak_column(n)]
+    if gone and log_fn is not None:
+        log_fn(f"Dropped feature selections that no longer exist after the Active Killing rework"
+               f"{' (' + context + ')' if context else ''}: {', '.join(map(str, gone))}")
+    return kept
 
 
 def excluded_non_behavior_columns(cols, metadata=None):
@@ -538,10 +611,13 @@ def excluded_non_behavior_columns(cols, metadata=None):
         "origin_TrackID",
         "orientation_vector",
         "border_touching_segment",
+        # Active Killing identifiers / labels -- not behavioural features.
         "targeted_track_id",
+        "targeted_cell_type",
         "contact_event_id",
-        "killing_threshold_used",
-        "observation_complete",
+        "death_event_id",
+        "attribution_class",
+        "n_events_credited",
     }
 
     if metadata is not None:
@@ -571,6 +647,10 @@ def excluded_non_behavior_columns(cols, metadata=None):
         if lc.startswith("pix_distance_"):
             excluded.add(c)
         if lc.startswith("pix_") and lc.endswith("_contact"):
+            excluded.add(c)
+        # summarize_track_features() averages every numeric column, so ID
+        # columns also appear as meaningless mean_<id> features.
+        if lc.startswith("mean_") and c[len("mean_"):] in _ID_LIKE_COLUMNS:
             excluded.add(c)
 
     return excluded.intersection(col_set)

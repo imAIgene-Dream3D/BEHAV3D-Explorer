@@ -88,8 +88,33 @@ FILE_CATALOG: list[tuple[str, str]] = [
     ),
     (
         "BEHAV3D_*_advanced_track_features.csv",
-        "Advanced (active-killing-aware) per-track features.",
+        "Effector per-timepoint features plus Active Killing credit columns (kill_credit, is_active_killing, ...).",
     ),
+    # ── Active Killing ────────────────────────────────────────────────────
+    ("kill_candidates_*.csv",
+     "Active Killing: one row per (death event, candidate effector) with its kill credit; credit sums to 1 per attributed death."),
+    ("death_events_*.csv",
+     "Death events (new dead-mask patches) with their attribution class (exclusive / shared / unattributed)."),
+    ("per_effector_killing_*.csv",
+     "Active Killing per effector: kills attributed / exclusive / nearest, killing rate, serial-killing metrics."),
+    ("per_target_death_*.csv",
+     "Active Killing per target: death events, attributed vs unattributed, attributed dead volume."),
+    ("per_sample_killing_*.csv",
+     "Active Killing per sample: conversion rate, background death rate, attribution ambiguity, killing Gini."),
+    ("contact_events_*.csv",
+     "Continuous effector-target contact events, one per (effector, target) pair."),
+    ("active_killing_run_params.json", "Active Killing schema version and resolved parameters of the run."),
+    ("*_death_events.csv", "Cached death events for one sample and target type (reused across Active Killing runs)."),
+    ("*_death_timeseries.csv", "Per target and timepoint: dead volume and newly dead volume from the dead mask."),
+    ("death_event_fate_over_time*", "Active Killing: death events over time, attributed vs unattributed."),
+    ("attributed_fraction_by_condition*", "Active Killing: immune-attributed fraction of death by condition."),
+    ("attribution_funnel*", "Active Killing: where unattributed death events drop out of attribution."),
+    ("patch_depth_attributed_vs_unattributed*", "Active Killing: death-patch depth, attributed vs unattributed."),
+    ("killing_concentration*", "Active Killing: Lorenz curve / Gini of kill credit, and kills vs contact time."),
+    ("serial_killing_*", "Active Killing: serial-killing intervals, breadth, time to first kill and contact-to-death lag."),
+    ("organoid_swimmer_top*", "Active Killing: contact periods and death events for the targets of the top-N killers."),
+    ("engagement_dose_response*", "Active Killing: attributed deaths vs effector engagement per target."),
+    ("killing_event_*.gif", "Active Killing: a top killer's largest attributed death event (animated)."),
     (
         "*_intensity.csv",
         "Per-timepoint intensity features for a single sample (intermediate).",
@@ -272,7 +297,7 @@ def describe(path: Path) -> str:
 # ---------------------------------------------------------------------------
 _VIEWABLE_KINDS = {"pdf", "image"}
 
-_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif"}
 
 
 def _kind_for(path: Path) -> str:
@@ -365,7 +390,7 @@ _SKIP_DIR_NAMES = {
 # Extensions we care about. Other files (logs, temp, etc.) are skipped.
 _ALLOWED_EXTS = {
     ".pdf",
-    ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp",
+    ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif",
     ".csv", ".tsv",
     ".html", ".htm",
     ".json", ".yaml", ".yml",

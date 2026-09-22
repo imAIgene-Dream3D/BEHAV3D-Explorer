@@ -35,6 +35,36 @@ def load_zarr_timepoint(path, t):
     arr = zarr.open(zarr_store, mode="r")
     return np.asarray(arr[t])
 
+
+def open_zarr_array(path):
+    """Open a zarr array read-only and return the ``zarr.Array`` handle.
+
+    No data is read. Reuse the handle across timepoints instead of calling
+    :func:`load_zarr_timepoint` in a loop, which reopens the store on every
+    call - noticeable for sequential per-frame passes over long movies.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Path to zarr file does not exist:\n{path}")
+    if path.suffix == ".zip":
+        zarr_store = zarr.storage.ZipStore(path)
+    else:
+        zarr_store = zarr.storage.LocalStore(path)
+    return zarr.open(zarr_store, mode="r")
+
+
+def load_zarr_timepoint_region(path_or_array, t, region=None):
+    """Read ``arr[t][region]`` as numpy, touching only the chunks it needs.
+
+    ``path_or_array`` is a path or a handle from :func:`open_zarr_array`.
+    ``region`` is a tuple of slices over the spatial axes (``None`` = the
+    whole timepoint, equivalent to :func:`load_zarr_timepoint`).
+    """
+    arr = path_or_array if hasattr(path_or_array, "shape") else open_zarr_array(path_or_array)
+    if region is None:
+        return np.asarray(arr[t])
+    return np.asarray(arr[(t,) + tuple(region)])
+
 def save_as_zarr(
     img, 
     path, 

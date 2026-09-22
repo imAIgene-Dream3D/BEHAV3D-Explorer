@@ -171,19 +171,6 @@ _APOC_FEATURE_LABELS = {
 }
 
 
-_ACTIVE_KILLING_SIGNAL_LABELS = {
-    "percentage_dead_mask": "Dead-mask percentage",
-    "mean_dead_dye": "Mean dead-dye intensity",
-    "nr_dead_mask_pixels": "Dead-mask pixel count",
-}
-
-
-_ACTIVE_KILLING_CONTACT_LABELS = {
-    "contact": "Pixel adjacency (contact)",
-    "contact_on_distance": "Distance threshold (contact_on_distance)",
-}
-
-
 def _apoc_feature_grid_binding(control_id, label, tab, **kwargs):
     checks_by_key = getattr(tab, "_feat_sigma_checks", {}) or {}
     checks = {
@@ -834,80 +821,29 @@ def _feature_bindings(main_widget) -> list[dict]:
     )) if getattr(tab, "_ak_toggle_btn", None) is not None else False
     if active is not None:
         immune_combo = getattr(active, "immune_combo", None)
-        absolute_check = getattr(active, "check_abs_threshold", None)
         immune = (
             _safe(immune_combo.currentText, "")
             if immune_combo is not None else ""
         ) or None
-        absolute = bool(
-            _safe(absolute_check.isChecked, False)
-            if absolute_check is not None else False
-        )
         specs = [
-            ("immune_type", "Effector cell type", "immune_combo", None, True),
-            ("observation_window", "Observation window",
-             "spin_obs_window", "timepoints", True),
-            ("death_signal", "Death or reporter signal",
-             "death_signal_combo", None, True),
-            ("use_absolute_threshold", "Use an absolute signal-increase threshold",
-             "check_abs_threshold", None, True),
-            ("threshold_multiplier", "Signal-increase multiplier",
-             "spin_threshold_mult", None, not absolute),
-            ("absolute_threshold", "Absolute signal-increase threshold",
-             "spin_abs_threshold", None, absolute),
-            ("minimum_contact_duration", "Minimum contact duration",
-             "spin_min_contact", "timepoints", True),
-            ("contact_column", "Contact column",
-             "contact_column_combo", None, True),
-            ("top_killers_to_display", "Top killers to display",
-             "spin_top_n", None, True),
+            ("immune_type", "Effector cell type", "immune_combo", None),
+            ("target_cell_diameter_um", "Target cell diameter", "spin_cell_diameter", "µm"),
+            ("min_patch_volume_um3", "Minimum death-patch volume (sets the death threshold directly)",
+             "spin_min_patch_volume", "µm³"),
+            ("causal_window_min", "Causal window", "spin_causal_window", "min"),
+            ("attribution_radius_um", "Attribution radius", "spin_attr_radius", "µm"),
+            ("top_killers_to_display", "Top killers to display", "spin_top_n", None),
         ]
-        _token_label_specs = {
-            "death_signal": _ACTIVE_KILLING_SIGNAL_LABELS,
-            "contact_column": _ACTIVE_KILLING_CONTACT_LABELS,
-        }
-        for suffix, label, attr, unit, relevant in specs:
+        for suffix, label, attr, unit in specs:
             widget = getattr(active, attr, None)
             if widget is not None:
-                binding_kwargs = {}
-                labels = _token_label_specs.get(suffix)
-                if labels is not None:
-                    values = {
-                        display.lower(): token
-                        for token, display in labels.items()
-                    }
-
-                    def get_token(combo=widget, display_labels=labels):
-                        token = str(_safe(combo.currentText, "") or "")
-                        return display_labels.get(token, token)
-
-                    def set_token(value, combo=widget, token_values=values):
-                        token = token_values.get(str(value).strip().lower())
-                        if token is None:
-                            return False
-                        combo.setCurrentText(token)
-                        return str(_safe(combo.currentText, "") or "") == token
-
-                    binding_kwargs = {
-                        "getter": get_token,
-                        "setter": set_token,
-                    }
-                item = _binding(
+                out.append(_binding(
                     f"features.active_killing.{suffix}",
                     f"Active Killing: {label}", widget,
                     step="feature_extraction", unit=unit,
                     method="Active Killing", cell_type=immune,
                     visible=expanded,
-                    **binding_kwargs,
-                )
-                if suffix in {"threshold_multiplier", "absolute_threshold"}:
-                    # Both alternatives must remain addressable in one assistant
-                    # proposal when the mode checkbox also changes.
-                    item["enabled"] = expanded
-                    item["active"] = relevant
-                if labels is not None:
-                    item["choices"] = list(labels.values())
-                out.append(item)
+                ))
         target_list = getattr(active, "target_list", None)
         if target_list is not None:
             out.append(_selection_binding(

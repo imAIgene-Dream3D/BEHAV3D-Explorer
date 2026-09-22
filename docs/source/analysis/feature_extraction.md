@@ -15,7 +15,7 @@ For each cell type, Feature Extraction writes one combined table:
 
 Each row in that CSV = one cell (`TrackID`) at one timepoint (`position_t`). The columns are grouped into six families (see [below](#the-six-feature-families)). Per-sample intermediate CSVs are also written under `trackdata/<sample>/<cell_type>/`.
 
-Optionally, an **Active Killing** detector can run on top of the immune-cell features to flag the timepoints at which an immune cell appears to kill a target. That produces several extra files in `analysis/<immune_type>/active_killing/`.
+Optionally, **Active Killing** can run on top of the immune-cell features: it detects new death patches in the dead mask inside each target and attributes each one's single unit of killing credit to the effectors that touched that target just before, next to the patch. That produces several extra files in `analysis/<immune_type>/active_killing/`.
 
 ```{important}
 The main **▶ Run Feature Extraction** step writes CSVs only — no plot PDFs. Other tabs produce most QC and behavioural figures ([Filtering](filtering.md), [State Classification](single_cell/state_classification.md), etc.).
@@ -23,10 +23,10 @@ The main **▶ Run Feature Extraction** step writes CSVs only — no plot PDFs. 
 Graphics from **this** tab are limited to:
 
 - **Preview Dead Threshold in Viewer** — live napari overlay only (not saved).
-- **Active Killing** (immune panel, after baseline extraction) — when you run the analysis or **Display Existing Results**:
-  - Per sample: `plots/<sample>/killing_kinetics_summary_<sample>.png` (four panels: efficiency, kinetics, cumulative events, events per cell).
-  - All samples: `plots/combined_killing_efficiency_distribution.png`.
-  - Top killers: `gallery/<sample>/killing_event_*.gif` (Event GIFs of cropped 3D views (maximum-intensity projections) around each top killing event; count set by **Top-N killers to display**).
+- **Preview death patches** (Active Killing panel) — live napari overlay of the candidate new-death patches at the current frame (not saved).
+- **Active Killing** (immune panel, after baseline extraction) — every run writes `plots/` with the attributed-vs-unattributed figures (death events over time, attributed fraction by condition, attribution funnel, patch depth), killing concentration, serial killing and timing, a swimmer plot of the top-N killers' targets and the engagement dose-response — each with its backing CSV.
+  - Top killers: `gallery/<sample>/killing_event_*.gif` (**Export Killing GIFs**; cropped maximum-intensity projections around each top killer's largest attributed death event; count set by **Top-N killers**).
+  - **Calibrate radius & validate** writes `validation/` (density-invariance and attribution-radius calibration).
 
 See [Active Killing](population_analysis/active_killing.md) for file names and how to read the plots.
 ```
@@ -111,11 +111,11 @@ If you already ran extraction with one threshold and want another, change Dead m
 
 ## Active Killing detection
 
-A collapsible **▶ Extended Analysis — Active Killing (Immune Cells)** section sits at the bottom of this tab. It detects, for each effector cell, the timepoints at which the target it touched shows a signal rise large enough to count as killing.
+A collapsible **▶ Extended Analysis — Active Killing (Immune Cells)** section sits at the bottom of this tab. It detects **death events** — new connected patches in the dead mask inside a target — and gives each one exactly one unit of killing credit, shared among the effectors that touched that target within the causal window and sit within the attribution radius of the patch. Total credit equals the number of attributed deaths, so it does not grow with effector density.
 
-**It is configured and run here, but explained with the population analyses.** It lives in this tab because it needs the per-timepoint contact and signal columns while they are being computed, and it writes its results back into the effector's own feature table. Conceptually it belongs with Death Dynamics, Interaction and Invasiveness, because it is about targets, effectors and contact.
+**It is configured and run here, but explained with the population analyses.** It lives in this tab because it needs the effector's per-timepoint contact columns and writes its results back into the effector's own feature table. Conceptually it belongs with Death Dynamics, Interaction and Invasiveness, because it is about targets, effectors and contact.
 
-The panel only appears when the metadata contains at least one **immune** cell type, and it requires that cell type's combined feature CSV to exist already — so run baseline Feature Extraction for it first.
+The panel only appears when the metadata contains at least one **immune** cell type. It requires that cell type's combined feature CSV **with contact features** (run baseline Feature Extraction for it first), the annotated **dead mask**, and the **tracked label images** of the effector and the targets. Death is read from the dead mask, never by re-thresholding the raw death channel, so the death-signal columns below are not used by it.
 
 **Full explanation, parameters, calibration and outputs: [Active Killing](population_analysis/active_killing.md).**
 
@@ -328,7 +328,7 @@ $$
 \text{nr\_dead\_mask\_pixels} = \text{nr\_pixels} \times \text{percentage\_dead\_mask}
 $$
 
-The three death signals capture death differently: `percentage_dead_mask` is **size-independent** (good when objects differ in size) but saturates; `nr_dead_mask_pixels` is an **absolute** count (cannot go negative, pairs well with an absolute threshold — see [Active Killing](population_analysis/active_killing.md)); and `mean_dead_dye` (from the Intensity family) is the **mean dead-channel intensity** across the whole mask, which is the right choice when you have no dead-cell segmentation, or when the dye is diffuse and fills the whole cell rather than forming a discrete region.
+The three death signals capture death differently: `percentage_dead_mask` is **size-independent** (good when objects differ in size) but saturates; `nr_dead_mask_pixels` is an **absolute** count (cannot go negative); and `mean_dead_dye` (from the Intensity family) is the **mean dead-channel intensity** across the whole mask, which is the right choice when you have no dead-cell segmentation, or when the dye is diffuse and fills the whole cell rather than forming a discrete region.
 
 If you set the threshold to 0, the `dead` column is not added.
 
@@ -344,7 +344,7 @@ A **fluctuating** reporter that goes on and off, such as calcium, is a different
 - **Use Apply to all category for multi-sample experiments.** Once one organoid sub-tab is correctly tuned, propagate the settings to the others; otherwise it is easy to forget a sub-tab and end up with inconsistent features.
 - **Workers parallelise image-based work, not movement.** Movement and death-flag calculation are CPU-cheap and serial. The bulk of wall time is in morphology + intensity + contact + dead-mask measurement, which is what the worker count actually speeds up.
 - **Reruns are incremental.** Per-sample intermediate CSVs (intensity, contact, morphology, dead mask) are reused if they already exist on disk and you choose **Skip** in the overwrite dialog — useful when you only need to recompute one feature family. Choose **Overwrite** when you change a threshold and need a clean recompute.
-- **Active Killing is opt-in for a reason.** Baseline Feature Extraction is fast; Active Killing has to scan every contact event for every immune track per sample and is much slower. Run it only when you actually need killing-event analysis.
+- **Active Killing is opt-in for a reason.** Baseline Feature Extraction is fast; Active Killing reads the dead mask and the tracked label images frame by frame to detect death events, which is much slower the first time. Death events are cached per target type, so later runs with a different causal window or attribution radius are fast; changing the target cell diameter re-detects them.
 - **Active Killing always reads the *raw*, unfiltered combined feature CSV** — never the filtered one, even if [Filtering](filtering.md) has already been run. This is deliberate: [Filtering](filtering.md) reads Active Killing's advanced-features CSV as its own input when one exists (so the killing columns survive filtering), which would make the two steps each other's upstream dependency if Active Killing also preferred Filtering's output — each could end up refusing to run because the other's file looked newer or older. Reading raw always succeeds. If a filtered CSV for this cell type already exists, Active Killing will print a warning (and the GUI will pop up a reminder) that you should **re-run Filtering afterwards** so the filtered table picks up the fresh killing columns.
 
 ## See also

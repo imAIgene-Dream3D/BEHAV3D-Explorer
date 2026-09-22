@@ -78,7 +78,7 @@ This is the happy path. Each step links to its full reference page.
    - In the Visualization tab the resulting tracked segments can be manually corrected.
 5. **Extract features in Feature Extraction** ([details](analysis/feature_extraction))
    - Pick the feature families you want from the six available (movement, intensity, morphology, contact, invasiveness, death). Some are forced on for some cell types — e.g. movement for immune cells, death whenever a dead channel is present. Set the global organoid dead threshold and per-immune/per-other cell types thresholds.
-   - You can also run Extended Analysis → Active Killing to detect which effector contacts were followed by a signal rise in the target they touched. Requires baseline feature extraction (with contact + death features) on both cell types first, and the effector must be declared as an immune (`im_`) type. It is explained with the other [Population Dynamics analyses](analysis/population_analysis/index).
+   - You can also run Extended Analysis → Active Killing to attribute each localised death event in a target to the effectors that touched it just before (one unit of credit per death). Requires baseline feature extraction (with contact + death features) on both cell types first, and the effector must be declared as an immune (`im_`) type. It is explained with the other [Population Dynamics analyses](analysis/population_analysis/index).
 6. **Filter in Filtering** ([details](analysis/filtering))
    - Drop tracks shorter than `min_track_length`, optionally cap them at `max_track_length`, drop undersized starting cells with `min_size_t1`, drop dead-at-t0 cells, cap the experiment duration.
 7. **Analyse in Analysis** ([details](analysis/index))

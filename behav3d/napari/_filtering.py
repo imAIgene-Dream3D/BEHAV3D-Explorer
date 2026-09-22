@@ -704,8 +704,18 @@ class CellTypeFilterPanel(QWidget):
 
         out_dir = str(Path(self.metadata_loader.output_dir).expanduser())
 
-        # Check for advanced features CSV
-        adv_path = find_advanced_features_csv(out_dir, cell_type)
+        # Check for advanced features CSV. A stale one (Feature Extraction,
+        # Segmentation or Tracking rerun after Active Killing, or output of the
+        # previous Active Killing algorithm) must stop Filtering with an
+        # actionable message rather than being consumed or dumped as a traceback.
+        # This runs on a worker thread, so it raises; the panel logs the message.
+        from behav3d.features.advanced_timepoint_features import StaleDataError
+        try:
+            adv_path = find_advanced_features_csv(out_dir, cell_type)
+        except StaleDataError as exc:
+            raise RuntimeError(
+                f"Filtering for '{cell_type}' stopped: {exc} Then re-run Filtering."
+            ) from None
         df_input_path = str(adv_path) if adv_path is not None else None
 
         filter_kwargs = {

@@ -97,8 +97,9 @@ Never import a numeric value from a named population or another experiment.
 ## Signal-to-analysis mapping
 
 - A signal that rises and remains positive can drive Death Dynamics and, when tied
-  to contact, Active Killing or Interaction Analysis. Call it death only when the
-  reporter has been biologically validated as a death signal.
+  to contact, Active Killing (which counts localised new-signal patches, not a
+  whole-object rise) or Interaction Analysis. Call it death only when the reporter
+  has been biologically validated as a death signal.
 - A fluctuating signal can be a Behavioral State or State Trajectory feature.
 - Contact, movement, morphology, and channel intensity can all define single-cell
   states. Ask what the researcher wants the state profile to represent.

@@ -10,7 +10,10 @@ from .formats.h5 import load_h5
 from .formats.ims import load_ims, load_ims_metadata, load_ims_timepoint_czyx, get_ims_dimension_order, get_ims_shape
 from .formats.liff import load_liff, get_liff_shape, load_liff_metadata, load_elsizes_liff, load_liff_timepoint_czyx, get_liff_dimension_order
 from .formats.tiff import load_tiff, get_tiff_shape, get_tiff_dimension_order
-from .formats.zarr import load_zarr, load_zarr_timepoint, append_to_zarr, save_as_zarr, write_zarr_parallel
+from .formats.zarr import (
+    load_zarr, load_zarr_timepoint, load_zarr_timepoint_region, open_zarr_array,
+    append_to_zarr, save_as_zarr, write_zarr_parallel,
+)
 
 _FORMATS_WITH_TP_LOADER = {".czi", ".lif", ".liff", ".ims", ".zarr"}
 
@@ -170,6 +173,31 @@ def load_image_timepoint(path, t):
     if path.suffix == ".zarr" or str(path).endswith(".zarr.zip"):
         return load_zarr_timepoint(path, t)
     return np.asarray(load_image(path)[t])
+
+
+def open_image_timepoints(path):
+    """Return an indexable handle over a ``(T, ...)`` image without reading data.
+
+    For zarr this is the raw ``zarr.Array`` (store opened once); other formats
+    fall back to the lazily loaded array from :func:`load_image`. Either way
+    ``handle[t]`` and ``handle[(t,) + region]`` read only what they index.
+    """
+    path = Path(path)
+    if path.suffix == ".zarr" or str(path).endswith(".zarr.zip"):
+        return open_zarr_array(path)
+    return load_image(path)
+
+
+def load_image_timepoint_region(path_or_handle, t, region=None):
+    """Load ``image[t][region]`` as numpy.
+
+    Accepts a path or a handle from :func:`open_image_timepoints`; ``region``
+    is a tuple of spatial slices, ``None`` for the whole timepoint.
+    """
+    handle = path_or_handle if hasattr(path_or_handle, "shape") else open_image_timepoints(path_or_handle)
+    if region is None:
+        return np.asarray(handle[t])
+    return np.asarray(handle[(t,) + tuple(region)])
 
 def load_image_metadata(path):
     path = Path(path)

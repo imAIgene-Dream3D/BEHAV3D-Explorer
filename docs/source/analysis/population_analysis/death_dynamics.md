@@ -18,6 +18,11 @@ Next to each button:
 - **+🛒** — adds the step to the [Processing Queue](../../plugin_essentials/processing_queue) to run later in a batch.
 - **👁** — opens the resulting PDF in napari (enabled once it exists; if several targets are selected it offers a chooser menu).
 
+
+```{note}
+**Death Dynamics and Active Killing use the same dead mask differently.** Death Dynamics calls a whole organoid *dead* once its dead-mask fraction crosses `dead_mask_percentage_threshold`. [Active Killing](active_killing) instead counts **localised** death events — new connected patches in that same mask — and attributes them to effectors. The two answer different questions and can disagree (an organoid can have attributed kills without ever being called dead); both depend on the same dead-mask segmentation quality.
+```
+
 ## Death thresholds (read-only)
 
 Below the buttons, a read-only panel lists the **Dead mask % threshold** currently configured for each target. This value is **owned by Feature Extraction** — there is nothing to tune here. To change it, go back to the [Feature Extraction](../feature_extraction) tab, set a new Dead mask % threshold, and re-run Feature Extraction (and Filtering) for that cell type.

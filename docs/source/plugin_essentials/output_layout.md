@@ -25,7 +25,8 @@ You pick it once, in **Data Preparation → Output Directory**. Every other tab 
     ├── <cell_type>/                                # per-cell-type results
     │   ├── track_features/                         # feature CSVs (raw, filtered, summarised)
     │   ├── quality_control/                        # filtering QC plots
-    │   ├── active_killing/                         # immune cell types only — killing events
+    │   ├── active_killing/                         # immune cell types only — attributed death events
+    │   ├── death_events/                           # target cell types — cached death events (Active Killing)
     │   ├── invasiveness_analysis/                  # immune cell types only — surface-engagement analyses
     │   ├── results/                                # organoid-type dynamics analyses
     │   ├── interaction_analysis/                   # immune ↔ organoid contact analyses
@@ -67,7 +68,7 @@ File names use the cell type name from your metadata. If your metadata defines `
 | Writes | Path |
 |---|---|
 | Per-timepoint features | `analysis/{cell_type}/track_features/` |
-| Extended Analysis → Active Killing (immune only) | `analysis/{immune_type}/active_killing/` |
+| Extended Analysis → Active Killing (immune only) | `analysis/{immune_type}/active_killing/{target or combined}/` (tables, `plots/`, `gallery/`, `validation/`) and the death-event cache in `analysis/{target_type}/death_events/` |
 
 ### Filtering
 

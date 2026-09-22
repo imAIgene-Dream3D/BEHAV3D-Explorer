@@ -98,7 +98,21 @@ def summarize_track_features(
         df_summarized_tracks['displacement_from_origin'] = grouped_df_tracks['displacement_from_origin'].max().reset_index()['displacement_from_origin']
     if 'cumulative_displacement' in df_tracks.columns:
         df_summarized_tracks['cumulative_displacement'] = grouped_df_tracks['cumulative_displacement'].last().reset_index()['cumulative_displacement']
-    
+
+    # Active Killing counts must be summed, not averaged: kill_credit sums to the
+    # number of death events this effector is credited with (a fraction when a
+    # death event was shared), is_nearest_effector to the events it was the
+    # closest candidate for.
+    ak_sums = {
+        "kill_credit": "kills_attributed",
+        "is_active_killing": "n_credited_timepoints",
+        "is_nearest_effector": "kills_nearest",
+        "attributed_death_volume_um3": "attributed_death_volume_um3",
+    }
+    for src, dst in ak_sums.items():
+        if src in df_tracks.columns:
+            df_summarized_tracks[dst] = grouped_df_tracks[src].sum().reset_index()[src].astype(float)
+
     if not imaris:
         # Calculate active contact percentage for all *_contact columns (generic for any cell type)
         # For each contact type, calculates what % of contact time was "active" contact

@@ -172,7 +172,7 @@ For each cell type, filtering writes two CSVs and a folder of QC PDFs:
 Same columns as the input Feature Extraction CSV, with only the rows of surviving tracks (subject to experiment duration and max-length trims). One row per `(track, timepoint)`. **This is the file every downstream analysis reads** — Death Dynamics, Interaction and behavioural-state classification all start from here.
 
 ```{tip}
-If a sample has an **Active Killing** advanced features CSV available, filtering will use *that* as input instead of the plain feature-extraction CSV — so the immune-cell killing columns are preserved through filtering.
+If a sample has an **Active Killing** advanced features CSV available, filtering will use *that* as input instead of the plain feature-extraction CSV — so the immune-cell kill-credit columns are preserved through filtering.
 ```
 
 ```{important}

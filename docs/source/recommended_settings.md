@@ -76,9 +76,12 @@ Choose features from the research question:
 - Invasiveness for surface engagement between selected objects.
 
 Death Dynamics measures the population fraction with a switch-on signal over time.
-Active Killing measures a contact-associated signal rise in a selected target. These
-names do not prove the signal represents death; preserve the researcher's biological
-definition.
+Active Killing detects new death patches in the dead mask inside a target and attributes
+each one to the effectors that touched it shortly before, next to the patch. Set the target
+cell diameter from one target cell (not the organoid) and check it with Preview death
+patches; give the causal window in minutes from the expected contact-to-death delay (~120 min
+for organoids, ~30 min for haematologic targets). These names do not prove the signal
+represents death; preserve the researcher's biological definition.
 
 Behavioral State can classify any single-cell population. Ask whether states should
 represent movement, contact, morphology, channel intensity, or a combination. Derive
