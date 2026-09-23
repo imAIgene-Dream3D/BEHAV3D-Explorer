@@ -300,6 +300,38 @@ def _make_info_label(text: str) -> QLabel:
     return lbl
 
 
+def _scan_state_feature_columns(csv_path, usable_cols) -> dict:
+    """Value-based binary/non-numeric column classification over the full
+    track-features CSV. Pure pandas, no Qt/``self`` access — dispatched via
+    ``BackgroundOperation`` from `StateClassificationSubTab._populate_dynamic_features`
+    so the full-CSV scan doesn't block the Qt main thread."""
+    from behav3d.core.column_detection import (
+        detect_binary_columns_from_csv,
+        detect_non_numeric_columns_from_csv,
+    )
+    bin_cols = detect_binary_columns_from_csv(Path(csv_path), usable_cols)
+    bin_set = set(bin_cols)
+    # Columns that aren't binary and can't be parsed as continuous numbers
+    # (e.g. "touching_27ts" holding comma-separated contact-ID lists, or
+    # unit/label columns) must not be offered as selectable HMM features --
+    # picking one silently breaks the .h5ad write later on.
+    non_feature_candidates = [c for c in usable_cols if c not in bin_set]
+    non_numeric_cols = set(
+        detect_non_numeric_columns_from_csv(Path(csv_path), non_feature_candidates)
+    )
+    feat_cols = [c for c in non_feature_candidates if c not in non_numeric_cols]
+    return {"bin_cols": bin_cols, "feat_cols": feat_cols}
+
+
+def _scan_track_dtw_columns(csv_path, usable_cols) -> list:
+    """Full-CSV non-numeric-column scan for the Feature-based (legacy
+    BEHAV3D) DTW feature picker. Pure pandas, no Qt/``self`` access —
+    dispatched via ``BackgroundOperation`` from
+    `TrackClassificationSubTab._populate_feature_dtw_picker`."""
+    from behav3d.core.column_detection import detect_non_numeric_columns_from_csv
+    return detect_non_numeric_columns_from_csv(Path(csv_path), usable_cols)
+
+
 def _fit_list_widget_height(list_widget, min_rows: int = 2, max_rows: int = 5) -> None:
     """Size a QListWidget's height to its current item count instead of a fixed box,
     so a short candidate-column list doesn't leave a lot of empty space."""
@@ -481,6 +513,11 @@ class StateClassificationSubTab(QWidget):
         self._hmm_model_cell_type = None
         self._bg = BackgroundOperation(self)
         self._preload_bg = BackgroundOperation(self)
+        # Dedicated instance for the feature-column scan dispatched from
+        # `_populate_dynamic_features` — kept separate from `_preload_bg`
+        # (used for the h5ad preload later in `_reload()`) so the two don't
+        # collide on `BackgroundOperation`'s one-job-at-a-time guard.
+        self._colscan_bg = BackgroundOperation(self)
         self._last_features_key: tuple = ()
         # Current-timepoint-only state backprojection preview (see
         # `_refresh_state_bp_layer`): recomputed on every dims scrub instead
@@ -1781,55 +1818,90 @@ class StateClassificationSubTab(QWidget):
             md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
             excluded = excluded_non_behavior_columns(cols, metadata=md)
             usable_cols = [c for c in cols if c not in excluded]
-            # Value-based binary detection over the full CSV (see
-            # behav3d.core.column_detection.detect_binary_columns_from_csv).
-            # The previous 5-row dtype heuristic mis-classified numeric feature
-            # columns as "binary" whenever the sampled rows were NaN/blank, so
-            # switching cell types could dump every feature into the binary list.
-            # Imported from the leaf ``core.column_detection`` module rather than
-            # ``widgets.base_state_classification``: the latter pulls in scanpy/
-            # umap/pynndescent, whose numba JIT costs ~12 s on the Qt main thread
-            # the first time metadata is loaded.
-            from behav3d.core.column_detection import (
-                detect_binary_columns_from_csv,
-                detect_non_numeric_columns_from_csv,
-            )
-            bin_cols = detect_binary_columns_from_csv(Path(csv_path), usable_cols)
-            bin_set = set(bin_cols)
-            # Columns that aren't binary and can't be parsed as continuous numbers
-            # (e.g. "touching_27ts" holding comma-separated contact-ID lists, or
-            # unit/label columns) must not be offered as selectable HMM features --
-            # picking one silently breaks the .h5ad write later on.
-            non_feature_candidates = [c for c in usable_cols if c not in bin_set]
-            non_numeric_cols = set(
-                detect_non_numeric_columns_from_csv(Path(csv_path), non_feature_candidates)
-            )
-            feat_cols = [c for c in non_feature_candidates if c not in non_numeric_cols]
+
+            # The value-based binary/non-numeric column classification below
+            # scans the *full* CSV (see behav3d.core.column_detection) and is
+            # dispatched to a background thread via self._colscan_bg so it
+            # doesn't block the Qt main thread. Show a placeholder until it
+            # completes.
+            self.timepoint_features_lay.addWidget(_make_info_label("<i>Scanning feature columns…</i>"))
+            self.log_scale_lay.addWidget(_make_info_label("<i>Scanning feature columns…</i>"))
+            self.bin_grp_lay.addWidget(_make_info_label("<i>Scanning feature columns…</i>"))
+        finally:
+            self.setUpdatesEnabled(True)
+
+        # Live "(n/total selected)" count on each category's collapsed
+        # header, so a collapsed group's selections aren't overlooked.
+        def _refresh_group_header(gname, group_sec, checkboxes):
+            n = sum(1 for cb in checkboxes if cb.isChecked())
+            group_sec.setTitle(f"{gname} ({n}/{len(checkboxes)} selected)")
+
+        def _current_features_key():
+            try:
+                cur_mtime = csv_path.stat().st_mtime if csv_path.exists() else None
+            except OSError:
+                cur_mtime = None
+            return (self._cell_type(), str(csv_path), cur_mtime)
+
+        def _on_scan_done(result):
+            if _current_features_key() != features_key:
+                # Stale — the user moved on to a different cell type/CSV
+                # while this scan was running. Re-trigger for what's current.
+                self._populate_dynamic_features(self._cell_type())
+                return
+
+            bin_cols = result["bin_cols"]
+            feat_cols = result["feat_cols"]
             # Continuous features eligible for log scaling; reused by the
             # "Preview feature distributions" histogram button.
             self._logscale_candidate_cols = list(feat_cols)
             self._logscale_csv_path = Path(csv_path)
 
-            # Live "(n/total selected)" count on each category's collapsed
-            # header, so a collapsed group's selections aren't overlooked.
-            def _refresh_group_header(gname, group_sec, checkboxes):
-                n = sum(1 for cb in checkboxes if cb.isChecked())
-                group_sec.setTitle(f"{gname} ({n}/{len(checkboxes)} selected)")
+            self.setUpdatesEnabled(False)
+            try:
+                for lay in [self.timepoint_features_lay, self.bin_grp_lay]:
+                    while lay.count():
+                        child = lay.takeAt(0)
+                        if child.widget():
+                            child.widget().deleteLater()
 
-            from copy import deepcopy
-            base_groups = deepcopy(behav3d_calculated_features)
-            matched = set()
-            for gname, patterns in base_groups.items():
-                vals = []
-                for pat in patterns:
-                    vals.extend(expand_column_patterns(pat, feat_cols))
-                clean_vals = sorted({x for x in vals if x in feat_cols})
-                if clean_vals:
-                    group_sec = CollapsibleSection(gname, expanded=False)
+                from copy import deepcopy
+                base_groups = deepcopy(behav3d_calculated_features)
+                matched = set()
+                for gname, patterns in base_groups.items():
+                    vals = []
+                    for pat in patterns:
+                        vals.extend(expand_column_patterns(pat, feat_cols))
+                    clean_vals = sorted({x for x in vals if x in feat_cols})
+                    if clean_vals:
+                        group_sec = CollapsibleSection(gname, expanded=False)
+                        group_content = QWidget()
+                        grid = QGridLayout(group_content)
+                        group_checkboxes = []
+                        for i, f in enumerate(clean_vals):
+                            cb = QCheckBox(f)
+                            if f in saved_features:
+                                cb.setChecked(True)
+                            cb.stateChanged.connect(self._rebuild_log_scale_features)
+                            self._timepoint_checkboxes[f] = cb
+                            group_checkboxes.append(cb)
+                            grid.addWidget(cb, i // 3, i % 3)
+                        group_sec.addWidget(group_content)
+                        self.timepoint_features_lay.addWidget(group_sec)
+                        matched.update(clean_vals)
+                        for cb in group_checkboxes:
+                            cb.stateChanged.connect(
+                                lambda _=None, g=gname, s=group_sec, cbs=group_checkboxes: _refresh_group_header(g, s, cbs)
+                            )
+                        _refresh_group_header(gname, group_sec, group_checkboxes)
+
+                other = sorted([c for c in feat_cols if c not in matched])
+                if other:
+                    group_sec = CollapsibleSection("other", expanded=False)
                     group_content = QWidget()
                     grid = QGridLayout(group_content)
                     group_checkboxes = []
-                    for i, f in enumerate(clean_vals):
+                    for i, f in enumerate(other):
                         cb = QCheckBox(f)
                         if f in saved_features:
                             cb.setChecked(True)
@@ -1839,52 +1911,59 @@ class StateClassificationSubTab(QWidget):
                         grid.addWidget(cb, i // 3, i % 3)
                     group_sec.addWidget(group_content)
                     self.timepoint_features_lay.addWidget(group_sec)
-                    matched.update(clean_vals)
                     for cb in group_checkboxes:
                         cb.stateChanged.connect(
-                            lambda _=None, g=gname, s=group_sec, cbs=group_checkboxes: _refresh_group_header(g, s, cbs)
+                            lambda _=None, g="other", s=group_sec, cbs=group_checkboxes: _refresh_group_header(g, s, cbs)
                         )
-                    _refresh_group_header(gname, group_sec, group_checkboxes)
+                    _refresh_group_header("other", group_sec, group_checkboxes)
 
-            other = sorted([c for c in feat_cols if c not in matched])
-            if other:
-                group_sec = CollapsibleSection("other", expanded=False)
-                group_content = QWidget()
-                grid = QGridLayout(group_content)
-                group_checkboxes = []
-                for i, f in enumerate(other):
-                    cb = QCheckBox(f)
-                    if f in saved_features:
-                        cb.setChecked(True)
-                    cb.stateChanged.connect(self._rebuild_log_scale_features)
-                    self._timepoint_checkboxes[f] = cb
-                    group_checkboxes.append(cb)
-                    grid.addWidget(cb, i // 3, i % 3)
-                group_sec.addWidget(group_content)
-                self.timepoint_features_lay.addWidget(group_sec)
-                for cb in group_checkboxes:
-                    cb.stateChanged.connect(
-                        lambda _=None, g="other", s=group_sec, cbs=group_checkboxes: _refresh_group_header(g, s, cbs)
-                    )
-                _refresh_group_header("other", group_sec, group_checkboxes)
+                self._rebuild_log_scale_features()
 
-            self._rebuild_log_scale_features()
+                if not bin_cols:
+                    self.bin_grp_lay.addWidget(QLabel("<i>No binary columns detected yet.</i>"))
+                else:
+                    for b in bin_cols:
+                        cb = QCheckBox(b)
+                        if b in saved_bin:
+                            cb.setChecked(True)
+                        cb.stateChanged.connect(self._update_config_summary)
+                        self._bingrp_checkboxes[b] = cb
+                        self.bin_grp_lay.addWidget(cb)
+                    self._update_config_summary()
 
-            if not bin_cols:
-                self.bin_grp_lay.addWidget(QLabel("<i>No binary columns detected yet.</i>"))
-            else:
-                for b in bin_cols:
-                    cb = QCheckBox(b)
-                    if b in saved_bin:
-                        cb.setChecked(True)
-                    cb.stateChanged.connect(self._update_config_summary)
-                    self._bingrp_checkboxes[b] = cb
-                    self.bin_grp_lay.addWidget(cb)
-                self._update_config_summary()
+                self._last_features_key = features_key
+            finally:
+                self.setUpdatesEnabled(True)
 
-            self._last_features_key = features_key
-        finally:
-            self.setUpdatesEnabled(True)
+        def _on_scan_failed(err):
+            traceback.print_exc()
+            if _current_features_key() != features_key:
+                self._populate_dynamic_features(self._cell_type())
+                return
+            self.setUpdatesEnabled(False)
+            try:
+                for lay in [self.timepoint_features_lay, self.bin_grp_lay]:
+                    while lay.count():
+                        child = lay.takeAt(0)
+                        if child.widget():
+                            child.widget().deleteLater()
+                self.timepoint_features_lay.addWidget(
+                    _make_info_label(f"<i>Could not scan feature columns: {err}</i>")
+                )
+                self.bin_grp_lay.addWidget(_make_info_label("<i>Could not scan feature columns.</i>"))
+            finally:
+                self.setUpdatesEnabled(True)
+
+        if self._colscan_bg.is_running():
+            return
+
+        self._colscan_bg.run(
+            fn=_scan_state_feature_columns,
+            args=(csv_path, usable_cols),
+            inject_progress=False,
+            on_done=_on_scan_done,
+            on_failed=_on_scan_failed,
+        )
 
     def _model_adata_path(self, cell_type: str) -> Optional[Path]:
         out = self._out_dir()
@@ -3352,6 +3431,11 @@ class TrackClassificationSubTab(QWidget):
         self._track_adata_load_error: Optional[str] = None
         self._bg = BackgroundOperation(self)
         self._preload_bg = BackgroundOperation(self)
+        # Dedicated instance for the feature-column scan dispatched from
+        # `_populate_feature_dtw_picker` — kept separate from `_preload_bg`
+        # (used for the h5ad-ish preload later in `_reload()`) so the two
+        # don't collide on `BackgroundOperation`'s one-job-at-a-time guard.
+        self._colscan_bg = BackgroundOperation(self)
         # Current-timepoint-only track-cluster backprojection preview (see
         # `_refresh_track_bp_layer`): recomputed on every dims scrub instead
         # of writing a full per-sample zarr up front.
@@ -5199,7 +5283,6 @@ class TrackClassificationSubTab(QWidget):
         import pandas as pd
         from behav3d.widgets.utils import behav3d_calculated_features, excluded_non_behavior_columns
         from behav3d.core.utils import expand_column_patterns
-        from behav3d.core.column_detection import detect_non_numeric_columns_from_csv
 
         csv_path = self._feature_dtw_track_features_csv(ct) if ct else None
         try:
@@ -5209,7 +5292,6 @@ class TrackClassificationSubTab(QWidget):
         features_key = (ct, str(csv_path) if csv_path else None, mtime)
         if features_key == getattr(self, "_last_feature_dtw_key", None):
             return
-        self._last_feature_dtw_key = features_key
 
         lay = self._feature_dtw_groups_lay
         while lay.count():
@@ -5223,61 +5305,115 @@ class TrackClassificationSubTab(QWidget):
                 "<i>No track-features CSV found for this cell type. "
                 "Run Feature Extraction first.</i>"
             ))
+            self._last_feature_dtw_key = features_key
             return
 
         md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
         cols = list(pd.read_csv(csv_path, nrows=0).columns)
         excluded = excluded_non_behavior_columns(cols, metadata=md)
         usable_cols = [c for c in cols if c not in excluded]
-        non_numeric_cols = set(detect_non_numeric_columns_from_csv(Path(csv_path), usable_cols))
-        feat_cols = [c for c in usable_cols if c not in non_numeric_cols]
 
-        cfg = getattr(self.metadata_loader, "behav3d_parameters", {}).get("track_classification", {}).get(ct, {})
-        saved_selection_raw = cfg.get("feature_dtw_selected_columns", None)
-        if saved_selection_raw is not None:
-            saved_selection = set(saved_selection_raw)
-        else:
-            # Default to the original hardcoded feature set, so unchecking
-            # "exact settings" starts from a recognizable baseline.
-            from behav3d.analysis.behavior.track.feature_dtw import (
-                _KINEMATIC_FEATURES, _detect_contact_feature_cols,
-            )
-            saved_selection = set(_KINEMATIC_FEATURES) | set(_detect_contact_feature_cols(feat_cols))
+        # The non-numeric-column scan below is a full-CSV scan (see
+        # behav3d.core.column_detection.detect_non_numeric_columns_from_csv)
+        # and is dispatched to a background thread via self._colscan_bg so
+        # it doesn't block the Qt main thread.
+        lay.addWidget(_make_info_label("<i>Scanning feature columns…</i>"))
 
-        from copy import deepcopy
-        base_groups = deepcopy(behav3d_calculated_features)
-        matched = set()
-        for gname, patterns in base_groups.items():
-            vals = []
-            for pat in patterns:
-                vals.extend(expand_column_patterns(pat, feat_cols))
-            clean_vals = sorted({x for x in vals if x in feat_cols})
-            if not clean_vals:
-                continue
-            group_sec = CollapsibleSection(gname, expanded=False)
-            group_content = QWidget()
-            grid = QGridLayout(group_content)
-            for i, f in enumerate(clean_vals):
-                cb = QCheckBox(f)
-                cb.setChecked(f in saved_selection)
-                self._feature_dtw_checkboxes[f] = cb
-                grid.addWidget(cb, i // 3, i % 3)
-            group_sec.addWidget(group_content)
-            lay.addWidget(group_sec)
-            matched.update(clean_vals)
+        def _current_features_key():
+            cur_ct = self._cell_type()
+            cur_csv_path = self._feature_dtw_track_features_csv(cur_ct) if cur_ct else None
+            try:
+                cur_mtime = cur_csv_path.stat().st_mtime if cur_csv_path else None
+            except OSError:
+                cur_mtime = None
+            return (cur_ct, str(cur_csv_path) if cur_csv_path else None, cur_mtime)
 
-        other = sorted([c for c in feat_cols if c not in matched])
-        if other:
-            group_sec = CollapsibleSection("other", expanded=False)
-            group_content = QWidget()
-            grid = QGridLayout(group_content)
-            for i, f in enumerate(other):
-                cb = QCheckBox(f)
-                cb.setChecked(f in saved_selection)
-                self._feature_dtw_checkboxes[f] = cb
-                grid.addWidget(cb, i // 3, i % 3)
-            group_sec.addWidget(group_content)
-            lay.addWidget(group_sec)
+        def _clear_lay():
+            while lay.count():
+                child = lay.takeAt(0)
+                if child.widget():
+                    child.widget().deleteLater()
+            self._feature_dtw_checkboxes = {}
+
+        def _on_scan_done(non_numeric_list):
+            if _current_features_key() != features_key:
+                # Stale — the user moved on to a different cell type/CSV
+                # while this scan was running. Re-trigger for what's current.
+                self._populate_feature_dtw_picker(self._cell_type())
+                return
+
+            non_numeric_cols = set(non_numeric_list)
+            feat_cols = [c for c in usable_cols if c not in non_numeric_cols]
+
+            cfg = getattr(self.metadata_loader, "behav3d_parameters", {}).get("track_classification", {}).get(ct, {})
+            saved_selection_raw = cfg.get("feature_dtw_selected_columns", None)
+            if saved_selection_raw is not None:
+                saved_selection = set(saved_selection_raw)
+            else:
+                # Default to the original hardcoded feature set, so unchecking
+                # "exact settings" starts from a recognizable baseline.
+                from behav3d.analysis.behavior.track.feature_dtw import (
+                    _KINEMATIC_FEATURES, _detect_contact_feature_cols,
+                )
+                saved_selection = set(_KINEMATIC_FEATURES) | set(_detect_contact_feature_cols(feat_cols))
+
+            _clear_lay()
+
+            from copy import deepcopy
+            base_groups = deepcopy(behav3d_calculated_features)
+            matched = set()
+            for gname, patterns in base_groups.items():
+                vals = []
+                for pat in patterns:
+                    vals.extend(expand_column_patterns(pat, feat_cols))
+                clean_vals = sorted({x for x in vals if x in feat_cols})
+                if not clean_vals:
+                    continue
+                group_sec = CollapsibleSection(gname, expanded=False)
+                group_content = QWidget()
+                grid = QGridLayout(group_content)
+                for i, f in enumerate(clean_vals):
+                    cb = QCheckBox(f)
+                    cb.setChecked(f in saved_selection)
+                    self._feature_dtw_checkboxes[f] = cb
+                    grid.addWidget(cb, i // 3, i % 3)
+                group_sec.addWidget(group_content)
+                lay.addWidget(group_sec)
+                matched.update(clean_vals)
+
+            other = sorted([c for c in feat_cols if c not in matched])
+            if other:
+                group_sec = CollapsibleSection("other", expanded=False)
+                group_content = QWidget()
+                grid = QGridLayout(group_content)
+                for i, f in enumerate(other):
+                    cb = QCheckBox(f)
+                    cb.setChecked(f in saved_selection)
+                    self._feature_dtw_checkboxes[f] = cb
+                    grid.addWidget(cb, i // 3, i % 3)
+                group_sec.addWidget(group_content)
+                lay.addWidget(group_sec)
+
+            self._last_feature_dtw_key = features_key
+
+        def _on_scan_failed(err):
+            traceback.print_exc()
+            if _current_features_key() != features_key:
+                self._populate_feature_dtw_picker(self._cell_type())
+                return
+            _clear_lay()
+            lay.addWidget(_make_info_label(f"<i>Could not scan feature columns: {err}</i>"))
+
+        if self._colscan_bg.is_running():
+            return
+
+        self._colscan_bg.run(
+            fn=_scan_track_dtw_columns,
+            args=(csv_path, usable_cols),
+            inject_progress=False,
+            on_done=_on_scan_done,
+            on_failed=_on_scan_failed,
+        )
 
     # ── Metadata / reload ────────────────────────────────────────────────
 

@@ -55,6 +55,11 @@ _FEATURE_BP_EXCLUDED_COLUMNS = {
 _FEATURE_LAYER_PREFIX = "[Feature BP]"
 
 
+def _read_features_csv(csv_path: Path) -> pd.DataFrame:
+    """Full CSV read, run off the Qt main thread via ``BackgroundOperation``."""
+    return pd.read_csv(csv_path, low_memory=False)
+
+
 class FeatureBackprojectionTab(QWidget):
     """Pick a cell type + numeric feature, preview it backprojected for
     whichever timepoint the viewer is currently showing."""
@@ -67,6 +72,10 @@ class FeatureBackprojectionTab(QWidget):
         self._df_features: Optional[pd.DataFrame] = None
         self._df_features_csv_path: Optional[Path] = None
         self._df_features_cell_type: Optional[str] = None
+        self._df_features_mtime: Optional[float] = None
+
+        self._features_bg = BackgroundOperation(self)
+        self._pending_show_after_load = False
 
         self._tracked_path: Optional[Path] = None
         self._sample: Optional[str] = None
@@ -228,26 +237,90 @@ class FeatureBackprojectionTab(QWidget):
         self._teardown_preview()
         cell_type = self.combo_cell_type.currentText()
         self._load_features_for_cell_type(cell_type)
-        self._populate_feature_combo()
 
     def _on_sample_changed(self, *_):
         self._teardown_preview()
 
     def _load_features_for_cell_type(self, cell_type: str):
-        self._df_features = None
-        self._df_features_csv_path = None
+        """(Re)load ``self._df_features`` for ``cell_type``, off the Qt main
+        thread — the combined track-features CSV can be large, and this is
+        called on every Analysis-tab visit via ``_on_metadata_updated``."""
         self._df_features_cell_type = cell_type
         if not cell_type:
+            self._df_features = None
+            self._df_features_csv_path = None
+            self._df_features_mtime = None
+            self._populate_feature_combo()
             return
+
         csv_path = self._feature_csv_path(cell_type)
         self._df_features_csv_path = csv_path
         if csv_path is None or not csv_path.exists():
-            return
-        try:
-            self._df_features = pd.read_csv(csv_path, low_memory=False)
-        except Exception:
-            traceback.print_exc()
             self._df_features = None
+            self._df_features_mtime = None
+            self._populate_feature_combo()
+            return
+
+        try:
+            mtime = csv_path.stat().st_mtime
+        except OSError:
+            mtime = None
+        if (
+            self._df_features is not None
+            and self._df_features_cell_type == cell_type
+            and self._df_features_mtime == mtime
+        ):
+            # Already loaded and unchanged since the last load — skip the
+            # re-read (this file has no caching otherwise, unlike the
+            # single-cell tab's mtime-keyed caches).
+            self._populate_feature_combo()
+            return
+
+        if self._features_bg.is_running():
+            return
+
+        self.combo_feature.blockSignals(True)
+        self.combo_feature.clear()
+        self.combo_feature.blockSignals(False)
+        self.combo_feature.setEnabled(False)
+        self.btn_show.setEnabled(False)
+        self.status_label.setStyleSheet("color:#888;font-size:11px;")
+        self.status_label.setText("Loading feature list…")
+
+        self._features_bg.run(
+            fn=_read_features_csv,
+            args=(csv_path,),
+            inject_progress=False,
+            on_done=lambda df: self._on_features_loaded(cell_type, csv_path, mtime, df),
+            on_failed=lambda err: self._on_features_load_failed(cell_type, csv_path, err),
+        )
+
+    def _on_features_loaded(self, cell_type, csv_path, mtime, df):
+        if cell_type != self.combo_cell_type.currentText() or csv_path != self._feature_csv_path(cell_type):
+            # The user has moved on to a different cell type since this scan
+            # was dispatched — discard the result and load whatever's current.
+            self._load_features_for_cell_type(self.combo_cell_type.currentText())
+            return
+
+        self._df_features = df
+        self._df_features_mtime = mtime
+        self._populate_feature_combo()
+
+        if self._pending_show_after_load:
+            self._pending_show_after_load = False
+            self._on_show_clicked()
+
+    def _on_features_load_failed(self, cell_type, csv_path, err):
+        traceback.print_exc()
+        if cell_type != self.combo_cell_type.currentText() or csv_path != self._feature_csv_path(cell_type):
+            self._pending_show_after_load = False
+            self._load_features_for_cell_type(self.combo_cell_type.currentText())
+            return
+
+        self._df_features = None
+        self._df_features_mtime = None
+        self._pending_show_after_load = False
+        self._populate_feature_combo()
 
     def _populate_feature_combo(self):
         prev = self.combo_feature.currentText()
@@ -353,11 +426,17 @@ class FeatureBackprojectionTab(QWidget):
 
         if self._df_features is None or self._df_features_cell_type != cell_type:
             self._load_features_for_cell_type(cell_type)
-        if self._df_features is None:
-            self.status_label.setText(
-                f"No track-features CSV found for '{cell_type}'. Run Feature Extraction first."
-            )
-            return
+            if self._df_features is None or self._df_features_cell_type != cell_type:
+                if self._features_bg.is_running():
+                    self.btn_show.setEnabled(False)
+                    self.status_label.setStyleSheet("color:#888;font-size:11px;")
+                    self.status_label.setText("Loading feature list… will continue automatically.")
+                    self._pending_show_after_load = True
+                else:
+                    self.status_label.setText(
+                        f"No track-features CSV found for '{cell_type}'. Run Feature Extraction first."
+                    )
+                return
         if feature_col not in self._df_features.columns:
             self.status_label.setText(
                 f"Feature '{feature_col}' not found in {self._df_features_csv_path.name}."
