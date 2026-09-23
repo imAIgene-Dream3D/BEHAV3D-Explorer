@@ -64,6 +64,7 @@ from behav3d.napari._pdf_view import open_pdf_in_napari
 from behav3d.napari._rename_dialog import RenameClusterDialog
 from behav3d.napari._preview_dims import (
     clear_viewer_layers,
+    close_backprojection_legend_docks,
     disconnect_all_preview_dims_listeners,
     register_preview_dims_listener,
     stop_dim_playback,
@@ -3086,19 +3087,16 @@ class StateClassificationSubTab(QWidget):
                     self._log(f"⚠️ Could not add state trajectory layers: {exc}")
 
             mapping_text = _build_state_mapping_text(label_map, code_colors)
-            _existing_dock = getattr(self, "_state_mapping_dock", None)
-            if _existing_dock is not None:
-                try:
-                    self.viewer.window.remove_dock_widget(_existing_dock)
-                except Exception:
-                    pass
-            self._state_mapping_dock = _add_mapping_dock_widget(
+            close_backprojection_legend_docks(self.viewer)
+            state_mapping_dock = _add_mapping_dock_widget(
                 self.viewer,
                 mapping_text=mapping_text,
                 label_map=label_map,
                 code_colors=code_colors,
                 title="State Class Mapping",
             )
+            if state_mapping_dock is not None:
+                state_mapping_dock.widget()._behav3d_backprojection_legend_dock = True
             self._log("✅ State backprojection loaded (current timepoint; updates as you scrub).")
         except Exception as e:
             traceback.print_exc()
@@ -8123,14 +8121,17 @@ class TrackClassificationSubTab(QWidget):
                     self._log(f"⚠️ Could not add trajectory layers: {exc}")
 
             mapping_text = _build_state_mapping_text(label_map, code_colors)
-            _add_mapping_dock_widget(
+            close_backprojection_legend_docks(self.viewer)
+            track_mapping_dock = _add_mapping_dock_widget(
                 self.viewer,
                 mapping_text=mapping_text,
                 label_map=label_map,
                 code_colors=code_colors,
                 title="Track Cluster Mapping",
             )
-            _add_track_statebar_click_dock(
+            if track_mapping_dock is not None:
+                track_mapping_dock.widget()._behav3d_backprojection_legend_dock = True
+            statebar_widget = _add_track_statebar_click_dock(
                 self.viewer,
                 sample_name=sample_name,
                 adata_full=adata_full,
@@ -8138,6 +8139,8 @@ class TrackClassificationSubTab(QWidget):
                 cluster_col=cluster_col,
                 title="Track State Bar",
             )
+            if statebar_widget is not None:
+                statebar_widget._behav3d_backprojection_legend_dock = True
             self._log("✅ Track backprojection loaded (current timepoint; updates as you scrub).")
         except Exception as e:
             traceback.print_exc()
@@ -8388,7 +8391,6 @@ class SingleCellTab(QWidget):
         )
         self.data_consistency_warning_label.hide()
         outer.addWidget(self.data_consistency_warning_label)
-        self._consistency_bg = BackgroundOperation(self)
 
         # ── Guided overview + isolated settings pages ────────────────────
         from behav3d.napari._guided import GuidedPanel, make_back_header
@@ -8474,6 +8476,7 @@ class SingleCellTab(QWidget):
 
     def _on_inner_tab_changed(self, index: int):
         """Auto-fill path fields when switching to Track Classification tab."""
+        close_backprojection_legend_docks(self.viewer)
         if index == 1:  # Track Classification
             self.track_tab._autofill_paths(self._current_cell_type())
             # Re-check prerequisites too: a behavioral-states h5ad may have been
@@ -8555,7 +8558,7 @@ class SingleCellTab(QWidget):
         self._refresh_data_consistency_warning()
 
     def _refresh_data_consistency_warning(self):
-        """Cheap background check: do the filtered track-features CSV and the
+        """Cheap check: do the filtered track-features CSV and the
         track/behavioral-states h5ad(s) for the current cell type still describe
         the same tracks?
 
@@ -8563,9 +8566,11 @@ class SingleCellTab(QWidget):
         ``.obs`` table from each h5ad in ``backed="r"`` mode (not the full
         AnnData, so no X matrix is loaded) — this is far cheaper than the
         full contact/no-contact analysis pipeline and safe to run on every tab
-        entry. Runs off the Qt thread so it never blocks tab switching; if a
-        previous check is still in flight, this call is skipped (a subsequent
-        trigger — e.g. the next tab visit — will pick it up).
+        entry. Runs synchronously on the GUI thread rather than via
+        ``BackgroundOperation``: h5py/HDF5 is not safe to touch concurrently
+        from another thread while the GUI thread may also be reading an
+        h5ad, and this read is cheap enough (ID columns only) not to need
+        backgrounding.
         """
         ct = self._current_cell_type()
         out = self._out_dir()
@@ -8582,9 +8587,6 @@ class SingleCellTab(QWidget):
         ]
         h5ad_sources = [(label, p) for label, p in h5ad_sources if p and p.exists()]
         if not h5ad_sources:
-            return
-
-        if self._consistency_bg.is_running():
             return
 
         groupby_cols = ["sample_name", "TrackID"]
@@ -8614,25 +8616,19 @@ class SingleCellTab(QWidget):
                     mismatches.append((label, len(missing)))
             return mismatches
 
-        def _on_done(mismatches):
-            if not mismatches:
-                self.data_consistency_warning_label.hide()
-                return
-            details = "; ".join(f"{n} track(s) missing from {label}" for label, n in mismatches)
-            self.data_consistency_warning_label.setText(
-                f"⚠ Filtered track data no longer matches the behavioral-analysis h5ad output "
-                f"for cell type '{ct}' ({details}). Re-run Track / State Classification to "
-                f"refresh the h5ad from the current filtered data."
-            )
-            self.data_consistency_warning_label.show()
-
-        def _on_failed(err):
+        try:
+            mismatches = _check()
+        except Exception as err:
             print(f"[BEHAV3D] Data-consistency check failed: {err}")
+            return
 
-        self._consistency_bg.run(
-            fn=_check,
-            desc="Checking data consistency…",
-            inject_progress=False,
-            on_done=_on_done,
-            on_failed=_on_failed,
+        if not mismatches:
+            self.data_consistency_warning_label.hide()
+            return
+        details = "; ".join(f"{n} track(s) missing from {label}" for label, n in mismatches)
+        self.data_consistency_warning_label.setText(
+            f"⚠ Filtered track data no longer matches the behavioral-analysis h5ad output "
+            f"for cell type '{ct}' ({details}). Re-run Track / State Classification to "
+            f"refresh the h5ad from the current filtered data."
         )
+        self.data_consistency_warning_label.show()

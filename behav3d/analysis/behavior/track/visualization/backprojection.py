@@ -871,6 +871,7 @@ def _add_track_statebar_click_dock(
         "info_label": info_label,
         "image_label": image_label,
         "callback": _on_click,
+        "clickable_layer": clickable_layer,
         "state_values": state_values,
     }
     return widget

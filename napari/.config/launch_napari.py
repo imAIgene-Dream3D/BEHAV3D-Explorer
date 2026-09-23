@@ -43,11 +43,20 @@ def run_napari_payload():
     if os.environ.get("BEHAV3D_DEV_MODE") == "1":
         window_title += " [DEV MODE]"
     viewer = napari.Viewer(title=window_title)
-    
+
+    # napari's vispy Qt canvas backend installs its own qInstallMessageHandler
+    # as a side effect of being imported, which happens during Viewer()
+    # construction above — *after* behav3d.napari's own package-import-time
+    # install, silently taking over. Re-install now that vispy has definitely
+    # already loaded, so crash diagnostics stay the active handler for the
+    # actual running session (see behav3d/napari/_crash_diagnostics.py).
+    from behav3d.napari._crash_diagnostics import install_crash_diagnostics
+    install_crash_diagnostics()
+
     # Add our dock widget
     widget = BEHAV3DWidget(viewer)
     viewer.window.add_dock_widget(widget, name="BEHAV3D Explorer", area="right")
-    
+
     # Start the event loop
     napari.run()
 
@@ -170,14 +179,37 @@ def run_launcher():
     print(f"  Command: {cmd_display}")
     print()
 
+    from datetime import datetime
+
+    log_dir = Path.home() / ".behav3d" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"launch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    print(f"  Full output also saved to: {log_path}")
+    print()
+
+    # Popen (not run()) so output can be streamed to the terminal live *and*
+    # saved to a file — subprocess.run only gives us the inherited terminal,
+    # which is gone by the time a crash needs investigating.
+    returncode = 1
     try:
-        subprocess.run(cmd, shell=use_shell, check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"\nERROR: napari exited with error code {e.returncode}")
-        input("Press Enter to close...")
-        sys.exit(e.returncode)
+        with open(log_path, "a", buffering=1) as log_f:
+            proc = subprocess.Popen(
+                cmd, shell=use_shell,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+            )
+            for line in proc.stdout:
+                sys.stdout.write(line)
+                log_f.write(line)
+            returncode = proc.wait()
     except KeyboardInterrupt:
-        pass
+        return
+
+    if returncode != 0:
+        print(f"\nERROR: napari exited with error code {returncode}")
+        print(f"Full output saved to: {log_path}")
+        input("Press Enter to close...")
+        sys.exit(returncode)
 
 
 def main():

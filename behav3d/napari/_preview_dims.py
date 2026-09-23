@@ -183,3 +183,60 @@ def stop_dim_playback(viewer) -> None:
             thread.wait()
     except Exception:
         pass
+
+
+def close_backprojection_legend_docks(viewer) -> None:
+    """Close any open state/track backprojection legend or statebar dock.
+
+    State and track backprojection (``StateClassificationSubTab``,
+    ``TrackClassificationSubTab`` in ``_single_cell.py``) each add one or two
+    plain napari dock widgets alongside the preview layers: a cluster-color
+    mapping legend, and for tracks a click-driven statebar dock. Unlike the
+    preview layers themselves (handled by ``clear_viewer_layers`` above),
+    nothing tracked these docks well enough to remove a stale one before
+    adding a fresh one, so re-running backprojection — or navigating to a
+    different tab and back — used to stack duplicates indefinitely.
+
+    Napari's ``Viewer`` is a pydantic ``EventedModel`` and rejects arbitrary
+    attribute assignment, so callers tag each dock's inner ``QWidget`` with
+    ``_behav3d_backprojection_legend_dock = True`` at creation time (same
+    trick used by ``behav3d/napari/_pdf_view.py:_install_result_dock``)
+    instead of storing a reference on the viewer or on the owning tab. This
+    function scans ``viewer.window._dock_widgets`` (private napari API, same
+    as ``_install_result_dock``) for that tag and removes every match, so it
+    finds stale docks even if the tab instance that created them is no
+    longer reachable.
+
+    The track statebar dock also registers a mouse-click callback directly
+    on a viewer layer (``clickable_layer.mouse_drag_callbacks``). That layer
+    normally outlives the dock once this function can close the dock while
+    leaving the backprojection layers in place (e.g. on tab navigation), so
+    the callback is dropped here too — otherwise a later click would call
+    into Qt widgets whose C++ side this removal already deleted.
+    """
+    if viewer is None:
+        return
+    try:
+        docks = list(viewer.window._dock_widgets.values())
+    except Exception:
+        return
+    for dock in docks:
+        try:
+            inner = dock.widget()
+        except Exception:
+            continue
+        if not getattr(inner, "_behav3d_backprojection_legend_dock", False):
+            continue
+        statebar_info = getattr(inner, "_behav3d_track_statebar_dock", None)
+        if isinstance(statebar_info, dict):
+            layer = statebar_info.get("clickable_layer")
+            callback = statebar_info.get("callback")
+            if layer is not None and callback is not None:
+                try:
+                    layer.mouse_drag_callbacks.remove(callback)
+                except Exception:
+                    pass
+        try:
+            viewer.window.remove_dock_widget(dock)
+        except Exception:
+            pass

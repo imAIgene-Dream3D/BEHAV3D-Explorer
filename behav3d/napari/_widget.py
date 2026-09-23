@@ -10,6 +10,7 @@ import napari
 
 from behav3d.napari._queue import ProcessingQueuePanel, StepType
 from behav3d.napari._global_workers import GlobalWorkersController
+from behav3d.napari._preview_dims import close_backprojection_legend_docks
 from behav3d.core.qt_help import disable_spinbox_wheel_scroll, reset_scroll_on_page_change
 from pathlib import Path
 
@@ -841,15 +842,19 @@ class BEHAV3DWidget(QWidget):
                 self.tabs.blockSignals(False)
                 return
 
+        # The switch is really happening now (nothing above vetoed it) — drop
+        # any state/track backprojection legend dock so it doesn't linger
+        # while the user works on an unrelated pipeline tab.
+        close_backprojection_legend_docks(self.viewer)
+
         self._last_tab_index = index
 
-        # Auto-refresh Analysis tab when switched to
+        # Auto-refresh Analysis tab when switched to. This already cascades
+        # into single_cell_tab._on_metadata_updated() (see
+        # AnalysisTab._on_metadata_updated), so no separate call is needed.
         if index == 6 and hasattr(self, 'analysis_tab'):
             if hasattr(self.analysis_tab, '_on_metadata_updated'):
                 self.analysis_tab._on_metadata_updated()
-            # Also notify inner single cell tab to reload (picks up Track tab auto-fill)
-            if hasattr(self.analysis_tab, 'single_cell_tab') and hasattr(self.analysis_tab.single_cell_tab, '_on_metadata_updated'):
-                self.analysis_tab.single_cell_tab._on_metadata_updated()
 
     def sizeHint(self):
         return QSize(440, 650)

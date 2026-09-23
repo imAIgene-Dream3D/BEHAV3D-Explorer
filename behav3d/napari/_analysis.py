@@ -38,6 +38,7 @@ from qtpy.QtCore import Qt, QUrl
 from qtpy.QtGui import QDesktopServices
 
 from behav3d.napari._pdf_view import open_pdf_in_napari
+from behav3d.napari._preview_dims import close_backprojection_legend_docks
 from behav3d.napari._results_panel import ResultsPanel
 from behav3d.core.qt_help import make_help_row, HelpButton, reset_scroll_on_page_change
 
@@ -2613,6 +2614,12 @@ class AnalysisTab(QWidget):
         # without an explicit refresh click.
         self.inner_tabs.currentChanged.connect(
             lambda _i: self.results_panel.refresh()
+        )
+        # Leaving Single Cell's backprojection sub-tabs for another inner tab
+        # (Feature Backprojection, Population Dynamics) shouldn't leave a
+        # stale state/track legend dock cluttering the viewer.
+        self.inner_tabs.currentChanged.connect(
+            lambda _i: close_backprojection_legend_docks(self.viewer)
         )
 
         self.stack.addWidget(self.main_content)
