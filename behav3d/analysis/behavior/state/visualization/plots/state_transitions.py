@@ -16,6 +16,10 @@ from behav3d.analysis.behavior.state.utils import (
     _get_classification_state_order,
     _normalize_label_color_map,
 )
+from behav3d.analysis.behavior.general.visualization.plots.circular_transition_diagram import (
+    plot_circular_transition_diagram,
+    plot_circular_transition_diagram_grid,
+)
 
 # -----------------------------
 # Plot timepoint>timepoint state transition matrix
@@ -1059,7 +1063,15 @@ def save_state_transition_report(
     collapse_bouts=True,
     allow_revisit_end=False,
     max_path_len=None,
+    include_transition_matrix=True,
     include_no_self_matrices=True,
+    include_circular_diagram=True,
+    circular_min_prob_to_draw=0.03,
+    circular_emphasis_gamma=2.0,
+    circular_curvature=0.28,
+    circular_label_style="on_node",
+    circular_include_self_transitions=False,
+    include_circular_diagram_per_cluster=True,
     include_ngram_rankings=True,
     ngram_orders=(2, 3),
     ngram_pooled_top_n=30,
@@ -1067,6 +1079,7 @@ def save_state_transition_report(
     ngram_include_per_end_state=True,
     ngram_include_per_start_state=True,
     ngram_min_count=1,
+    include_sankey_pairs=True,
     state_colors=None,
     state_order=None,
     verbose=True,
@@ -1167,31 +1180,85 @@ def save_state_transition_report(
 
     with PdfPages(matrix_heatmap_pdf) as pdf:
         # Page 1 — all four heatmaps in a 2×2 square grid (when no-self matrices available)
-        if include_no_self_matrices and probs_no_self is not None and counts_no_self is not None:
-            fig_quad = _plot_transition_heatmap_quad_page(
-                probs, probs_no_self, counts, counts_no_self, state_col=str(state_col),
-            )
-            pdf.savefig(fig_quad, bbox_inches="tight")
-            plt.close(fig_quad)
-        else:
-            # Fallback: one A4 page per metric when no-self matrices are not computed
-            fig_probs = _plot_transition_heatmap_page(
-                probs,
-                title=f"Transition Probabilities — all transitions  ({state_col})",
-                colorbar_label="P(next | current)",
-                normalized=True,
-            )
-            pdf.savefig(fig_probs, bbox_inches="tight")
-            plt.close(fig_probs)
+        if include_transition_matrix:
+            if include_no_self_matrices and probs_no_self is not None and counts_no_self is not None:
+                fig_quad = _plot_transition_heatmap_quad_page(
+                    probs, probs_no_self, counts, counts_no_self, state_col=str(state_col),
+                )
+                pdf.savefig(fig_quad, bbox_inches="tight")
+                plt.close(fig_quad)
+            else:
+                # Fallback: one A4 page per metric when no-self matrices are not computed
+                fig_probs = _plot_transition_heatmap_page(
+                    probs,
+                    title=f"Transition Probabilities — all transitions  ({state_col})",
+                    colorbar_label="P(next | current)",
+                    normalized=True,
+                )
+                pdf.savefig(fig_probs, bbox_inches="tight")
+                plt.close(fig_probs)
 
-            fig_counts = _plot_transition_heatmap_page(
-                counts,
-                title=f"Transition Counts — all transitions  ({state_col})",
-                colorbar_label="Count",
-                normalized=False,
+                fig_counts = _plot_transition_heatmap_page(
+                    counts,
+                    title=f"Transition Counts — all transitions  ({state_col})",
+                    colorbar_label="Count",
+                    normalized=False,
+                )
+                pdf.savefig(fig_counts, bbox_inches="tight")
+                plt.close(fig_counts)
+
+        # Page 2 — circular inter-state transition diagram. Self-transitions are never drawn as
+        # arrows (arcs need distinct start/end nodes), but `circular_include_self_transitions`
+        # still picks which matrix feeds the diagram: the self-inclusive `probs` (arrow weight
+        # reflects each transition's share of ALL activity, including time spent not switching)
+        # or the self-excluded/renormalized no-self matrix (default, current behavior) - computed
+        # on the fly when `include_no_self_matrices=False` didn't already produce it, since
+        # only_transitions=True costs nothing beyond what's already computed.
+        if include_circular_diagram:
+            if circular_include_self_transitions:
+                circular_probs = probs
+            else:
+                circular_probs = probs_no_self
+                if circular_probs is None:
+                    _, circular_probs = compute_cluster_transition_matrix(
+                        adata,
+                        cluster_key=str(state_col),
+                        id_cols=tuple(id_cols),
+                        time_key=str(time_col),
+                        normalize=True,
+                        plot=False,
+                        only_transitions=True,
+                        state_order=state_order,
+                    )
+            fig_circular = plot_circular_transition_diagram(
+                circular_probs,
+                state_colors=state_colors,
+                state_order=state_order,
+                title=f"Inter-cluster transition probability ({state_col})",
+                min_prob_to_draw=circular_min_prob_to_draw,
+                emphasis_gamma=circular_emphasis_gamma,
+                curvature=circular_curvature,
+                label_style=circular_label_style,
             )
-            pdf.savefig(fig_counts, bbox_inches="tight")
-            plt.close(fig_counts)
+            pdf.savefig(fig_circular, bbox_inches="tight")
+            plt.close(fig_circular)
+
+            # Page 2b — same matrix, broken out one panel per cluster (outgoing transitions
+            # only), all on one grid page so every cluster's own pattern stays inspectable
+            # without paging through the population-wide overlay above.
+            if include_circular_diagram_per_cluster:
+                fig_circular_grid = plot_circular_transition_diagram_grid(
+                    circular_probs,
+                    state_colors=state_colors,
+                    state_order=state_order,
+                    title=f"Per-cluster outgoing transitions ({state_col})",
+                    min_prob_to_draw=circular_min_prob_to_draw,
+                    emphasis_gamma=circular_emphasis_gamma,
+                    curvature=circular_curvature,
+                    label_style=circular_label_style,
+                )
+                pdf.savefig(fig_circular_grid, bbox_inches="tight")
+                plt.close(fig_circular_grid)
 
         # Pages 3+ — N-gram rankings (A4, batched 2 per page)
         if include_ngram_rankings and df_ngrams is not None:
@@ -1265,224 +1332,227 @@ def save_state_transition_report(
     sankey_pdf_path = output_dir / "sankey_all_pairs.pdf"
     kaleido_available = True
     kaleido_warned = False
+    sankey_pdf_written = False
+    pair_index_csv = None
     use_spawn_for_static_export = not _is_main_thread()
-    if use_spawn_for_static_export and verbose:
-        print(
-            "Sankey static export delegated to a spawned child process because the current thread is not the main thread."
-        )
 
-    for start_state in states:
-        for end_state in states:
-            if (not include_self_pairs) and (str(start_state) == str(end_state)):
-                continue
-
-            row = {
-                "start_state": str(start_state),
-                "end_state": str(end_state),
-                "n_paths": 0,
-                "count_sum": 0,
-                "status": "no_paths",
-                "sankey_output_path": None,
-                "sankey_pdf_page": None,
-                "error": None,
-            }
-
-            df_paths = paths_between_states(
-                adata,
-                start_state=str(start_state),
-                end_state=str(end_state),
-                state_col=str(state_col),
-                group_cols=tuple(id_cols),
-                time_col=str(time_col),
-                collapse_bouts=bool(collapse_bouts),
-                mode=str(sankey_mode),
-                allow_revisit_end=bool(allow_revisit_end),
-                max_len=max_path_len,
+    if include_sankey_pairs:
+        if use_spawn_for_static_export and verbose:
+            print(
+                "Sankey static export delegated to a spawned child process because the current thread is not the main thread."
             )
 
-            if not df_paths.empty:
-                row["n_paths"] = int(len(df_paths))
-                row["count_sum"] = int(pd.to_numeric(df_paths["count"], errors="coerce").fillna(0).sum())
+        for start_state in states:
+            for end_state in states:
+                if (not include_self_pairs) and (str(start_state) == str(end_state)):
+                    continue
 
-            if len(df_paths) == 0:
-                pair_rows.append(row)
-                continue
+                row = {
+                    "start_state": str(start_state),
+                    "end_state": str(end_state),
+                    "n_paths": 0,
+                    "count_sum": 0,
+                    "status": "no_paths",
+                    "sankey_output_path": None,
+                    "sankey_pdf_page": None,
+                    "error": None,
+                }
 
-            df_paths_filtered, _total_count = _filter_paths_for_sankey(
-                df_paths,
-                count_col="count",
-                min_count=sankey_min_count,
-                relative_count=sankey_relative_count,
-            )
-            row["n_paths_filtered"] = int(len(df_paths_filtered))
-            row["count_sum_filtered"] = int(
-                pd.to_numeric(df_paths_filtered.get("count", pd.Series([], dtype=float)), errors="coerce")
-                .fillna(0)
-                .sum()
-            )
-            if len(df_paths_filtered) == 0:
-                row["status"] = "no_paths_after_filter"
-                pair_rows.append(row)
-                continue
+                df_paths = paths_between_states(
+                    adata,
+                    start_state=str(start_state),
+                    end_state=str(end_state),
+                    state_col=str(state_col),
+                    group_cols=tuple(id_cols),
+                    time_col=str(time_col),
+                    collapse_bouts=bool(collapse_bouts),
+                    mode=str(sankey_mode),
+                    allow_revisit_end=bool(allow_revisit_end),
+                    max_len=max_path_len,
+                )
 
-            try:
-                fig = plot_sankey_diagram_between_states(
+                if not df_paths.empty:
+                    row["n_paths"] = int(len(df_paths))
+                    row["count_sum"] = int(pd.to_numeric(df_paths["count"], errors="coerce").fillna(0).sum())
+
+                if len(df_paths) == 0:
+                    pair_rows.append(row)
+                    continue
+
+                df_paths_filtered, _total_count = _filter_paths_for_sankey(
                     df_paths,
-                    state_colors=state_colors,
+                    count_col="count",
                     min_count=sankey_min_count,
                     relative_count=sankey_relative_count,
                 )
-            except Exception as exc:
-                row["status"] = "error"
-                row["error"] = str(exc)
-                pair_rows.append(row)
-                continue
+                row["n_paths_filtered"] = int(len(df_paths_filtered))
+                row["count_sum_filtered"] = int(
+                    pd.to_numeric(df_paths_filtered.get("count", pd.Series([], dtype=float)), errors="coerce")
+                    .fillna(0)
+                    .sum()
+                )
+                if len(df_paths_filtered) == 0:
+                    row["status"] = "no_paths_after_filter"
+                    pair_rows.append(row)
+                    continue
 
-            if kaleido_available and sankey_vector_export:
                 try:
-                    sankey_pdf_pages_dir.mkdir(parents=True, exist_ok=True)
-                    page_filename = (
-                        "sankey_"
-                        + _sanitize_filename_token(start_state, "start")
-                        + "_to_"
-                        + _sanitize_filename_token(end_state, "end")
-                        + ".pdf"
+                    fig = plot_sankey_diagram_between_states(
+                        df_paths,
+                        state_colors=state_colors,
+                        min_count=sankey_min_count,
+                        relative_count=sankey_relative_count,
                     )
-                    page_path = sankey_pdf_pages_dir / page_filename
-                    export_result = _export_plotly_static(
-                        fig,
-                        export_format="pdf",
-                        output_path=page_path,
-                        width=1400,
-                        height=700,
-                        scale=2,
-                        use_spawn=use_spawn_for_static_export,
-                    )
-                    if not bool(export_result.get("ok", False)):
-                        raise RuntimeError(str(export_result.get("error", "unknown Plotly export error")))
-                    row["status"] = "pdf_unmerged"
-                    row["sankey_output_path"] = str(page_path)
-                    sankey_pdf_page_rows.append({"row": row, "pdf_path": page_path})
-                except Exception as exc:
-                    kaleido_available = False
-                    if not kaleido_warned:
-                        warnings.warn(
-                            "Static Plotly export unavailable for Sankey vector PDF; falling back to HTML files. "
-                            f"Details: {exc}",
-                            RuntimeWarning,
-                        )
-                        kaleido_warned = True
-
-            if kaleido_available and (not sankey_vector_export):
-                try:
-                    export_result = _export_plotly_static(
-                        fig,
-                        export_format="png",
-                        width=1400,
-                        height=700,
-                        scale=2,
-                        use_spawn=use_spawn_for_static_export,
-                    )
-                    if not bool(export_result.get("ok", False)):
-                        raise RuntimeError(str(export_result.get("error", "unknown Plotly export error")))
-                    png_bytes = export_result["png_bytes"]
-                    row["status"] = "pdf_pending"
-                    sankey_png_rows.append({"row": row, "png_bytes": png_bytes})
-                except Exception as exc:
-                    kaleido_available = False
-                    if not kaleido_warned:
-                        warnings.warn(
-                            "Kaleido unavailable for Sankey PDF export; falling back to HTML files. "
-                            f"Details: {exc}",
-                            RuntimeWarning,
-                        )
-                        kaleido_warned = True
-
-            if not kaleido_available:
-                try:
-                    html_path = _write_sankey_html(
-                        fig,
-                        html_dir=html_dir,
-                        start_state=start_state,
-                        end_state=end_state,
-                    )
-                    row["status"] = "html"
-                    row["sankey_output_path"] = str(html_path)
                 except Exception as exc:
                     row["status"] = "error"
                     row["error"] = str(exc)
+                    pair_rows.append(row)
+                    continue
 
-            pair_rows.append(row)
+                if kaleido_available and sankey_vector_export:
+                    try:
+                        sankey_pdf_pages_dir.mkdir(parents=True, exist_ok=True)
+                        page_filename = (
+                            "sankey_"
+                            + _sanitize_filename_token(start_state, "start")
+                            + "_to_"
+                            + _sanitize_filename_token(end_state, "end")
+                            + ".pdf"
+                        )
+                        page_path = sankey_pdf_pages_dir / page_filename
+                        export_result = _export_plotly_static(
+                            fig,
+                            export_format="pdf",
+                            output_path=page_path,
+                            width=1400,
+                            height=700,
+                            scale=2,
+                            use_spawn=use_spawn_for_static_export,
+                        )
+                        if not bool(export_result.get("ok", False)):
+                            raise RuntimeError(str(export_result.get("error", "unknown Plotly export error")))
+                        row["status"] = "pdf_unmerged"
+                        row["sankey_output_path"] = str(page_path)
+                        sankey_pdf_page_rows.append({"row": row, "pdf_path": page_path})
+                    except Exception as exc:
+                        kaleido_available = False
+                        if not kaleido_warned:
+                            warnings.warn(
+                                "Static Plotly export unavailable for Sankey vector PDF; falling back to HTML files. "
+                                f"Details: {exc}",
+                                RuntimeWarning,
+                            )
+                            kaleido_warned = True
 
-    sankey_pdf_written = False
-    if sankey_vector_export and len(sankey_pdf_page_rows) > 0:
-        if sankey_merge_backend == "none":
-            sankey_pdf_written = False
-        else:
-            merger_cls = None
-            try:
-                from pypdf import PdfMerger as _PdfMerger
-                merger_cls = _PdfMerger
-            except Exception as exc:
-                if sankey_merge_backend == "pypdf_required":
-                    raise RuntimeError(
-                        "sankey_merge_backend='pypdf_required' but pypdf is not available."
-                    ) from exc
-                if not kaleido_warned:
-                    warnings.warn(
-                        "pypdf unavailable for merging Sankey vector pages; keeping per-pair PDF files only.",
-                        RuntimeWarning,
-                    )
-                    kaleido_warned = True
+                if kaleido_available and (not sankey_vector_export):
+                    try:
+                        export_result = _export_plotly_static(
+                            fig,
+                            export_format="png",
+                            width=1400,
+                            height=700,
+                            scale=2,
+                            use_spawn=use_spawn_for_static_export,
+                        )
+                        if not bool(export_result.get("ok", False)):
+                            raise RuntimeError(str(export_result.get("error", "unknown Plotly export error")))
+                        png_bytes = export_result["png_bytes"]
+                        row["status"] = "pdf_pending"
+                        sankey_png_rows.append({"row": row, "png_bytes": png_bytes})
+                    except Exception as exc:
+                        kaleido_available = False
+                        if not kaleido_warned:
+                            warnings.warn(
+                                "Kaleido unavailable for Sankey PDF export; falling back to HTML files. "
+                                f"Details: {exc}",
+                                RuntimeWarning,
+                            )
+                            kaleido_warned = True
+
+                if not kaleido_available:
+                    try:
+                        html_path = _write_sankey_html(
+                            fig,
+                            html_dir=html_dir,
+                            start_state=start_state,
+                            end_state=end_state,
+                        )
+                        row["status"] = "html"
+                        row["sankey_output_path"] = str(html_path)
+                    except Exception as exc:
+                        row["status"] = "error"
+                        row["error"] = str(exc)
+
+                pair_rows.append(row)
+
+        if sankey_vector_export and len(sankey_pdf_page_rows) > 0:
+            if sankey_merge_backend == "none":
+                sankey_pdf_written = False
+            else:
                 merger_cls = None
+                try:
+                    from pypdf import PdfMerger as _PdfMerger
+                    merger_cls = _PdfMerger
+                except Exception as exc:
+                    if sankey_merge_backend == "pypdf_required":
+                        raise RuntimeError(
+                            "sankey_merge_backend='pypdf_required' but pypdf is not available."
+                        ) from exc
+                    if not kaleido_warned:
+                        warnings.warn(
+                            "pypdf unavailable for merging Sankey vector pages; keeping per-pair PDF files only.",
+                            RuntimeWarning,
+                        )
+                        kaleido_warned = True
+                    merger_cls = None
 
-            if merger_cls is not None:
-                merger = merger_cls()
-                for i, item in enumerate(sankey_pdf_page_rows):
-                    row = item["row"]
-                    page_path = item["pdf_path"]
-                    merger.append(str(page_path))
-                    row["status"] = "pdf"
-                    row["sankey_pdf_page"] = int(i) + 1
-                    row["sankey_output_path"] = str(sankey_pdf_path)
-                with open(sankey_pdf_path, "wb") as f:
-                    merger.write(f)
-                merger.close()
-                sankey_pdf_written = True
+                if merger_cls is not None:
+                    merger = merger_cls()
+                    for i, item in enumerate(sankey_pdf_page_rows):
+                        row = item["row"]
+                        page_path = item["pdf_path"]
+                        merger.append(str(page_path))
+                        row["status"] = "pdf"
+                        row["sankey_pdf_page"] = int(i) + 1
+                        row["sankey_output_path"] = str(sankey_pdf_path)
+                    with open(sankey_pdf_path, "wb") as f:
+                        merger.write(f)
+                    merger.close()
+                    sankey_pdf_written = True
 
-    if (not sankey_vector_export) and len(sankey_png_rows) > 0:
-        with PdfPages(sankey_pdf_path) as pdf:
-            for i in range(0, len(sankey_png_rows), rows_per_page):
-                chunk = sankey_png_rows[i : i + rows_per_page]
-                n_chunk = len(chunk)
-                fig, axes = plt.subplots(n_chunk, 1, figsize=(11.69, 3.6 * n_chunk))
-                if n_chunk == 1:
-                    axes = [axes]
+        if (not sankey_vector_export) and len(sankey_png_rows) > 0:
+            with PdfPages(sankey_pdf_path) as pdf:
+                for i in range(0, len(sankey_png_rows), rows_per_page):
+                    chunk = sankey_png_rows[i : i + rows_per_page]
+                    n_chunk = len(chunk)
+                    fig, axes = plt.subplots(n_chunk, 1, figsize=(11.69, 3.6 * n_chunk))
+                    if n_chunk == 1:
+                        axes = [axes]
 
-                for j, item in enumerate(chunk):
-                    row = item["row"]
-                    page_number = int((i + j) // rows_per_page) + 1
-                    row["status"] = "pdf"
-                    row["sankey_pdf_page"] = page_number
-                    row["sankey_output_path"] = str(sankey_pdf_path)
-                    img = plt.imread(BytesIO(item["png_bytes"]), format="png")
-                    ax = axes[j]
-                    ax.imshow(img)
-                    ax.axis("off")
-                    ax.set_title(
-                        f"{row['start_state']} -> {row['end_state']} "
-                        f"(n_paths={row['n_paths']}, count_sum={row['count_sum']})",
-                        fontsize=10,
-                    )
+                    for j, item in enumerate(chunk):
+                        row = item["row"]
+                        page_number = int((i + j) // rows_per_page) + 1
+                        row["status"] = "pdf"
+                        row["sankey_pdf_page"] = page_number
+                        row["sankey_output_path"] = str(sankey_pdf_path)
+                        img = plt.imread(BytesIO(item["png_bytes"]), format="png")
+                        ax = axes[j]
+                        ax.imshow(img)
+                        ax.axis("off")
+                        ax.set_title(
+                            f"{row['start_state']} -> {row['end_state']} "
+                            f"(n_paths={row['n_paths']}, count_sum={row['count_sum']})",
+                            fontsize=10,
+                        )
 
-                fig.tight_layout()
-                pdf.savefig(fig, bbox_inches="tight")
-                plt.close(fig)
-        sankey_pdf_written = True
+                    fig.tight_layout()
+                    pdf.savefig(fig, bbox_inches="tight")
+                    plt.close(fig)
+            sankey_pdf_written = True
 
-    pair_index_df = pd.DataFrame(pair_rows)
-    pair_index_csv = output_dir / "sankey_pairs_index.csv"
-    pair_index_df.to_csv(pair_index_csv, index=False)
+        pair_index_df = pd.DataFrame(pair_rows)
+        pair_index_csv = output_dir / "sankey_pairs_index.csv"
+        pair_index_df.to_csv(pair_index_csv, index=False)
 
     if verbose:
         print(f"Saved transition matrix counts CSV: {matrix_counts_csv}")
@@ -1500,7 +1570,8 @@ def save_state_transition_report(
             print(f"Saved Sankey all-pairs PDF: {sankey_pdf_path}")
         elif html_dir.exists():
             print(f"Saved Sankey HTML fallback directory: {html_dir}")
-        print(f"Saved Sankey pair index CSV: {pair_index_csv}")
+        if include_sankey_pairs:
+            print(f"Saved Sankey pair index CSV: {pair_index_csv}")
 
     return {
         "output_dir": str(output_dir),
@@ -1521,7 +1592,7 @@ def save_state_transition_report(
         "transition_ngrams_pooled_csv": (str(ngrams_pooled_csv) if include_ngram_rankings else None),
         "transition_ngrams_per_end_csv": (str(ngrams_per_end_csv) if include_ngram_rankings else None),
         "transition_ngrams_per_start_csv": (str(ngrams_per_start_csv) if include_ngram_rankings else None),
-        "sankey_pairs_index_csv": str(pair_index_csv),
+        "sankey_pairs_index_csv": (str(pair_index_csv) if include_sankey_pairs else None),
         "sankey_pdf_path": (str(sankey_pdf_path) if sankey_pdf_written else None),
         "sankey_pdf_pages_dir": (str(sankey_pdf_pages_dir) if sankey_pdf_pages_dir.exists() else None),
         "sankey_html_dir": (str(html_dir) if html_dir.exists() else None),

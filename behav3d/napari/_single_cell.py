@@ -983,6 +983,88 @@ class StateClassificationSubTab(QWidget):
         trans_row.addWidget(self.btn_view_transition)
         g_state_transition.addLayout(trans_row)
 
+        adv_state_transition = CollapsibleSection("⚙ Advanced Configuration", expanded=True)
+        st_trans_form = QFormLayout()
+        st_trans_form.setSpacing(3)
+        self.spin_state_transition_min_prob = QDoubleSpinBox()
+        self.spin_state_transition_min_prob.setRange(0.0, 100.0)
+        self.spin_state_transition_min_prob.setDecimals(1)
+        self.spin_state_transition_min_prob.setSingleStep(0.5)
+        self.spin_state_transition_min_prob.setValue(3.0)
+        self.spin_state_transition_min_prob.setSuffix(" %")
+        st_trans_form.addRow("Min probability cutoff:", make_help_row(
+            self.spin_state_transition_min_prob, "Min Probability Cutoff",
+            "In the circular transition diagram, a transition below this probability is "
+            "dropped entirely (not just faded) so rare, noisy transitions don't clutter "
+            "the plot."
+        ))
+        self.spin_state_transition_gamma = QDoubleSpinBox()
+        self.spin_state_transition_gamma.setRange(0.5, 5.0)
+        self.spin_state_transition_gamma.setDecimals(1)
+        self.spin_state_transition_gamma.setSingleStep(0.1)
+        self.spin_state_transition_gamma.setValue(2.0)
+        st_trans_form.addRow("Emphasis (gamma):", make_help_row(
+            self.spin_state_transition_gamma, "Emphasis Gamma",
+            "How hard the circular diagram's line width/opacity fall off for weaker "
+            "transitions. 1.0 is linear; higher values (e.g. 2-3) make the strongest "
+            "transitions stand out much more clearly against everything else."
+        ))
+        self.combo_state_transition_label_style = QComboBox()
+        self.combo_state_transition_label_style.addItems(["On dots", "Side legend"])
+        st_trans_form.addRow("Node labels:", make_help_row(
+            self.combo_state_transition_label_style, "Node Labels",
+            "Where the circular diagram's cluster/state names are shown: written inside "
+            "each dot ('On dots'), or moved to a numbered legend beside the plot ('Side "
+            "legend') - useful when names are long or there are many clusters."
+        ))
+        adv_state_transition.addLayout(st_trans_form)
+
+        self.chk_state_transition_include_matrix = QCheckBox("Transition matrix heatmap")
+        self.chk_state_transition_include_matrix.setChecked(True)
+        adv_state_transition.addLayout(_make_chk_help_row(
+            self.chk_state_transition_include_matrix, "Transition Matrix Heatmap",
+            "Include the transition-probability/count heatmap page(s)."
+        ))
+        self.chk_state_transition_include_circular = QCheckBox("Circular transition diagram")
+        self.chk_state_transition_include_circular.setChecked(True)
+        adv_state_transition.addLayout(_make_chk_help_row(
+            self.chk_state_transition_include_circular, "Circular Transition Diagram",
+            "Include the circular inter-cluster transition diagram page."
+        ))
+        self.chk_state_transition_include_self = QCheckBox("Include self-transitions")
+        self.chk_state_transition_include_self.setChecked(False)
+        adv_state_transition.addLayout(_make_chk_help_row(
+            self.chk_state_transition_include_self, "Include Self-Transitions",
+            "Self-transitions are never drawn as arrows (a cluster can't arc to itself). This "
+            "instead picks which probabilities the circular diagram(s) are scaled from: off "
+            "(default) renormalizes over inter-cluster switches only, so the arrows show how a "
+            "cluster splits between the states it switches to. On uses each transition's share "
+            "of all activity, including time spent not switching, which dilutes the arrows for "
+            "clusters that mostly self-transition."
+        ))
+        self.chk_state_transition_include_per_cluster = QCheckBox("Show per-cluster breakdown grid")
+        self.chk_state_transition_include_per_cluster.setChecked(True)
+        adv_state_transition.addLayout(_make_chk_help_row(
+            self.chk_state_transition_include_per_cluster, "Per-Cluster Breakdown Grid",
+            "Add a page with one small panel per cluster, each showing only that cluster's "
+            "outgoing transitions with arrow weight scaled to that cluster's own transitions - "
+            "useful when the single overlaid diagram gets too busy to read."
+        ))
+        self.chk_state_transition_include_ngrams = QCheckBox("N-gram rankings")
+        self.chk_state_transition_include_ngrams.setChecked(True)
+        adv_state_transition.addLayout(_make_chk_help_row(
+            self.chk_state_transition_include_ngrams, "N-gram Rankings",
+            "Include the top state-sequence n-gram ranking pages."
+        ))
+        self.chk_state_transition_include_sankey = QCheckBox("Sankey diagrams (all state pairs)")
+        self.chk_state_transition_include_sankey.setChecked(True)
+        adv_state_transition.addLayout(_make_chk_help_row(
+            self.chk_state_transition_include_sankey, "Sankey Diagrams",
+            "Include the Sankey diagrams for every pair of states - the heaviest part of "
+            "this report to compute; uncheck to skip it entirely and speed up regeneration."
+        ))
+        g_state_transition.addWidget(adv_state_transition)
+
         self.grp_state_comparison = QGroupBox("Condition Comparison Report")
         g_state_comparison = QVBoxLayout(self.grp_state_comparison)
         g_state_comparison.setSpacing(4)
@@ -1276,7 +1358,6 @@ class StateClassificationSubTab(QWidget):
     # ── Guided pipeline dispatch (Step 3 reports) ────────────────────────
     _STATE_PIPELINE_RUN_BUTTONS = {
         "state_diagnostics": "btn_state_diagnostics",
-        "state_transition": "btn_state_transition",
     }
 
     def _on_pipeline_start(self, pipeline_id: str):
@@ -2700,6 +2781,18 @@ class StateClassificationSubTab(QWidget):
         out = self._out_dir()
         self._log(f"▶ Generating state transition report for '{ct}'…")
 
+        circular_min_prob_to_draw = self.spin_state_transition_min_prob.value() / 100.0
+        circular_emphasis_gamma = self.spin_state_transition_gamma.value()
+        circular_label_style = (
+            "legend" if self.combo_state_transition_label_style.currentIndex() == 1 else "on_node"
+        )
+        include_transition_matrix = self.chk_state_transition_include_matrix.isChecked()
+        include_circular_diagram = self.chk_state_transition_include_circular.isChecked()
+        circular_include_self_transitions = self.chk_state_transition_include_self.isChecked()
+        include_circular_diagram_per_cluster = self.chk_state_transition_include_per_cluster.isChecked()
+        include_ngram_rankings = self.chk_state_transition_include_ngrams.isChecked()
+        include_sankey_pairs = self.chk_state_transition_include_sankey.isChecked()
+
         def _run(**kw):
             import anndata as ad
             from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
@@ -2721,6 +2814,15 @@ class StateClassificationSubTab(QWidget):
                 time_col="position_t",
                 state_colors=_get_classification_state_colors(adata, FULL_STATE_COL),
                 state_order=_get_classification_state_order(adata, FULL_STATE_COL),
+                include_transition_matrix=include_transition_matrix,
+                include_circular_diagram=include_circular_diagram,
+                circular_min_prob_to_draw=circular_min_prob_to_draw,
+                circular_emphasis_gamma=circular_emphasis_gamma,
+                circular_label_style=circular_label_style,
+                circular_include_self_transitions=circular_include_self_transitions,
+                include_circular_diagram_per_cluster=include_circular_diagram_per_cluster,
+                include_ngram_rankings=include_ngram_rankings,
+                include_sankey_pairs=include_sankey_pairs,
                 verbose=True,
             )
 
@@ -3971,6 +4073,92 @@ class TrackClassificationSubTab(QWidget):
         wintrans_row.addWidget(self.btn_view_window_transitions)
         g_wintrans.addLayout(wintrans_row)
 
+        self.grp_transition_analysis = QGroupBox("Transition Analysis")
+        g_transanalysis = QVBoxLayout(self.grp_transition_analysis)
+        g_transanalysis.setSpacing(4)
+        g_transanalysis.addWidget(_make_info_label(
+            "Pooled inter-cluster transition analysis: a circular diagram of how often each "
+            "trajectory cluster transitions into every other cluster (window index is "
+            "collapsed, unlike the Sankey above), plus the row-normalized transition-"
+            "probability matrix. Needs 'Divide long tracks' to have been used."
+        ))
+        transanalysis_row = QHBoxLayout()
+        self.btn_transition_analysis = QPushButton("▶ Create Transition Analysis")
+        _style_secondary(self.btn_transition_analysis)
+        transanalysis_row.addWidget(self.btn_transition_analysis, stretch=1)
+        self.btn_view_transition_analysis = _make_view_btn()
+        transanalysis_row.addWidget(self.btn_view_transition_analysis)
+        g_transanalysis.addLayout(transanalysis_row)
+
+        adv_transition_analysis = CollapsibleSection("⚙ Advanced Configuration", expanded=True)
+        transanalysis_form = QFormLayout()
+        transanalysis_form.setSpacing(3)
+        self.spin_transanalysis_min_prob = QDoubleSpinBox()
+        self.spin_transanalysis_min_prob.setRange(0.0, 100.0)
+        self.spin_transanalysis_min_prob.setDecimals(1)
+        self.spin_transanalysis_min_prob.setSingleStep(0.5)
+        self.spin_transanalysis_min_prob.setValue(3.0)
+        self.spin_transanalysis_min_prob.setSuffix(" %")
+        transanalysis_form.addRow("Min probability cutoff:", make_help_row(
+            self.spin_transanalysis_min_prob, "Min Probability Cutoff",
+            "In the circular transition diagram, a transition below this probability is "
+            "dropped entirely (not just faded) so rare, noisy transitions don't clutter "
+            "the plot."
+        ))
+        self.spin_transanalysis_gamma = QDoubleSpinBox()
+        self.spin_transanalysis_gamma.setRange(0.5, 5.0)
+        self.spin_transanalysis_gamma.setDecimals(1)
+        self.spin_transanalysis_gamma.setSingleStep(0.1)
+        self.spin_transanalysis_gamma.setValue(2.0)
+        transanalysis_form.addRow("Emphasis (gamma):", make_help_row(
+            self.spin_transanalysis_gamma, "Emphasis Gamma",
+            "How hard the circular diagram's line width/opacity fall off for weaker "
+            "transitions. 1.0 is linear; higher values (e.g. 2-3) make the strongest "
+            "transitions stand out much more clearly against everything else."
+        ))
+        self.combo_transanalysis_label_style = QComboBox()
+        self.combo_transanalysis_label_style.addItems(["On dots", "Side legend"])
+        transanalysis_form.addRow("Node labels:", make_help_row(
+            self.combo_transanalysis_label_style, "Node Labels",
+            "Where the circular diagram's cluster names are shown: written inside each "
+            "dot ('On dots'), or moved to a numbered legend beside the plot ('Side "
+            "legend') - useful when names are long or there are many clusters."
+        ))
+        adv_transition_analysis.addLayout(transanalysis_form)
+
+        self.chk_transanalysis_include_matrix = QCheckBox("Transition matrix heatmap")
+        self.chk_transanalysis_include_matrix.setChecked(True)
+        adv_transition_analysis.addLayout(_make_chk_help_row(
+            self.chk_transanalysis_include_matrix, "Transition Matrix Heatmap",
+            "Include the transition-probability/count heatmap page."
+        ))
+        self.chk_transanalysis_include_circular = QCheckBox("Circular transition diagram")
+        self.chk_transanalysis_include_circular.setChecked(True)
+        adv_transition_analysis.addLayout(_make_chk_help_row(
+            self.chk_transanalysis_include_circular, "Circular Transition Diagram",
+            "Include the circular inter-cluster transition diagram page."
+        ))
+        self.chk_transanalysis_include_self = QCheckBox("Include self-transitions")
+        self.chk_transanalysis_include_self.setChecked(False)
+        adv_transition_analysis.addLayout(_make_chk_help_row(
+            self.chk_transanalysis_include_self, "Include Self-Transitions",
+            "Self-transitions are never drawn as arrows (a cluster can't arc to itself). This "
+            "instead picks which probabilities the circular diagram(s) are scaled from: off "
+            "(default) renormalizes over inter-cluster switches only, so the arrows show how a "
+            "cluster splits between the clusters it switches to. On uses each transition's "
+            "share of all activity, including windows spent not switching, which dilutes the "
+            "arrows for clusters that mostly self-transition."
+        ))
+        self.chk_transanalysis_include_per_cluster = QCheckBox("Show per-cluster breakdown grid")
+        self.chk_transanalysis_include_per_cluster.setChecked(True)
+        adv_transition_analysis.addLayout(_make_chk_help_row(
+            self.chk_transanalysis_include_per_cluster, "Per-Cluster Breakdown Grid",
+            "Add a page with one small panel per cluster, each showing only that cluster's "
+            "outgoing transitions with arrow weight scaled to that cluster's own transitions - "
+            "useful when the single overlaid diagram gets too busy to read."
+        ))
+        g_transanalysis.addWidget(adv_transition_analysis)
+
         self.grp_track_comparison = QGroupBox("Condition Comparison Report")
         g_track_comparison = QVBoxLayout(self.grp_track_comparison)
         g_track_comparison.setSpacing(4)
@@ -4390,6 +4578,7 @@ class TrackClassificationSubTab(QWidget):
         pipeline_content_lay.addWidget(self.grp_diag)
         pipeline_content_lay.addWidget(self.grp_track_proportions)
         pipeline_content_lay.addWidget(self.grp_window_transitions)
+        pipeline_content_lay.addWidget(self.grp_transition_analysis)
         pipeline_content_lay.addWidget(self.grp_track_comparison)
         pipeline_content_lay.addWidget(self.grp_contact_analysis)
         pipeline_content_lay.addWidget(self.grp_exemplar)
@@ -4516,6 +4705,8 @@ class TrackClassificationSubTab(QWidget):
         _wire_view_btn(self.btn_view_track_proportions, self._on_view, "track_proportions")
         self.btn_window_transitions.clicked.connect(self._on_window_transitions)
         _wire_view_btn(self.btn_view_window_transitions, self._on_view, "window_transitions")
+        self.btn_transition_analysis.clicked.connect(self._on_transition_analysis)
+        _wire_view_btn(self.btn_view_transition_analysis, self._on_view, "transition_analysis")
         self.btn_track_condition_comparison.clicked.connect(self._on_track_condition_comparison)
         _wire_view_btn(self.btn_view_track_condition_comparison, self._on_view, "track_condition_comparison")
         self.btn_contact_rate.clicked.connect(lambda: self._on_contact_rate_report())
@@ -4686,12 +4877,14 @@ class TrackClassificationSubTab(QWidget):
             "track_diagnostics": {self.grp_diag},
             "track_proportions": {self.grp_track_proportions},
             "track_window_transitions": {self.grp_window_transitions},
+            "track_transition_analysis": {self.grp_transition_analysis},
             "track_comparison": {self.grp_track_comparison},
             "track_contact": {self.grp_contact_analysis},
             "track_exemplars": {self.grp_exemplar},
         }.get(pipeline_id, set())
         for group in (self.grp_diag, self.grp_track_proportions, self.grp_window_transitions,
-                      self.grp_track_comparison, self.grp_contact_analysis, self.grp_exemplar):
+                      self.grp_transition_analysis, self.grp_track_comparison,
+                      self.grp_contact_analysis, self.grp_exemplar):
             group.setVisible(group in visible)
         title = next(
             (s["title"] for s in TRACK_PLOT_PIPELINES if s["id"] == pipeline_id), ""
@@ -5652,7 +5845,7 @@ class TrackClassificationSubTab(QWidget):
             for btn in (
                 self.btn_view_exemplars,
                 self.btn_view_diagnostics, self.btn_view_track_proportions,
-                self.btn_view_window_transitions,
+                self.btn_view_window_transitions, self.btn_view_transition_analysis,
                 self.btn_view_track_condition_comparison,
                 self.btn_view_contact_rate, self.btn_view_contact_composition,
                 self.btn_view_contact_condition_comparison,
@@ -5685,6 +5878,14 @@ class TrackClassificationSubTab(QWidget):
                 window_transitions_dir
                 and window_transitions_dir.exists()
                 and any(window_transitions_dir.glob("*.pdf"))
+            )
+        )
+        transition_analysis_dir = traj_dir / "transition_analysis" if traj_dir else None
+        self.btn_view_transition_analysis.setEnabled(
+            bool(
+                transition_analysis_dir
+                and transition_analysis_dir.exists()
+                and any(transition_analysis_dir.glob("*.pdf"))
             )
         )
         comparisons_dir = traj_dir / "behavior_comparisons" if traj_dir else None
@@ -6166,6 +6367,19 @@ class TrackClassificationSubTab(QWidget):
                     )
                 except Exception as exc:
                     result["window_transitions_error"] = str(exc)
+                try:
+                    from behav3d.analysis.behavior.track.visualization.plots.transition_analysis import (
+                        save_window_cluster_transition_analysis,
+                    )
+                    result["transition_analysis"] = save_window_cluster_transition_analysis(
+                        track_adata,
+                        output_dir=str(out) if out else "",
+                        cell_type=ct,
+                        cluster_key=cluster_col,
+                        verbose=True,
+                    )
+                except Exception as exc:
+                    result["transition_analysis_error"] = str(exc)
             # Refresh the example-track PDF too, so it reflects the just-renamed
             # cluster labels/colors rather than staying stale - caught locally
             # so a failure here doesn't take down the reports above, which
@@ -6919,6 +7133,73 @@ class TrackClassificationSubTab(QWidget):
                 self._notify_results(),
             ),
             on_failed=lambda e: self._log(f"❌ Window transition Sankey failed: {e}"),
+        )
+
+    def _on_transition_analysis(self):
+        ct = self._cell_type()
+        if not ct:
+            return
+        if self._track_adata is None:
+            QMessageBox.warning(self, "No data", "Run track clustering first.")
+            return
+        if "trajectory_window_id" not in self._track_adata.obs.columns:
+            QMessageBox.warning(
+                self, "No sub-track windows",
+                "This report needs tracks split into windows. Enable 'Divide long "
+                "tracks' in Step 1's Advanced Configuration and re-run track clustering.",
+            )
+            return
+        if self._bg.is_running():
+            QMessageBox.warning(self, "Busy", "Another operation is running.")
+            return
+        out = self._out_dir()
+        self._log(f"▶ Creating transition analysis for '{ct}'…")
+        track_adata = self._track_adata
+
+        min_prob_to_draw = self.spin_transanalysis_min_prob.value() / 100.0
+        emphasis_gamma = self.spin_transanalysis_gamma.value()
+        label_style = (
+            "legend" if self.combo_transanalysis_label_style.currentIndex() == 1 else "on_node"
+        )
+        include_transition_matrix = self.chk_transanalysis_include_matrix.isChecked()
+        include_circular_diagram = self.chk_transanalysis_include_circular.isChecked()
+        circular_include_self_transitions = self.chk_transanalysis_include_self.isChecked()
+        include_circular_diagram_per_cluster = self.chk_transanalysis_include_per_cluster.isChecked()
+
+        def _run(**kw):
+            from behav3d.analysis.behavior.track.visualization.plots.transition_analysis import (
+                save_window_cluster_transition_analysis,
+            )
+            from behav3d.napari._rename_dialog import _track_cluster_col
+            cluster_col = _track_cluster_col(track_adata) or "ClusterID"
+            return save_window_cluster_transition_analysis(
+                track_adata,
+                output_dir=str(out) if out else "",
+                cell_type=ct,
+                cluster_key=cluster_col,
+                min_prob_to_draw=min_prob_to_draw,
+                emphasis_gamma=emphasis_gamma,
+                label_style=label_style,
+                include_transition_matrix=include_transition_matrix,
+                include_circular_diagram=include_circular_diagram,
+                circular_include_self_transitions=circular_include_self_transitions,
+                include_circular_diagram_per_cluster=include_circular_diagram_per_cluster,
+                verbose=True,
+            )
+
+        self._bg.run(
+            fn=_run,
+            desc=f"Transition analysis ({ct})…",
+            progress_row=self.progress_row,
+            buttons=[self.btn_transition_analysis],
+            viewer=self.viewer,
+            inject_progress=False,
+            on_done=lambda r: (
+                self._log(f"✅ Transition analysis done for '{ct}'."),
+                self._update_view_buttons(),
+                self._notify_results(),
+            ),
+            on_failed=lambda e: self._log(f"❌ Transition analysis failed: {e}"),
         )
 
     def _on_track_condition_comparison(self):
@@ -8238,6 +8519,9 @@ class TrackClassificationSubTab(QWidget):
                 (f"per-sample/{f.stem}", f)
                 for f in sorted(wt_dir.glob("sankey_pdf_pages/*.pdf"))
             ]
+        elif kind == "transition_analysis" and traj_dir:
+            ta_dir = traj_dir / "transition_analysis"
+            candidates = [(f.stem, f) for f in sorted(ta_dir.glob("*.pdf"))]
         elif kind == "track_condition_comparison" and traj_dir:
             comparisons_dir = traj_dir / "behavior_comparisons"
             candidates = [

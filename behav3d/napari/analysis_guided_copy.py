@@ -266,16 +266,31 @@ STATE_TRANSITION_REPORT = {
     "color": "#4a90d9",
     "what_does": (
         "Plots state-to-state transition probabilities, showing which "
-        "behavioral states cells move into and out of."
+        "behavioral states cells move into and out of: a transition-matrix "
+        "heatmap, a circular inter-state transition diagram, n-gram "
+        "rankings, and Sankey diagrams for every state pair."
     ),
-    "concept": None,
-    "what_get": "A transition-probability plot — no further configuration needed.",
-    "decide": [],
-    "has_params": False,
-    "start_label": "Generate State Transition plots  ▸",
+    "concept": {
+        "term": "Inter-cluster transition probability",
+        "text": (
+            "given a cell is currently in state A, how likely is its next "
+            "timepoint to be state B rather than A again? Self-transitions "
+            "are excluded from the circular diagram so it shows only "
+            "genuine switches between states."
+        ),
+    },
+    "what_get": (
+        "A transition-matrix heatmap + circular transition diagram PDF, "
+        "n-gram rankings, and all-pairs Sankey diagrams."
+    ),
+    "decide": [
+        _decide("Minimum probability to draw, emphasis, and which pages to include", _DEFAULTS),
+    ],
+    "has_params": True,
     "seed": (
         "Explain the BEHAV3D State Transition Report: what a state-to-state "
-        "transition probability plot shows."
+        "transition probability plot shows, and how the circular diagram's "
+        "probability cutoff/emphasis settings change what's drawn."
     ),
 }
 
@@ -404,6 +419,40 @@ TRACK_WINDOW_TRANSITIONS = {
     ),
 }
 
+TRACK_TRANSITION_ANALYSIS = {
+    "id": "track_transition_analysis",
+    "title": "Transition Analysis",
+    "subtitle": "Pooled across every window, how often does one trajectory cluster become another?",
+    "color": "#c98a2c",
+    "what_does": (
+        "Collapses window index out of the same window-to-window trajectory-cluster "
+        "transitions Window Transitions tracks, pooling every sample and every window "
+        "into one population-level view: a circular diagram of inter-cluster transition "
+        "probability, plus the row-normalized transition-probability matrix."
+    ),
+    "concept": {
+        "term": "Inter-cluster transition probability",
+        "text": (
+            "given a track is currently in cluster A, how likely is its next window to "
+            "be cluster B rather than A again? Self-transitions are excluded from the "
+            "circular diagram so it shows only genuine switches between clusters."
+        ),
+    },
+    "what_get": (
+        "A transition-matrix heatmap + circular transition diagram PDF, and the "
+        "underlying count/probability CSVs."
+    ),
+    "decide": [
+        _decide("Minimum probability to draw, emphasis, and which pages to include", _DEFAULTS),
+    ],
+    "has_params": True,
+    "seed": (
+        "Explain the BEHAV3D Transition Analysis report: what the circular inter-cluster "
+        "transition diagram and its matrix show, and how the probability cutoff/emphasis "
+        "settings change what's drawn."
+    ),
+}
+
 TRACK_COMPARISON_REPORT = {
     "id": "track_comparison",
     "title": "Condition Comparison Report",
@@ -497,8 +546,8 @@ STATE_REPORT_PIPELINES = [
     STATE_DIAGNOSTICS, STATE_COMPOSITION_REPORT, STATE_TRANSITION_REPORT, STATE_COMPARISON_REPORT,
 ]
 TRACK_PLOT_PIPELINES = [
-    TRACK_DIAGNOSTICS, TRACK_PROPORTIONS, TRACK_WINDOW_TRANSITIONS, TRACK_COMPARISON_REPORT,
-    TRACK_CONTACT_GROUPING, TRACK_EXEMPLAR_TRACKS,
+    TRACK_DIAGNOSTICS, TRACK_PROPORTIONS, TRACK_WINDOW_TRANSITIONS, TRACK_TRANSITION_ANALYSIS,
+    TRACK_COMPARISON_REPORT, TRACK_CONTACT_GROUPING, TRACK_EXEMPLAR_TRACKS,
 ]
 
 
