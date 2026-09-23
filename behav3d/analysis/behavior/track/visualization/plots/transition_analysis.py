@@ -187,7 +187,7 @@ def save_window_cluster_transition_analysis(
             plt.close(fig_circular)
 
             if include_circular_diagram_per_cluster:
-                fig_circular_grid = plot_circular_transition_diagram_grid(
+                fig_circular_grid_out = plot_circular_transition_diagram_grid(
                     circular_probs,
                     state_colors=colors,
                     state_order=state_order,
@@ -196,9 +196,24 @@ def save_window_cluster_transition_analysis(
                     emphasis_gamma=emphasis_gamma,
                     curvature=curvature,
                     label_style=label_style,
+                    direction="outgoing",
                 )
-                pdf.savefig(fig_circular_grid, bbox_inches="tight")
-                plt.close(fig_circular_grid)
+                pdf.savefig(fig_circular_grid_out, bbox_inches="tight")
+                plt.close(fig_circular_grid_out)
+
+                fig_circular_grid_in = plot_circular_transition_diagram_grid(
+                    circular_probs,
+                    state_colors=colors,
+                    state_order=state_order,
+                    title=f"{cell_type} — per-cluster incoming transitions ({cluster_key})",
+                    min_prob_to_draw=min_prob_to_draw,
+                    emphasis_gamma=emphasis_gamma,
+                    curvature=curvature,
+                    label_style=label_style,
+                    direction="incoming",
+                )
+                pdf.savefig(fig_circular_grid_in, bbox_inches="tight")
+                plt.close(fig_circular_grid_in)
 
     if verbose:
         _winfo("trajectory-dtai", f"saved transition matrix counts CSV: {counts_csv}")

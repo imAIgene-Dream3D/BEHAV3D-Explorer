@@ -223,9 +223,13 @@ class CollapsibleSection(QWidget):
     title and only enables/disables the contents), this widget genuinely
     hides the body when collapsed and exposes a simple ``contentLayout()``
     for callers to populate.
+
+    Pass ``highlight=True`` for a main pipeline step (e.g. "Step 1 — ...")
+    so it reads as more prominent than minor subsections like "Feature
+    Selection" or "Advanced Configuration".
     """
 
-    def __init__(self, title: str, *, expanded: bool = False, parent=None):
+    def __init__(self, title: str, *, expanded: bool = False, highlight: bool = False, parent=None):
         super().__init__(parent)
 
         outer = QVBoxLayout(self)
@@ -236,10 +240,16 @@ class CollapsibleSection(QWidget):
         # reads as a distinct, clickable box rather than plain text.
         card = QFrame()
         card.setObjectName("collapsibleCard")
-        card.setStyleSheet(
-            "QFrame#collapsibleCard { background: #2a2a2e; "
-            "border: 1px solid #3a3a40; border-radius: 6px; }"
-        )
+        if highlight:
+            card.setStyleSheet(
+                "QFrame#collapsibleCard { background: #1b2b3a; "
+                "border: 1px solid #3a6ea5; border-radius: 6px; }"
+            )
+        else:
+            card.setStyleSheet(
+                "QFrame#collapsibleCard { background: #2a2a2e; "
+                "border: 1px solid #3a3a40; border-radius: 6px; }"
+            )
         outer.addWidget(card)
 
         card_lay = QVBoxLayout(card)
@@ -247,11 +257,18 @@ class CollapsibleSection(QWidget):
         card_lay.setSpacing(2)
 
         self._toggle = QToolButton()
-        self._toggle.setStyleSheet(
-            "QToolButton { border: none; font-weight: bold; color: #ddd; "
-            "background: transparent; padding: 2px; text-align: left; }"
-            "QToolButton:hover { color: #fff; }"
-        )
+        if highlight:
+            self._toggle.setStyleSheet(
+                "QToolButton { border: none; font-weight: bold; font-size: 13px; "
+                "color: #ddeeff; background: transparent; padding: 2px; text-align: left; }"
+                "QToolButton:hover { color: #fff; }"
+            )
+        else:
+            self._toggle.setStyleSheet(
+                "QToolButton { border: none; font-weight: bold; color: #ddd; "
+                "background: transparent; padding: 2px; text-align: left; }"
+                "QToolButton:hover { color: #fff; }"
+            )
         self._toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self._toggle.setCheckable(True)
         self._toggle.setChecked(expanded)

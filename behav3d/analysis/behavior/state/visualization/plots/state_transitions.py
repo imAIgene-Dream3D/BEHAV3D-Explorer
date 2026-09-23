@@ -1247,7 +1247,7 @@ def save_state_transition_report(
             # only), all on one grid page so every cluster's own pattern stays inspectable
             # without paging through the population-wide overlay above.
             if include_circular_diagram_per_cluster:
-                fig_circular_grid = plot_circular_transition_diagram_grid(
+                fig_circular_grid_out = plot_circular_transition_diagram_grid(
                     circular_probs,
                     state_colors=state_colors,
                     state_order=state_order,
@@ -1256,9 +1256,24 @@ def save_state_transition_report(
                     emphasis_gamma=circular_emphasis_gamma,
                     curvature=circular_curvature,
                     label_style=circular_label_style,
+                    direction="outgoing",
                 )
-                pdf.savefig(fig_circular_grid, bbox_inches="tight")
-                plt.close(fig_circular_grid)
+                pdf.savefig(fig_circular_grid_out, bbox_inches="tight")
+                plt.close(fig_circular_grid_out)
+
+                fig_circular_grid_in = plot_circular_transition_diagram_grid(
+                    circular_probs,
+                    state_colors=state_colors,
+                    state_order=state_order,
+                    title=f"Per-cluster incoming transitions ({state_col})",
+                    min_prob_to_draw=circular_min_prob_to_draw,
+                    emphasis_gamma=circular_emphasis_gamma,
+                    curvature=circular_curvature,
+                    label_style=circular_label_style,
+                    direction="incoming",
+                )
+                pdf.savefig(fig_circular_grid_in, bbox_inches="tight")
+                plt.close(fig_circular_grid_in)
 
         # Pages 3+ — N-gram rankings (A4, batched 2 per page)
         if include_ngram_rankings and df_ngrams is not None:

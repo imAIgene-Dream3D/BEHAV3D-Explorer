@@ -25,6 +25,38 @@ def _circular_node_positions(clusters, radius=1.0):
     return positions
 
 
+def _draw_self_loop(ax, pos, *, color, node_radius, linewidth, alpha, mutation_scale, span_deg=70.0, loop_curvature=1.6):
+    """Draw a small self-transition loop bulging outward from a node.
+
+    Nodes sit on a circle centered at the diagram origin, so the outward direction at `pos` is
+    just `pos` normalized. Two points are picked on the node's own boundary, straddling that
+    outward direction by `span_deg`. `arc3`'s control point is `posA`'s midpoint offset by
+    `rad * (posB - posA)` rotated 90 degrees - empirically, going from the "before" point (at
+    `phi - half`) to the "after" point (at `phi + half`) with positive `rad` bulges the arc
+    further outward; the reverse order bulges it back into the diagram interior where it would
+    cross other edges.
+    """
+    x, y = pos
+    phi = np.arctan2(y, x)
+    half = np.deg2rad(span_deg) / 2.0
+
+    start = (x + node_radius * np.cos(phi - half), y + node_radius * np.sin(phi - half))
+    end = (x + node_radius * np.cos(phi + half), y + node_radius * np.sin(phi + half))
+
+    loop = FancyArrowPatch(
+        start, end,
+        connectionstyle=f"arc3,rad={loop_curvature}",
+        arrowstyle="-|>",
+        mutation_scale=mutation_scale,
+        linewidth=linewidth,
+        color=color,
+        alpha=alpha,
+        shrinkA=0, shrinkB=0,
+        zorder=2,
+    )
+    ax.add_patch(loop)
+
+
 def _draw_circular_transition_diagram_on_ax(
     ax,
     probs_df,
@@ -41,13 +73,16 @@ def _draw_circular_transition_diagram_on_ax(
     label_fontsize=11,
     label_style="on_node",
     source_cluster=None,
+    target_cluster=None,
 ):
     """Draw a circular inter-cluster transition diagram on `ax`.
 
     One node per `probs_df` row/column, evenly spaced clockwise from 12 o'clock. One curved
     directed arrow per off-diagonal (from, to) pair with probability >= `min_prob_to_draw`,
-    colored by the source cluster. Self-transitions are never drawn (this view is explicitly
-    inter-cluster) even if `probs_df` has a nonzero diagonal.
+    colored by the source cluster. Diagonal (self-transition) entries are drawn too, as a small
+    loop beside the node rather than an arc between two nodes - so a matrix with a zeroed
+    diagonal (e.g. the renormalized no-self matrix) simply shows no loops, while a self-inclusive
+    matrix shows each cluster's self-persistence alongside its switches.
 
     Visual weight (linewidth/alpha) is deliberately non-linear in probability so rare
     transitions fade out instead of cluttering the plot. `min_prob_to_draw` drops anything below
@@ -55,7 +90,8 @@ def _draw_circular_transition_diagram_on_ax(
     normalized to [0, 1] against the strongest drawn edge and raised to `emphasis_gamma` (>1
     bends the low end down hard) before mapping onto the linewidth/alpha ranges, so an edge just
     above the threshold renders as a thin, faint hairline while only the dominant transitions
-    read as bold arcs.
+    read as bold arcs. Self-loops share this same pool, so a cluster that mostly stays put shows
+    a bold loop while its minor switches stay faint.
 
     `label_style="on_node"` (default) draws each cluster's full label inside its dot. With
     `label_style="legend"`, dots are labeled with their 1-based clockwise index instead (short,
@@ -63,13 +99,14 @@ def _draw_circular_transition_diagram_on_ax(
     function only has an `ax`, not the figure a legend would need to sit outside of); see
     `plot_circular_transition_diagram`.
 
-    `source_cluster`, when given, restricts the drawn edges to that one source: only its
-    outgoing transitions are drawn (every node still renders, for context). Because `max_p`/
-    `span` below are computed from the edges actually being drawn, this also rescales the
-    visual weight to that cluster's own transitions rather than the whole matrix's - the
-    strongest edge *out of this cluster* reads as the boldest arc, not the strongest edge
-    overall. See `plot_circular_transition_diagram_grid`, which draws one such panel per
-    cluster on a single page.
+    `source_cluster`/`target_cluster`, when given, restrict the drawn edges to that one source
+    or destination respectively (every node still renders, for context); a cluster's own
+    self-loop is drawn whenever it passes both filters, i.e. whenever that cluster is the
+    selected source and/or destination. Because `max_p`/`span` below are computed from the edges
+    actually being drawn, this also rescales the visual weight to that cluster's own transitions
+    rather than the whole matrix's - the strongest edge into/out of this cluster reads as the
+    boldest arc, not the strongest edge overall. See `plot_circular_transition_diagram_grid`,
+    which draws one such panel per cluster on a single page.
     """
     clusters = list(probs_df.index)
     positions = _circular_node_positions(clusters)
@@ -79,7 +116,7 @@ def _draw_circular_transition_diagram_on_ax(
         if source_cluster is not None and src != source_cluster:
             continue
         for dst in clusters:
-            if src == dst:
+            if target_cluster is not None and dst != target_cluster:
                 continue
             p = float(probs_df.loc[src, dst])
             if np.isfinite(p) and p >= min_prob_to_draw:
@@ -100,6 +137,14 @@ def _draw_circular_transition_diagram_on_ax(
             linewidth = min_linewidth + t * (max_linewidth - min_linewidth)
             alpha = min_alpha + t * (max_alpha - min_alpha)
             color = colors[src]
+            mutation_scale = 10 + 8 * t
+
+            if src == dst:
+                _draw_self_loop(
+                    ax, positions[src], color=color, node_radius=node_radius,
+                    linewidth=linewidth, alpha=alpha, mutation_scale=mutation_scale,
+                )
+                continue
 
             x0, y0 = positions[src]
             x1, y1 = positions[dst]
@@ -115,7 +160,7 @@ def _draw_circular_transition_diagram_on_ax(
                 start, end,
                 connectionstyle=f"arc3,rad={curvature}",
                 arrowstyle="-|>",
-                mutation_scale=10 + 8 * t,
+                mutation_scale=mutation_scale,
                 linewidth=linewidth,
                 color=color,
                 alpha=alpha,
@@ -217,16 +262,24 @@ def plot_circular_transition_diagram_grid(
     label_style="on_node",
     ncols=None,
     panel_size=3.0,
+    direction="outgoing",
 ):
-    """Grid figure: one panel per cluster, each showing only that cluster's outgoing
-    transitions (see `source_cluster` on `_draw_circular_transition_diagram_on_ax`).
+    """Grid figure: one panel per cluster, each showing only that cluster's outgoing (or
+    incoming) transitions (see `source_cluster`/`target_cluster` on
+    `_draw_circular_transition_diagram_on_ax`) plus that cluster's own self-loop, if any.
 
-    Laying every cluster's outgoing-only view side by side - rather than the single overlaid
+    Laying every cluster's own view side by side - rather than the single overlaid
     `plot_circular_transition_diagram`, or one page per cluster - keeps the population-wide
     circular diagram readable while still letting each cluster's own transition pattern be
     inspected at a glance, all on one page. Each panel's visual weight (arrow thickness/alpha)
     is scaled to that cluster's own transitions, not the global maximum - a cluster that mostly
-    stays put still shows its strongest available switch as a bold arc within its own panel.
+    stays put still shows its strongest available switch (or its self-loop) as a bold arc within
+    its own panel.
+
+    `direction="outgoing"` (default) restricts each panel to that cluster's own outgoing
+    transitions (`source_cluster=cluster`); `direction="incoming"` restricts it to transitions
+    into that cluster instead (`target_cluster=cluster`). Either way the cluster's own self-loop
+    is included, since it passes both filters.
 
     Panels are arranged in a roughly square grid (`ncols` columns, computed as `ceil(sqrt(n))`
     when not given) so the page stays close to square regardless of cluster count; unused
@@ -239,6 +292,9 @@ def plot_circular_transition_diagram_grid(
     thus grid density) grows. `label_style="legend"` sidesteps the issue entirely and is the
     better choice for many/long-named clusters.
     """
+    if direction not in ("outgoing", "incoming"):
+        raise ValueError(f"direction must be 'outgoing' or 'incoming', got {direction!r}")
+
     clusters, probs_df, colors = _prepare_clusters_and_colors(probs_df, state_colors, state_order)
     n = len(clusters)
 
@@ -251,7 +307,9 @@ def plot_circular_transition_diagram_grid(
     axes_flat = axes.ravel()
     for ax, cluster in zip(axes_flat, clusters):
         _draw_circular_transition_diagram_on_ax(
-            ax, probs_df, colors=colors, source_cluster=cluster,
+            ax, probs_df, colors=colors,
+            source_cluster=cluster if direction == "outgoing" else None,
+            target_cluster=cluster if direction == "incoming" else None,
             min_prob_to_draw=min_prob_to_draw, emphasis_gamma=emphasis_gamma, curvature=curvature,
             label_style=label_style, label_fontsize=8,
         )

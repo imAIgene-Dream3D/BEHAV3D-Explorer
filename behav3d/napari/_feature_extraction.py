@@ -3113,6 +3113,25 @@ class ActiveKillingPanel(QWidget):
         self.immune_combo.blockSignals(False)
         self._validate()
 
+    def refresh_target_types(self, target_types: list):
+        """Update the target-type list when metadata is reloaded."""
+        previously_selected = {item.text() for item in self.target_list.selectedItems()}
+        self.target_types = list(target_types)
+        self.target_list.blockSignals(True)
+        self.target_list.clear()
+        if self.target_types:
+            self.target_list.addItems(self.target_types)
+            surviving = previously_selected & set(self.target_types)
+            for i in range(self.target_list.count()):
+                item = self.target_list.item(i)
+                item.setSelected(item.text() in surviving if surviving else True)
+            self.target_list.setEnabled(True)
+        else:
+            self.target_list.addItem("(no targets detected)")
+            self.target_list.setEnabled(False)
+        self.target_list.blockSignals(False)
+        self._validate()
+
     # ── Run ──────────────────────────────────────────────────────────────────
     def _on_run_clicked(self):
         """Run Active Killing Analysis in the background (indeterminate)."""
@@ -3998,6 +4017,7 @@ class FeatureExtractionTab(QWidget):
                 self.active_killing_panel.metadata_loader = self.metadata_loader
                 self.active_killing_panel.viewer = self.viewer
                 self.active_killing_panel.refresh_immune_types(list(imm))
+                self.active_killing_panel.refresh_target_types(list(org) + list(oth))
             self.active_killing_panel.set_queue_callback(
                 self._queue_active_killing if self._queue_panel is not None else None
             )

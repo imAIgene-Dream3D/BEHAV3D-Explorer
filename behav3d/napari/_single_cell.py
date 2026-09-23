@@ -585,8 +585,12 @@ class StateClassificationSubTab(QWidget):
         lay.addWidget(self.grp_apply)
 
         # ── Group: Training (Step 1) ─────────────────────────────────────
-        self.grp_train = QGroupBox("Step 1 — State Clustering")
-        train_lay = QVBoxLayout(self.grp_train)
+        # Highlighted collapsible section (not a plain QGroupBox) so it reads
+        # as a main pipeline step, matching the other collapsible sections
+        # below (Feature Selection, Advanced Configuration, ...) rather than
+        # a checkbox toggle.
+        self.grp_train = CollapsibleSection("Step 1 — State Clustering", expanded=True, highlight=True)
+        train_lay = self.grp_train.contentLayout()
         train_lay.setSpacing(4)
 
         # Feature Selection
@@ -6348,38 +6352,10 @@ class TrackClassificationSubTab(QWidget):
                 verbose=True,
             )
             result = {"diagnostics": diag, "proportions": prop}
-            if "trajectory_window_id" in track_adata.obs.columns:
-                # Only meaningful when 'Divide long tracks' was used - most runs
-                # don't have this column, so skip silently rather than erroring
-                # the whole refresh for the common case. A real failure here is
-                # caught locally so it doesn't take down the reports above,
-                # which already succeeded by this point.
-                try:
-                    from behav3d.analysis.behavior.track.visualization.plots.window_transitions import (
-                        save_window_transition_report,
-                    )
-                    result["window_transitions"] = save_window_transition_report(
-                        track_adata,
-                        output_dir=str(out) if out else "",
-                        cell_type=ct,
-                        cluster_key=cluster_col,
-                        verbose=True,
-                    )
-                except Exception as exc:
-                    result["window_transitions_error"] = str(exc)
-                try:
-                    from behav3d.analysis.behavior.track.visualization.plots.transition_analysis import (
-                        save_window_cluster_transition_analysis,
-                    )
-                    result["transition_analysis"] = save_window_cluster_transition_analysis(
-                        track_adata,
-                        output_dir=str(out) if out else "",
-                        cell_type=ct,
-                        cluster_key=cluster_col,
-                        verbose=True,
-                    )
-                except Exception as exc:
-                    result["transition_analysis_error"] = str(exc)
+            # Note: the Sankey (window transitions) and transition-analysis (circular
+            # diagram + heatmap) reports are intentionally NOT regenerated here - they're
+            # expensive and a rename shouldn't trigger them automatically. Use the
+            # dedicated "Window Transitions" / "Transition Analysis" buttons instead.
             # Refresh the example-track PDF too, so it reflects the just-renamed
             # cluster labels/colors rather than staying stale - caught locally
             # so a failure here doesn't take down the reports above, which

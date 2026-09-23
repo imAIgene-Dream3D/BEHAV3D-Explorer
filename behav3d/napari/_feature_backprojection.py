@@ -36,6 +36,7 @@ from qtpy.QtWidgets import (
 from behav3d.core.qt_help import make_help_row
 from behav3d.core.metadata import resolve_metadata_csv_path
 from behav3d.napari._analysis import _detect_cell_types
+from behav3d.napari._background_runner import BackgroundOperation
 from behav3d.napari._single_cell import _bp_add_raw_channels
 from behav3d.napari._preview_dims import (
     clear_viewer_layers,
