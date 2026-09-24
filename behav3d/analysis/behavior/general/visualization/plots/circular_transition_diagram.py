@@ -74,6 +74,7 @@ def _draw_circular_transition_diagram_on_ax(
     label_style="on_node",
     source_cluster=None,
     target_cluster=None,
+    scale_mode="relative",
 ):
     """Draw a circular inter-cluster transition diagram on `ax`.
 
@@ -102,11 +103,20 @@ def _draw_circular_transition_diagram_on_ax(
     `source_cluster`/`target_cluster`, when given, restrict the drawn edges to that one source
     or destination respectively (every node still renders, for context); a cluster's own
     self-loop is drawn whenever it passes both filters, i.e. whenever that cluster is the
-    selected source and/or destination. Because `max_p`/`span` below are computed from the edges
-    actually being drawn, this also rescales the visual weight to that cluster's own transitions
-    rather than the whole matrix's - the strongest edge into/out of this cluster reads as the
-    boldest arc, not the strongest edge overall. See `plot_circular_transition_diagram_grid`,
-    which draws one such panel per cluster on a single page.
+    selected source and/or destination. With `scale_mode="relative"` (default), `max_p`/`span`
+    below are computed from the edges actually being drawn, which rescales the visual weight to
+    that cluster's own transitions rather than the whole matrix's - the strongest edge into/out
+    of this cluster reads as the boldest arc, not the strongest edge overall. See
+    `plot_circular_transition_diagram_grid`, which draws one such panel per cluster on a single
+    page.
+
+    `scale_mode="absolute"` instead maps probability directly onto visual weight on a fixed
+    0-1 scale (a 0.5 edge always reads as ~half of `max_linewidth`/`max_alpha`, regardless of
+    what else is drawn), rather than stretching the strongest edge among those drawn to fill the
+    full range. This matters most for a diagram that overlays every cluster's edges together:
+    with `"relative"` scaling there, one cluster's dominant edge (often a large self-transition)
+    becomes the reference for 100%, which visually flattens every other cluster's edges even
+    when, on their own terms, they aren't faint at all.
     """
     clusters = list(probs_df.index)
     positions = _circular_node_positions(clusters)
@@ -123,8 +133,11 @@ def _draw_circular_transition_diagram_on_ax(
                 edges.append((src, dst, p))
 
     if edges:
-        max_p = max(p for _, _, p in edges)
-        span = max(max_p - min_prob_to_draw, 1e-9)
+        if scale_mode == "absolute":
+            span = max(1.0 - min_prob_to_draw, 1e-9)
+        else:
+            max_p = max(p for _, _, p in edges)
+            span = max(max_p - min_prob_to_draw, 1e-9)
 
         def visual_weight(p):
             t = (p - min_prob_to_draw) / span
@@ -218,12 +231,14 @@ def plot_circular_transition_diagram(
     curvature=0.28,
     label_style="on_node",
     figsize=(7, 7),
+    scale_mode="relative",
 ):
     """Standalone figure: circular inter-cluster transition diagram.
 
-    See `_draw_circular_transition_diagram_on_ax` for the drawing/visual-weight semantics.
-    `probs_df` is typically a no-self transition-probability matrix (self-transitions zeroed
-    and rows renormalized over the remaining off-diagonal entries).
+    See `_draw_circular_transition_diagram_on_ax` for the drawing/visual-weight semantics,
+    including what `scale_mode` controls. `probs_df` is typically a no-self
+    transition-probability matrix (self-transitions zeroed and rows renormalized over the
+    remaining off-diagonal entries).
 
     `label_style="legend"` moves the full cluster/state names off the (now numbered) dots and
     into a legend beside the plot instead - useful for long names or many clusters, where in-dot
@@ -237,7 +252,7 @@ def plot_circular_transition_diagram(
     _draw_circular_transition_diagram_on_ax(
         ax, probs_df, colors=colors,
         min_prob_to_draw=min_prob_to_draw, emphasis_gamma=emphasis_gamma, curvature=curvature,
-        label_style=label_style,
+        label_style=label_style, scale_mode=scale_mode,
     )
     if title:
         ax.set_title(str(title), fontsize=12, fontweight="bold", pad=12)

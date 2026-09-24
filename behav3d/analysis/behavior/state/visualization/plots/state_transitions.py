@@ -161,42 +161,14 @@ def compute_cluster_transition_matrix(
     state_order=None,
 ):
     """
-    Compute a transition matrix between cluster states from tracked objects over time.
+    Compute a transition matrix (counts + row-normalized probabilities) between
+    `cluster_key` states over time.
 
-    Parameters
-    ----------
-    adata : anndata.AnnData
-        AnnData object containing tracking and clustering info in .obs.
-    cluster_key : str
-        Column in adata.obs with cluster labels (e.g. 'ClusterID', 'leiden').
-    id_cols : sequence of str, default ("sample_name", "TrackID")
-        Columns in adata.obs that together identify each track/object.
-    time_key : str, default "position_t"
-        Column in adata.obs giving time or frame index (must be sortable).
-    normalize : bool, default True
-        If True, return row-normalized probabilities (HMM-style).
-        If False, returns raw transition counts.
-    plot : bool, default False
-        If True, plot the transition matrix as a heatmap.
-    ax : matplotlib.axes.Axes, optional
-        Axis to plot on. If None and plot=True, a new figure/axis is created.
-    only_transitions : bool, default False
-        If True, remove self-transitions (diagonal) from the *returned* matrices
-        by setting diagonal counts to 0 and re-normalizing across off-diagonal
-        entries (so rows sum to 1 when there is at least one off-diagonal transition).
-        Also makes the diagonal appear empty in the plot.
-    state_order : list of str, optional
-        Saved display order for the states (e.g. from `_get_classification_state_order`). States
-        not present in this list are appended afterwards. Defaults to alphabetical.
-
-    Returns
-    -------
-    transition_counts : pandas.DataFrame
-        Matrix of transition counts, shape (n_states, n_states).
-        Rows = current state, columns = next state.
-    transition_probs : pandas.DataFrame
-        Row-normalized transition matrix.
-        If only_transitions=True, this is P(next | current, next != current).
+    `only_transitions=True` zeros the diagonal (self-transitions) and
+    renormalizes over off-diagonal entries only, in both the returned matrices
+    and the plot. `state_order` sets display order for the states (e.g. from
+    `_get_classification_state_order`); states not listed are appended
+    afterwards, defaulting to alphabetical.
     """
     if state_order is None:
         state_order = _get_classification_state_order(adata, cluster_key)
@@ -359,66 +331,6 @@ def all_ngrams(
     out = pd.DataFrame(rows)
     out = out.sort_values(["n", "count"], ascending=[True, False], kind="stable").reset_index(drop=True)
     return out
-
-# Get top-N n-grams (of order n) that lead to end_state
-def top_ngrams_per_end_state(df_ngrams, n, top_n=10):
-    """Get top-N n-grams (of order n) per end-state."""
-    sub = df_ngrams[df_ngrams["n"] == n]
-    out = {}
-    for end_state, g in sub.groupby("end_state", sort=True):
-        out[end_state] = (
-            g.sort_values("count", ascending=False, kind="stable")
-            .head(top_n)
-            .reset_index(drop=True)
-        )
-    return out
-
-# Plot top-N n-grams (of order n) pooled across end-states
-def plot_top_ngrams(df_ngrams, n, top_n=30, title=None):
-    sub = df_ngrams[df_ngrams["n"] == n].head(top_n)
-    if sub.empty:
-        print(f"No {n}-grams to plot.")
-        return
-
-    plt.figure(figsize=(12, max(4, 0.35 * len(sub))))
-    plt.barh(sub["ngram_str"][::-1], sub["count"][::-1])
-    plt.xlabel("Count (pooled across tracks)")
-    plt.ylabel(f"{n}-gram")
-    plt.title(title or f"Top {top_n} {n}-grams")
-    plt.tight_layout()
-    plt.show()
-
-def plot_top_ngrams_per_end_state(
-    df_ngrams,
-    n,
-    top_n=10,
-    min_total_end_occurrences=1,
-):
-    sub = df_ngrams[df_ngrams["n"] == n]
-    totals = sub.groupby("end_state")["count"].sum().sort_values(ascending=False)
-
-    for end_state in totals.index:
-        if totals[end_state] < min_total_end_occurrences:
-            continue
-
-        g = (
-            sub[sub["end_state"] == end_state]
-            .sort_values("count", ascending=False, kind="stable")
-            .head(top_n)
-        )
-        if g.empty:
-            continue
-
-        plt.figure(figsize=(12, max(4, 0.35 * len(g))))
-        plt.barh(g["ngram_str"][::-1], g["count"][::-1])
-        plt.xlabel("Count (pooled across tracks)")
-        plt.ylabel(f"{n}-gram")
-        plt.title(
-            f"Top {top_n} {n}-grams ending in {end_state} "
-            f"(total={int(totals[end_state])})"
-        )
-        plt.tight_layout()
-        plt.show()
 
 # -----------------------------
 # Calculate all paths from a beginning state to the first encountered selected end state
@@ -939,24 +851,6 @@ def _plot_ngram_batch_page(items, y_col="ngram_str", x_col="count"):
     return fig
 
 
-def _plot_ngram_ranking_page(df_ranking, title, y_col="ngram_str", x_col="count"):
-    work = df_ranking.copy()
-    if len(work) == 0:
-        return None
-    work[x_col] = pd.to_numeric(work[x_col], errors="coerce").fillna(0.0)
-    work = work.sort_values(x_col, ascending=False, kind="stable")
-    if len(work) == 0:
-        return None
-
-    fig_h = max(4.0, min(18.0, 0.35 * float(len(work)) + 1.5))
-    fig, ax = plt.subplots(figsize=(11.0, fig_h))
-    labels = work[y_col].astype(str).tolist()[::-1]
-    values = work[x_col].astype(float).tolist()[::-1]
-    ax.barh(labels, values)
-    ax.set_xlabel("Count (pooled across tracks)")
-    ax.set_ylabel("N-gram")
-    ax.set_title(str(title))
-    fig.tight_layout()
     return fig
 
 
@@ -1066,10 +960,10 @@ def save_state_transition_report(
     include_transition_matrix=True,
     include_no_self_matrices=True,
     include_circular_diagram=True,
-    circular_min_prob_to_draw=0.03,
-    circular_emphasis_gamma=2.0,
+    circular_min_prob_to_draw=0.0,
+    circular_emphasis_gamma=1.0,
     circular_curvature=0.28,
-    circular_label_style="on_node",
+    circular_label_style="legend",
     circular_include_self_transitions=False,
     include_circular_diagram_per_cluster=True,
     include_ngram_rankings=True,
@@ -1079,7 +973,7 @@ def save_state_transition_report(
     ngram_include_per_end_state=True,
     ngram_include_per_start_state=True,
     ngram_min_count=1,
-    include_sankey_pairs=True,
+    include_sankey_pairs=False,
     state_colors=None,
     state_order=None,
     verbose=True,
@@ -1121,6 +1015,7 @@ def save_state_transition_report(
     matrix_probs_csv = matrix_data_dir / "transition_matrix_probs.csv"
     matrix_counts_no_self_csv = matrix_data_dir / "transition_matrix_counts_no_self.csv"
     matrix_probs_no_self_csv = matrix_data_dir / "transition_matrix_probs_no_self.csv"
+    matrix_probs_incoming_csv = matrix_data_dir / "transition_matrix_probs_incoming.csv"
     matrix_heatmap_pdf = matrix_dir / "transition_matrix_heatmap.pdf"
     counts.to_csv(matrix_counts_csv)
     probs.to_csv(matrix_probs_csv)
@@ -1216,11 +1111,13 @@ def save_state_transition_report(
         # only_transitions=True costs nothing beyond what's already computed.
         if include_circular_diagram:
             if circular_include_self_transitions:
+                circular_counts = counts
                 circular_probs = probs
             else:
+                circular_counts = counts_no_self
                 circular_probs = probs_no_self
                 if circular_probs is None:
-                    _, circular_probs = compute_cluster_transition_matrix(
+                    circular_counts, circular_probs = compute_cluster_transition_matrix(
                         adata,
                         cluster_key=str(state_col),
                         id_cols=tuple(id_cols),
@@ -1243,7 +1140,64 @@ def save_state_transition_report(
             pdf.savefig(fig_circular, bbox_inches="tight")
             plt.close(fig_circular)
 
-            # Page 2b — same matrix, broken out one panel per cluster (outgoing transitions
+            # Page 2-absolute — absolute-scale counterpart of `fig_circular`, added alongside
+            # (not replacing) it for comparison: probability maps directly onto arc thickness on
+            # a fixed 0-1 scale, instead of being stretched relative to this diagram's own
+            # strongest edge (often a large self-transition elsewhere in the matrix that would
+            # otherwise flatten every other cluster's edges by comparison).
+            fig_circular_absolute = plot_circular_transition_diagram(
+                circular_probs,
+                state_colors=state_colors,
+                state_order=state_order,
+                title=f"Inter-cluster transition probability, absolute scale ({state_col})",
+                min_prob_to_draw=circular_min_prob_to_draw,
+                emphasis_gamma=circular_emphasis_gamma,
+                curvature=circular_curvature,
+                label_style=circular_label_style,
+                scale_mode="absolute",
+            )
+            pdf.savefig(fig_circular_absolute, bbox_inches="tight")
+            plt.close(fig_circular_absolute)
+
+            # Page 2b — column-normalized counterpart of `circular_probs`: for each destination
+            # cluster, what share of its arrivals came from each source. Must be derived from
+            # the counts (not from the already row-normalized `circular_probs`), since
+            # normalizing an already-normalized matrix's columns would not equal each source's
+            # true share.
+            col_sums = circular_counts.sum(axis=0)
+            circular_probs_incoming = circular_counts.div(col_sums.replace(0, np.nan), axis=1)
+            circular_probs_incoming.to_csv(matrix_probs_incoming_csv)
+            fig_circular_incoming = plot_circular_transition_diagram(
+                circular_probs_incoming,
+                state_colors=state_colors,
+                state_order=state_order,
+                title=f"Inter-cluster transition probability, incoming ({state_col})",
+                min_prob_to_draw=circular_min_prob_to_draw,
+                emphasis_gamma=circular_emphasis_gamma,
+                curvature=circular_curvature,
+                label_style=circular_label_style,
+            )
+            pdf.savefig(fig_circular_incoming, bbox_inches="tight")
+            plt.close(fig_circular_incoming)
+
+            fig_circular_incoming_absolute = plot_circular_transition_diagram(
+                circular_probs_incoming,
+                state_colors=state_colors,
+                state_order=state_order,
+                title=(
+                    f"Inter-cluster transition probability, incoming, absolute scale "
+                    f"({state_col})"
+                ),
+                min_prob_to_draw=circular_min_prob_to_draw,
+                emphasis_gamma=circular_emphasis_gamma,
+                curvature=circular_curvature,
+                label_style=circular_label_style,
+                scale_mode="absolute",
+            )
+            pdf.savefig(fig_circular_incoming_absolute, bbox_inches="tight")
+            plt.close(fig_circular_incoming_absolute)
+
+            # Page 2c — same matrix, broken out one panel per cluster (outgoing transitions
             # only), all on one grid page so every cluster's own pattern stays inspectable
             # without paging through the population-wide overlay above.
             if include_circular_diagram_per_cluster:
@@ -1262,7 +1216,7 @@ def save_state_transition_report(
                 plt.close(fig_circular_grid_out)
 
                 fig_circular_grid_in = plot_circular_transition_diagram_grid(
-                    circular_probs,
+                    circular_probs_incoming,
                     state_colors=state_colors,
                     state_order=state_order,
                     title=f"Per-cluster incoming transitions ({state_col})",

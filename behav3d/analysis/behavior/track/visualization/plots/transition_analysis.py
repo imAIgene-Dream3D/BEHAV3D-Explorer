@@ -27,7 +27,7 @@ from behav3d.analysis.behavior.general.visualization.plots.circular_transition_d
     plot_circular_transition_diagram,
     plot_circular_transition_diagram_grid,
 )
-from behav3d.analysis.behavior.track.utils import _resolve_dtaidistance_paths, _winfo
+from behav3d.analysis.behavior.track.utils import _resolve_track_paths, _winfo
 from behav3d.analysis.behavior.track.visualization.plots.window_transitions import (
     compute_window_transition_links,
 )
@@ -131,8 +131,8 @@ def save_window_cluster_transition_analysis(
     if state_colors is None:
         state_colors = _get_classification_state_colors(adata_tracks, cluster_key)
 
-    paths = _resolve_dtaidistance_paths(output_dir, cell_type)
-    out_dir = paths["outfolder"] / "transition_analysis"
+    paths = _resolve_track_paths(output_dir, cell_type)
+    out_dir = paths.outfolder / "transition_analysis"
     data_dir = out_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -152,6 +152,7 @@ def save_window_cluster_transition_analysis(
     probs_csv = data_dir / "transition_matrix_probs.csv"
     counts_no_self_csv = data_dir / "transition_matrix_counts_no_self.csv"
     probs_no_self_csv = data_dir / "transition_matrix_probs_no_self.csv"
+    probs_incoming_csv = data_dir / "transition_matrix_probs_incoming.csv"
     counts.to_csv(counts_csv)
     probs.to_csv(probs_csv)
     counts_no_self.to_csv(counts_no_self_csv)
@@ -172,6 +173,7 @@ def save_window_cluster_transition_analysis(
             # Self-transitions are never drawn as arrows; `circular_include_self_transitions`
             # instead picks which matrix feeds the diagram - see the matching comment in
             # `state_transitions.save_state_transition_report`.
+            circular_counts = counts if circular_include_self_transitions else counts_no_self
             circular_probs = probs if circular_include_self_transitions else probs_no_self
             fig_circular = plot_circular_transition_diagram(
                 circular_probs,
@@ -185,6 +187,62 @@ def save_window_cluster_transition_analysis(
             )
             pdf.savefig(fig_circular, bbox_inches="tight")
             plt.close(fig_circular)
+
+            # Absolute-scale counterpart of `fig_circular`, added alongside (not replacing) it
+            # for comparison: probability maps directly onto arc thickness on a fixed 0-1 scale,
+            # instead of being stretched relative to this diagram's own strongest edge (which is
+            # often a large self-transition elsewhere in the matrix that would otherwise flatten
+            # every other cluster's edges by comparison).
+            fig_circular_absolute = plot_circular_transition_diagram(
+                circular_probs,
+                state_colors=colors,
+                state_order=state_order,
+                title=f"{cell_type} — inter-cluster transition probability, absolute scale ({cluster_key})",
+                min_prob_to_draw=min_prob_to_draw,
+                emphasis_gamma=emphasis_gamma,
+                curvature=curvature,
+                label_style=label_style,
+                scale_mode="absolute",
+            )
+            pdf.savefig(fig_circular_absolute, bbox_inches="tight")
+            plt.close(fig_circular_absolute)
+
+            # Column-normalized counterpart of `circular_probs`: for each destination cluster,
+            # what share of its arrivals came from each source. Must be derived from the counts
+            # (not from the already row-normalized `circular_probs`), since normalizing an
+            # already-normalized matrix's columns would not equal each source's true share.
+            col_sums = circular_counts.sum(axis=0)
+            circular_probs_incoming = circular_counts.div(col_sums.replace(0, np.nan), axis=1)
+            circular_probs_incoming.to_csv(probs_incoming_csv)
+            fig_circular_incoming = plot_circular_transition_diagram(
+                circular_probs_incoming,
+                state_colors=colors,
+                state_order=state_order,
+                title=f"{cell_type} — inter-cluster transition probability, incoming ({cluster_key})",
+                min_prob_to_draw=min_prob_to_draw,
+                emphasis_gamma=emphasis_gamma,
+                curvature=curvature,
+                label_style=label_style,
+            )
+            pdf.savefig(fig_circular_incoming, bbox_inches="tight")
+            plt.close(fig_circular_incoming)
+
+            fig_circular_incoming_absolute = plot_circular_transition_diagram(
+                circular_probs_incoming,
+                state_colors=colors,
+                state_order=state_order,
+                title=(
+                    f"{cell_type} — inter-cluster transition probability, incoming, "
+                    f"absolute scale ({cluster_key})"
+                ),
+                min_prob_to_draw=min_prob_to_draw,
+                emphasis_gamma=emphasis_gamma,
+                curvature=curvature,
+                label_style=label_style,
+                scale_mode="absolute",
+            )
+            pdf.savefig(fig_circular_incoming_absolute, bbox_inches="tight")
+            plt.close(fig_circular_incoming_absolute)
 
             if include_circular_diagram_per_cluster:
                 fig_circular_grid_out = plot_circular_transition_diagram_grid(
@@ -202,7 +260,7 @@ def save_window_cluster_transition_analysis(
                 plt.close(fig_circular_grid_out)
 
                 fig_circular_grid_in = plot_circular_transition_diagram_grid(
-                    circular_probs,
+                    circular_probs_incoming,
                     state_colors=colors,
                     state_order=state_order,
                     title=f"{cell_type} — per-cluster incoming transitions ({cluster_key})",
