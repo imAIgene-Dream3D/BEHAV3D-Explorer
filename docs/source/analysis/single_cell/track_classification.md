@@ -2,7 +2,7 @@
 
 The second inner sub-tab of **Analysis → 🧬 Single Cell**. Where [State Classification](state_classification.md) labels behaviour **timepoint by timepoint**, Track Classification groups **whole trajectories** into clusters based on how their behaviour unfolds over time — so two cells that follow a similar behavioural "story" (e.g. *static*▶*scanning*▶*killing* ) end up in the same trajectory cluster, even if they are never in the exact same state at the exact same frame.
 
-It runs on the **cell type chosen in the dropdown** at the top of the Single Cell sub-tab (immune / other only). The default method compares the **sequence of behavioural states** along each track, so you normally run [State Classification](state_classification.md) for that cell type first.
+It runs on the **cell type chosen in the dropdown** at the top of the Single Cell sub-tab (immune / other only). The default method compares the **sequence of behavioural states** along each track, so you normally run [State Clustering](state_classification.md) for that cell type first.
 
 ![Track Classification sub-tab](../../_static/screenshots/track_classification_tab.png)
 
@@ -48,7 +48,7 @@ flowchart TD
 ```
 
 ```{tip}
-**If State Classification hasn't been run** for the selected cell type, the sub-tab shows a warning and **locks Step 1 into Original BEHAV3D DTW** (the checkbox is ticked and greyed out), because the categorical method needs the behavioural-states file. Steps 2–5 stay disabled until you run State Classification, after which the sub-tab automatically reverts to the categorical method.
+**If State Clustering hasn't been run** for the selected cell type, the sub-tab shows a warning and **locks Step 1 into Original BEHAV3D DTW** (the checkbox is ticked and greyed out), because the categorical method needs the behavioural-states file. Steps 2–5 stay disabled until you run State Clustering, after which the sub-tab automatically reverts to the categorical method.
 ```
 
 ## Step 1 — Track Clustering
@@ -158,7 +158,7 @@ Both have **+🛒** (queue) and **👁** (view) buttons.
 | **n_estimators** | 100 | Number of trees in the random forest. More trees = steadier but slower. |
 | **Test holdout** | 0.20 | Fraction of trajectories held out to estimate classifier accuracy (0.05–0.5). |
 
-## Step 4 — Create Plots
+## Step 4 — Reports & Plots
 
 ### Exemplars & diagnostics
 
@@ -176,7 +176,7 @@ Each has a **👁** button to reopen its PDF.
 
 For deciding whether **`N clusters`** was sensible, inspect the **overview PDF first** and use the diagnostics PDF second. The overview tells you whether the model has split tracks into visually meaningful trajectory types; the diagnostics help support that interpretation, but they are not the primary evidence for this particular choice.
 
-### Track-Class Proportions
+### Track Composition Report
 
 What fraction of tracks each trajectory cluster occupies, per sample — optionally grouped by experimental condition.
 
@@ -186,7 +186,7 @@ What fraction of tracks each trajectory cluster occupies, per sample — optiona
 | **Group in Y** | — none — | A second metadata column for the other grid axis. With one or two columns set you get a true 2D grid; with neither set you just get the plain per-sample bars. |
 | **Group per page** | none selected | Additional metadata column(s) (Ctrl/Cmd-click for several) whose combinations instead **paginate** the output — one full grid page per combination, rather than adding more grid axes. |
 
-Click **▶ Create Track Proportion Plots**. The output is one PDF with the per-sample bars plus (if grouping is set) the grouped grid pages; a companion CSV records, per group, both the mean proportion *and* the underlying track count (`n_tracks`) behind each bar, since the bar itself only shows the mean.
+Click **▶ Track Composition Report**. The output is one PDF with the per-sample bars plus (if grouping is set) the grouped grid pages; a companion CSV records, per group, both the mean proportion *and* the underlying track count (`n_tracks`) behind each bar, since the bar itself only shows the mean.
 
 ```{tip}
 Three or more **Group per page** columns selected at once falls back to a flat, wrapped panel-per-combination layout rather than a true 2D grid — keep to at most two grouping axes (X + Y) if you want the proper grid.
@@ -295,7 +295,7 @@ The final step paints the **trajectory clusters back onto the raw images**, so y
 
 ### Live overlay in napari
 
-The **Live Napari Layer Backprojection (Tracks)** panel overlays coloured cluster labels onto the selected sample's image.
+The **Live Napari Layer Backprojection** panel overlays coloured cluster labels onto the selected sample's image.
 
 | Control | Default | Meaning |
 |---|---|---|
@@ -347,7 +347,7 @@ The folder name on disk is `behavioral_trajectories`. The easiest way to reopen 
 
 ## Tips & best practices
 
-- **Run State Classification first** (for the categorical method). The default clustering compares behavioural-state sequences, so it needs the per-timepoint states to exist for the cell type.
+- **Run State Clustering first** (for the categorical method). The default clustering compares behavioural-state sequences, so it needs the per-timepoint states to exist for the cell type.
 - **Use the overview-PDF decision loop.** A good practical workflow is: fit clusters → inspect `example_tracks_overview.pdf` → rename and merge similar clusters → only then rerun with higher or lower *N clusters* if the split still looks too coarse or too fragmented.
 - **Slight over-splitting is safer.** If you are unsure, it is usually better to split a bit too much and merge later during renaming than to force several distinct trajectory patterns into one cluster from the start.
 - **Leave Linkage on `average`.** `complete` gives comparable results and is worth trying; **`single` rarely works well** for these distances. Agglomerative clustering is preferred over k-means here, with the caveat that the resulting UMAP embedding can look poor even when the clusters themselves are sensible.

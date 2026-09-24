@@ -115,7 +115,7 @@ $$
 
 ### Running it
 
-**▶ Run State Classification** fits the model in the background (a progress bar and **Log** show what is happening; the rest of the GUI stays responsive). The **👁** button next to it becomes available once a model exists and lets you re-open the classified result. The fitted, classified data is written under the cell type's `behavioral_states` folder in the output directory.
+**▶ Run State Clustering** fits the model in the background (a progress bar and **Log** show what is happening; the rest of the GUI stays responsive). The **👁** button next to it becomes available once a model exists and lets you re-open the classified result. The fitted, classified data is written under the cell type's `behavioral_states` folder in the output directory.
 
 Alongside the classified data, the run also saves the **full trained workflow** — features, processing, binary groups and the fitted HMM itself — as a single deployment artifact:
 
@@ -126,7 +126,7 @@ Alongside the classified data, the run also saves the **full trained workflow** 
 This is the `.pkl` file you point **Apply existing behavioral state classification** (see *Two ways to run* above) at to classify new datasets with exactly the same, already-defined states — no need to retrain or re-choose features.
 
 ```{note}
-You can run State Classification interactively with the button, or add it to the [Processing Queue](../../plugin_essentials/processing_queue) with the **+🛒** button next to it (the queue exposes it as **🔬 State Clustering**, with separate **Train** / **Apply State Classifier** queue steps for the apply-existing workflow).
+You can run State Clustering interactively with the button, or add it to the [Processing Queue](../../plugin_essentials/processing_queue) with the **+🛒** button next to it (the queue exposes it as **🔬 State Clustering**, with separate **Train** / **Apply State Classifier** queue steps for the apply-existing workflow).
 ```
 
 ### How to interpret the QC outputs
@@ -150,7 +150,7 @@ Practical reasons to **combine** intrinsic states later in Step 2 include:
 - no clear visual difference in backprojection,
 - or no distinct biological story you would actually describe separately in a figure legend or results section.
 
-## Step 2 — Rename Clusters
+## Step 2 — Rename State Clusters
 
 Freshly fitted states are numbered, not named. This step lets you give them meaningful biological labels and merge clusters if you think they are biologically similar. You can additionally order the clusters by dragging them and give them unique colors, which are used in the following reports and backprojection.
 

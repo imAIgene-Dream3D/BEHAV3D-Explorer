@@ -325,7 +325,7 @@ STATE_COMPARISON_REPORT = {
 
 TRACK_PLOTS_ENTRY = {
     "id": "track_plots",
-    "title": "Create Plots",
+    "title": "Reports & Plots",
     "subtitle": "Turn your track clustering into diagnostics and figures.",
     "color": "#c98a2c",
     "show_explainer": False,
@@ -370,7 +370,7 @@ TRACK_DIAGNOSTICS = {
 
 TRACK_PROPORTIONS = {
     "id": "track_proportions",
-    "title": "Track Proportions",
+    "title": "Track Composition Report",
     "subtitle": "How do movement-type proportions vary across samples?",
     "color": "#c98a2c",
     "what_does": (
@@ -421,7 +421,7 @@ TRACK_WINDOW_TRANSITIONS = {
 
 TRACK_TRANSITION_ANALYSIS = {
     "id": "track_transition_analysis",
-    "title": "Transition Analysis",
+    "title": "Track Transition Report",
     "subtitle": "Pooled across every window, how often does one trajectory cluster become another?",
     "color": "#c98a2c",
     "what_does": (

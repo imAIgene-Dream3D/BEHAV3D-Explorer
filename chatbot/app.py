@@ -2473,7 +2473,7 @@ def hmm_setup_guidance(context: dict, messages: list[dict]) -> str | None:
         f"**{timepoint}**; current window features: **{window}**.\n"
         "2. Keep binary groups separate from HMM training. Current binary groups: "
         f"**{binary}**.{state_text}\n"
-        "3. Run State Classification and inspect the feature heatmap, per-state "
+        "3. Run State Clustering and inspect the feature heatmap, per-state "
         "distributions, and example state bars.\n"
         "4. In Step 2, rename the primary states by biological meaning; reuse a name "
         "to merge redundant states.\n"
