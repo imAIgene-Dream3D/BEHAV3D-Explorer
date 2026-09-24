@@ -58,7 +58,7 @@ def test_full_containment_removes_loser():
         _cleanup_case_dir(case_dir)
 
 
-def test_partial_overlap_single_survivor_gets_union():
+def test_partial_overlap_single_survivor_drops_thin_remainder():
     case_dir = _make_case_dir("single_survivor")
     try:
         img1 = _make_empty()
@@ -74,9 +74,14 @@ def test_partial_overlap_single_survivor_gets_union():
 
         res1 = np.asarray(load_zarr(out1))
         res2 = np.asarray(load_zarr(out2))
-        expected_union = (img1 > 0) | (img2 > 0)
 
-        assert np.array_equal(res1 > 0, expected_union)
+        # label 22's exclusive remainder (outside the shared region) is a
+        # single-voxel-thick slab that erosion_pixels=1 erodes to nothing,
+        # so it's too thin to survive as its own segment. Those voxels were
+        # never part of label 11's raw mask, so they must NOT be handed to
+        # label 11 either -- they're dropped entirely, and the winner keeps
+        # exactly its own original footprint, nothing more.
+        assert np.array_equal(res1 > 0, img1 > 0)
         assert np.count_nonzero(res2) == 0
     finally:
         _cleanup_case_dir(case_dir)
@@ -110,11 +115,11 @@ def test_partial_overlap_multiple_survivors_repartition_without_overlap():
 def test_seed_erosion_does_not_apply_min_size_filter():
     case_dir = _make_case_dir("seed_stage_no_size_filter")
     try:
-        img1 = _make_empty(shape=(1, 8, 10, 10))
-        img2 = _make_empty(shape=(1, 8, 10, 10))
+        img1 = _make_empty(shape=(1, 9, 20, 10))
+        img2 = _make_empty(shape=(1, 9, 20, 10))
 
-        img1[:, 1:7, 1:8, 1:8] = 5
-        img2[:, 1:7, 4:9, 4:9] = 6
+        img1[:, 1:7, 1:14, 1:9] = 5
+        img2[:, 1:7, 8:19, 1:9] = 6
 
         shared = (img1[0] > 0) & (img2[0] > 0)
         seed1 = _erode_candidate((img1[0] > 0) & ~shared, 1)
