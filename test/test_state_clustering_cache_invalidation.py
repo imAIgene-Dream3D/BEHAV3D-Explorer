@@ -14,10 +14,12 @@ from behav3d.analysis.behavior.state.visualization import backprojection as stat
 from behav3d.features import rolling_window_features
 from behav3d.analysis.behavior.state.classification import (
     _resolve_state_paths,
-    prepare_state_classification_dataset,
-    run_state_clustering,
+    run_hmm_state_clustering,
 )
-from behav3d.analysis.behavior.state.classification import run_hmm_state_clustering
+from behav3d.analysis.behavior.general import relabel_cluster_ids
+from behav3d.deprecated.analysis.clustering.state_classifier_apply import (
+    prepare_state_classification_dataset,
+)
 
 
 def _load_hmm_widget_module():
@@ -195,287 +197,6 @@ def test_prepare_rebuilds_older_cache_missing_window_metadata(tmp_path, monkeypa
     assert adata_prepared.uns["preprocessing"]["windowing"]["descriptive_features"] == ["mean", "median"]
 
 
-def test_run_state_clustering_rebuilds_model_cache_when_std_is_removed(tmp_path, monkeypatch):
-    _force_serial_window_generation(monkeypatch)
-    df_positions = _make_positions_df()
-    output_dir = Path(tmp_path) / "state_cache_case"
-
-    run_state_clustering(
-        features=["speed", "elongation"],
-        binary_features_to_group=[],
-        output_dir=output_dir,
-        cell_type="tcell",
-        window_size=4,
-        min_spacing=1,
-        n_neighbors=10,
-        min_dist=0.1,
-        resolution=3,
-        descriptive_features=["mean", "median", "std"],
-        clustering_method="kmeans",
-        incomplete_window_policy="partial",
-        random_state=7,
-        reuse_prepared_dataset=True,
-        plot_exemplar_videos=False,
-        df_positions=df_positions,
-        verbose=False,
-    )
-
-    model_adata = run_state_clustering(
-        features=["speed", "elongation"],
-        binary_features_to_group=[],
-        output_dir=output_dir,
-        cell_type="tcell",
-        window_size=4,
-        min_spacing=1,
-        n_neighbors=10,
-        min_dist=0.1,
-        resolution=3,
-        descriptive_features=["mean", "median"],
-        clustering_method="kmeans",
-        incomplete_window_policy="partial",
-        random_state=7,
-        reuse_prepared_dataset=True,
-        plot_exemplar_videos=False,
-        df_positions=df_positions,
-        verbose=False,
-    )
-
-    assert _std_cols(model_adata.var_names) == []
-
-    state_paths = _resolve_state_paths(output_dir, "tcell")
-    saved_model = sc.read_h5ad(state_paths.model_adata_path)
-    assert _std_cols(saved_model.var_names) == []
-
-    heatmap_csv = state_paths.state_clustering_outdir / "behavioral_clustering_diagnostics_heatmap_matrix.csv"
-    heatmap_df = pd.read_csv(heatmap_csv, index_col=0)
-    assert _std_cols(heatmap_df.columns) == []
-
-    feature_distribution_pdf = state_paths.state_clustering_outdir / "behavioral_clustering_feature_distributions.pdf"
-    assert feature_distribution_pdf.exists()
-    assert model_adata.uns["clustering"]["feature_distribution_pdf"] == str(feature_distribution_pdf)
-
-
-def test_run_state_clustering_supports_pca_and_no_pca_modes(tmp_path, monkeypatch):
-    _force_serial_window_generation(monkeypatch)
-    df_positions = _make_positions_df()
-
-    model_with_pca = run_state_clustering(
-        features=["speed", "elongation"],
-        binary_features_to_group=[],
-        output_dir=Path(tmp_path) / "with_pca",
-        cell_type="tcell",
-        window_size=4,
-        min_spacing=1,
-        n_neighbors=10,
-        min_dist=0.1,
-        resolution=0.5,
-        descriptive_features=["mean", "median", "std"],
-        pca_var_selection=0.95,
-        use_pca=True,
-        clustering_method="leiden",
-        incomplete_window_policy="partial",
-        random_state=11,
-        reuse_prepared_dataset=True,
-        plot_exemplar_videos=False,
-        df_positions=df_positions,
-        verbose=False,
-    )
-    assert "X_pca" in model_with_pca.obsm
-    assert "X_umap" in model_with_pca.obsm
-    assert "neighbors" in model_with_pca.uns
-
-    model_no_pca_leiden = run_state_clustering(
-        features=["speed", "elongation"],
-        binary_features_to_group=[],
-        output_dir=Path(tmp_path) / "no_pca_leiden",
-        cell_type="tcell",
-        window_size=4,
-        min_spacing=1,
-        n_neighbors=10,
-        min_dist=0.1,
-        resolution=0.5,
-        descriptive_features=["mean", "median", "std"],
-        pca_var_selection=0.95,
-        use_pca=False,
-        clustering_method="leiden",
-        incomplete_window_policy="partial",
-        random_state=11,
-        reuse_prepared_dataset=True,
-        plot_exemplar_videos=False,
-        df_positions=df_positions,
-        verbose=False,
-    )
-    assert "X_pca" not in model_no_pca_leiden.obsm
-    assert "X_umap" in model_no_pca_leiden.obsm
-    assert "neighbors" in model_no_pca_leiden.uns
-    assert model_no_pca_leiden.uns["preprocessing"]["model_cache"]["neighbors"]["use_rep"] == "X"
-
-    model_no_pca_kmeans = run_state_clustering(
-        features=["speed", "elongation"],
-        binary_features_to_group=[],
-        output_dir=Path(tmp_path) / "no_pca_kmeans",
-        cell_type="tcell",
-        window_size=4,
-        min_spacing=1,
-        n_neighbors=10,
-        min_dist=0.1,
-        resolution=3,
-        descriptive_features=["mean", "median", "std"],
-        pca_var_selection=0.95,
-        use_pca=False,
-        clustering_method="kmeans",
-        incomplete_window_policy="partial",
-        random_state=11,
-        reuse_prepared_dataset=True,
-        plot_exemplar_videos=False,
-        df_positions=df_positions,
-        verbose=False,
-    )
-    assert "X_pca" not in model_no_pca_kmeans.obsm
-    assert "intrinsic_behavioral_cluster" in model_no_pca_kmeans.obs.columns
-
-
-def test_run_state_clustering_rebuilds_model_cache_when_toggling_pca(tmp_path, monkeypatch):
-    _force_serial_window_generation(monkeypatch)
-    df_positions = _make_positions_df()
-    output_dir = Path(tmp_path) / "toggle_pca_case"
-
-    run_state_clustering(
-        features=["speed", "elongation"],
-        binary_features_to_group=[],
-        output_dir=output_dir,
-        cell_type="tcell",
-        window_size=4,
-        min_spacing=1,
-        n_neighbors=10,
-        min_dist=0.1,
-        resolution=3,
-        descriptive_features=["mean", "median", "std"],
-        pca_var_selection=0.95,
-        use_pca=True,
-        clustering_method="kmeans",
-        incomplete_window_policy="partial",
-        random_state=13,
-        reuse_prepared_dataset=True,
-        plot_exemplar_videos=False,
-        df_positions=df_positions,
-        verbose=False,
-    )
-
-    model_no_pca = run_state_clustering(
-        features=["speed", "elongation"],
-        binary_features_to_group=[],
-        output_dir=output_dir,
-        cell_type="tcell",
-        window_size=4,
-        min_spacing=1,
-        n_neighbors=10,
-        min_dist=0.1,
-        resolution=3,
-        descriptive_features=["mean", "median", "std"],
-        pca_var_selection=0.95,
-        use_pca=False,
-        clustering_method="kmeans",
-        incomplete_window_policy="partial",
-        random_state=13,
-        reuse_prepared_dataset=True,
-        plot_exemplar_videos=False,
-        df_positions=df_positions,
-        verbose=False,
-    )
-    assert "X_pca" not in model_no_pca.obsm
-    assert model_no_pca.uns["preprocessing"]["model_cache"]["pca"]["enabled"] is False
-    assert model_no_pca.uns["preprocessing"]["model_cache"]["neighbors"]["use_rep"] == "X"
-    assert model_no_pca.uns["preprocessing"]["model_cache"]["umap"]["use_rep"] == "X"
-    assert model_no_pca.uns["preprocessing"]["model_cache"]["clustering"]["use_rep"] == "X"
-    assert model_no_pca.uns["clustering"]["use_pca"] is False
-    assert model_no_pca.uns["clustering"]["use_rep"] == "X"
-
-    model_with_pca_again = run_state_clustering(
-        features=["speed", "elongation"],
-        binary_features_to_group=[],
-        output_dir=output_dir,
-        cell_type="tcell",
-        window_size=4,
-        min_spacing=1,
-        n_neighbors=10,
-        min_dist=0.1,
-        resolution=3,
-        descriptive_features=["mean", "median", "std"],
-        pca_var_selection=0.95,
-        use_pca=True,
-        clustering_method="kmeans",
-        incomplete_window_policy="partial",
-        random_state=13,
-        reuse_prepared_dataset=True,
-        plot_exemplar_videos=False,
-        df_positions=df_positions,
-        verbose=False,
-    )
-    assert "X_pca" in model_with_pca_again.obsm
-    assert model_with_pca_again.uns["preprocessing"]["model_cache"]["pca"]["enabled"] is True
-    assert model_with_pca_again.uns["preprocessing"]["model_cache"]["neighbors"]["use_rep"] == "X_pca"
-    assert model_with_pca_again.uns["clustering"]["use_pca"] is True
-    assert model_with_pca_again.uns["clustering"]["use_rep"] == "X_pca"
-
-
-def test_run_state_clustering_rebuilds_older_model_cache_missing_pca_metadata(tmp_path, monkeypatch):
-    _force_serial_window_generation(monkeypatch)
-    df_positions = _make_positions_df()
-    output_dir = Path(tmp_path) / "older_model_cache_missing_pca_meta"
-
-    run_state_clustering(
-        features=["speed", "elongation"],
-        binary_features_to_group=[],
-        output_dir=output_dir,
-        cell_type="tcell",
-        window_size=4,
-        min_spacing=1,
-        n_neighbors=10,
-        min_dist=0.1,
-        resolution=3,
-        descriptive_features=["mean", "median", "std"],
-        pca_var_selection=0.95,
-        use_pca=True,
-        clustering_method="kmeans",
-        incomplete_window_policy="partial",
-        random_state=17,
-        reuse_prepared_dataset=True,
-        plot_exemplar_videos=False,
-        df_positions=df_positions,
-        verbose=False,
-    )
-
-    state_paths = _resolve_state_paths(output_dir, "tcell")
-    stale_model = sc.read_h5ad(state_paths.model_adata_path)
-    del stale_model.uns["preprocessing"]["model_cache"]["pca"]["enabled"]
-    stale_model.write(state_paths.model_adata_path, compression="gzip")
-
-    rebuilt_model = run_state_clustering(
-        features=["speed", "elongation"],
-        binary_features_to_group=[],
-        output_dir=output_dir,
-        cell_type="tcell",
-        window_size=4,
-        min_spacing=1,
-        n_neighbors=10,
-        min_dist=0.1,
-        resolution=3,
-        descriptive_features=["mean", "median", "std"],
-        pca_var_selection=0.95,
-        use_pca=True,
-        clustering_method="kmeans",
-        incomplete_window_policy="partial",
-        random_state=17,
-        reuse_prepared_dataset=True,
-        plot_exemplar_videos=False,
-        df_positions=df_positions,
-        verbose=False,
-    )
-
-    assert "X_pca" in rebuilt_model.obsm
-    assert rebuilt_model.uns["preprocessing"]["model_cache"]["pca"]["enabled"] is True
-
 
 def test_run_hmm_state_clustering_fixed_k_outputs(tmp_path):
     df_positions = _make_positions_df()
@@ -511,9 +232,12 @@ def test_run_hmm_state_clustering_fixed_k_outputs(tmp_path):
     state_paths = _resolve_state_paths(output_dir, "tcell")
     saved_model = sc.read_h5ad(state_paths.model_adata_path)
     assert saved_model.n_obs == model_adata.n_obs
-    assert (state_paths.state_clustering_outdir / "behavioral_clustering_diagnostics.pdf").exists()
-    assert (state_paths.state_clustering_outdir / "behavioral_clustering_feature_distributions.pdf").exists()
-    assert (state_paths.state_clustering_outdir / "behavioral_clustering_hmm_state_counts.csv").exists()
+    quality_control_raw_dir = (
+        state_classification._resolve_hmm_quality_control_outdir(state_paths=state_paths) / "raw"
+    )
+    assert (quality_control_raw_dir / "behavioral_clustering_diagnostics.pdf").exists()
+    assert (quality_control_raw_dir / "behavioral_clustering_feature_distributions.pdf").exists()
+    assert (quality_control_raw_dir / "behavioral_clustering_hmm_state_counts.csv").exists()
 
 
 def test_run_hmm_state_clustering_leave_unassigned_start_offset_writes_diagnostics_pdf(tmp_path):
@@ -908,7 +632,7 @@ def test_hmm_deployment_artifact_roundtrip_and_apply(tmp_path):
         key=state_classification._mixed_label_sort_key,
     )
     mapping = {label: f"state_{label}" for label in intrinsic_labels}
-    state_classification.relabel_cluster_ids(
+    relabel_cluster_ids(
         adata=model_adata,
         mapping=mapping,
         cluster_key=state_classification.INTRINSIC_STATE_COL,
@@ -926,7 +650,7 @@ def test_hmm_deployment_artifact_roundtrip_and_apply(tmp_path):
         key=state_classification._mixed_label_sort_key,
     )
     full_mapping = {label: f"curated_{idx}_{label}" for idx, label in enumerate(full_labels, start=1)}
-    state_classification.relabel_cluster_ids(
+    relabel_cluster_ids(
         adata=model_adata,
         mapping=full_mapping,
         cluster_key=state_classification.FULL_STATE_COL,
@@ -1050,7 +774,7 @@ def test_relabel_cluster_ids_preserves_nan_rows_through_hmm_rename_and_save(tmp_
         key=state_classification._mixed_label_sort_key,
     )
     mapping = {label: f"state_{label}" for label in intrinsic_labels}
-    state_classification.relabel_cluster_ids(
+    relabel_cluster_ids(
         adata=model_adata,
         mapping=mapping,
         cluster_key=state_classification.INTRINSIC_STATE_COL,
@@ -1079,7 +803,7 @@ def test_relabel_cluster_ids_preserves_nan_rows_through_hmm_rename_and_save(tmp_
         key=state_classification._mixed_label_sort_key,
     )
     full_mapping = {label: f"curated_{label}" for label in full_labels}
-    state_classification.relabel_cluster_ids(
+    relabel_cluster_ids(
         adata=model_adata,
         mapping=full_mapping,
         cluster_key=state_classification.FULL_STATE_COL,
@@ -1132,7 +856,7 @@ def test_hmm_deployment_artifact_updates_after_intrinsic_rename(tmp_path):
         )
     ):
         first_mapping[str(label)] = "merged_state" if idx < 2 else f"kept_{label}"
-    state_classification.relabel_cluster_ids(
+    relabel_cluster_ids(
         adata=model_adata,
         mapping=first_mapping,
         cluster_key=state_classification.INTRINSIC_STATE_COL,
@@ -1151,7 +875,7 @@ def test_hmm_deployment_artifact_updates_after_intrinsic_rename(tmp_path):
         key=state_classification._mixed_label_sort_key,
     ):
         second_mapping[str(label)] = "final_merged" if str(label) == "merged_state" else f"final_{label}"
-    state_classification.relabel_cluster_ids(
+    relabel_cluster_ids(
         adata=model_adata,
         mapping=second_mapping,
         cluster_key=state_classification.INTRINSIC_STATE_COL,
@@ -1279,7 +1003,7 @@ def test_run_hmm_state_clustering_start_offset_backfills_initial_rows(tmp_path):
     for _, group in model_adata.obs.sort_values(["sample_name", "TrackID", "position_t"]).groupby(
         ["sample_name", "TrackID"],
         sort=False,
-        observed=False,
+        observed=True,
     ):
         labels = pd.Series(
             group[state_classification.INTRINSIC_STATE_COL],
@@ -1372,7 +1096,7 @@ def test_hmm_deployment_apply_start_offset_leave_unassigned(tmp_path):
     assert pd.to_numeric(multi_frame_first_rows["intrinsic_behavioral_cluster_confidence"], errors="coerce").isna().all()
 
     scored_rows = obs.groupby(["sample_name", "TrackID"], sort=False, observed=False).nth(1)
-    scored_rows = scored_rows[scored_rows.index.get_level_values("TrackID").astype(int) != 0]
+    scored_rows = scored_rows[scored_rows["TrackID"].astype(int) != 0]
     assert pd.Series(scored_rows[state_classification.INTRINSIC_STATE_COL], dtype="string").notna().all()
     assert pd.Series(scored_rows[state_classification.FULL_STATE_COL], dtype="string").notna().all()
 

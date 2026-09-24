@@ -1,32 +1,34 @@
+"""Deprecated windowed-feature RandomForest classifier pipeline.
+
+This module predates the HMM-based state classification pipeline in
+``behav3d.analysis.behavior.state.classification`` / ``.hmm``. Training a new
+classifier from scratch (KMeans/Leiden clustering + RandomForestClassifier
+fitting) has been fully removed here -- see
+``behav3d/deprecated/state_classification_clustering.py`` and
+``behav3d/deprecated/analysis/clustering/state_classification_working_copy.py``
+for that. What remains is kept only so previously-trained classifier
+artifacts (pickled before the HMM pipeline existed) can still be applied to
+new data via the deployment panel in
+``behav3d.widgets.state_classification``.
+"""
+
+import copy
+import pickle
+import warnings
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from pandas.api.types import is_numeric_dtype
-import json
-import copy
-import warnings
-import time
-import shutil
-from matplotlib.backends.backend_pdf import PdfPages
-
-from pathlib import Path
-import pickle
 
 import anndata as ad
 ad.settings.allow_write_nullable_strings = True
 
 import scanpy as sc
-from sklearn.cluster import KMeans
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.inspection import permutation_importance
-from sklearn.metrics import accuracy_score, balanced_accuracy_score, classification_report, confusion_matrix, f1_score
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
 from behav3d.core.anndata import df_to_adata
 from behav3d.features.rolling_window_features import create_descriptive_track_dataset
-from behav3d.analysis.behavior.general import relabel_cluster_ids
-from behav3d.analysis.behavior.general.leiden import run_pca, run_leiden_clustering
 from behav3d.analysis.behavior.state.visualization.plots.state_composition import (
     save_state_composition_report,
 )
@@ -35,20 +37,13 @@ from behav3d.analysis.behavior.state.visualization.plots.state_transitions impor
 )
 from behav3d.analysis.behavior.state.visualization.backprojection import (
     export_behavioral_state_backprojection_zarrs,
-    show_behavioral_state_backprojection,
-)
-from behav3d.analysis.behavior.state.visualization.videos.track_max_projection import (
-    save_selected_fulltrack_cluster_videos,
 )
 from behav3d.analysis.behavior.state.utils import (
-    A4_LANDSCAPE,
     _apply_log1p_to_feature_matrix,
     _apply_log_scaling_to_continuous_matrix,
     _coerce_log_scaling_params,
     _get_classification_state_colors,
     _get_classification_state_order,
-    _infer_binary_group_constraints,
-    _invert_log_scaling_in_continuous_matrix,
     _mixed_label_sort_key,
     _normalize_label_color_map,
     _normalize_log_scale_feature_selectors,
@@ -57,9 +52,7 @@ from behav3d.analysis.behavior.state.utils import (
     _resolve_log_scale_feature_cols,
     _resolve_positions_csv_path,
     _resolve_state_paths,
-    _resolve_state_stage_paths,
     _save_adata_obs_csv,
-    _save_pdf_page_a4,
     _sanitize_filename_token,
     _to_numpy_2d,
     _vdone,
@@ -159,36 +152,6 @@ def _descriptor_column_mismatch_reasons(feature_cols, *, features, descriptive_f
         "feature columns conflict with requested descriptive_features "
         f"(unexpected columns: {unexpected[:10]})"
     ]
-
-
-
-
-def build_identity_cluster_mapping(
-    adata,
-    cluster_col="intrinsic_behavioral_cluster",
-):
-    """
-    Build an identity mapping dict from unique values in a cluster column.
-
-    Example:
-        {"dead": "dead", "scanner": "scanner", "static": "static"}
-    """
-    if not hasattr(adata, "obs"):
-        raise ValueError("adata must have an .obs attribute.")
-    if cluster_col not in adata.obs.columns:
-        raise ValueError(f"Missing '{cluster_col}' in adata.obs.")
-
-    labels = (
-        pd.Series(adata.obs[cluster_col])
-        .astype("string")
-        .dropna()
-        .unique()
-        .tolist()
-    )
-    labels = sorted([str(x) for x in labels], key=_mixed_label_sort_key)
-    return {label: label for label in labels}
-
-
 
 
 def prepare_state_classification_dataset(
@@ -1978,82 +1941,3 @@ def apply_state_classifiers_to_full_dataset(
     return adata_full
 
 
- 
-if __name__ == "__main__":
-    """
-    Return lightweight defaults for quick test runs.
-
-    This helper is optional and not used by the normal pipeline.
-    """
-    from behav3d.core.metadata import load_behav3d_metadata
-    ssd_dir = r"/Volumes/T7_Sam/"
-    ssd_dir = Path(ssd_dir)
-    output_dir = Path(ssd_dir, r"BHVD_BEHAV3D/BEHAV3D_python/runs/ROCHE")
-    metadata_csv_path = Path(ssd_dir, r"BHVD_BEHAV3D/BEHAV3D_python/runs/ROCHE/metadata.csv")
-    # metadata_csv_path = Path(ssd_dir, r"BHVD_BEHAV3D/BEHAV3D_python/runs/ROCHE/metadata_home.csv")
-    metadata = load_behav3d_metadata(metadata_csv_path)
-    output_dir = Path("/Volumes/T7_Sam/BHVD_BEHAV3D/BEHAV3D_python/runs/ROCHE")
-    cell_type = "tcell"
-    window_size = 5
-    max_samples = None
-    min_spacing = 10
-    n_neighbors = 60
-    resolution = 0.2
-    features=[
-        "percentage_dead_mask",
-        # "mean_dead_dye",
-        # "nr_dead_mask_pixels",
-        # "organoid_contact_pixels",
-        # "tcell_contact_pixels",
-        # "mean_square_displacement",
-        "speed",
-        # "directional_persistence",
-        "extent",
-        "elongation",
-        "sphericity",
-        "solidity",
-        # "oblateness",
-        # "prolateness"
-        # "surface_to_volume_ratio"
-    ]
-    
-    # Define binary features to use for grouping
-    binary_features_to_group = [
-        "organoid_contact_pixels",
-        "tcell_contact_pixels",
-    ]
-    
-    descriptive_features = (
-        "mean",
-        "median",
-        "std",
-        "net_displacement",
-        "straightness",
-        "mean_square_displacement",
-    )
-    pca_var_selection = 0.95
-    clustering_method = "leiden"
-    resolutions = 0.2
-    lower_quantile_cap = None
-    upper_quantile_cap = 0.99
-    incomplete_window_policy = "partial"
-    random_state = 12345
-    reuse_prepared_dataset = True
-    save_prepared_dataset = True
-    label_transfer_method = "classifier"
-    cell_type = "tcell"
-    classifier_backend = "random_forest"
-    classifier_n_estimators = 300
-    classifier_min_samples_leaf = 2
-    classifier_n_jobs = -1
-    classifier_max_depth = None
-    classifier_min_samples_split = 2
-    classifier_max_features = "sqrt"
-    classifier_class_weight = None
-    classifier_confidence_col = "intrinsic_behavioral_cluster_confidence"
-    save_label_classifier = True
-    
-    
-    train_full_label_classifier = True
-    verbose=True
-    

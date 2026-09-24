@@ -33,6 +33,7 @@ from behav3d.analysis.behavior.state.utils import (
     _resolve_state_paths,
     _set_classification_state_colors,
     _set_classification_state_order,
+    build_identity_cluster_mapping,
 )
 
 from behav3d.analysis.behavior.state.visualization.backprojection import (
@@ -52,11 +53,6 @@ from behav3d.analysis.behavior.state.visualization.plots.state_composition impor
 from behav3d.analysis.behavior.utils import _sanitize_filename_token
 from behav3d.analysis.behavior.state.visualization.plots.state_transitions import (
     save_state_transition_report,
-)
-from behav3d.analysis.behavior.state.legacy_clustering import (
-    apply_state_classifiers_to_full_dataset,
-    build_identity_cluster_mapping,
-    load_state_classifier_artifact,
 )
 from behav3d.widgets.base_state_classification import (
     BaseStateClassificationPanel,
@@ -783,16 +779,6 @@ class StateClassificationHMMPanel(BaseStateClassificationPanel):
                 self.apply_hmm_default_paths_html,
                 widgets.HBox([self.btn_apply_hmm_artifact, self.apply_hmm_spinner]),
                 self.out_apply_hmm,
-            ]
-        )
-        self.apply_section = widgets.VBox(
-            [
-                widgets.HTML("<b>Apply saved classifier artifacts</b>"),
-                self.apply_full_pkl_picker,
-                self.apply_intrinsic_pkl_picker,
-                self.apply_default_paths_html,
-                widgets.HBox([self.btn_apply, self.apply_spinner]),
-                self.out_apply,
             ]
         )
 
@@ -3043,51 +3029,6 @@ class StateClassificationHMMPanel(BaseStateClassificationPanel):
                 self._set_busy(self.btn_cluster, self.cluster_spinner, busy=False)
                 self._refresh_enablement()
 
-    def _on_apply_clicked(self, _):
-        self._set_busy(self.btn_apply, self.apply_spinner, busy=True)
-        self.out_apply.clear_output()
-        with self.out_apply:
-            try:
-                self._persist_current_settings()
-                full_pkl_path = str(self.apply_full_pkl_picker.value).strip()
-                intrinsic_pkl_path = str(self.apply_intrinsic_pkl_picker.value).strip()
-                if full_pkl_path == "":
-                    raise ValueError("Please provide a full classification .pkl path.")
-
-                full_artifact = self._coerce_classifier_artifact(full_pkl_path, "Full")
-                intrinsic_artifact = None
-                if intrinsic_pkl_path != "":
-                    intrinsic_artifact = self._coerce_classifier_artifact(intrinsic_pkl_path, "Intrinsic")
-
-                self.adata_full = self._apply_classifiers_to_full_dataset(
-                    intrinsic_artifact=intrinsic_artifact,
-                    full_artifact=full_artifact,
-                )
-
-                n_rows = int(self.adata_full.n_obs)
-                n_intrinsic = (
-                    int(self.adata_full.obs[INTRINSIC_STATE_COL].astype(str).nunique())
-                    if INTRINSIC_STATE_COL in self.adata_full.obs.columns
-                    else 0
-                )
-                n_full = (
-                    int(self.adata_full.obs[FULL_STATE_COL].astype(str).nunique())
-                    if FULL_STATE_COL in self.adata_full.obs.columns
-                    else 0
-                )
-                _winfo(
-                    "state-hmm-widget",
-                    (
-                        "Apply finished: "
-                        f"rows={n_rows}, intrinsic_clusters={n_intrinsic}, full_clusters={n_full}"
-                    ),
-                )
-            except Exception:
-                traceback.print_exc()
-            finally:
-                self._set_busy(self.btn_apply, self.apply_spinner, busy=False)
-                self._refresh_enablement()
-
     def _on_apply_hmm_artifact_clicked(self, _):
         self._set_busy(self.btn_apply_hmm_artifact, self.apply_hmm_spinner, busy=True)
         self.out_apply_hmm.clear_output()
@@ -3129,29 +3070,12 @@ class StateClassificationHMMPanel(BaseStateClassificationPanel):
                 self._set_busy(self.btn_apply_hmm_artifact, self.apply_hmm_spinner, busy=False)
                 self._refresh_enablement()
 
-    def _coerce_classifier_artifact(self, path, label):
-        if path == "":
-            raise ValueError(f"Please provide a {label.lower()} classification .pkl path.")
-        if not Path(path).exists():
-            raise FileNotFoundError(f"{label} classifier file not found: {path}")
-        return load_state_classifier_artifact(path)
-
     def _coerce_hmm_deployment_artifact(self, path):
         if path == "":
             raise ValueError("Please provide an HMM deployment artifact .pkl path.")
         if not Path(path).exists():
             raise FileNotFoundError(f"HMM deployment artifact file not found: {path}")
         return load_hmm_deployment_artifact(path)
-
-    def _apply_classifiers_to_full_dataset(self, *, intrinsic_artifact, full_artifact):
-        return apply_state_classifiers_to_full_dataset(
-            output_dir=self.output_dir,
-            cell_type=self._current_cell_type(),
-            label_classifier_artifact=intrinsic_artifact,
-            full_label_classifier_artifact=full_artifact,
-            combine_binary_with_continuous=False,
-            verbose=True,
-        )
 
     def _apply_hmm_deployment_artifact_to_full_dataset(self, *, hmm_artifact):
         return apply_hmm_deployment_artifact_to_full_dataset(
@@ -3448,7 +3372,6 @@ class StateClassificationHMMDeploymentPanel(StateClassificationHMMPanel):
             self.steps.selected_index = None
 
     def _build_apply_section(self):
-        BaseStateClassificationPanel._build_apply_section(self)
         self.apply_hmm_artifact_picker = self._make_hmm_artifact_picker()
         self.apply_hmm_artifact_picker.filter_pattern = "*.pkl"
         self.apply_hmm_default_paths_html = widgets.HTML("")
@@ -3477,8 +3400,6 @@ class StateClassificationHMMDeploymentPanel(StateClassificationHMMPanel):
         super()._refresh_enablement()
         has_cell_type = self._current_cell_type() != ""
         has_hmm_artifact_input = str(self.apply_hmm_artifact_picker.value).strip() != ""
-        if hasattr(self, "btn_apply"):
-            self.btn_apply.disabled = True
         self.btn_apply_hmm_artifact.disabled = not (has_cell_type and has_hmm_artifact_input)
 
 

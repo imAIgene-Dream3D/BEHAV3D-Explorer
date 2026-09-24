@@ -688,6 +688,32 @@ def _rebuild_full_behavioral_cluster_from_intrinsic(
     return adata
 
 
+def build_identity_cluster_mapping(
+    adata,
+    cluster_col="intrinsic_behavioral_cluster",
+):
+    """
+    Build an identity mapping dict from unique values in a cluster column.
+
+    Example:
+        {"dead": "dead", "scanner": "scanner", "static": "static"}
+    """
+    if not hasattr(adata, "obs"):
+        raise ValueError("adata must have an .obs attribute.")
+    if cluster_col not in adata.obs.columns:
+        raise ValueError(f"Missing '{cluster_col}' in adata.obs.")
+
+    labels = (
+        pd.Series(adata.obs[cluster_col])
+        .astype("string")
+        .dropna()
+        .unique()
+        .tolist()
+    )
+    labels = sorted([str(x) for x in labels], key=_mixed_label_sort_key)
+    return {label: label for label in labels}
+
+
 @dataclass(frozen=True)
 class StatePaths:
     output_dir: Path
@@ -709,15 +735,6 @@ class StatePaths:
     full_classifier_default_path: Path
     state_composition_outdir: Path
     state_transitions_outdir: Path
-
-
-def _resolve_state_outdir(output_dir, cell_type):
-    if cell_type is None or len(str(cell_type).strip()) == 0:
-        raise ValueError("cell_type is required.")
-    root = _resolve_output_dir(output_dir)
-    state_outdir = root / "analysis" / str(cell_type) / "behavioral_states"
-    state_outdir.mkdir(parents=True, exist_ok=True)
-    return state_outdir
 
 
 def _resolve_state_paths(output_dir, cell_type):
