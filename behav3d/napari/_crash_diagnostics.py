@@ -17,10 +17,21 @@ a terminal window that may already be gone. Two gaps, closed here:
   SIGILL/SIGFPE) and dumps every live thread's Python stack before the
   process dies.
 
-Both are wired to the same timestamped log file under ``~/.behav3d/logs/``
-so a single file has the full picture: Qt's own warning trail leading up to
-a crash, followed by the Python-level stack of every thread at the moment
-it happened.
+Both are wired to the same timestamped log file under the ``logs/``
+directory at the root of the BEHAV3D-Explorer checkout, so a single file
+has the full picture: Qt's own warning trail leading up to a crash,
+followed by the Python-level stack of every thread at the moment it
+happened.
+
+A third gap this closes: regular ``logging.getLogger(__name__)`` calls made
+anywhere under ``behav3d.*`` did not reach this file either (nothing in the
+app ever attached a handler to any logger) -- so a crash like the QThread
+one above left no trail of *why* it happened (which widget/dock was being
+torn down, whether a background operation was mid-run), only *that* it
+happened. ``install_crash_diagnostics`` now also attaches a handler to the
+``"behav3d"`` logger, so lifecycle breadcrumbs logged by e.g.
+``behav3d.napari._background_runner`` land in the same file, in the same
+timeline, as the Qt/faulthandler output above.
 """
 from __future__ import annotations
 
@@ -32,7 +43,10 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_LOG_DIR = Path.home() / ".behav3d" / "logs"
+# behav3d/napari/_crash_diagnostics.py -> repo root is three parents up.
+# Editable-installed (pip install -e .), so __file__ resolves to the actual
+# checkout, not a copy under site-packages.
+_LOG_DIR = Path(__file__).resolve().parents[2] / "logs"
 
 # Kept at module scope: faulthandler and the Qt message handler both need
 # this file object to stay open and referenced for the lifetime of the
@@ -82,7 +96,7 @@ def _make_qt_message_handler(log_file, previous_handler):
 
 def install_crash_diagnostics() -> None:
     """Enable faulthandler + a Qt message logger, both writing to a
-    timestamped file under ``~/.behav3d/logs/``.
+    timestamped file under the repo's ``logs/`` directory.
 
     Several dependencies (vispy's Qt canvas backend, in particular) install
     their *own* ``qInstallMessageHandler`` as a side effect of being
@@ -104,6 +118,18 @@ def install_crash_diagnostics() -> None:
             _log_file = open(log_path, "a", buffering=1)
             faulthandler.enable(file=_log_file, all_threads=True)
             print(f"[BEHAV3D] Crash diagnostics: logging to {log_path}", flush=True)
+
+            # Attach to the "behav3d" logger (not the root logger) so every
+            # behav3d.* module's logging.getLogger(__name__) call propagates
+            # up into this file automatically, with no per-file wiring.
+            behav3d_logger = logging.getLogger("behav3d")
+            file_handler = logging.StreamHandler(_log_file)
+            file_handler.setFormatter(logging.Formatter(
+                "[%(asctime)s.%(msecs)03d] %(name)s %(levelname)s: %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            ))
+            behav3d_logger.addHandler(file_handler)
+            behav3d_logger.setLevel(logging.INFO)
 
         from qtpy.QtCore import qInstallMessageHandler
 

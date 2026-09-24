@@ -42,6 +42,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from behav3d.napari._background_runner import BackgroundOperation
 from behav3d.napari._pdf_view import (
     open_externally,
     open_image_in_napari,
@@ -56,32 +57,6 @@ from behav3d.napari._results_catalog import (
     group_by_tree,
     scan_outputs,
 )
-
-
-# ---------------------------------------------------------------------------
-# Per-tick scan cache
-# ---------------------------------------------------------------------------
-# Every top-level tab (Filtering, Feature Extraction, Analysis) embeds its
-# own ResultsPanel, but all of them point at the same output directory and
-# refresh in response to the same events (metadata_loaded, job-finished
-# callbacks) — so a single event can trigger scan_outputs() back-to-back for
-# the exact same directory. scan_outputs() walks the whole analysis/ tree
-# twice (os.walk + rglob("*.zarr")), so that's wasted disk I/O repeated per
-# panel. Memoize per output_dir for the rest of the current Qt event-loop
-# tick only (cleared via a zero-delay QTimer): simultaneous refreshes share
-# one real scan, while any later refresh (e.g. after a background job
-# writes new files) always re-scans, so results can never go stale.
-_scan_cache: dict[str, list[ResultFile]] = {}
-
-
-def _scan_outputs_coalesced(output_dir: Path) -> list[ResultFile]:
-    key = str(output_dir)
-    if key in _scan_cache:
-        return _scan_cache[key]
-    results = scan_outputs(output_dir)
-    _scan_cache[key] = results
-    QTimer.singleShot(0, lambda: _scan_cache.pop(key, None))
-    return results
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +158,14 @@ class ResultsPanel(QWidget):
         self.viewer = viewer
         self.metadata_loader = metadata_loader
         self._collapsed = False
+        # scan_outputs() walks the whole analysis/ tree (os.walk, pruning
+        # .zarr stores) and can take seconds on a large or network-mounted
+        # output directory, so it runs off the Qt main thread. The last
+        # scan's raw file list is cached so the "Show non-viewable"
+        # checkbox can re-filter/re-render without a fresh disk walk.
+        self._scan_bg = BackgroundOperation(self)
+        self._last_scan_out_dir: Optional[Path] = None
+        self._last_scan_files: Optional[list[ResultFile]] = None
         self._init_ui()
 
         if metadata_loader is not None and hasattr(
@@ -227,7 +210,7 @@ class ResultsPanel(QWidget):
             "Include CSV / HTML / JSON / Zarr entries. When unchecked, "
             "only PDFs and images are listed."
         )
-        self.chk_show_extras.toggled.connect(self.refresh)
+        self.chk_show_extras.toggled.connect(self._on_show_extras_toggled)
         header.addWidget(self.chk_show_extras)
 
         header.addStretch(1)
@@ -386,10 +369,13 @@ class ResultsPanel(QWidget):
 
     # ── Public API ─────────────────────────────────────────────────────
     def refresh(self):
-        """Re-scan the output directory and rebuild the tree."""
-        self.tree.clear()
+        """Re-scan the output directory (in the background) and rebuild the
+        tree once the scan completes."""
         out_dir = self._output_dir()
+        self.tree.clear()
         if out_dir is None:
+            self._last_scan_out_dir = None
+            self._last_scan_files = None
             placeholder = QTreeWidgetItem(
                 self.tree,
                 ["⚠ No output directory configured"],
@@ -400,7 +386,50 @@ class ResultsPanel(QWidget):
             placeholder.setFlags(placeholder.flags() & ~Qt.ItemIsSelectable)
             return
 
-        files = _scan_outputs_coalesced(out_dir)
+        scanning = QTreeWidgetItem(self.tree, ["Scanning output directory…"])
+        scanning.setFlags(scanning.flags() & ~Qt.ItemIsSelectable)
+
+        if self._scan_bg.is_running():
+            # A scan for this panel is already in flight (e.g. rapid tab
+            # switches) -- its on_done will rebuild the tree with fresh
+            # results, so starting a second walk here would be redundant.
+            return
+
+        self._scan_bg.run(
+            fn=scan_outputs,
+            args=(out_dir,),
+            inject_progress=False,
+            on_done=lambda files: self._on_scan_done(out_dir, files),
+            on_failed=self._on_scan_failed,
+        )
+
+    def _on_scan_done(self, out_dir: Path, files: list):
+        self._last_scan_out_dir = out_dir
+        self._last_scan_files = files
+        self._build_tree(out_dir, files)
+
+    def _on_scan_failed(self, err: str):
+        self.tree.clear()
+        error_item = QTreeWidgetItem(
+            self.tree, [f"⚠ Could not scan outputs: {err}"]
+        )
+        error_item.setFlags(error_item.flags() & ~Qt.ItemIsSelectable)
+
+    def _on_show_extras_toggled(self, *_):
+        """Re-filter/re-render from the last scan instead of re-walking
+        disk -- the checkbox only changes which already-scanned files are
+        shown."""
+        if (
+            self._last_scan_files is not None
+            and self._last_scan_out_dir == self._output_dir()
+        ):
+            self._build_tree(self._last_scan_out_dir, self._last_scan_files)
+        else:
+            self.refresh()
+
+    def _build_tree(self, out_dir: Path, files: list):
+        """Rebuild the tree widget from an already-scanned file list."""
+        self.tree.clear()
         if not self.chk_show_extras.isChecked():
             files = [f for f in files if f.is_viewable]
         if not files:

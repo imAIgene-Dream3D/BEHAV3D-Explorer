@@ -33,6 +33,8 @@ ipywidgets layer) so notebook behaviour is unaffected.
 """
 from __future__ import annotations
 
+import logging
+import threading
 import time
 import traceback
 from dataclasses import dataclass
@@ -40,6 +42,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 
 from qtpy.QtCore import QObject, QThread, QTimer, Qt, Signal
 from qtpy.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QLabel,
     QProgressBar,
@@ -50,6 +53,8 @@ try:
     from napari.utils import progress as _NapariProgress
 except Exception:  # pragma: no cover - napari < 0.5 or import error fallback
     _NapariProgress = None  # type: ignore[assignment]
+
+logger = logging.getLogger(__name__)
 
 
 __all__ = [
@@ -375,6 +380,51 @@ def close_activity_progress(pbr, viewer=None, *, delay_ms: int = 1000) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Thread-wait helper
+# ---------------------------------------------------------------------------
+def _wait_pumping(thread: QThread, timeout_ms: int) -> bool:
+    """Like ``QThread.wait()``, but also pumps the calling thread's Qt event
+    loop while waiting.
+
+    ``BackgroundOperation.run()`` connects ``worker.finished`` (emitted on
+    the *worker* thread) to ``thread.quit`` (a slot on the ``QThread``
+    object, which lives on whichever thread created it). Qt resolves that
+    as a queued, cross-thread connection, so ``thread.quit()`` is only
+    actually invoked once the *creating* thread's event loop processes that
+    queued call -- which is also what lets the worker thread's default
+    ``run()`` (``exec_()``) return. A plain, non-pumping ``QThread.wait()``
+    called from the creating thread (e.g. from an ``aboutToQuit`` handler,
+    which does not itself pump) would therefore block for the full timeout
+    even after the worker has already finished its work — see the
+    docstring of :meth:`BackgroundOperation.wait` for where this is used.
+    """
+    app = QApplication.instance()
+    if app is None:
+        # No event loop to pump (e.g. a non-GUI context) -- best effort,
+        # a plain wait is at least correct when nothing needs dispatching.
+        try:
+            return bool(thread.wait(timeout_ms if timeout_ms >= 0 else 0x7FFFFFFF))
+        except Exception:
+            return False
+    unlimited = timeout_ms < 0
+    deadline = None if unlimited else (time.monotonic() + timeout_ms / 1000.0)
+    try:
+        while True:
+            if unlimited:
+                slice_ms = 20
+            else:
+                remaining_ms = int((deadline - time.monotonic()) * 1000)
+                if remaining_ms <= 0:
+                    return bool(thread.wait(0))
+                slice_ms = max(0, min(20, remaining_ms))
+            if thread.wait(slice_ms):
+                return True
+            app.processEvents()
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Generic worker
 # ---------------------------------------------------------------------------
 class _AsyncWorker(QObject):
@@ -400,7 +450,8 @@ class _AsyncWorker(QObject):
     progress = Signal(int, int, str)
 
     def __init__(self, fn: Callable[..., Any], args: tuple, kwargs: dict,
-                 inject_progress: bool = True) -> None:
+                 inject_progress: bool = True,
+                 cancel_event: Optional[threading.Event] = None) -> None:
         super().__init__()
         self._fn = fn
         self._args = tuple(args or ())
@@ -411,6 +462,10 @@ class _AsyncWorker(QObject):
             # auto-connection to the Qt thread is handled at the
             # ``progress.connect(...)`` site in :class:`BackgroundOperation`.
             self._kwargs.setdefault("progress_cb", self._emit_progress)
+        if cancel_event is not None:
+            # Same injection pattern as progress_cb: the backend opts in by
+            # accepting a ``cancel_check`` kwarg and polling it periodically.
+            self._kwargs.setdefault("cancel_check", cancel_event.is_set)
 
     def _emit_progress(self, current: int, total: int, label: str = "") -> None:
         try:
@@ -445,6 +500,9 @@ class _RunState:
     finish_delay_ms: int
     viewer: Any = None
     pending_result: Optional[Tuple[bool, Any]] = None
+    cancel_event: Optional[threading.Event] = None
+    desc: str = ""
+    fn_name: str = ""
 
 
 class BackgroundOperation(QObject):
@@ -453,8 +511,9 @@ class BackgroundOperation(QObject):
     One instance is intended to be owned by a single widget (tab or sub-
     panel) and re-used across runs.  Only one operation may be active at a
     time on a given instance; calling :meth:`run` again while a previous
-    operation is in flight raises ``RuntimeError`` so callers get a clear
-    signal rather than silently dropping the request.
+    operation is in flight prints a message and returns without starting
+    the new run, so callers get a clear signal rather than silently
+    dropping the request.
 
     Typical usage from a Qt button slot::
 
@@ -486,11 +545,21 @@ class BackgroundOperation(QObject):
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._state: Optional[_RunState] = None
+        # Threads that didn't stop within a cancel() timeout. Kept
+        # referenced (never dereferenced) so Qt can't destroy a QThread
+        # while its OS thread is still alive -- see cancel()'s docstring.
+        self._zombie_threads: List[Tuple[QThread, _AsyncWorker]] = []
 
     # ------------------------------------------------------------------
     def is_running(self) -> bool:
         st = self._state
-        return st is not None and st.thread is not None
+        # ``st.thread.isRunning()`` reflects Qt's own view of whether the OS
+        # thread is still alive, not just whether we haven't cleared
+        # ``self._state`` yet. ``QThread.start()`` flips Qt's internal
+        # "running" flag synchronously, before the OS thread body begins
+        # executing, so there is no false-negative window immediately after
+        # ``run()`` below calls ``thread.start()``.
+        return st is not None and st.thread is not None and st.thread.isRunning()
 
     # ------------------------------------------------------------------
     def run(
@@ -506,6 +575,7 @@ class BackgroundOperation(QObject):
         on_done: Optional[Callable[[Any], None]] = None,
         on_failed: Optional[Callable[[str], None]] = None,
         inject_progress: bool = True,
+        inject_cancel_check: bool = False,
         indeterminate: bool = False,
         finish_delay_ms: int = 600,
     ) -> None:
@@ -537,6 +607,12 @@ class BackgroundOperation(QObject):
             When ``False``, ``progress_cb`` is not added to ``kwargs``
             (use this for backends that take other progress keywords or
             none at all).
+        inject_cancel_check:
+            When ``True``, a ``cancel_check`` kwarg (a zero-arg callable
+            returning ``bool``) is added to ``kwargs`` so ``fn`` can poll it
+            and return early when :meth:`cancel` is called. Opt-in and
+            ``False`` by default: most existing backends don't accept this
+            kwarg, so defaulting to inject would break them.
         indeterminate:
             When ``True``, force the in-tab progress row into busy mode
             even when the worker emits progress (useful for backends that
@@ -548,6 +624,58 @@ class BackgroundOperation(QObject):
         if self.is_running():
             print("BackgroundOperation already running, ignoring request.", flush=True)
             return
+
+        # self._state may still reference a previous run. Note that
+        # is_running() above reads the same live QThread.isRunning() flag
+        # we'd have to re-read here to decide whether it's still alive --
+        # a second read can't tell us anything the first one didn't, so
+        # gating this park step on "isRunning() is True" makes it
+        # unreachable whenever is_running() has already told us False.
+        # Instead, always disconnect and park whatever old_state exists:
+        # parking an already-finished thread is a harmless no-op, but
+        # letting the plain ``self._state = state`` reassignment below drop
+        # the last Python reference to a thread that's still genuinely
+        # alive is exactly what produces the fatal "QThread: Destroyed
+        # while thread is still running" crash (see cancel()'s docstring).
+        # Do this before touching any of *this* run's buttons/progress
+        # row/activity dock so cleaning up the orphaned run can't stomp UI
+        # objects the caller is reusing for the new run.
+        old_state = self._state
+        if old_state is not None:
+            still_alive = old_state.thread is not None and old_state.thread.isRunning()
+            if still_alive:
+                logger.warning(
+                    "BackgroundOperation.run: previous run (fn=%s) still "
+                    "alive when starting new run (fn=%s) -- parking old "
+                    "thread as zombie instead of dropping the last "
+                    "reference to it.",
+                    old_state.fn_name, getattr(fn, "__name__", repr(fn)),
+                )
+            else:
+                logger.info(
+                    "BackgroundOperation.run: previous run (fn=%s) state "
+                    "was not cleared before starting new run (fn=%s) -- "
+                    "parking its thread defensively in case isRunning() "
+                    "misreported it as finished.",
+                    old_state.fn_name, getattr(fn, "__name__", repr(fn)),
+                )
+            if old_state.cancel_event is not None:
+                old_state.cancel_event.set()
+            if old_state.thread is not None:
+                for signal, slot in (
+                    (old_state.thread.finished, self._on_thread_finished),
+                    (old_state.worker.done, self._on_done),
+                    (old_state.worker.failed, self._on_failed),
+                    (old_state.worker.progress, self._on_progress),
+                ):
+                    try:
+                        signal.disconnect(slot)
+                    except (TypeError, RuntimeError):
+                        pass
+            self._cleanup_ui()
+            if old_state.thread is not None:
+                self._zombie_threads.append((old_state.thread, old_state.worker))
+            self._state = None
 
         kwargs = dict(kwargs or {})
         btn_list = [b for b in (buttons or []) if b is not None]
@@ -570,12 +698,20 @@ class BackgroundOperation(QObject):
         activity_progress = make_activity_progress(viewer, desc=desc)
 
         # Worker + thread.
+        cancel_event = threading.Event() if inject_cancel_check else None
         worker = _AsyncWorker(fn, tuple(args), kwargs,
-                              inject_progress=inject_progress)
+                              inject_progress=inject_progress,
+                              cancel_event=cancel_event)
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(thread.quit)
+
+        fn_name = getattr(fn, "__name__", repr(fn))
+        logger.info(
+            "BackgroundOperation run start: owner=%r fn=%s desc=%r",
+            self.parent(), fn_name, desc,
+        )
 
         state = _RunState(
             thread=thread,
@@ -586,6 +722,9 @@ class BackgroundOperation(QObject):
             buttons=btn_list,
             progress_row=progress_row,
             finish_delay_ms=finish_delay_ms,
+            cancel_event=cancel_event,
+            desc=desc,
+            fn_name=fn_name,
             viewer=viewer,
         )
         self._state = state
@@ -692,6 +831,11 @@ class BackgroundOperation(QObject):
         """
         st = self._state
         self._state = None
+        if st is not None:
+            logger.info(
+                "BackgroundOperation run finished: owner=%r fn=%s",
+                self.parent(), st.fn_name,
+            )
         # Also the safest point to reclaim any pyplot figure the backend
         # opened and never closed: the worker is gone, so nothing can be
         # mid-draw.
@@ -719,11 +863,99 @@ class BackgroundOperation(QObject):
         Returns ``True`` if the worker thread terminated within the
         timeout, ``False`` otherwise.  Useful only in tests / shutdown
         paths — interactive code should rely on the ``on_done`` callback.
+        Pumps the calling thread's Qt event loop while waiting -- see
+        :func:`_wait_pumping` for why that's required.
         """
         st = self._state
         if st is None or st.thread is None:
             return True
-        try:
-            return bool(st.thread.wait(timeout_ms if timeout_ms >= 0 else 0x7FFFFFFF))
-        except Exception:
-            return False
+        return _wait_pumping(st.thread, timeout_ms)
+
+    # ------------------------------------------------------------------
+    def cancel(self, timeout_ms: int = 500) -> bool:
+        """Best-effort stop of the in-flight run, safe to call at teardown.
+
+        Requests cooperative cancellation (if the run opted in via
+        ``inject_cancel_check``), disconnects this instance's Qt signal
+        handlers so a straggling worker's eventual completion can't corrupt
+        a later, unrelated run, then waits up to ``timeout_ms`` for the
+        thread to actually stop.
+
+        If it doesn't stop in time, the ``(thread, worker)`` pair is parked
+        in ``self._zombie_threads`` instead of being dropped — mirroring
+        ``_segment_editor.py``'s ``_cleanup()`` — because dropping the last
+        Python reference to a still-running ``QThread`` is exactly what
+        produces ``QThread: Destroyed while thread is still running``.
+        Either way, ``self._state`` is cleared so this instance is free to
+        start new work immediately; the scan-style backends this is
+        designed for are pure/read-only, so an abandoned zombie run has no
+        shared mutable state to corrupt.
+
+        Returns ``True`` if the thread stopped cleanly within the timeout.
+        """
+        st = self._state
+        if st is None:
+            return True
+
+        logger.info(
+            "BackgroundOperation cancel requested: owner=%r fn=%s",
+            self.parent(), st.fn_name,
+        )
+
+        if st.cancel_event is not None:
+            st.cancel_event.set()
+
+        for signal, slot in (
+            (st.thread.finished, self._on_thread_finished),
+            (st.worker.done, self._on_done),
+            (st.worker.failed, self._on_failed),
+            (st.worker.progress, self._on_progress),
+        ):
+            try:
+                signal.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass
+
+        finished_cleanly = _wait_pumping(st.thread, timeout_ms)
+
+        self._cleanup_ui()
+
+        if finished_cleanly:
+            logger.info(
+                "BackgroundOperation cancel: fn=%s stopped cleanly within %dms",
+                st.fn_name, timeout_ms,
+            )
+        else:
+            logger.warning(
+                "BackgroundOperation cancel: fn=%s did not stop within %dms, "
+                "parking as zombie thread",
+                st.fn_name, timeout_ms,
+            )
+            self._zombie_threads.append((st.thread, st.worker))
+
+        self._state = None
+        return finished_cleanly
+
+    # ------------------------------------------------------------------
+    def drain_zombies(self, timeout_ms: int = 0) -> int:
+        """Give parked zombie threads a further bounded wait.
+
+        Removes any that have since finished. Returns the number still
+        alive. Intended for a second, longer-timeout pass at app-quit time
+        (see ``BEHAV3DWidget._shutdown_background_operations``), after the
+        initial ``cancel()`` sweep.
+        """
+        still_alive: List[Tuple[QThread, _AsyncWorker]] = []
+        for thread, worker in self._zombie_threads:
+            finished = _wait_pumping(thread, timeout_ms)
+            if finished:
+                logger.info("BackgroundOperation zombie thread finished: %r", worker)
+            else:
+                still_alive.append((thread, worker))
+        self._zombie_threads = still_alive
+        if still_alive:
+            logger.warning(
+                "BackgroundOperation: %d zombie thread(s) still running after drain",
+                len(still_alive),
+            )
+        return len(still_alive)

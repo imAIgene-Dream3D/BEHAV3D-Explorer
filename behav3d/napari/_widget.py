@@ -2,17 +2,21 @@
 BEHAV3D napari plugin – main dock widget.
 Provides a QTabWidget with tabs for the full BEHAV3D pipeline.
 """
-from qtpy.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QPushButton
-from qtpy.QtCore import Qt, QSize, QEvent
+from qtpy.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QPushButton
+from qtpy.QtCore import Qt, QSize, QEvent, QThread
 from qtpy.QtGui import QIcon
+import logging
 import os
 import napari
 
+from behav3d.napari._background_runner import BackgroundOperation
 from behav3d.napari._queue import ProcessingQueuePanel, StepType
 from behav3d.napari._global_workers import GlobalWorkersController
 from behav3d.napari._preview_dims import close_backprojection_legend_docks
 from behav3d.core.qt_help import disable_spinbox_wheel_scroll, reset_scroll_on_page_change
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class FloatingAssistantButton(QPushButton):
@@ -172,6 +176,9 @@ class BEHAV3DWidget(QWidget):
         self.viewer = napari_viewer
         self.dev_mode = os.environ.get("BEHAV3D_DEV_MODE") == "1"
         self.setMinimumWidth(300)
+        # Direct QThread subclasses parked here by _shutdown_background_operations
+        # when they don't stop within their teardown timeout.
+        self._direct_thread_zombies = []
 
         # Stop the mouse wheel from silently changing spin box / combo box
         # values when the user is just scrolling a tab past them.
@@ -443,6 +450,70 @@ class BEHAV3DWidget(QWidget):
                 self.btn_toggle_assistant.setEnabled(False)
             except Exception:
                 pass
+
+        # Every BackgroundOperation and direct-QThread worker in the plugin
+        # is Qt-parented somewhere under self, so on app quit they'd
+        # otherwise race their owning widget's teardown and crash with
+        # "QThread: Destroyed while thread is still running" if still
+        # running. aboutToQuit is the one choke point every quit path goes
+        # through (see napari's own _QtMainWindow.closeEvent docstring).
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._shutdown_background_operations)
+
+    # ------------------------------------------------------------------
+    def _shutdown_background_operations(self) -> None:
+        """Best-effort stop of every live background thread before the app
+        (or just this dock) is torn down.
+
+        Two independent teardown races share this one method: the app
+        quitting (connected to ``aboutToQuit`` above) and just this dock
+        being closed (connected to the dock widget's ``destroyed`` signal
+        in ``launch_napari.py``). Both use ``findChildren`` rather than
+        tracking operations by hand, so every ``BackgroundOperation``
+        anywhere under this widget is covered automatically, not just the
+        ones known about at the time this was written.
+        """
+        logger.info("Teardown: scanning for live background operations…")
+        ops = self.findChildren(BackgroundOperation)
+        for op in ops:
+            op.cancel(timeout_ms=500)
+
+        # Direct QThread subclasses (e.g. _data_preparation.py's metadata /
+        # zarr workers) aren't BackgroundOperation instances, but are real
+        # Qt children, so findChildren(QThread) catches them too.
+        # BackgroundOperation's own worker QThread is deliberately
+        # parent-less (see _background_runner.py), so it is NOT caught
+        # here — that's why it must be handled separately, above.
+        for thread in self.findChildren(QThread):
+            if not thread.isRunning():
+                continue
+            thread.quit()
+            if thread.wait(500):
+                continue
+            logger.warning(
+                "Teardown: QThread %r did not stop within 500ms, parking as zombie",
+                thread,
+            )
+            self._direct_thread_zombies.append(thread)
+
+        # Second, longer pass: give stragglers (including BackgroundOperation's
+        # own zombies from the sweep above) a further chance before we either
+        # let the process exit or leave the dock's threads to run alone.
+        remaining = sum(op.drain_zombies(timeout_ms=1000) for op in ops)
+        still_alive = []
+        for thread in self._direct_thread_zombies:
+            if not thread.wait(1000):
+                still_alive.append(thread)
+        self._direct_thread_zombies = still_alive
+        remaining += len(still_alive)
+        if remaining:
+            logger.warning(
+                "Teardown: %d background thread(s) still running after shutdown sweep",
+                remaining,
+            )
+        else:
+            logger.info("Teardown: all background operations stopped cleanly")
 
     def _toggle_assistant(self):
         """Show or hide the assistant dock. Closing only hides the dock, so the
@@ -852,8 +923,21 @@ class BEHAV3DWidget(QWidget):
         # Auto-refresh Analysis tab when switched to. This already cascades
         # into single_cell_tab._on_metadata_updated() (see
         # AnalysisTab._on_metadata_updated), so no separate call is needed.
+        # Skip the refresh (rather than firing it unconditionally on every
+        # switch to this tab) when a background CSV column scan is already
+        # in flight in the Single Cell sub-tabs -- re-cascading would just
+        # queue a second, wasteful multi-second full-CSV rescan behind the
+        # first. The in-flight scan's own on_done/on_failed callback already
+        # refreshes the UI once it completes, so nothing is lost by skipping.
         if index == 6 and hasattr(self, 'analysis_tab'):
-            if hasattr(self.analysis_tab, '_on_metadata_updated'):
+            sc_tab = getattr(self.analysis_tab, 'single_cell_tab', None)
+            bg_ops = [
+                getattr(sub, bg_name, None)
+                for sub in (getattr(sc_tab, 'state_tab', None), getattr(sc_tab, 'track_tab', None))
+                for bg_name in ('_colscan_bg', '_preload_bg')
+            ]
+            scan_in_flight = any(bg is not None and bg.is_running() for bg in bg_ops)
+            if not scan_in_flight and hasattr(self.analysis_tab, '_on_metadata_updated'):
                 self.analysis_tab._on_metadata_updated()
 
     def sizeHint(self):

@@ -55,7 +55,16 @@ def run_napari_payload():
 
     # Add our dock widget
     widget = BEHAV3DWidget(viewer)
-    viewer.window.add_dock_widget(widget, name="BEHAV3D Explorer", area="right")
+    dock_widget = viewer.window.add_dock_widget(widget, name="BEHAV3D Explorer", area="right")
+    # Closing just this dock (its native 'x') doesn't call .close() on
+    # `widget` or destroy it — it only reparents/deletes the dock wrapper —
+    # but destroyed() still fires once that teardown actually happens, so
+    # this is a real (if secondary) point to sweep for background threads
+    # that would otherwise be left racing app quit later. See
+    # BEHAV3DWidget._shutdown_background_operations for the primary
+    # (aboutToQuit-driven) sweep.
+    if dock_widget is not None:
+        dock_widget.destroyed.connect(widget._shutdown_background_operations)
 
     # Start the event loop
     napari.run()
@@ -181,7 +190,7 @@ def run_launcher():
 
     from datetime import datetime
 
-    log_dir = Path.home() / ".behav3d" / "logs"
+    log_dir = _ROOT_DIR / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"launch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     print(f"  Full output also saved to: {log_path}")

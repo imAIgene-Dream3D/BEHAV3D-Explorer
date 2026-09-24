@@ -13,6 +13,7 @@ indeterminate (busy) progress bar.  The batch Run shows determinate
 progress at cell-type granularity.  Queue compatibility is preserved by
 defaulting ``block=True``.
 """
+import logging
 import sys
 import traceback
 from pathlib import Path
@@ -28,6 +29,8 @@ from qtpy.QtCore import Qt, Signal
 
 from behav3d.core.qt_help import HelpButton, make_help_row, reset_scroll_on_page_change
 from behav3d.napari._units import UnitGroupManager, TimeUnitGroupManager
+
+logger = logging.getLogger(__name__)
 from behav3d.napari._results_panel import (
     ResultsPanel,
     notify_results_changed,
@@ -1010,6 +1013,15 @@ class FilteringTab(QWidget):
         )
 
     def _rebuild_tabs(self):
+        for panel in self.panels.values():
+            bg = getattr(panel, "_bg", None)
+            if bg is not None and bg.is_running():
+                logger.warning(
+                    "FilteringTab._rebuild_tabs: cancelling in-flight run "
+                    "for panel %r before rebuilding tabs.", panel.cell_type,
+                )
+                bg.cancel(timeout_ms=500)
+
         self.cell_tabs.clear()
         self.panels.clear()
 
@@ -1190,12 +1202,13 @@ class FilteringTab(QWidget):
         # Persist + snapshot every panel's Qt widget state on the Qt
         # thread — the worker must not read widgets.
         panel_params: dict[str, dict] = {}
-        for ct, panel in self.panels.items():
+        panels_snapshot = list(self.panels.items())
+        for ct, panel in panels_snapshot:
             panel._persist()
             panel_params[ct] = panel.collect_runtime_params()
 
         def _do_batch(progress_cb=None):
-            for i, (ct, panel) in enumerate(self.panels.items()):
+            for i, (ct, panel) in enumerate(panels_snapshot):
                 if progress_cb is not None:
                     try:
                         progress_cb(i, total, f"Filtering: {ct}")
