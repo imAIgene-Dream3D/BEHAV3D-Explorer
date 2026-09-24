@@ -11,7 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import scanpy as sc
 
 from behav3d.analysis.behavior.track.utils import (
-    _resolve_dtaidistance_paths,
+    _resolve_track_paths,
     get_dtaidistance_track_trajectories_filename,
 )
 from behav3d.analysis.behavior.track.visualization.plots.transition_analysis import (
@@ -53,8 +53,8 @@ LABEL_STYLE = "on_node"
 
 def load_track_adata(output_dir: str, cell_type: str):
     """Resolve and load the trajectory-clustering h5ad the same way the napari panel does."""
-    paths = _resolve_dtaidistance_paths(output_dir, cell_type)
-    h5ad_path = paths["outfolder"] / get_dtaidistance_track_trajectories_filename(cell_type)
+    paths = _resolve_track_paths(output_dir, cell_type)
+    h5ad_path = paths.outfolder / get_dtaidistance_track_trajectories_filename(cell_type)
     if not h5ad_path.exists():
         raise FileNotFoundError(
             f"No trajectory-clustering h5ad at '{h5ad_path}'. Run track (trajectory) clustering "

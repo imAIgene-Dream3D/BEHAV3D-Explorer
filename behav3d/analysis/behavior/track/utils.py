@@ -116,27 +116,6 @@ def _resolve_track_paths(output_dir, cell_type, *, output_subdir_name=None):
     )
 
 
-def _resolve_dtaidistance_paths(output_dir, cell_type, output_subdir_name=None):
-    """Deprecated: use `_resolve_track_paths` (returns a `TrackPaths` dataclass).
-
-    Kept as a dict-shaped shim so not-yet-migrated call sites keep working.
-    `"quality_control_outfolder"` is aliased to `clustering_outfolder`, since
-    track-classification diagnostics now live in `clustering/` for every method.
-    """
-    paths = _resolve_track_paths(output_dir, cell_type, output_subdir_name=output_subdir_name)
-    paths.clustering_outfolder.mkdir(parents=True, exist_ok=True)
-    return {
-        "root": paths.output_dir,
-        "analysis_outdir": paths.analysis_outdir,
-        "state_outdir": paths.state_outdir,
-        "outfolder": paths.outfolder,
-        "clustering_outfolder": paths.clustering_outfolder,
-        "quality_control_outfolder": paths.clustering_outfolder,
-        "behavior_proportions_outfolder": paths.behavior_proportions_outfolder,
-        "behavior_comparisons_outfolder": paths.behavior_comparisons_outfolder,
-    }
-
-
 def get_dtaidistance_track_trajectories_filename(cell_type):
     cell_token = _sanitize_filename_token(cell_type, fallback="cell")
     return f"BEHAV3D_{cell_token}_behavioral_trajectories.h5ad"

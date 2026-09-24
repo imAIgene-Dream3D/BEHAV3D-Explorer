@@ -79,7 +79,6 @@ from behav3d.analysis.behavior.track.utils import (
     _filter_tracks_for_dtaidistance,
     _ordered_unique,
     _peek_track_outfolder,
-    _resolve_dtaidistance_paths,
     _resolve_optional_int,
     _resolve_track_paths,
     _winfo,
@@ -1832,9 +1831,7 @@ class TrackClassificationPanel:
         _set_classification_state_colors(adata_tracks, "ClusterID", new_colors)
         _set_classification_state_order(adata_tracks, "ClusterID", new_order)
         adata_tracks.write(self._model_adata_path(), compression="lzf")
-        qc_dir = _resolve_dtaidistance_paths(self.output_dir, self._current_cell_type())[
-            "clustering_outfolder"
-        ] / "after_renaming"
+        qc_dir = _resolve_track_paths(self.output_dir, self._current_cell_type()).clustering_outfolder / "after_renaming"
         plot_paths = save_dtaidistance_diagnostics(
             adata_tracks,
             output_dir=self.output_dir,
@@ -1892,7 +1889,7 @@ class TrackClassificationPanel:
             self.output_dir,
             ct,
             cluster_percentage_group_by=list(self.apply_group_cols_select.value) or None,
-            proportions_outfolder=_resolve_dtaidistance_paths(self.output_dir, ct)["behavior_proportions_outfolder"],
+            proportions_outfolder=_resolve_track_paths(self.output_dir, ct).behavior_proportions_outfolder,
         )
         self.plot_status_html.value = "<b>Renamed QC ready:</b> original BEHAV3D diagnostics were written after renaming."
         _winfo("trajectory-dtai-widget", f"Saved original BEHAV3D cluster names: {mapping_path}")
@@ -2284,9 +2281,9 @@ class TrackClassificationPanel:
                         self.output_dir,
                         self._current_cell_type(),
                         cluster_percentage_group_by=list(self.apply_group_cols_select.value) or None,
-                        proportions_outfolder=_resolve_dtaidistance_paths(
+                        proportions_outfolder=_resolve_track_paths(
                             self.output_dir, self._current_cell_type()
-                        )["behavior_proportions_outfolder"],
+                        ).behavior_proportions_outfolder,
                     )
                     self.plot_status_html.value = "<b>Diagnostics ready:</b> original BEHAV3D QC was written."
                     for path in plot_paths.values():
@@ -2332,9 +2329,9 @@ class TrackClassificationPanel:
                         self.output_dir,
                         self._current_cell_type(),
                         cluster_percentage_group_by=group_cols,
-                        proportions_outfolder=_resolve_dtaidistance_paths(
+                        proportions_outfolder=_resolve_track_paths(
                             self.output_dir, self._current_cell_type()
-                        )["behavior_proportions_outfolder"],
+                        ).behavior_proportions_outfolder,
                     )
                     self.plot_status_html.value = (
                         "<b>Track proportions ready:</b> original BEHAV3D per-sample proportions were written."
@@ -2348,10 +2345,10 @@ class TrackClassificationPanel:
                     cols_to_merge = [c for c in all_cols if c not in adata_tracks.obs.columns]
                     if cols_to_merge and md is not None:
                         merge_condition_columns_into_obs(adata_tracks, md, cols_to_merge)
-                    paths = _resolve_dtaidistance_paths(self.output_dir, self._current_cell_type())
+                    paths = _resolve_track_paths(self.output_dir, self._current_cell_type())
                     plot_paths = save_track_class_proportions_by_sample_plot(
                         adata_tracks,
-                        paths["behavior_proportions_outfolder"],
+                        paths.behavior_proportions_outfolder,
                         sample_col="sample_name",
                         class_col="ClusterID",
                         group_cols=group_cols,
@@ -2401,10 +2398,10 @@ class TrackClassificationPanel:
                 cols_to_merge = [c for c in all_cols if c not in adata_tracks.obs.columns]
                 if cols_to_merge and md is not None:
                     merge_condition_columns_into_obs(adata_tracks, md, cols_to_merge)
-                paths = _resolve_dtaidistance_paths(self.output_dir, self._current_cell_type())
+                paths = _resolve_track_paths(self.output_dir, self._current_cell_type())
                 result = save_track_condition_comparison_report(
                     adata_tracks,
-                    paths["behavior_comparisons_outfolder"],
+                    paths.behavior_comparisons_outfolder,
                     sample_col="sample_name",
                     class_col="ClusterID",
                     condition_col=condition_col,
@@ -2450,7 +2447,7 @@ class TrackClassificationPanel:
                 cols_to_merge = [c for c in all_extra_cols if c not in adata_tracks.obs.columns]
                 if cols_to_merge and md is not None:
                     merge_condition_columns_into_obs(adata_tracks, md, cols_to_merge)
-                paths = _resolve_dtaidistance_paths(self.output_dir, self._current_cell_type())
+                paths = _resolve_track_paths(self.output_dir, self._current_cell_type())
 
                 target_class_kwargs = {}
                 use_target_class = bool(self.use_target_class_checkbox.value)
@@ -2484,7 +2481,7 @@ class TrackClassificationPanel:
                 result = save_track_contact_group_analysis(
                     adata_tracks,
                     df_timepoints,
-                    paths["outfolder"],
+                    paths.outfolder,
                     contact_col=contact_col,
                     min_bout_length=min_bout_length,
                     sample_col="sample_name",
@@ -2536,12 +2533,12 @@ class TrackClassificationPanel:
                 adata_tracks = self._load_model_adata()
                 df_timepoints = pd.read_csv(self._original_track_features_path())
                 full_adata = ad.read_h5ad(str(self._state_adata_path()))
-                paths = _resolve_dtaidistance_paths(self.output_dir, self._current_cell_type())
+                paths = _resolve_track_paths(self.output_dir, self._current_cell_type())
                 result = save_track_contact_state_shift_report(
                     adata_tracks,
                     df_timepoints,
                     full_adata,
-                    paths["outfolder"],
+                    paths.outfolder,
                     contact_col=contact_col,
                     min_bout_length=min_bout_length,
                     state_col=state_col,
@@ -2591,12 +2588,12 @@ class TrackClassificationPanel:
                 adata_tracks = self._load_model_adata()
                 df_timepoints = pd.read_csv(self._original_track_features_path())
                 full_adata = ad.read_h5ad(str(self._state_adata_path()))
-                paths = _resolve_dtaidistance_paths(self.output_dir, self._current_cell_type())
+                paths = _resolve_track_paths(self.output_dir, self._current_cell_type())
                 result = save_track_contact_overview_report(
                     adata_tracks,
                     df_timepoints,
                     full_adata,
-                    paths["outfolder"],
+                    paths.outfolder,
                     contact_col=contact_col,
                     min_bout_length=min_bout_length,
                     state_col=state_col,
