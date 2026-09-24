@@ -36,12 +36,6 @@ def _format_state_token(row_values, missing_token="missing"):
     return "|".join(tokens)
 
 
-def _local_dissimilarity_name(value):
-    if callable(value):
-        return getattr(value, "__name__", value.__class__.__name__)
-    return str(value)
-
-
 def extract_categorical_track_sequences(
     adata,
     *,

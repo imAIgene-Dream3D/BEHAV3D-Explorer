@@ -555,28 +555,6 @@ def _plot_projected_track_state_colored_on_ax(
         ax.set_title(title)
 
 
-def _plot_track_state_colored_on_ax(
-    ax,
-    track_df,
-    *,
-    state_key,
-    state_color_map,
-    x_col="pixel_position_x",
-    y_col="pixel_position_y",
-    z_col="pixel_position_z",
-    title=None,
-    fixed_lim=None,
-):
-    xyz = track_df[[x_col, y_col, z_col]].to_numpy(dtype=float, copy=False)
-    proj2 = _project_xyz_to_pc12(xyz)
-    _plot_projected_track_state_colored_on_ax(
-        ax=ax,
-        proj2=proj2,
-        states=track_df[state_key].astype(str).to_numpy(),
-        state_color_map=state_color_map,
-        title=title,
-        fixed_lim=fixed_lim,
-    )
 
 
 def _resolve_trajectory_coordinate_columns(obs):

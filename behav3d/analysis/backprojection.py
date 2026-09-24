@@ -277,52 +277,11 @@ def backproject_feature_at_timepoint(
     background_value=0,
 ):
     """
-    Map a single feature column onto a single already-sliced label frame
-    (2D or 3D) for one timepoint.
+    Map `feature_col` onto a single already-sliced label frame for one timepoint.
 
-    ``df_features`` must already be filtered to the single sample and
-    timepoint the frame represents (one row per track at most is assumed;
-    if duplicates exist the last row wins, matching ``_build_summary_lookup``).
-
-    Mirrors ``backproject_columns``'s track/label-id convention: whenever
-    ``original_TrackID`` is present in ``df_features`` it is used instead
-    of ``track_col`` to key the pixel lookup, because track-splitting
-    during filtering reassigns ``TrackID`` per chunk while pixel labels in
-    the segmentation image always carry the original, pre-split id.
-
-    Parameters
-    ----------
-    labels_frame : np.ndarray
-        Single-timepoint label array, any shape (2D XY or 3D ZYX).
-    df_features : pandas.DataFrame
-        Feature rows for this sample/timepoint. Must contain `track_col`
-        (or `original_TrackID`) and `feature_col`.
-    feature_col : str
-        Numeric (or numeric-coercible) column to backproject.
-    track_col : str
-        Column to use as the label id, unless `original_TrackID` is present.
-    background_value : int
-        Fill value for label==0 / unmatched pixels.
-
-    Returns
-    -------
-    mapped_frame : np.ndarray
-        Same shape as `labels_frame`, feature values written at label
-        positions, `background_value` elsewhere. dtype chosen by
-        `_infer_backprojection_dtype`.
-    ids_with_value : np.ndarray[int64]
-        Sorted label ids that had a valid (non-NaN, numeric) feature value
-        in `df_features`. Callers can use
-        ``np.isin(label_view, ids_with_value)`` to distinguish "no feature
-        row for this track at this timepoint" pixels from legitimate
-        `background_value`/zero feature values.
-
-    Raises
-    ------
-    ValueError
-        If `feature_col` (or the resolved track column) is missing, or if
-        `feature_col` cannot be coerced to numeric (propagated from
-        `_prepare_feature_series`).
+    `df_features` must already be filtered to this sample/timepoint (last row
+    wins on duplicates). Uses `original_TrackID` instead of `track_col` when
+    present (see module convention). Returns `(mapped_frame, ids_with_value)`.
     """
     if "original_TrackID" in df_features.columns:
         track_col = "original_TrackID"
@@ -764,9 +723,6 @@ def _load_active_killing_data(
             # Identify targeted organoid
             if has_targeted_id and pd.notna(row["targeted_track_id"]):
                 targeted_id = int(row["targeted_track_id"])
-                # We need the organoid mask. Since we don't have it here, we'll store the ID
-                # and the view_napari function can use it if we provide the organoid layer.
-                # BETTER: let's modify the result to include the targeted IDs per timepoint.
                 if "Targeted_IDs" not in result: result["Targeted_IDs"] = {}
                 result["Targeted_IDs"][t] = result.get("Targeted_IDs", {}).get(t, []) + [targeted_id]
 
@@ -879,10 +835,7 @@ def backproject_mean_features_behav3d(
     
     track_img = np.expand_dims(track_img, axis=1)
     
-    # Filter to only tracks with ClusterID
-    # Pixel labels in track_img are always original segmentation ids; use
-    # original_TrackID (when present) so chunks split by filtering still
-    # match, not just the first chunk of each split track.
+    # original_TrackID (when present) keys pixel labels — see module convention.
     keep_id_col = "original_TrackID" if "original_TrackID" in df_tracks_clustered.columns else "TrackID"
     filt_track_img = np.where(np.isin(track_img, df_tracks_clustered[keep_id_col].unique()), track_img, 0)
     
@@ -1081,10 +1034,7 @@ def backproject_time_features_behav3d(
     
     track_img = np.expand_dims(track_img, axis=1)
     
-    # Filter to only tracks with ClusterID
-    # Pixel labels in track_img are always original segmentation ids; use
-    # original_TrackID (when present) so chunks split by filtering still
-    # match, not just the first chunk of each split track.
+    # original_TrackID (when present) keys pixel labels — see module convention.
     keep_id_col = "original_TrackID" if "original_TrackID" in df_tracks_clustered.columns else "TrackID"
     filt_track_img = np.where(np.isin(track_img, df_tracks_clustered[keep_id_col].unique()), track_img, 0)
     
@@ -1298,14 +1248,7 @@ def backproject_columns(
         If True, recompute requested feature groups even when they already exist
         in the backprojection zarr store.
 
-    Notes
-    -----
-    Pixel values in ``track_img`` are always the original segmentation
-    labels. When tracks were split into chunks by the filtering step's
-    "Split long tracks into chunks" option, ``TrackID`` no longer matches
-    those labels for chunks after the first — ``original_TrackID`` does.
-    So whenever ``df_tracks_clustered`` carries an ``original_TrackID``
-    column, it is used to key the pixel lookup instead of ``track_col``.
+    See `_subset_to_sample` for the `original_TrackID` pixel-label convention.
     """
     mode = _normalize_backprojection_mode(mode)
     if "original_TrackID" in df_tracks_clustered.columns:
@@ -1525,14 +1468,9 @@ def view_napari(
         except Exception as e:
             print(f"  Skipping layer '{k}': {e}")
 
-    # Specific logic for Targeted Organoids layer
     if targeted_ids_per_tp:
-        # We look for organoid track layers to highlight
         org_layers = [lay for lay in viewer.layers if "_TrackID" in lay.name and cell_type not in lay.name]
         if org_layers:
-            # Create a dedicated layer for targeted organoids
-            # This is complex to do purely with labels if we don't have the full img here.
-            # Instead, we'll try to use the existing organoid layers and filter them.
             print("  ✨ Targeted IDs found - highlights will be synchronized")
 
     # Add tracks

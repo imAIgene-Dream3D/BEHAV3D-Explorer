@@ -1450,7 +1450,11 @@ def _plot_hmm_state_diagnostics_pdf(
             cluster_series = pd.Series(ad_heat.obs[cluster_col], index=ad_heat.obs.index, dtype="string")
             valid_mask = cluster_series.notna()
             if not bool(valid_mask.all()):
-                ad_heat = ad_heat[valid_mask.to_numpy()].copy()
+                # pandas' copy-on-write can hand back a read-only ndarray from
+                # to_numpy(); anndata's boolean-mask indexing round-trips
+                # through DLPack, which can't signal readonly and raises a
+                # BufferError. Force a writable copy to avoid that.
+                ad_heat = ad_heat[valid_mask.to_numpy(copy=True)].copy()
                 cluster_series = cluster_series[valid_mask]
             cluster_order = sorted(cluster_series.unique().tolist(), key=_mixed_label_sort_key)
             ad_heat.obs[cluster_col] = pd.Categorical(
@@ -2116,7 +2120,7 @@ def _finalize_hmm_apply_outputs(
         if not bool(report_mask.any()):
             report_adata = adata_full[:0].copy()
         elif not bool(report_mask.all()):
-            report_adata = adata_full[report_mask.to_numpy(dtype=bool)].copy()
+            report_adata = adata_full[report_mask.to_numpy(dtype=bool, copy=True)].copy()
 
     adata_full.uns["preprocessing"] = dict(preprocessing_meta)
     adata_full.uns["classification"] = dict(classification_meta)

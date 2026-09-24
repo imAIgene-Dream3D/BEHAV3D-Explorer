@@ -156,31 +156,6 @@ _GRID_TOP_MARGIN_IN = 0.5        # space reserved above the grid for the suptitl
 _GRID_BOTTOM_MARGIN_IN = 0.55    # space reserved below the grid for the legend
 
 
-def archive_track_clustering_pdfs(outfolder, archive_dir_name="clustering_originals"):
-    outfolder = Path(outfolder)
-    outfolder.mkdir(parents=True, exist_ok=True)
-
-    pdf_paths = sorted([p for p in outfolder.glob("*.pdf") if p.is_file()])
-    if len(pdf_paths) == 0:
-        return {"archive_dir": None, "archived_paths": []}
-
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    archive_dir = outfolder / str(archive_dir_name) / ts
-    archive_dir.mkdir(parents=True, exist_ok=True)
-
-    archived_paths = []
-    for src in pdf_paths:
-        dst = archive_dir / src.name
-        suffix_idx = 1
-        while dst.exists():
-            dst = archive_dir / f"{src.stem}_{suffix_idx}{src.suffix}"
-            suffix_idx += 1
-        src.replace(dst)
-        archived_paths.append(dst)
-
-    return {"archive_dir": archive_dir, "archived_paths": archived_paths}
-
-
 def _apply_best_pdf_orientation(fig, default_orientation="landscape"):
     """
     Keep figure orientation matched to content shape before PDF export.

@@ -449,22 +449,12 @@ def run_interaction_analysis(
 ):
     """
     Run interaction analysis for an organoid cell type.
-    
+
     Parameters
     ----------
-    output_dir : str
-        Base output directory for BEHAV3D results
-    cell_type : str
-        Name of the organoid cell type (e.g., "organoid")
-    interacting_cell_types : list
-        List of cell types to analyze interactions with (e.g., ["tcell", "macrophage"])
     dead_threshold : float
         Retained for backward compatibility. Interaction analysis now reads the
         final death classification directly from the ``dead`` column in the CSV.
-    df_tracks_path : str, optional
-        Path to filtered track features CSV. If None, uses default location.
-    show_plots : bool
-        Whether to display plots inline (default: True)
     group_by_line_condition : bool
         When True, the two *overall* plots are split by the interacting immune
         cell's line condition (``im_{type}_line_condition``): the cumulative
@@ -472,17 +462,8 @@ def run_interaction_analysis(
         by condition (solid = survives, dashed = dies). Default False keeps the
         original single-curve behaviour. Per-sample plots are unaffected.
 
-    Returns
-    -------
-    dict
-        Dictionary with results per interacting cell type:
-        {
-            "cell_type": {
-                "stats_df": pd.DataFrame,
-                "pdf_path": Path,
-                "figs": dict of matplotlib figures (if show_plots=True)
-            }
-        }
+    Returns a dict of results per interacting cell type: {"cell_type": {"stats_df",
+    "pdf_path", "figs" (if show_plots=True)}}.
     """
     
     
@@ -674,27 +655,7 @@ def calculate_interaction_stats(
     cumulative_col: str,
     has_dead_column: bool,
 ) -> pd.DataFrame:
-    """
-    Calculate summary statistics for interactions with a specific cell type.
-    
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Track features dataframe with contact columns
-    cell_type : str
-        Organoid cell type name
-    interacting_type : str
-        Interacting cell type name
-    cumulative_col : str
-        Name of cumulative contact column
-    has_dead_column : bool
-        Whether death data is available
-        
-    Returns
-    -------
-    pd.DataFrame
-        Per-sample summary statistics
-    """
+    """Per-sample summary statistics for interactions with `interacting_type`."""
     contact_col = f"{interacting_type}_contact"
     
     # Per-track summary
@@ -977,7 +938,6 @@ def plot_cumulative_per_sample(
         ax.set_title(f"{sample}\n(n = {n_org_sample})", fontsize=11)
         ax.grid(True, alpha=0.3)
     
-    # Hide unused axes
     for idx in range(len(samples), len(axes)):
         axes[idx].set_visible(False)
     
@@ -1130,10 +1090,9 @@ def plot_alive_vs_dead_per_sample(
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
     
-    # Hide unused axes
     for idx in range(len(samples), len(axes)):
         axes[idx].set_visible(False)
-    
+
     fig.suptitle(
         f"Cumulative {interacting_type} Interactions: Surviving vs Dying {cell_type}s (Per Sample)",
         fontsize=14, y=0.995,

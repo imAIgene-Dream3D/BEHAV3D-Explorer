@@ -444,30 +444,9 @@ def backproject_single_sample_behavioral_states(
     verbose=True,
 ):
     """
-    Replace tracked segment labels by behavioral-state integer codes for one sample.
-
-    Parameters
-    ----------
-    tracked_img_path : str | pathlib.Path
-        Path to sample tracked image (*.zarr or *.zarr.zip).
-    sample_obs : pandas.DataFrame
-        One-sample subset of adata.obs with at least state/track/time columns.
-    state_col, track_col, time_col : str
-        Column names in sample_obs.
-    output_path : str | pathlib.Path
-        Destination path for behavioral-state zarr image.
-    code_map : dict[str, int]
-        Mapping from state label to integer code (0 reserved for background).
-    raw_image_path : str | pathlib.Path | None, default None
-        Optional raw image path. If supplied, only compatibility is validated.
-        Output is always stored in tracked-image shape.
-    background_value : int, default 0
-        Output value for unmatched voxels.
-    verbose : bool, default True
-        Print progress messages.
-    require_all_rows_present : bool, default False
-        If True, every (time_col, track_col) entry in sample_obs must be present
-        in the tracked segmentation at that frame; otherwise raise ValueError.
+    Replace tracked segment labels with behavioral-state integer codes for one
+    sample. `require_all_rows_present=True` raises if any `(time, track)` in
+    `sample_obs` is missing from the segmentation.
     """
     tracked_img_path = Path(tracked_img_path)
     output_path = Path(output_path)
@@ -1272,24 +1251,6 @@ def _add_mapping_dock_widget(viewer, mapping_text=None, title="State Class Mappi
             RuntimeWarning,
         )
         return None
-
-
-def _is_dask_array(arr):
-    try:
-        import dask.array as da
-
-        return isinstance(arr, da.Array)
-    except Exception:
-        return False
-
-
-def _broadcast_to_shape(arr, target_shape):
-    target_shape = tuple(int(v) for v in target_shape)
-    if _is_dask_array(arr):
-        import dask.array as da
-
-        return da.broadcast_to(arr, target_shape)
-    return np.broadcast_to(arr, target_shape)
 
 
 def _align_labels_to_raw_shape_for_view(labels_img, raw_img, layer_name, verbose=False):

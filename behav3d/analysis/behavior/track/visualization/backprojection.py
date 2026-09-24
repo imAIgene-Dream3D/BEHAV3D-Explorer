@@ -90,53 +90,6 @@ from behav3d.analysis.behavior.utils import (
 )
 
 
-def assign_track_clusters_to_full_dataset(
-    adata_full,
-    adata_tracks,
-    cluster_col="ClusterID",
-    output_col="track_behavioral_cluster",
-    id_cols=("sample_name", "TrackID"),
-    unassigned_label="unassigned",
-    inplace=False,
-):
-    """
-    Broadcast track-level cluster labels to all rows in the full per-timepoint dataset.
-    """
-    if adata_full is None or not hasattr(adata_full, "obs"):
-        raise ValueError("adata_full with .obs is required.")
-    if adata_tracks is None or not hasattr(adata_tracks, "obs"):
-        raise ValueError("adata_tracks with .obs is required.")
-
-    required_full = [str(c) for c in id_cols]
-    missing_full = [c for c in required_full if c not in adata_full.obs.columns]
-    if len(missing_full) > 0:
-        raise ValueError(f"adata_full.obs missing required id columns: {missing_full}")
-
-    required_tracks = [str(c) for c in id_cols] + [str(cluster_col)]
-    missing_tracks = [c for c in required_tracks if c not in adata_tracks.obs.columns]
-    if len(missing_tracks) > 0:
-        raise ValueError(
-            "adata_tracks.obs missing required columns for track-label assignment: "
-            f"{missing_tracks}"
-        )
-
-    adata_out = adata_full if bool(inplace) else adata_full.copy()
-    id_cols = [str(c) for c in id_cols]
-
-    track_labels = (
-        adata_tracks.obs[id_cols + [cluster_col]]
-        .copy()
-        .dropna(subset=[cluster_col])
-        .groupby(id_cols, observed=True, as_index=False)[cluster_col]
-        .first()
-    )
-
-    full_obs = adata_out.obs[id_cols].copy()
-    merged = full_obs.merge(track_labels, on=id_cols, how="left")
-    labels = pd.Series(merged[cluster_col], index=adata_out.obs.index).astype("string")
-    labels = labels.fillna(str(unassigned_label)).astype(str)
-    adata_out.obs[output_col] = pd.Categorical(labels)
-    return adata_out
 
 
 def build_track_cluster_frame_assignments(

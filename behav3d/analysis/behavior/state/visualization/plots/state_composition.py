@@ -1825,22 +1825,3 @@ def save_state_composition_report(
         "relative_by_sample": relative_by_sample,
         "relative_pooled": relative_pooled if include_pooled_summary else None,
     }
-
-
-# df_fig, fig, ax = plot_state_composition_over_time(
-#     adata_full, 
-#     time_col="position_t", 
-#     state_col="ClusterID", 
-#     relative=False
-#     )
-
-# df_fig, fig, axes= plot_state_composition_over_time(
-#     adata_full, 
-#     time_col="position_t", 
-#     state_col="ClusterID", 
-#     relative=True,
-#     group_by_sample=True
-#     )
-
-# fig, axes = plot_state_composition_over_time(adata, group_by_sample=True, relative=True)
-# plt.show()
