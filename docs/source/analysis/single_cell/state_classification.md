@@ -202,7 +202,26 @@ In other words: use the binary flags as clues, but let the **combination of QC p
 Three report buttons summarise the classification across your samples. Each has a **👁** button to reopen its PDF.
 
 - **▶ State Composition Report** — what fraction of time each state occupies, broken down by sample and (optionally) by metadata groupings. The **Group composition plots by** list below it lets you pick one or more metadata columns to group the composition by, which combines samples with these same conditions (Ctrl/Cmd-click for several).
-- **▶ State Transition Report** — Which behavioral states cells transition into from each state, and how frequently these transitions occur.
+- **▶ State Transition Report** — which behavioral states cells transition into from each state, and how frequently. Two complementary views: a **circular transition diagram** (which states a given state's traffic comes from / goes to directly, one hop) and an **all-pairs Sankey diagram** (the fuller multi-step paths a track can take to end up in a given state). Sankey is the heaviest part of this report to compute, so it is **off by default** — turn it on when you need the full-path view.
+
+  ```{tip}
+  **Circular vs. Sankey, in practice.** The circular diagram only shows a state's immediate neighbours: for a state named *killer*, it shows only the state cells were in one step before becoming *killer*, not the whole route (e.g. *static* → *scanner* → *engaging* → *killer*). The Sankey diagram is what shows that full route. Use the circular diagram to see direct relationships at a glance; use Sankey when you need to trace how cells actually got somewhere.
+  ```
+
+  | Control | Default | Meaning |
+  |---|---|---|
+  | **Min probability cutoff** | 0 % | In the circular diagram, a transition below this probability is dropped entirely (not just faded), so rare, noisy transitions don't clutter the plot. |
+  | **Emphasis (gamma)** | 1.0 | How hard the circular diagram's line width/opacity fall off for weaker transitions. 1.0 is linear; higher values (2–3) make the strongest transitions stand out much more against everything else. |
+  | **Node labels** | Side legend | Where the circular diagram's state names are shown: written inside each dot (**On dots**), or moved to a numbered legend beside the plot (**Side legend**) — useful when names are long or there are many states. |
+  | **Transition matrix heatmap** | on | Include the transition-probability/count heatmap page(s). |
+  | **Circular transition diagram** | on | Include the circular inter-state transition diagram pages (see below for exactly which pages this produces). |
+  | **Include self-transitions** | off | Self-transitions are never drawn as arrows (a state can't arc to itself). This instead picks which probabilities the diagrams are scaled from: off (default) renormalises over inter-state switches only, so arrows show how a state splits between the states it switches to; on uses each transition's share of *all* activity, including time spent not switching, which dilutes the arrows for states that mostly self-transition. |
+  | **Show per-cluster breakdown grid** | on | Add two small-multiples pages, one panel per state: outgoing (that state's own transitions to others) and incoming (that state's arrivals, broken down by source) — useful when the single overlaid diagram gets too busy to read. |
+  | **N-gram rankings** | on | Include the top state-sequence n-gram ranking pages. |
+  | **Sankey diagrams (all state pairs)** | **off** | Include the Sankey diagrams for every pair of states — the heaviest part of this report to compute; leave off unless you need the full-path view. |
+
+  When the circular diagram is on, it produces two overlaid pages: outgoing (row-normalised — "where does this state's traffic go next") and incoming (column-normalised — "where did this state's arrivals come from"). Each page shows two panels side by side — the full, unfiltered diagram (cutoff = 0) next to the same diagram at the **Min probability cutoff** above — so the effect of the cutoff is visible by direct comparison. (An absolute-scale variant, with arcs on a fixed 0–1 scale instead of scaled to each diagram's own strongest edge, exists but is currently disabled by default.)
+
 - **▶ Create condition comparison plot** — statistically compares state proportions between the levels of one metadata column, e.g. does state composition differ between organoid lines?
 
   | Control | Default | Meaning |
@@ -213,6 +232,10 @@ Three report buttons summarise the classification across your samples. Each has 
   | **Group per page** | none selected | Additional column(s) that paginate rather than add another axis. |
 
   Each state gets a signed bar showing the proportion difference between two condition levels, annotated with significance stars (`*`/`**`/`***`/`****`) — the same layout as Track Classification's [Condition Comparison Report](track_classification.md).
+
+```{tip}
+**Pooling levels with "Group conditions".** Both **Group composition plots by** above and every **Group in X / Group in Y** control here also support a **Group conditions** checkbox that pools a column's levels into two custom groups instead of comparing every level individually — e.g. 3 healthy organoid lines vs. 3 tumor lines pooled into "healthy" vs. "tumor" rather than 15 pairwise line comparisons. It works the same way everywhere it appears; see [Track Composition Report](track_classification.md#step-4-reports-plots) for the full walkthrough.
+```
 
 Reports are saved as PDFs and can be reopened at any time with their **👁** button or from the shared **Results** panel.
 
@@ -301,11 +324,14 @@ The three reports are each saved as a PDF (the composition and condition-compari
 - Any **metadata groupings** you chose in the *Group composition plots by* list.
 
 
-**The State Transition Report** answers *"how do cells move between states?"*. It contains:
+**The State Transition Report** answers *"how do cells move between states?"*. Depending on the Advanced Configuration toggles (Step 3, above), it contains:
 
 - **Transition-matrix heatmaps** as both raw counts and row-normalised probabilities, plus versions that exclude self-transitions (state → same state) so the switching pattern stands out.
-- **All-pairs Sankey diagrams** visualising the flow between states.
+- **Circular transition diagrams** — two pages (outgoing/incoming), each showing the full/unfiltered diagram side by side with the diagram at the configured cutoff, plus two per-state breakdown-grid pages.
 - **Rankings of the most common state sequences** (n-grams) cells follow over time.
+- **All-pairs Sankey diagrams** visualising the fuller, multi-step paths between states — off by default.
+
+It is written as two files: `transition_matrix_heatmap.pdf` (matrix heatmap + circular diagrams + n-gram pages, one merged PDF) and, only when the Sankey toggle is on, a separate `sankey_all_pairs.pdf` (Sankey needs plotly/kaleido rendering, so it can't share the matplotlib-built PDF).
 
 **The Condition Comparison Report** answers *"does state composition differ between these conditions?"*. It writes `condition_comparison_<condition>.pdf`/`.csv` under `behavioral_states/state_composition/behavior_proportions/`, alongside the composition report's own CSVs.
 

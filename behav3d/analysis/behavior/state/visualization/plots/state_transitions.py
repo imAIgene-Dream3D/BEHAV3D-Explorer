@@ -10,6 +10,7 @@ from io import BytesIO
 from pathlib import Path
 from matplotlib.backends.backend_pdf import PdfPages
 from behav3d.analysis.behavior.utils import _natural_sort_key, _sanitize_filename_token
+from behav3d.core.utils import rmtree_ignore_missing
 from behav3d.analysis.behavior.state.utils import (
     _apply_state_order,
     _get_classification_state_colors,
@@ -19,6 +20,7 @@ from behav3d.analysis.behavior.state.utils import (
 from behav3d.analysis.behavior.general.visualization.plots.circular_transition_diagram import (
     plot_circular_transition_diagram,
     plot_circular_transition_diagram_grid,
+    plot_circular_transition_diagram_pair,
 )
 
 # -----------------------------
@@ -965,6 +967,7 @@ def save_state_transition_report(
     circular_curvature=0.28,
     circular_label_style="legend",
     circular_include_self_transitions=False,
+    include_circular_absolute_scale=False,
     include_circular_diagram_per_cluster=True,
     include_ngram_rankings=True,
     ngram_orders=(2, 3),
@@ -990,6 +993,14 @@ def save_state_transition_report(
     matrix_data_dir = matrix_dir / "data"
     matrix_data_dir.mkdir(parents=True, exist_ok=True)
     html_dir = output_dir / "sankey_html"
+    sankey_pdf_pages_dir = output_dir / "sankey_pdf_pages"
+    # Clear stale per-state-pair Sankey exports unconditionally, every time this
+    # report is (re)generated -- regardless of this call's include_sankey_pairs
+    # value -- so files left over from a run with renamed/removed states, or
+    # from a prior run where the flag was on, never linger alongside this run's
+    # outputs.
+    rmtree_ignore_missing(html_dir)
+    rmtree_ignore_missing(sankey_pdf_pages_dir)
 
     include_no_self_matrices = bool(include_no_self_matrices)
     include_ngram_rankings = bool(include_ngram_rankings)
@@ -1127,7 +1138,7 @@ def save_state_transition_report(
                         only_transitions=True,
                         state_order=state_order,
                     )
-            fig_circular = plot_circular_transition_diagram(
+            fig_circular = plot_circular_transition_diagram_pair(
                 circular_probs,
                 state_colors=state_colors,
                 state_order=state_order,
@@ -1144,20 +1155,22 @@ def save_state_transition_report(
             # (not replacing) it for comparison: probability maps directly onto arc thickness on
             # a fixed 0-1 scale, instead of being stretched relative to this diagram's own
             # strongest edge (often a large self-transition elsewhere in the matrix that would
-            # otherwise flatten every other cluster's edges by comparison).
-            fig_circular_absolute = plot_circular_transition_diagram(
-                circular_probs,
-                state_colors=state_colors,
-                state_order=state_order,
-                title=f"Inter-cluster transition probability, absolute scale ({state_col})",
-                min_prob_to_draw=circular_min_prob_to_draw,
-                emphasis_gamma=circular_emphasis_gamma,
-                curvature=circular_curvature,
-                label_style=circular_label_style,
-                scale_mode="absolute",
-            )
-            pdf.savefig(fig_circular_absolute, bbox_inches="tight")
-            plt.close(fig_circular_absolute)
+            # otherwise flatten every other cluster's edges by comparison). Hidden by default
+            # (`include_circular_absolute_scale=False`) for now.
+            if include_circular_absolute_scale:
+                fig_circular_absolute = plot_circular_transition_diagram(
+                    circular_probs,
+                    state_colors=state_colors,
+                    state_order=state_order,
+                    title=f"Inter-cluster transition probability, absolute scale ({state_col})",
+                    min_prob_to_draw=circular_min_prob_to_draw,
+                    emphasis_gamma=circular_emphasis_gamma,
+                    curvature=circular_curvature,
+                    label_style=circular_label_style,
+                    scale_mode="absolute",
+                )
+                pdf.savefig(fig_circular_absolute, bbox_inches="tight")
+                plt.close(fig_circular_absolute)
 
             # Page 2b — column-normalized counterpart of `circular_probs`: for each destination
             # cluster, what share of its arrivals came from each source. Must be derived from
@@ -1167,7 +1180,7 @@ def save_state_transition_report(
             col_sums = circular_counts.sum(axis=0)
             circular_probs_incoming = circular_counts.div(col_sums.replace(0, np.nan), axis=1)
             circular_probs_incoming.to_csv(matrix_probs_incoming_csv)
-            fig_circular_incoming = plot_circular_transition_diagram(
+            fig_circular_incoming = plot_circular_transition_diagram_pair(
                 circular_probs_incoming,
                 state_colors=state_colors,
                 state_order=state_order,
@@ -1180,22 +1193,23 @@ def save_state_transition_report(
             pdf.savefig(fig_circular_incoming, bbox_inches="tight")
             plt.close(fig_circular_incoming)
 
-            fig_circular_incoming_absolute = plot_circular_transition_diagram(
-                circular_probs_incoming,
-                state_colors=state_colors,
-                state_order=state_order,
-                title=(
-                    f"Inter-cluster transition probability, incoming, absolute scale "
-                    f"({state_col})"
-                ),
-                min_prob_to_draw=circular_min_prob_to_draw,
-                emphasis_gamma=circular_emphasis_gamma,
-                curvature=circular_curvature,
-                label_style=circular_label_style,
-                scale_mode="absolute",
-            )
-            pdf.savefig(fig_circular_incoming_absolute, bbox_inches="tight")
-            plt.close(fig_circular_incoming_absolute)
+            if include_circular_absolute_scale:
+                fig_circular_incoming_absolute = plot_circular_transition_diagram(
+                    circular_probs_incoming,
+                    state_colors=state_colors,
+                    state_order=state_order,
+                    title=(
+                        f"Inter-cluster transition probability, incoming, absolute scale "
+                        f"({state_col})"
+                    ),
+                    min_prob_to_draw=circular_min_prob_to_draw,
+                    emphasis_gamma=circular_emphasis_gamma,
+                    curvature=circular_curvature,
+                    label_style=circular_label_style,
+                    scale_mode="absolute",
+                )
+                pdf.savefig(fig_circular_incoming_absolute, bbox_inches="tight")
+                plt.close(fig_circular_incoming_absolute)
 
             # Page 2c — same matrix, broken out one panel per cluster (outgoing transitions
             # only), all on one grid page so every cluster's own pattern stays inspectable
@@ -1295,7 +1309,6 @@ def save_state_transition_report(
         print("Sankey vector export uses one plot per page; ignoring sankey_one_plot_per_page=False.")
 
     pair_rows = []
-    sankey_pdf_pages_dir = output_dir / "sankey_pdf_pages"
     sankey_pdf_page_rows = []
     sankey_png_rows = []
     sankey_pdf_path = output_dir / "sankey_all_pairs.pdf"

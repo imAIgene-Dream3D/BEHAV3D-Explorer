@@ -201,15 +201,23 @@ def run_launcher():
     # which is gone by the time a crash needs investigating.
     returncode = 1
     try:
-        with open(log_path, "a", buffering=1) as log_f:
+        with open(log_path, "ab", buffering=0) as log_f:
             proc = subprocess.Popen(
                 cmd, shell=use_shell,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1,
+                bufsize=0,
             )
-            for line in proc.stdout:
-                sys.stdout.write(line)
-                log_f.write(line)
+            # Raw byte passthrough — no text mode. text=True's universal-newline
+            # translation treats a bare '\r' as a line break, which shreds a
+            # tqdm progress bar's carriage-return-based in-place redraws into
+            # one emitted line per refresh (visible as the bar being "pasted"
+            # repeatedly instead of updating). Copying bytes untouched keeps
+            # '\r' intact so the terminal redraws in place, same as running
+            # the payload directly (without this relay) would look.
+            for chunk in iter(lambda: proc.stdout.read(4096), b""):
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.buffer.flush()
+                log_f.write(chunk)
             returncode = proc.wait()
     except KeyboardInterrupt:
         return

@@ -192,6 +192,12 @@ Click **▶ Track Composition Report**. The output is one PDF with the per-sampl
 Three or more **Group per page** columns selected at once falls back to a flat, wrapped panel-per-combination layout rather than a true 2D grid — keep to at most two grouping axes (X + Y) if you want the proper grid.
 ```
 
+```{tip}
+**Pooling levels with "Group conditions".** Next to **Group in X** and **Group in Y** (here, and in every other report on this page and in [State Classification](state_classification.md) that has a Group in X/Y control) sits a **Group conditions** checkbox. Ticking it reveals a two-list picker where you manually assign each level of the chosen column to a left group or a right group, collapsing that axis down to one left-vs-right comparison instead of one bar/panel per level.
+
+Worked example: you have 6 organoid lines — 3 healthy, 3 tumor. Pick the line-condition column for **Group in X**, tick **Group conditions**, put the 3 healthy lines in the left list and the 3 tumor lines in the right list. The report now compares healthy-pooled vs. tumor-pooled, instead of running (or plotting) all 15 pairwise line-vs-line combinations.
+```
+
 ### Condition Comparison Report
 
 Statistically compares trajectory-cluster proportions between the levels of one metadata column — e.g. does cluster composition differ between organoid lines?
@@ -204,46 +210,87 @@ Statistically compares trajectory-cluster proportions between the levels of one 
 
 Click **▶ Condition Comparison Report**. Each cluster gets a signed bar showing the proportion difference between two condition levels, annotated with significance stars (`*`/`**`/`***`/`****`). When **Compare condition** has exactly two levels and a second grouping axis is also set, the report switches to a true 2D grid layout instead of one row per pairwise comparison.
 
+**Group in X** here also supports the **Group conditions** pooling checkbox described under [Track Composition Report](#track-composition-report) above — the mechanic is identical.
+
+### Track Transition Report
+
+Pooled, inter-cluster transition analysis for trajectory clusters — the trajectory-cluster counterpart of [State Classification's State Transition Report](state_classification.md#step-3-reports). It uses the **same circular-diagram / Sankey engine and Advanced Configuration options** described there (min probability cutoff, emphasis gamma, node-label style, and the matrix/circular/self-transitions/per-cluster-grid/Sankey toggles) — see that page for what each control does. What's different here:
+
+- It operates on **trajectory clusters** instead of per-timepoint states, and the window index is collapsed — every track's windows are pooled together, so this is a population-wide view, not a per-window one (see *Window Transitions* below for the per-window view).
+- It **requires "Divide long tracks"** (Step 1's Advanced Configuration) to have been used when clustering. Without split windows, each track only ever has one cluster label, so there is nothing to transition between.
+- Output: `transition_analysis.pdf`.
+
+Click **▶ Track Transition Report** to run it; **+🛒** queues it, **👁** reopens the result.
+
+```{note}
+N-gram rankings are a state-sequence concept and don't carry over here — the Track Transition Report's Advanced Configuration is the matrix/circular/Sankey subset of State Transition Report's options, not the full set.
+```
+
+#### Window Transitions
+
+Where the Track Transition Report above pools everything and asks "which clusters transition into which, overall," Window Transitions asks a narrower question: **within one physical track**, does its assigned cluster drift from one "Divide long tracks" window to the next? It reconnects the sub-tracks that "Divide long tracks" split apart, via their shared parent `TrackID`, into a Sankey diagram of window-to-window cluster transitions — one diagram per sample, plus a pooled page across all samples.
+
+This is about a single track's own windows changing cluster over time, not about different tracks influencing each other.
+
+Like the report above, it **requires "Divide long tracks"** to have been used — with a single window per track there is nothing to connect.
+
+Click **▶ Create Window Transition Sankey** to run it. Output: `window_transitions_all_samples.pdf` (the merged, pooled-plus-per-sample PDF), with the individual per-sample pages also kept under a `sankey_pdf_pages/` subfolder.
+
 ### Contact Analysis
 
-Labels every classified track **contact** or **no_contact** with another cell type (using the `*_contact` columns from [Filtering](../filtering.md)), so you can ask whether a trajectory cluster occurs more in cells that touched a given population — a target structure, or another cell type.
-
-| Control | Default | Meaning |
-|---|---|---|
-| **Contact column** | first detected | Which per-timepoint contact column to use (auto-populated from columns ending in `_contact` / `_contact_on_distance`). |
-| **Min. contiguous contact bout (timepoints)** | 5 | A track is labelled **contact** if it has an unbroken run of at least this many consecutive contact timepoints within its classified time window; otherwise **no_contact**. Raise it to require sustained contact and ignore fleeting touches; lower it (e.g. to 1) to count any single contact timepoint. |
-| **Group in X** / **Group in Y** | — none — | Same 2D-grid grouping as the plots above, applied to the contact/no_contact composition grid. |
-| **Group per page** | none selected | Same pagination behaviour as above. |
-
-Click **▶ Run Contact-vs-No-Contact Analysis**. This produces one combined PDF with:
-- per-sample contact-rate bars,
-- a cluster × contact/no_contact composition grid,
-- a contact-vs-no_contact condition-comparison (always a binary, 2D-grid-eligible comparison),
-- two violin plots — **mean contact fraction** and **max contact-bout length** per cluster — the two continuous per-track features computed alongside the binary label.
+A family of reports that all start from the same question — labelling every classified track **contact** or **no_contact** with another cell type, using the `*_contact` columns from [Filtering](../filtering.md) — and then look at that split from different angles: rate, composition, condition comparison, a cluster-vs-contact heatmap, duration, and behavioural state-shift. They all share one settings panel and can be run individually or all at once.
 
 ```{important}
 Only available for the **Categorical DTW** method (needs a fitted one-hot dtaidistance model). The legacy **Original BEHAV3D DTW** engine has no contact-grouping support.
 ```
 
-Output:
+#### Shared settings
 
-```text
-<output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/contact_analysis.pdf
-<output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/csv/
+These apply to every report below, not just the one nearest them in the GUI:
+
+| Control | Default | Meaning |
+|---|---|---|
+| **Contact column** | first detected | Which per-timepoint contact column to use (auto-populated from columns ending in `_contact` / `_contact_on_distance`). |
+| **Min. contiguous contact bout (timepoints)** | 5 | A track is labelled **contact** if it has an unbroken run of at least this many consecutive contact timepoints within its classified time window; otherwise **no_contact**. Raise it to require sustained contact and ignore fleeting touches; lower it (e.g. to 1) to count any single contact timepoint. |
+| **Use contact cell classification** | off | Instead of a plain contact/no_contact flag, label each track's contact by the ***touched*** cell's own classification (see the tip below). |
+| **Target classification** | State classification | Only used when **Use contact cell classification** is on: whether the touched population's classes come from its **State classification** or its **Track classification**. |
+| **Target state column** | full_behavioral_cluster | Only relevant when **Target classification** = State classification: `full_behavioral_cluster`, `intrinsic_behavioral_cluster`, or `raw_hmm_state`. |
+| **Group in X** / **Group in Y** | — none — | Same 2D-grid grouping as the plots elsewhere on this page, applied to the contact-related composition grids — including the **Group conditions** pooling checkbox described under [Track Composition Report](#track-composition-report). |
+| **Group per page** | none selected | Same pagination behaviour as above. |
+
+```{tip}
+**"Use contact cell classification" turns a binary flag into a class label.** With it off, a track is simply *contact* or *no_contact*. With it on, "contact" is broken down by *which class* of the touched population it contacted. For example, if the touched population is a macrophage line already run through State Classification for morphology (classes round / elongated / plastic), you can ask whether a trajectory cluster contacts *plastic* macrophages more than *round* ones, or whether contact with a *plastic* macrophage tends to last longer than contact with a *round* one — see [Contact Duration Comparison](#contact-duration-comparison) below.
 ```
 
-### Contact Duration Comparison
+#### Run All Contact Analyses
 
-Pulled out of the bundle above so it can be run on its own: for every class the target cell type's
-classification assigns (e.g. macrophage morphology classes round / elongated / plastic), how long
-tracks stay in **sustained contact** with a target of that class — the same "max contact-bout
-length" feature as the bundle's per-target-class violin plot, in **timepoints and minutes side by
+**▶▶ Run All Contact Analyses** runs every report below once, using the shared settings above, in this order: Contact Rate Report → Contact Composition Grid → Contact Condition Comparison → Contact Cluster Heatmap → Contact Duration Comparison → Contact State-Shift Analysis → Track Contact Overview.
+
+#### Contact Rate Report
+
+The simplest view: per-sample % of tracks in contact, plus — when **Use contact cell classification** is on — a per-target-class contact fraction. Click **▶ Create Contact Rate Report**. Output: `contact_rate.pdf`.
+
+#### Contact Composition Grid
+
+A cluster × contact/no_contact composition grid, faceted by **Group in X / Y / page** — do certain trajectory clusters occur more in tracks that made contact? Click **▶ Create Contact Composition Grid**. Output: `contact_composition.pdf`.
+
+#### Contact Condition Comparison
+
+A Welch's t-test grid comparing class composition between the contact and no_contact groups — the contact-analysis counterpart of the plain [Condition Comparison Report](#condition-comparison-report) above, always run as a binary (2D-grid-eligible) comparison. Click **▶ Create Contact Condition Comparison**. Output: `condition_comparison_<condition>.pdf`, written into this report's own contact-analysis folder — same filename pattern as the plain Condition Comparison Report, kept in a different folder so the two never collide.
+
+#### Contact Cluster Heatmap
+
+A heatmap-first complement to the Contact Duration Comparison violins below: crosses mean contact fraction and max-contact-bout-length against the **track's own** trajectory cluster (not the touched cell's class), alongside a heatmap of what fraction of tracks in each cluster made contact at all. Click **▶ Create Contact Cluster Heatmap**. Output: `contact_cluster_heatmap.pdf`.
+
+#### Contact Duration Comparison
+
+For every class the touched cell type's classification assigns (e.g. macrophage morphology classes round / elongated / plastic), how long tracks stay in **sustained contact** with a target of that class — the same "max contact-bout length" feature as the Contact Cluster Heatmap above, in **timepoints and minutes side by
 side** (minutes needs a valid `time_interval`/`time_unit` in metadata; otherwise only timepoints are
 shown). Every class is compared against every other class **and** against every other class pooled
 together ("rest") — e.g. with round / elongated / plastic you get round-vs-elongated,
 round-vs-plastic, elongated-vs-plastic, and round-vs-rest, elongated-vs-rest, plastic-vs-rest.
 
-Requires **Use contact cell classification** (above) to be enabled — there is nothing to compare
+Requires **Use contact cell classification** (in the shared settings above) to be enabled — there is nothing to compare
 "by class" without it.
 
 | Control | Default | Meaning |
@@ -252,18 +299,18 @@ Requires **Use contact cell classification** (above) to be enabled — there is 
 | **Pairing column** | `sample_name` | Only shown for the paired test. Which column defines a pairing unit; any of the same condition-like columns offered elsewhere, plus `sample_name`. |
 | **Comparisons per page** | 12 | How many small boxplot pairs to place on each PDF page before starting a new one. |
 
-Click **▶ Create Contact Duration Comparison**. Output, written as a sibling artifact to the bundle above:
+Click **▶ Create Contact Duration Comparison**. Output:
 
 ```text
 <output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/contact_duration_comparison.pdf
 <output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/csv/contact_duration_comparison.csv
 ```
 
-### Contact State-Shift Analysis
+#### Contact State-Shift Analysis
 
-Where Contact Analysis asks *which* clusters occur more in contacting vs. non-contacting tracks, this asks a different question: does a track's **behavioural-state mix change** once it makes contact? It compares each classified track's [State Classification](state_classification.md) state composition **before vs. after** its first sufficiently long contact bout, against a **timing-matched null** before/after split for tracks that never contact — so a state shift attributable to contact can be distinguished from a track-wide temporal trend that would show up either way.
+Where the reports above ask *which* clusters occur more in contacting vs. non-contacting tracks, this asks a different question: does a track's **behavioural-state mix change** once it makes contact? It compares each classified track's [State Classification](state_classification.md) state composition **before vs. after** its first sufficiently long contact bout, against a **timing-matched null** before/after split for tracks that never contact — so a state shift attributable to contact can be distinguished from a track-wide temporal trend that would show up either way.
 
-- **Contact tracks** use the same bout definition as Contact Analysis: the first contiguous run of the chosen **Contact column** at least **Min. contiguous contact bout** timepoints long (both controls above are reused here, not duplicated).
+- **Contact tracks** use the same bout definition as the shared settings above: the first contiguous run of the chosen **Contact column** at least **Min. contiguous contact bout** timepoints long.
 - **No-contact tracks** get a synthetic reference split point instead of a real bout — its relative position within the track is drawn from the empirical distribution of real bout-start positions seen elsewhere in the run (not simply the track midpoint), so the null is matched to *when* contact tends to happen.
 
 | Control | Default | Meaning |
@@ -277,10 +324,10 @@ Click **▶ Run contact state-shift analysis** (**▶ Run State-Shift Analysis**
 - a **stacked-composition panel**: pooled per-timepoint before/after state composition.
 
 ```{important}
-Only available for the **Categorical DTW** method, and only once **State Classification has been run** for this cell type (it reads the behavioral-states `.h5ad`).
+Only once **State Classification has been run** for this cell type (it reads the behavioral-states `.h5ad`).
 ```
 
-Output, written as sibling artifacts to the Contact Analysis report (so re-running one does not overwrite the other):
+Output:
 
 ```text
 <output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/contact_state_shift.pdf
@@ -288,6 +335,18 @@ Output, written as sibling artifacts to the Contact Analysis report (so re-runni
 <output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/csv/state_shift_diff_bars.csv
 <output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/csv/state_shift_stacked_composition.csv
 ```
+
+#### Track Contact Overview
+
+A **QC / sanity-check view**, in the same spirit as [Backprojection](#step-5-backprojection) below — not a figure meant for a manuscript, but a way to visually confirm that the contact bouts driving all the reports above actually line up with real behavioural changes. For every track whose contact meets the **Min. contiguous contact bout** threshold, it plots that track's full (untrimmed, classified-window) behavioural-state trajectory as a coloured bar, with a grey/green bar directly beneath marking every contact bout of at least that length. Pages are grouped by sample — a sample's tracks are never split across a page shared with the next sample's, even if that leaves the page under-full.
+
+Requires **State Classification** to have been run for this cell type (it reads the behavioral-states `.h5ad`), even though it lives in the Track Classification tab.
+
+| Control | Default | Meaning |
+|---|---|---|
+| **Tracks per page** | 6 | How many track rows to place on each page before starting a new one. |
+
+Click **▶ Create Track Contact Overview**. Output: `track_contact_overview.pdf`, in the same `contact_analysis/<contact_col>/` folder as the other contact reports.
 
 ## Step 5 — Backprojection
 
@@ -334,7 +393,9 @@ You will find there, depending on which steps you ran:
 - Additional **exemplar** PDFs under `example_tracks/` and **diagnostics** PDFs under the trajectory-clustering output folders.
 - **Track-class proportion plots** under `behavior_proportions/`: `track_class_proportions_by_sample_<class>.pdf`/`.csv`, plus `track_class_proportions_by_group_<class>.csv` when grouping is used.
 - **Condition comparison reports** under `behavior_comparisons/`: `condition_comparison_<condition>.pdf`/`.csv`.
-- **Contact analysis** under `contact_analysis/<contact_col>/`: `contact_analysis.pdf` plus a sibling `csv/` folder with the underlying tables.
+- **Track Transition Report**: `transition_analysis.pdf` (pooled circular diagram + transition matrix for trajectory clusters).
+- **Window Transitions**: `window_transitions_all_samples.pdf` (merged pooled + per-sample Sankey), with individual per-sample pages also kept under `sankey_pdf_pages/`.
+- **Contact analysis** under `contact_analysis/<contact_col>/`, one file per report you ran: `contact_rate.pdf`, `contact_composition.pdf`, `condition_comparison_<condition>.pdf` (condition comparison, contact-analysis version), `contact_cluster_heatmap.pdf`, and `track_contact_overview.pdf`, plus a sibling `csv/` folder with the underlying tables.
 - **Contact duration comparison** in the same `contact_analysis/<contact_col>/` folder: `contact_duration_comparison.pdf` plus `csv/contact_duration_comparison.csv`.
 - **Contact state-shift analysis** in the same `contact_analysis/<contact_col>/` folder: `contact_state_shift.pdf` plus `csv/state_shift_track_windows.csv`, `csv/state_shift_diff_bars.csv` and `csv/state_shift_stacked_composition.csv`.
 - Optionally the **DTW distance matrix** CSV (if you ticked *Save distance matrix CSV*).
@@ -354,7 +415,7 @@ The folder name on disk is `behavioral_trajectories`. The easiest way to reopen 
 - **Use Variable-length mode for uneven tracks.** If your tracks differ a lot in length and resampling distorts them, switch *Trajectory size* to its minimum (Variable-length) so DTW compares native lengths.
 - **Save the distance matrix only when you need it.** It grows with the square of the number of tracks and is rarely needed for routine analysis.
 - **Queue the heavy steps.** DTW clustering and classifier training are CPU-intensive — use the **+🛒** buttons to run them unattended behind your other pipeline steps.
-- **Turn on Divide long tracks when tracks run much longer than Trajectory size** and the part that would otherwise be discarded likely holds meaningfully different behaviour — you get more, shorter, independently classified trajectories instead of one truncated one.
+- **Turn on Divide long tracks when tracks run much longer than Trajectory size** and the part that would otherwise be discarded likely holds meaningfully different behaviour — you get more, shorter, independently classified trajectories instead of one truncated one. This is also a **prerequisite** for the Track Transition Report and Window Transitions below — without split windows every track has only one cluster label, so there's nothing to transition between.
 - **Tune Min. contiguous contact bout to your imaging's time resolution.** A few timepoints is usually enough to exclude noisy single-frame touches while still catching genuine sustained contact; lower it toward 1 only if you want any touch, however brief, to count.
 - **Cluster colors and order set during renaming persist automatically** into every later plot — proportions, condition comparisons, contact analysis, backprojection — so you don't need to reapply them per report.
 

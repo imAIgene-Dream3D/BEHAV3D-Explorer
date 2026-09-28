@@ -265,6 +265,55 @@ def plot_circular_transition_diagram(
     return fig
 
 
+def plot_circular_transition_diagram_pair(
+    probs_df,
+    *,
+    state_colors=None,
+    state_order=None,
+    title=None,
+    min_prob_to_draw=0.03,
+    emphasis_gamma=2.0,
+    curvature=0.28,
+    label_style="on_node",
+    panel_figsize=(7, 7),
+    scale_mode="relative",
+):
+    """Two-panel figure: the full/unfiltered diagram (cutoff = 0) beside the same diagram at
+    `min_prob_to_draw`, so the effect of the cutoff is visible by direct comparison rather than
+    having to page back and forth between two single-panel figures.
+
+    Both panels share one `colors`/`state_order` resolution and one legend (when
+    `label_style="legend"`) - see `plot_circular_transition_diagram` for what `scale_mode` and
+    the other drawing parameters control; they're applied identically to both panels here.
+    """
+    clusters, probs_df, colors = _prepare_clusters_and_colors(probs_df, state_colors, state_order)
+
+    fig, axes = plt.subplots(1, 2, figsize=(panel_figsize[0] * 2, panel_figsize[1]))
+    _draw_circular_transition_diagram_on_ax(
+        axes[0], probs_df, colors=colors,
+        min_prob_to_draw=0.0, emphasis_gamma=emphasis_gamma, curvature=curvature,
+        label_style=label_style, scale_mode=scale_mode,
+    )
+    axes[0].set_title("All transitions (cutoff = 0)", fontsize=11, pad=10)
+
+    _draw_circular_transition_diagram_on_ax(
+        axes[1], probs_df, colors=colors,
+        min_prob_to_draw=min_prob_to_draw, emphasis_gamma=emphasis_gamma, curvature=curvature,
+        label_style=label_style, scale_mode=scale_mode,
+    )
+    axes[1].set_title(f"Cutoff = {min_prob_to_draw:g}", fontsize=11, pad=10)
+
+    if title:
+        fig.suptitle(str(title), fontsize=12, fontweight="bold")
+    if label_style == "legend":
+        fig.legend(
+            handles=_legend_handles(clusters, colors), loc="center left",
+            bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=9,
+        )
+    fig.tight_layout(rect=(0, 0, 1, 0.94) if title else None)
+    return fig
+
+
 def plot_circular_transition_diagram_grid(
     probs_df,
     *,

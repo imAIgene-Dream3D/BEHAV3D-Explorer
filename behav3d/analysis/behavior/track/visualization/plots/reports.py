@@ -128,6 +128,7 @@ from behav3d.analysis.behavior.state.visualization.plots.state_composition impor
     _build_overall_summary_plot_data_table,
     _panels_per_a4_page,
     _paginate_samples,
+    _apply_time_binning,
 )
 from behav3d.analysis.behavior.state.utils import (
     _apply_state_order,
@@ -817,6 +818,7 @@ def save_track_class_proportions_by_sample_plot(
     time_col="position_t",
     tmin_col="position_t_min",
     tmax_col="position_t_max",
+    time_bin_size=None,
 ):
     """
     Save one horizontal stacked bar per sample showing track-class proportions,
@@ -829,6 +831,13 @@ def save_track_class_proportions_by_sample_plot(
         as ``condition_groups`` in ``compute_condition_diff_stats_pairwise``) - when
         given, that axis is pooled into the merged labels instead of showing one panel
         per raw level. Rows whose raw level isn't in the mapping are dropped.
+
+    ``time_bin_size`` : int, optional
+        Groups timepoints into fixed-width buckets (bucket start value) before
+        computing the track-class proportions *over time* section below, to reduce
+        noise from many raw per-frame timepoints. ``None`` or ``<= 1`` means no
+        binning (raw per-frame resolution). Does not affect the static (non-time)
+        proportion bars above.
 
     If ``tmin_col``/``tmax_col`` (each track's active timepoint window) are present
     in ``adata_tracks.obs``, this also adds track-class proportions *over time*:
@@ -1042,6 +1051,7 @@ def save_track_class_proportions_by_sample_plot(
             expanded_df = _expand_track_windows_to_timepoints(
                 time_plot_df, time_col=time_col, tmin_col=tmin_col, tmax_col=tmax_col,
             )
+            expanded_df = _apply_time_binning(expanded_df, time_col=time_col, time_bin_size=time_bin_size)
 
             if len(expanded_df) > 0:
                 panels_per_page, ncols_eff, max_rows = _panels_per_a4_page(grid_ncols)

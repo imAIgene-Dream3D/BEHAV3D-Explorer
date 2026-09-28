@@ -796,7 +796,7 @@ def run_convpaint_segmentation(
                         zarr_death[t] = death_mask
                         mark_done(death_journal, journal_path(death_path), t)
                         if i == 0:
-                            print(
+                            tqdm.write(
                                 f"    \u23F1 death segment_per_z + write: "
                                 f"{time.time() - _t0_death:.2f}s"
                             )
@@ -860,7 +860,7 @@ def _process_edt_timepoint(
     multi_labels = segment_per_z(unified_model, frame, fe_use_device=fe_device)
     multi_labels = np.asarray(multi_labels)
     if diag:
-        print(
+        tqdm.write(
             f"    \u23F1 unified segment_per_z: {time.time() - _t0:.2f}s  "
             f"shape={multi_labels.shape}"
         )
@@ -891,7 +891,7 @@ def _process_edt_timepoint(
         )
         zarr_segs[ct][t] = instances.astype(np.uint16)
         if diag:
-            print(f"    \u23F1 {ct} mask->instances + writes: {time.time() - _t0:.2f}s")
+            tqdm.write(f"    \u23F1 {ct} mask->instances + writes: {time.time() - _t0:.2f}s")
 
 
 def _process_probability_timepoint(
@@ -905,7 +905,7 @@ def _process_probability_timepoint(
     probas = predict_probas_per_z(unified_model, frame, fe_use_device=fe_device)
     probas = np.asarray(probas)
     if diag:
-        print(
+        tqdm.write(
             f"    \u23F1 unified predict_probas: {time.time() - _t0:.2f}s  "
             f"shape={probas.shape}"
         )
@@ -915,7 +915,7 @@ def _process_probability_timepoint(
         prob_axis = k - 1  # class indices [1..N+1] -> axis [0..N]
         if not (0 <= prob_axis < probas.shape[0]):
             # Should not happen with a correctly trained model + label map.
-            print(
+            tqdm.write(
                 f"    \u26a0\ufe0f Probability slice missing for {ct} "
                 f"(class {k}, axis {prob_axis} out of {probas.shape[0]}). "
                 "Skipping."
@@ -929,7 +929,7 @@ def _process_probability_timepoint(
         segment_size_min = int(cfg.get(f"{ct}_segment_size_min", 10))
 
         if diag:
-            print(
+            tqdm.write(
                 f"    \u23F1 {ct} prob slice range="
                 f"[{prob_map.min():.3f}, {prob_map.max():.3f}]"
             )

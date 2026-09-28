@@ -14,6 +14,7 @@ from behav3d.analysis.behavior.track.state_dtw import (
     save_dtaidistance_exemplar_overview,
 )
 from behav3d.analysis.behavior.track.visualization.plots.exemplar_track_per_cluster import (
+    save_exemplar_statebar_track_pdf_per_cluster,
     select_exemplar_tracks_by_cluster,
 )
 
@@ -161,3 +162,52 @@ def test_bouts_native_exemplar_overview_regenerates_with_multiple_tracklets_per_
         "expected the regenerated overview to land directly in the same "
         "clustering/ folder run_state_based_analysis itself writes to"
     )
+
+
+def test_save_exemplar_statebar_track_pdf_per_cluster_removes_stale_files_after_rename(tmp_path):
+    """Regenerating per-cluster exemplar PDFs after a cluster rename must not
+    leave the old cluster-labeled files behind alongside the new ones."""
+    adata_full = _make_behavioral_states_adata(n_tracks=4, track_len=50)
+    out_dir = Path(tmp_path) / "exemplar_rename_case"
+
+    chosen_df = pd.DataFrame(
+        {
+            "sample_name": ["sample_0", "sample_1"],
+            "TrackID": [0, 1],
+            "position_t_min": [0, 0],
+            "position_t_max": [49, 49],
+            "ClusterID": ["1", "2"],
+        }
+    )
+
+    save_exemplar_statebar_track_pdf_per_cluster(
+        adata_full=adata_full,
+        out_dir=out_dir,
+        chosen_df=chosen_df,
+        state_key=FULL_STATE_COL,
+        cluster_key="ClusterID",
+        time_key="position_t",
+        layout_mode="per_cluster",
+    )
+    per_cluster_dir = out_dir / "per_cluster" / "pdf"
+    assert (per_cluster_dir / "example_track_cluster_1.pdf").exists()
+    assert (per_cluster_dir / "example_track_cluster_2.pdf").exists()
+
+    # Simulate a rename: cluster "2" becomes "renamed".
+    chosen_df_renamed = chosen_df.copy()
+    chosen_df_renamed["ClusterID"] = chosen_df_renamed["ClusterID"].replace({"2": "renamed"})
+
+    save_exemplar_statebar_track_pdf_per_cluster(
+        adata_full=adata_full,
+        out_dir=out_dir,
+        chosen_df=chosen_df_renamed,
+        state_key=FULL_STATE_COL,
+        cluster_key="ClusterID",
+        time_key="position_t",
+        layout_mode="per_cluster",
+    )
+    assert (per_cluster_dir / "example_track_cluster_1.pdf").exists()
+    assert not (per_cluster_dir / "example_track_cluster_2.pdf").exists(), (
+        "stale exemplar PDF from the pre-rename cluster label must be removed"
+    )
+    assert (per_cluster_dir / "example_track_cluster_renamed.pdf").exists()

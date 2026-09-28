@@ -62,8 +62,10 @@ from behav3d.features.state_descriptive_features import (
 from behav3d.analysis.filtering import filter_and_truncate_tracks_anndata
 from behav3d.analysis.behavior.track.utils import (
     _filter_tracks_for_dtaidistance,
+    _peek_track_outfolder,
     _resolve_track_paths,
 )
+from behav3d.core.utils import rmtree_ignore_missing
 from behav3d.analysis.behavior.general.leiden import (
     run_pca, 
     run_leiden_clustering
@@ -1694,6 +1696,7 @@ def run_state_based_analysis(
     # Saving
     save_outputs=True,
     output_subdir_name=None,
+    clear_outputs=True,
     relabel_mapping=None,
     relabel_keep_unmapped=True,
 
@@ -1702,6 +1705,14 @@ def run_state_based_analysis(
 ):
     run_started = _vstart(verbose, "trajectory-clustering", "run trajectory clustering")
     start_time = time.time()
+
+    if bool(clear_outputs):
+        existing_outfolder = _peek_track_outfolder(
+            output_dir, cell_type, output_subdir_name=output_subdir_name
+        )
+        if existing_outfolder.exists():
+            rmtree_ignore_missing(existing_outfolder)
+            _vinfo(verbose, "trajectory-clustering", f"cleared previous outputs: {existing_outfolder}")
 
     resolved_paths = _resolve_track_paths(
         output_dir=output_dir,

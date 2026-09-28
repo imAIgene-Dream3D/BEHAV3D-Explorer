@@ -21,7 +21,7 @@ from behav3d.analysis.behavior.utils import (
     _handle_nan_in_distance_matrix,
     _save_adata_obs_csv,
 )
-from behav3d.core.utils import expand_column_patterns, format_time
+from behav3d.core.utils import expand_column_patterns, format_time, rmtree_ignore_missing
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +452,7 @@ def cluster_umap(
     cluster_percentage_group_by=None,
     plot_results=True,
     output_subdir_name="results",
+    clear_outputs=True,
     plot_feature_cols=None,
 ):
     assert config is not None or all(
@@ -468,6 +469,9 @@ def cluster_umap(
     results_outdir = Path(analysis_outdir, str(output_subdir_name).strip() or "results")
     analysis_outdir.mkdir(parents=True, exist_ok=True)
     feature_outdir.mkdir(parents=True, exist_ok=True)
+    if bool(clear_outputs) and results_outdir.exists():
+        rmtree_ignore_missing(results_outdir)
+        print(f"- Cleared previous results directory: {results_outdir}")
     results_outdir.mkdir(parents=True, exist_ok=True)
 
     if df_tracks is None:
@@ -620,6 +624,7 @@ def run_tcell_analysis(
     plot_results=True,
     seed=42,
     output_subdir_name="results",
+    clear_outputs=True,
     feature_scaling_preset=None,
     min_track_length=None,
     max_track_length=None,
@@ -727,6 +732,7 @@ def run_tcell_analysis(
         plot_results=plot_results,
         random_state=seed,
         output_subdir_name=output_subdir_name,
+        clear_outputs=clear_outputs,
         plot_feature_cols=plot_feature_cols,
     )
     end_time = time.time()

@@ -14,6 +14,7 @@ from matplotlib.figure import Figure
 from sklearn.preprocessing import StandardScaler
 
 from behav3d.core.anndata import df_to_adata
+from behav3d.core.utils import rmtree_ignore_missing
 from behav3d.features.rolling_window_features import create_descriptive_track_dataset
 from behav3d.analysis.behavior.state.hmm import (
     run_hmm_state_classification,
@@ -1597,11 +1598,15 @@ def run_hmm_state_clustering(
     random_state=123,
     df_positions=None,
     state_paths=None,
+    clear_outputs=True,
     return_details=False,
     verbose=True,
 ):
     hmm_started = _vstart(verbose, "state-hmm", "run HMM state clustering")
     state_paths = state_paths or _resolve_state_paths(output_dir, cell_type)
+    if bool(clear_outputs) and state_paths.state_outdir.exists():
+        rmtree_ignore_missing(state_paths.state_outdir)
+        _vinfo(verbose, "state-hmm", f"cleared previous outputs: {state_paths.state_outdir}")
     state_clustering_outdir = _resolve_hmm_quality_control_outdir(state_paths=state_paths) / "raw"
     state_clustering_outdir.mkdir(parents=True, exist_ok=True)
 

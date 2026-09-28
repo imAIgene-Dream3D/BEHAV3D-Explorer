@@ -1037,6 +1037,18 @@ class StateClassificationSubTab(QWidget):
         self.list_composition_group_cols = QListWidget()
         self.list_composition_group_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
         g_state_composition.addWidget(self.list_composition_group_cols)
+        comp_bin_form = QFormLayout()
+        comp_bin_form.setSpacing(3)
+        self.spin_state_composition_time_bin = QSpinBox()
+        self.spin_state_composition_time_bin.setRange(1, 100000)
+        self.spin_state_composition_time_bin.setValue(1)
+        self.spin_state_composition_time_bin.setMaximumWidth(100)
+        comp_bin_form.addRow("Time bin size:", make_help_row(
+            self.spin_state_composition_time_bin, "Time bin size (timepoints)",
+            "Groups timepoints into buckets of this size before computing composition, "
+            "to reduce visual noise. 1 = no binning (raw per-frame resolution)."
+        ))
+        g_state_composition.addLayout(comp_bin_form)
         g_state_composition.addWidget(_make_info_label(
             "Plots the proportion of each behavioral state per sample. Tick \"Group conditions\" "
             "under Group in X/Y to pool that axis's levels into two custom groups."
@@ -2789,6 +2801,7 @@ class StateClassificationSubTab(QWidget):
             return
         out = self._out_dir()
         self._log(f"▶ Generating state composition report for '{ct}'…")
+        time_bin_size = int(self.spin_state_composition_time_bin.value())
         selected_cols = [item.text() for item in self.list_composition_group_cols.selectedItems()]
         group_x = self.combo_composition_group_x.currentText()
         group_x = None if group_x in ("", "(none)") else group_x
@@ -2877,6 +2890,7 @@ class StateClassificationSubTab(QWidget):
                 group_y_levels_map=group_y_levels_map,
                 state_colors=_get_classification_state_colors(adata, FULL_STATE_COL),
                 state_order=_get_classification_state_order(adata, FULL_STATE_COL),
+                time_bin_size=time_bin_size,
                 verbose=True,
             )
 
@@ -4181,6 +4195,18 @@ class TrackClassificationSubTab(QWidget):
         self.list_track_proportion_group_cols = QListWidget()
         self.list_track_proportion_group_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
         g_prop.addWidget(self.list_track_proportion_group_cols)
+        track_bin_form = QFormLayout()
+        track_bin_form.setSpacing(3)
+        self.spin_track_composition_time_bin = QSpinBox()
+        self.spin_track_composition_time_bin.setRange(1, 100000)
+        self.spin_track_composition_time_bin.setValue(1)
+        self.spin_track_composition_time_bin.setMaximumWidth(100)
+        track_bin_form.addRow("Time bin size:", make_help_row(
+            self.spin_track_composition_time_bin, "Time bin size (timepoints)",
+            "Groups timepoints into buckets of this size before computing composition, "
+            "to reduce visual noise. 1 = no binning (raw per-frame resolution)."
+        ))
+        g_prop.addLayout(track_bin_form)
         prop_row = QHBoxLayout()
         self.btn_track_proportions = QPushButton("▶ Track Composition Report")
         _style_secondary(self.btn_track_proportions)
@@ -6485,6 +6511,7 @@ class TrackClassificationSubTab(QWidget):
             return
         out = self._out_dir()
         track_adata = self._track_adata
+        time_bin_size = int(self.spin_track_composition_time_bin.value())
         method = (track_adata.uns.get("dtai_trajectory_clustering", {}) or {}).get("method")
         if method == "original_behav3d_feature_dtw":
             # Known limitation: renaming feature-DTW clusters via this generic dialog updates
@@ -6535,6 +6562,7 @@ class TrackClassificationSubTab(QWidget):
                 paths.behavior_proportions_outfolder,
                 sample_col="sample_name",
                 class_col=cluster_col,
+                time_bin_size=time_bin_size,
                 verbose=True,
             )
             result = {"diagnostics": diag, "proportions": prop}
@@ -7173,6 +7201,7 @@ class TrackClassificationSubTab(QWidget):
         out = self._out_dir()
         self._log(f"▶ Creating track proportion plots for '{ct}'…")
         track_adata = self._track_adata
+        time_bin_size = int(self.spin_track_composition_time_bin.value())
         selected_cols = [item.text() for item in self.list_track_proportion_group_cols.selectedItems()]
         group_x = self.combo_track_proportion_group_x.currentText()
         group_x = None if group_x in ("", "(none)") else group_x
@@ -7229,6 +7258,7 @@ class TrackClassificationSubTab(QWidget):
                 group_y=group_y,
                 group_x_levels_map=group_x_levels_map,
                 group_y_levels_map=group_y_levels_map,
+                time_bin_size=time_bin_size,
                 verbose=True,
             )
 

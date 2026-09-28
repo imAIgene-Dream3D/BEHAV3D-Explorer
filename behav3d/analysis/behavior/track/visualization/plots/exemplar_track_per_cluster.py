@@ -16,6 +16,7 @@ from behav3d.analysis.behavior.utils import (
     _mixed_label_sort_key,
     _sanitize_filename_token,
 )
+from behav3d.core.utils import rmtree_ignore_missing
 
 from behav3d.analysis.behavior.state.visualization.videos.track_max_projection import (
     create_fulltrack_max_projection_stacks_with_track,
@@ -798,6 +799,7 @@ def save_exemplar_statebar_track_pdf_per_cluster(
                 plt.close(fig)
 
     if mode in {"per_cluster", "both"}:
+        rmtree_ignore_missing(per_cluster_dir)
         per_cluster_dir.mkdir(parents=True, exist_ok=True)
         for cluster_val in cluster_vals:
             cluster_token = _sanitize_filename_token(cluster_val, fallback="cluster")
@@ -809,6 +811,7 @@ def save_exemplar_statebar_track_pdf_per_cluster(
             paths_by_cluster[str(cluster_val)] = str(pdf_path)
 
     if mode in {"per_example", "both"}:
+        rmtree_ignore_missing(per_example_dir)
         per_example_dir.mkdir(parents=True, exist_ok=True)
         rank_limit = max(1, int(num_example_ranks))
         rank_groups = {int(r): [] for r in range(1, rank_limit + 1)}
@@ -1722,6 +1725,7 @@ def save_exemplar_statebar_backprojection_pdf(
                 _save_rgb_page_to_pdf(pdf, page, dpi=plot_dpi)
 
     if mode in {"per_cluster", "both"}:
+        rmtree_ignore_missing(per_cluster_dir)
         per_cluster_dir.mkdir(parents=True, exist_ok=True)
         cluster_keys, rows_by_cluster = _group_rows_by_cluster(rows_info, cluster_order)
         for cluster_text in cluster_keys:
@@ -1732,6 +1736,7 @@ def save_exemplar_statebar_backprojection_pdf(
             paths_by_cluster[str(cluster_text)] = str(pdf_path)
 
     if mode in {"per_example", "both"}:
+        rmtree_ignore_missing(per_example_dir)
         per_example_dir.mkdir(parents=True, exist_ok=True)
         rows_by_rank = _group_rows_by_rank(
             rows_info=rows_info,
@@ -1984,6 +1989,7 @@ def save_exemplar_statebar_backprojection_video_per_cluster(
             )
 
     if mode in {"per_cluster", "both"}:
+        rmtree_ignore_missing(per_cluster_dir)
         per_cluster_dir.mkdir(parents=True, exist_ok=True)
         cluster_keys, rows_by_cluster = _group_rows_by_cluster(rows_info, cluster_order)
         for cluster_text in cluster_keys:
@@ -1993,6 +1999,7 @@ def save_exemplar_statebar_backprojection_video_per_cluster(
             paths_by_cluster[str(cluster_text)] = str(video_path)
 
     if mode in {"per_example", "both"}:
+        rmtree_ignore_missing(per_example_dir)
         per_example_dir.mkdir(parents=True, exist_ok=True)
         rows_by_rank = _group_rows_by_rank(
             rows_info=rows_info,

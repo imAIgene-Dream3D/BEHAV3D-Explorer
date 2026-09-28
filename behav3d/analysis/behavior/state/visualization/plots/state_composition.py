@@ -255,6 +255,17 @@ def plot_state_composition_over_time(
     return data, fig, ax
 
 
+def _apply_time_binning(df, *, time_col, time_bin_size):
+    """Bin `time_col` into fixed-width buckets (bucket start value) to reduce
+    noise in composition-over-time plots. `time_bin_size` <= 1 or None is a no-op."""
+    if time_bin_size is None or int(time_bin_size) <= 1:
+        return df
+    bin_size = int(time_bin_size)
+    df = df.copy()
+    df[time_col] = (df[time_col] // bin_size) * bin_size
+    return df
+
+
 def _prepare_state_composition_df(
     adata,
     *,
@@ -262,6 +273,7 @@ def _prepare_state_composition_df(
     state_col="ClusterID",
     sample_col="sample_name",
     state_order=None,
+    time_bin_size=None,
 ):
     """Validate/clean obs and return normalized DataFrame + state/sample ordering."""
     obs = adata.obs
@@ -276,6 +288,7 @@ def _prepare_state_composition_df(
     if len(df) == 0:
         raise ValueError("No valid rows remain after filtering NaNs in required columns.")
     df[time_col] = df[time_col].astype(int)
+    df = _apply_time_binning(df, time_col=time_col, time_bin_size=time_bin_size)
     df[state_col] = df[state_col].astype(str)
     df[sample_col] = df[sample_col].astype(str)
 
@@ -1433,6 +1446,7 @@ def save_state_composition_report(
     state_col="ClusterID",
     sample_col="sample_name",
     state_order=None,
+    time_bin_size=None,
     grid_ncols=3,
     figsize_per_panel=(4.0, 2.8),
     include_pooled_summary=True,
@@ -1458,6 +1472,11 @@ def save_state_composition_report(
         as ``condition_groups`` in ``compute_condition_diff_stats_pairwise``) - when
         given, that axis is pooled into the merged labels instead of showing one panel
         per raw level. Rows whose raw level isn't in the mapping are dropped.
+
+    ``time_bin_size`` : int, optional
+        Groups timepoints into fixed-width buckets (bucket start value) before
+        computing composition, to reduce noise from many raw per-frame timepoints.
+        ``None`` or ``<= 1`` means no binning (raw per-frame resolution).
 
     Outputs:
       1) one combined PDF with all report pages
@@ -1487,6 +1506,7 @@ def save_state_composition_report(
         state_col=state_col,
         sample_col=sample_col,
         state_order=state_order,
+        time_bin_size=time_bin_size,
     )
     if not _state_order_explicit:
         state_order = _apply_state_order(state_order, _get_classification_state_order(adata, state_col))
