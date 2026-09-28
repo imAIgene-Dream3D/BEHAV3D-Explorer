@@ -291,6 +291,25 @@ def _make_timepoint_time_label() -> QLabel:
     return lbl
 
 
+def _clear_layout(layout) -> None:
+    """Remove and delete everything in ``layout``, including widgets inside nested
+    layouts (``takeAt`` alone only detaches a nested layout, leaving its widgets
+    drawn on the parent - e.g. stacked, overlapping checkbox grids).
+
+    Widgets are only hidden and scheduled with ``deleteLater`` - never
+    ``setParent(None)``, which hands them to Python and deletes them on the spot,
+    possibly while Qt is still delivering an event to them (a hard crash)."""
+    while layout.count():
+        item = layout.takeAt(0)
+        widget = item.widget()
+        if widget is not None:
+            widget.hide()
+            widget.deleteLater()
+        elif item.layout() is not None:
+            _clear_layout(item.layout())
+            item.layout().deleteLater()
+
+
 def _make_info_label(text: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setWordWrap(True)
@@ -982,6 +1001,65 @@ class StateClassificationSubTab(QWidget):
         trans_row.addWidget(self.btn_view_transition)
         g_state_transition.addLayout(trans_row)
 
+        self.grp_state_feature_heatmap = QGroupBox("State Feature Heatmap")
+        g_sfheat = QVBoxLayout(self.grp_state_feature_heatmap)
+        g_sfheat.setSpacing(4)
+        g_sfheat.addWidget(_make_info_label(
+            "Heatmap of behavioral states x features: the mean of each selected "
+            "per-timepoint feature per state. The features the states were built on are "
+            "preselected; add any other feature. Cell labels show the unscaled state mean."
+        ))
+        sfheat_form = QFormLayout()
+        sfheat_form.setSpacing(3)
+        self.combo_state_heatmap_state_col = QComboBox()
+        self.combo_state_heatmap_state_col.addItem("Full behavioral state", "behavioral_state")
+        self.combo_state_heatmap_state_col.addItem("Primary dynamic state", "intrinsic_behavioral_cluster")
+        self.combo_state_heatmap_state_col.setMinimumWidth(200)
+        sfheat_form.addRow("States:", make_help_row(
+            self.combo_state_heatmap_state_col, "States",
+            "'Full behavioral state': the final states, including the binary groups (e.g. "
+            "contact). 'Primary dynamic state': the HMM states before binary groups are merged in."
+        ))
+        self.combo_state_heatmap_weighting = QComboBox()
+        self.combo_state_heatmap_weighting.addItem("Every timepoint counts", "timepoints")
+        self.combo_state_heatmap_weighting.addItem("Each track counts once", "tracks")
+        self.combo_state_heatmap_weighting.setMinimumWidth(200)
+        sfheat_form.addRow("Average:", make_help_row(
+            self.combo_state_heatmap_weighting, "Average",
+            "'Every timepoint counts': mean over all timepoints in each state. 'Each track "
+            "counts once': each track is first averaged over its own timepoints in a state, "
+            "then tracks are averaged, so long tracks don't dominate."
+        ))
+        self.combo_state_heatmap_scaling = QComboBox()
+        self.combo_state_heatmap_scaling.addItems(["z-score", "min-max"])
+        self.combo_state_heatmap_scaling.setMaximumWidth(130)
+        sfheat_form.addRow("Colour scaling:", make_help_row(
+            self.combo_state_heatmap_scaling, "Colour scaling",
+            "'z-score': each feature is standardized, then averaged per state; 0 = average, "
+            "red = higher, blue = lower. 'min-max': state means rescaled 0-1 per feature."
+        ))
+        g_sfheat.addLayout(sfheat_form)
+        g_sfheat.addWidget(QLabel("Features (Ctrl/Cmd click for multiple):"))
+        self.list_state_heatmap_features = QListWidget()
+        self.list_state_heatmap_features.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        g_sfheat.addWidget(self.list_state_heatmap_features)
+        sfheat_sel_row = QHBoxLayout()
+        self.btn_state_heatmap_defaults = QPushButton("Select used features")
+        self.btn_state_heatmap_all = QPushButton("Select all")
+        self.btn_state_heatmap_clear = QPushButton("Clear")
+        for _b in (self.btn_state_heatmap_defaults, self.btn_state_heatmap_all, self.btn_state_heatmap_clear):
+            sfheat_sel_row.addWidget(_b)
+        g_sfheat.addLayout(sfheat_sel_row)
+        sfheat_row = QHBoxLayout()
+        self.btn_state_feature_heatmap = QPushButton("▶ Create State Feature Heatmap")
+        _style_secondary(self.btn_state_feature_heatmap)
+        sfheat_row.addWidget(self.btn_state_feature_heatmap, stretch=1)
+        self.btn_view_state_feature_heatmap = _make_view_btn()
+        sfheat_row.addWidget(self.btn_view_state_feature_heatmap)
+        g_sfheat.addLayout(sfheat_row)
+        self._state_heatmap_defaults = []
+        self._state_heatmap_cache_key = None
+
         self.grp_state_comparison = QGroupBox("Condition Comparison Report")
         g_state_comparison = QVBoxLayout(self.grp_state_comparison)
         g_state_comparison.setSpacing(4)
@@ -1091,6 +1169,7 @@ class StateClassificationSubTab(QWidget):
         pipeline_content_lay.addWidget(self.grp_state_diagnostics)
         pipeline_content_lay.addWidget(self.grp_state_composition)
         pipeline_content_lay.addWidget(self.grp_state_transition)
+        pipeline_content_lay.addWidget(self.grp_state_feature_heatmap)
         pipeline_content_lay.addWidget(self.grp_state_comparison)
         pipeline_content_lay.addStretch()
         self._pipeline_scroll.setWidget(pipeline_content)
@@ -1211,6 +1290,11 @@ class StateClassificationSubTab(QWidget):
         _wire_view_btn(self.btn_view_composition, self._on_view, "state_composition")
         self.btn_state_transition.clicked.connect(self._on_state_transition)
         _wire_view_btn(self.btn_view_transition, self._on_view, "state_transition")
+        self.btn_state_feature_heatmap.clicked.connect(self._on_state_feature_heatmap)
+        _wire_view_btn(self.btn_view_state_feature_heatmap, self._on_view, "state_feature_heatmap")
+        self.btn_state_heatmap_defaults.clicked.connect(self._select_state_heatmap_defaults)
+        self.btn_state_heatmap_all.clicked.connect(self.list_state_heatmap_features.selectAll)
+        self.btn_state_heatmap_clear.clicked.connect(self.list_state_heatmap_features.clearSelection)
         self.btn_condition_comparison.clicked.connect(self._on_condition_comparison)
         _wire_view_btn(self.btn_view_condition_comparison, self._on_view, "state_condition_comparison")
         self.btn_browse_hmm.clicked.connect(self._browse_hmm_artifact)
@@ -1298,11 +1382,12 @@ class StateClassificationSubTab(QWidget):
             "state_diagnostics": {self.grp_state_diagnostics},
             "state_composition": {self.grp_state_composition},
             "state_transition": {self.grp_state_transition},
+            "state_feature_heatmap": {self.grp_state_feature_heatmap},
             "state_comparison": {self.grp_state_comparison},
         }.get(pipeline_id, set())
         for group in (
             self.grp_state_diagnostics, self.grp_state_composition,
-            self.grp_state_transition, self.grp_state_comparison,
+            self.grp_state_transition, self.grp_state_feature_heatmap, self.grp_state_comparison,
         ):
             group.setVisible(group in visible)
         title = next(
@@ -1514,11 +1599,8 @@ class StateClassificationSubTab(QWidget):
 
     def _rebuild_log_scale_features(self, state=None):
         self._update_feature_tab_labels()
-        while self.log_scale_lay.count():
-            child = self.log_scale_lay.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
-                
+        _clear_layout(self.log_scale_lay)
+
         selected_feats = [f for f, cb in getattr(self, "_timepoint_checkboxes", {}).items() if cb.isChecked()]
         ct = self._cell_type()
         cfg = getattr(self.metadata_loader, "behav3d_parameters", {}).get("state_classification", {}).get(ct, {}) if ct else {}
@@ -1608,10 +1690,7 @@ class StateClassificationSubTab(QWidget):
         self.setUpdatesEnabled(False)
         try:
             for lay in [self.timepoint_features_lay, self.log_scale_lay, self.bin_grp_lay]:
-                while lay.count():
-                    child = lay.takeAt(0)
-                    if child.widget():
-                        child.widget().deleteLater()
+                _clear_layout(lay)
 
             if not csv_path.exists():
                 self.timepoint_features_lay.addWidget(_make_info_label(
@@ -1967,6 +2046,107 @@ class StateClassificationSubTab(QWidget):
             self.rename_status_lbl.setText("ℹ Run state classification first to enable renaming.")
 
         self._refresh_composition_group_cols()
+        self._refresh_state_heatmap_features()
+
+    def _refresh_state_heatmap_features(self):
+        """Fill the state-heatmap feature list (state features preselected); keeps the
+        user's selection when nothing changed on disk."""
+        ct = self._cell_type()
+        out = self._out_dir()
+        full_path = self._full_adata_path(ct) if ct else None
+        has_states = bool(full_path and full_path.exists())
+        self.btn_state_feature_heatmap.setEnabled(has_states)
+        if not ct or not out or not has_states:
+            self.list_state_heatmap_features.clear()
+            self._state_heatmap_cache_key = None
+            return
+        from behav3d.analysis.behavior.state.utils import _resolve_positions_csv_path
+        mtimes = [full_path.stat().st_mtime]
+        try:
+            mtimes.append(_resolve_positions_csv_path(output_dir=str(out), cell_type=ct).stat().st_mtime)
+        except Exception:
+            mtimes.append(None)
+        key = (str(out), ct, tuple(mtimes))
+        if key == self._state_heatmap_cache_key:
+            return
+        from behav3d.analysis.behavior.track.visualization.plots.feature_heatmap import (
+            list_track_feature_candidates,
+        )
+        try:
+            candidates, defaults = list_track_feature_candidates(str(out), ct)
+        except Exception as exc:
+            self._log(f"⚠ Could not list features for the state heatmap: {exc}")
+            candidates, defaults = [], []
+        previous = {i.text() for i in self.list_state_heatmap_features.selectedItems()}
+        keep_previous = (
+            self._state_heatmap_cache_key is not None and key[:2] == self._state_heatmap_cache_key[:2]
+        )
+        self._state_heatmap_cache_key = key
+        self._state_heatmap_defaults = list(defaults)
+        wanted = previous if keep_previous and previous else set(defaults)
+        self.list_state_heatmap_features.clear()
+        for col in candidates:
+            self.list_state_heatmap_features.addItem(col)
+            if col in wanted:
+                self.list_state_heatmap_features.item(
+                    self.list_state_heatmap_features.count() - 1
+                ).setSelected(True)
+        _fit_list_widget_height(self.list_state_heatmap_features, max_rows=10)
+
+    def _select_state_heatmap_defaults(self):
+        wanted = set(self._state_heatmap_defaults)
+        for i in range(self.list_state_heatmap_features.count()):
+            item = self.list_state_heatmap_features.item(i)
+            item.setSelected(item.text() in wanted)
+
+    def _on_state_feature_heatmap(self):
+        ct = self._cell_type()
+        if not ct:
+            return
+        if self._bg.is_running():
+            QMessageBox.warning(self, "Busy", "Another operation is running.")
+            return
+        full_path = self._full_adata_path(ct)
+        if not full_path or not full_path.exists():
+            QMessageBox.warning(self, "No data", "Run state classification first.")
+            return
+        features = [i.text() for i in self.list_state_heatmap_features.selectedItems()]
+        if not features:
+            QMessageBox.warning(self, "No features", "Select at least one feature for the heatmap.")
+            return
+        out = self._out_dir()
+        state_col = self.combo_state_heatmap_state_col.currentData()
+        weighting = self.combo_state_heatmap_weighting.currentData()
+        scaling = "zscore" if self.combo_state_heatmap_scaling.currentText() == "z-score" else "minmax"
+        self._log(
+            f"▶ Creating state feature heatmap for '{ct}' ({len(features)} features, {state_col}, {weighting})…"
+        )
+
+        def _run(**kw):
+            import anndata as ad
+            from behav3d.analysis.behavior.track.visualization.plots.feature_heatmap import (
+                save_state_feature_heatmap,
+            )
+            adata = ad.read_h5ad(str(full_path))
+            return save_state_feature_heatmap(
+                adata, str(out), ct, features,
+                state_col=state_col, weighting=weighting, scaling=scaling, verbose=True,
+            )
+
+        self._bg.run(
+            fn=_run,
+            desc=f"State feature heatmap ({ct})…",
+            progress_row=self.progress_row,
+            buttons=[self.btn_state_feature_heatmap],
+            viewer=self.viewer,
+            inject_progress=False,
+            on_done=lambda r: (
+                self._log(f"✅ State feature heatmap done for '{ct}': {r.get('feature_heatmap_pdf')}"),
+                self._update_view_buttons(),
+                self._notify_results(),
+            ),
+            on_failed=lambda e: self._log(f"❌ State feature heatmap failed: {e}"),
+        )
 
     def _composition_candidate_columns(self):
         cols = []
@@ -2139,9 +2319,13 @@ class StateClassificationSubTab(QWidget):
             for btn in (
                 self.btn_view_state, self.btn_view_state_diagnostics, self.btn_view_composition,
                 self.btn_view_transition, self.btn_view_condition_comparison,
+                self.btn_view_state_feature_heatmap,
             ):
                 btn.setEnabled(False)
             return
+        self.btn_view_state_feature_heatmap.setEnabled(
+            len(self._get_view_candidates("state_feature_heatmap", ct)) > 0
+        )
         self.btn_view_state.setEnabled(
             any(p.exists() for _lbl, p in self._state_run_qc_pdfs(ct))
         )
@@ -3190,6 +3374,14 @@ class StateClassificationSubTab(QWidget):
         if kind == "state_transition":
             p = self._report_path(ct, "state_transition_report")
             return [(f"Transition report ({ct})", p)] if p else []
+        if kind == "state_feature_heatmap":
+            heat_dir = out / "analysis" / ct / "behavioral_states" / "state_feature_heatmaps"
+            if not heat_dir.exists():
+                return []
+            return [
+                (p.stem.replace("state_feature_heatmap_", "feature heatmap: "), p)
+                for p in sorted(heat_dir.glob("state_feature_heatmap_*.pdf"))
+            ]
         if kind == "state_condition_comparison":
             comp_dir = out / "analysis" / ct / "behavioral_states" / "state_composition" / "behavior_proportions"
             if not comp_dir.exists():
@@ -3224,6 +3416,315 @@ class StateClassificationSubTab(QWidget):
                 panel.refresh()
             except Exception:
                 pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Feature selection for trajectory clustering without behavioral states
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TrajectoryFeatureSelector(QWidget):
+    """Pick the per-timepoint features (and their preprocessing) for feature-based
+    trajectory DTW run directly on the track-features CSV, with no behavioral states.
+
+    Mirrors the State Classification feature selection: category-grouped timepoint
+    features, optional window features, binary (0/1) columns, and processing
+    (smoothing, percentile caps, log scaling, start offset). ``params()`` returns
+    keyword arguments for
+    ``behav3d.analysis.behavior.track.trajectory_features.build_trajectory_feature_adata``.
+    """
+
+    _WINDOW_FEATURES = ("net_displacement", "straightness", "mean_square_displacement")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._timepoint_checkboxes: dict = {}
+        self._binary_checkboxes: dict = {}
+        self._logscale_checkboxes: dict = {}
+        self._pending_cfg: dict = {}
+        self._loaded_key = None
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(3)
+        lay.addWidget(_make_info_label(
+            "Features for trajectory DTW, read directly from the track-features table "
+            "(no behavioral states needed). Continuous features are smoothed / capped / "
+            "log-scaled as set below, then z-scored; binary columns are standardized and "
+            "weighted by 'Binary weight' (Advanced Configuration)."
+        ))
+
+        self.tabs = QTabWidget()
+        tp_tab = QWidget()
+        tp_lay = QVBoxLayout(tp_tab)
+        tp_lay.setSpacing(2)
+        self.timepoint_lay = QVBoxLayout()
+        tp_lay.addLayout(self.timepoint_lay)
+        tp_lay.addStretch(1)
+        self.tabs.addTab(tp_tab, "Timepoint Features")
+
+        win_tab = QWidget()
+        win_lay = QVBoxLayout(win_tab)
+        win_lay.setSpacing(2)
+        win_lay.addWidget(_make_info_label(
+            "Short-term trajectory-shape descriptors computed over a rolling window of "
+            "consecutive timepoints (needs position_x/y/z)."
+        ))
+        win_form = QFormLayout()
+        self.spin_window_size = QSpinBox()
+        self.spin_window_size.setRange(2, 500)
+        self.spin_window_size.setValue(5)
+        self.spin_window_size.setMaximumWidth(90)
+        win_form.addRow("Window size (timepoints):", self.spin_window_size)
+        win_lay.addLayout(win_form)
+        self._window_checkboxes = {}
+        for name in self._WINDOW_FEATURES:
+            cb = QCheckBox(name)
+            cb.stateChanged.connect(self._rebuild_logscale)
+            self._window_checkboxes[name] = cb
+            win_lay.addWidget(cb)
+        win_lay.addStretch(1)
+        self.tabs.addTab(win_tab, "Window Features")
+
+        bin_tab = QWidget()
+        bin_tab_lay = QVBoxLayout(bin_tab)
+        bin_tab_lay.setSpacing(2)
+        bin_tab_lay.addWidget(_make_info_label(
+            "0/1 columns (e.g. contacts) to include in the DTW distance."
+        ))
+        self.binary_lay = QVBoxLayout()
+        bin_tab_lay.addLayout(self.binary_lay)
+        bin_tab_lay.addStretch(1)
+        self.tabs.addTab(bin_tab, "Binary Features")
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumHeight(220)
+        scroll.setWidget(self.tabs)
+        lay.addWidget(scroll)
+
+        proc = CollapsibleSection("Feature Processing", expanded=False)
+        proc_form = QFormLayout()
+        proc_form.setSpacing(3)
+        self.spin_smoothing = QSpinBox()
+        self.spin_smoothing.setRange(1, 100)
+        self.spin_smoothing.setValue(1)
+        self.spin_smoothing.setMaximumWidth(90)
+        proc_form.addRow("Smooth window (timepoints):", make_help_row(
+            self.spin_smoothing, "Feature smoothing window",
+            "Rolling-mean window applied to the continuous timepoint features per track. "
+            "1 = no smoothing."
+        ))
+        self.spin_quant_lo = QDoubleSpinBox()
+        self.spin_quant_lo.setRange(0.0, 0.5)
+        self.spin_quant_lo.setSingleStep(0.01)
+        self.spin_quant_lo.setValue(0.0)
+        self.spin_quant_lo.setMaximumWidth(90)
+        proc_form.addRow("Low percentile cap:", make_help_row(
+            self.spin_quant_lo, "Low percentile cap",
+            "Clip feature values below this quantile (0 = no clipping)."
+        ))
+        self.spin_quant_hi = QDoubleSpinBox()
+        self.spin_quant_hi.setRange(0.5, 1.0)
+        self.spin_quant_hi.setSingleStep(0.01)
+        self.spin_quant_hi.setValue(1.0)
+        self.spin_quant_hi.setMaximumWidth(90)
+        proc_form.addRow("High percentile cap:", make_help_row(
+            self.spin_quant_hi, "High percentile cap",
+            "Clip feature values above this quantile (1 = no clipping)."
+        ))
+        self.spin_start_offset = QSpinBox()
+        self.spin_start_offset.setRange(0, 100)
+        self.spin_start_offset.setValue(1)
+        self.spin_start_offset.setMaximumWidth(90)
+        proc_form.addRow("Start offset (timepoints):", make_help_row(
+            self.spin_start_offset, "Start offset",
+            "Drop each track's first N timepoints. The first frame's motion features "
+            "(e.g. speed) are a fabricated 0, so 1 is recommended."
+        ))
+        proc_holder = QWidget()
+        proc_holder.setLayout(proc_form)
+        proc.addWidget(proc_holder)
+        proc.addWidget(QLabel("Log scaling (log1p) of selected features:"))
+        self.logscale_lay = QGridLayout()
+        log_holder = QWidget()
+        log_holder.setLayout(self.logscale_lay)
+        proc.addWidget(log_holder)
+        lay.addWidget(proc)
+
+    # ── population ──────────────────────────────────────────────────────
+    def populate(self, csv_path, metadata=None, cfg=None):
+        """(Re)build the checkboxes from the track-features CSV header."""
+        from copy import deepcopy
+        import pandas as pd
+        from behav3d.widgets.utils import behav3d_calculated_features, excluded_non_behavior_columns
+        from behav3d.core.utils import expand_column_patterns
+        from behav3d.core.column_detection import (
+            detect_binary_columns_from_csv,
+            detect_non_numeric_columns_from_csv,
+        )
+
+        cfg = dict(cfg or {})
+        try:
+            mtime = Path(csv_path).stat().st_mtime if csv_path and Path(csv_path).exists() else None
+        except OSError:
+            mtime = None
+        key = (str(csv_path), mtime)
+        if key == self._loaded_key:
+            if cfg:
+                self.set_params(cfg)
+            return
+        self._loaded_key = key
+
+        for sub in (self.timepoint_lay, self.binary_lay):
+            _clear_layout(sub)
+        self._timepoint_checkboxes = {}
+        self._binary_checkboxes = {}
+
+        if not csv_path or not Path(csv_path).exists():
+            self.timepoint_lay.addWidget(_make_info_label(
+                "<i>No track-features CSV found for this cell type. Run feature extraction first.</i>"
+            ))
+            self._rebuild_logscale()
+            return
+
+        cols = list(pd.read_csv(csv_path, nrows=0).columns)
+        excluded = excluded_non_behavior_columns(cols, metadata=metadata)
+        usable = [c for c in cols if c not in excluded]
+        bin_cols = detect_binary_columns_from_csv(Path(csv_path), usable)
+        bin_set = set(bin_cols)
+        candidates = [c for c in usable if c not in bin_set]
+        non_numeric = set(detect_non_numeric_columns_from_csv(Path(csv_path), candidates))
+        # Image/physical coordinates locate a cell; they don't describe its behavior.
+        coord_cols = {"position_x", "position_y", "position_z"}
+        feat_cols = [
+            c for c in candidates
+            if c not in non_numeric and c not in coord_cols and not str(c).startswith("pixel_position_")
+        ]
+
+        saved = cfg.get("features")
+        saved = set(saved) if saved is not None else set(_DEFAULT_TIMEPOINT_FEATURES)
+        saved_bin = set(cfg.get("binary_features", []) or [])
+
+        def _add_group(title, names):
+            sec = CollapsibleSection(title, expanded=False)
+            content = QWidget()
+            grid = QGridLayout(content)
+            boxes = []
+            for i, f in enumerate(names):
+                cb = QCheckBox(f)
+                cb.setChecked(f in saved)
+                cb.stateChanged.connect(self._rebuild_logscale)
+                self._timepoint_checkboxes[f] = cb
+                boxes.append(cb)
+                grid.addWidget(cb, i // 3, i % 3)
+            sec.addWidget(content)
+
+            def _refresh(*_):
+                sec.setTitle(f"{title} ({sum(b.isChecked() for b in boxes)}/{len(boxes)} selected)")
+            for cb in boxes:
+                cb.stateChanged.connect(_refresh)
+            _refresh()
+            self.timepoint_lay.addWidget(sec)
+
+        matched = set()
+        for gname, patterns in deepcopy(behav3d_calculated_features).items():
+            vals = []
+            for pat in patterns:
+                vals.extend(expand_column_patterns(pat, feat_cols))
+            names = sorted({v for v in vals if v in feat_cols and v not in matched})
+            if names:
+                _add_group(gname, names)
+                matched.update(names)
+        other = sorted(c for c in feat_cols if c not in matched)
+        if other:
+            _add_group("other", other)
+
+        if not bin_cols:
+            self.binary_lay.addWidget(QLabel("<i>No binary columns detected.</i>"))
+        for b in bin_cols:
+            cb = QCheckBox(b)
+            cb.setChecked(b in saved_bin)
+            cb.stateChanged.connect(self._update_tab_labels)
+            self._binary_checkboxes[b] = cb
+            self.binary_lay.addWidget(cb)
+
+        self.set_params(cfg, rebuild_checks=False)
+        self._rebuild_logscale()
+
+    def _selected_continuous(self):
+        feats = [f for f, cb in self._timepoint_checkboxes.items() if cb.isChecked()]
+        return feats + [f for f, cb in self._window_checkboxes.items() if cb.isChecked()]
+
+    def _rebuild_logscale(self, *_):
+        # Features already listed keep their current tick; only newly listed ones
+        # take the saved / default choice.
+        prev_present = set(self._logscale_checkboxes)
+        prev = {f for f, cb in self._logscale_checkboxes.items() if cb.isChecked()}
+        pending = set(self._pending_cfg.get("log_scale_features", []) or [])
+        _clear_layout(self.logscale_lay)
+        self._logscale_checkboxes = {}
+        selected = self._selected_continuous()
+        default_log = set(_DEFAULT_LOG_SCALE_FEATURES) if "log_scale_features" not in self._pending_cfg else set()
+        for i, f in enumerate(selected):
+            cb = QCheckBox(f)
+            cb.setChecked(f in prev if f in prev_present else (f in pending or f in default_log))
+            self._logscale_checkboxes[f] = cb
+            self.logscale_lay.addWidget(cb, i // 3, i % 3)
+        self._update_tab_labels()
+
+    def _update_tab_labels(self, *_):
+        n_tp = sum(cb.isChecked() for cb in self._timepoint_checkboxes.values())
+        n_win = sum(cb.isChecked() for cb in self._window_checkboxes.values())
+        n_bin = sum(cb.isChecked() for cb in self._binary_checkboxes.values())
+        self.tabs.setTabText(0, f"Timepoint Features ({n_tp})")
+        self.tabs.setTabText(1, f"Window Features ({n_win})")
+        self.tabs.setTabText(2, f"Binary Features ({n_bin})")
+
+    # ── params ──────────────────────────────────────────────────────────
+    def params(self) -> dict:
+        lo = float(self.spin_quant_lo.value())
+        hi = float(self.spin_quant_hi.value())
+        return {
+            "features": [f for f, cb in self._timepoint_checkboxes.items() if cb.isChecked()],
+            "binary_features": [b for b, cb in self._binary_checkboxes.items() if cb.isChecked()],
+            "additional_window_features": [f for f, cb in self._window_checkboxes.items() if cb.isChecked()],
+            "window_features_window": int(self.spin_window_size.value()),
+            "feature_smoothing_window": int(self.spin_smoothing.value()),
+            "lower_quantile_cap": lo if lo > 0 else None,
+            "upper_quantile_cap": hi if hi < 1 else None,
+            "log_scale_features": [f for f, cb in self._logscale_checkboxes.items() if cb.isChecked()],
+            "start_offset": int(self.spin_start_offset.value()),
+        }
+
+    def set_params(self, cfg: dict, rebuild_checks: bool = True):
+        cfg = dict(cfg or {})
+        self._pending_cfg = cfg
+        if rebuild_checks:
+            if "features" in cfg:
+                wanted = set(cfg["features"] or [])
+                for f, cb in self._timepoint_checkboxes.items():
+                    cb.setChecked(f in wanted)
+            if "binary_features" in cfg:
+                wanted = set(cfg["binary_features"] or [])
+                for f, cb in self._binary_checkboxes.items():
+                    cb.setChecked(f in wanted)
+        if "additional_window_features" in cfg:
+            wanted = set(cfg["additional_window_features"] or [])
+            for f, cb in self._window_checkboxes.items():
+                cb.setChecked(f in wanted)
+        if cfg.get("window_features_window") is not None:
+            self.spin_window_size.setValue(int(cfg["window_features_window"]))
+        if cfg.get("feature_smoothing_window") is not None:
+            self.spin_smoothing.setValue(int(cfg["feature_smoothing_window"]))
+        if "lower_quantile_cap" in cfg:
+            self.spin_quant_lo.setValue(float(cfg["lower_quantile_cap"] or 0.0))
+        if "upper_quantile_cap" in cfg:
+            self.spin_quant_hi.setValue(float(cfg["upper_quantile_cap"] or 1.0))
+        if cfg.get("start_offset") is not None:
+            self.spin_start_offset.setValue(int(cfg["start_offset"]))
+        if rebuild_checks:
+            self._logscale_checkboxes = {}
+            self._rebuild_logscale()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -3363,6 +3864,37 @@ class TrackClassificationSubTab(QWidget):
         self.chk_use_original_top.hide()
         g1.addWidget(self.chk_use_original_top)
 
+        # What the trajectories are built from. With "1. Behavioral states" the Basis
+        # (dtw / bouts, under Method) chooses how the state sequences are compared.
+        self._track_input_frame = QFrame()
+        input_form = QFormLayout(self._track_input_frame)
+        input_form.setSpacing(3)
+        self.combo_trajectory_source = QComboBox()
+        self.combo_trajectory_source.addItem("1. Behavioral states", "states")
+        self.combo_trajectory_source.addItem("2. State features (features behind the states)", "state features")
+        self.combo_trajectory_source.addItem("3. Features only (no states)", "features only")
+        self.combo_trajectory_source.setMinimumWidth(260)
+        input_form.addRow("Trajectories from:", make_help_row(
+            self.combo_trajectory_source, "Trajectories from",
+            "1. Behavioral states: the original method - trajectories are built from each "
+            "track's behavioral-state sequence; choose the Basis below (dtw on the state "
+            "sequences, or bouts). Needs State Classification.\n"
+            "2. State features: DTW on the numeric features the states were built from "
+            "(continuous features with the state model's scaling, plus the binary grouping "
+            "columns) instead of the state labels. Needs State Classification; exemplar "
+            "tracks, state bars and backprojection still show each track's states.\n"
+            "3. Features only: skips states altogether - pick the features below and tracks "
+            "are clustered by DTW on them. State bars, bouts and the track classifier are "
+            "then unavailable."
+        ))
+        g1.addWidget(self._track_input_frame)
+
+        self._traj_features_section = CollapsibleSection("Trajectory Features", expanded=True)
+        self.traj_feature_selector = TrajectoryFeatureSelector()
+        self._traj_features_section.addWidget(self.traj_feature_selector)
+        self._traj_features_section.setVisible(False)
+        g1.addWidget(self._traj_features_section)
+
         # Shared: Trajectory size + divide-long-tracks (always visible)
         basic_form = QFormLayout()
         basic_form.setSpacing(3)
@@ -3410,21 +3942,27 @@ class TrackClassificationSubTab(QWidget):
 
         # Trajectory basis + clustering method — the two main choices, kept always
         # visible (not buried in Advanced Configuration) since they each gate a
-        # different set of downstream parameter fields.
+        # different set of downstream parameter fields. The Basis row only applies to
+        # "1. Behavioral states" and is hidden for the feature-based sources.
         self._basis_method_frame = QFrame()
         basis_method_form = QFormLayout(self._basis_method_frame)
         basis_method_form.setSpacing(3)
 
+        self._basis_row = QFrame()
+        basis_row_form = QFormLayout(self._basis_row)
+        basis_row_form.setContentsMargins(0, 0, 0, 0)
+        basis_row_form.setSpacing(3)
         self.combo_trajectory_basis = QComboBox()
         self.combo_trajectory_basis.addItems(["dtw", "bouts"])
         self.combo_trajectory_basis.setMaximumWidth(130)
-        basis_method_form.addRow("Basis:", make_help_row(
+        basis_row_form.addRow("Basis:", make_help_row(
             self.combo_trajectory_basis, "Trajectory basis",
             "'dtw' clusters tracks by dynamic time warping distance over their raw "
             "per-timepoint state sequences. 'bouts' instead describes each track with "
             "bout/proportion features (fraction of time per state, bout counts/lengths, "
             "state-transition probabilities, n-grams) and clusters those feature vectors."
         ))
+        basis_method_form.addRow(self._basis_row)
 
         self.combo_clustering_method = QComboBox()
         self.combo_clustering_method.addItems(["agglomerative", "leiden"])
@@ -3645,6 +4183,70 @@ class TrackClassificationSubTab(QWidget):
             "Can be large for many tracks."
         ))
         self.adv1.addWidget(self._dtw_technical_frame)
+
+        # 'dtw features' only: how much the binary (contact) columns count relative to
+        # the continuous state features in the DTW distance.
+        self._dtw_features_frame = QFrame()
+        dtw_features_form = QFormLayout(self._dtw_features_frame)
+        dtw_features_form.setSpacing(3)
+        self.spin_binary_weight = QDoubleSpinBox()
+        self.spin_binary_weight.setRange(0.0, 10.0)
+        self.spin_binary_weight.setSingleStep(0.25)
+        self.spin_binary_weight.setDecimals(2)
+        self.spin_binary_weight.setValue(1.0)
+        self.spin_binary_weight.setMaximumWidth(90)
+        dtw_features_form.addRow("Binary weight:", make_help_row(
+            self.spin_binary_weight, "Binary weight",
+            "Weight of the binary (e.g. contact) columns in the feature DTW distance. "
+            "They are standardized like the continuous features, so 1 = each binary column "
+            "counts as much as one continuous feature; 0 leaves them out; >1 makes "
+            "contacts drive the clustering more."
+        ))
+        self.adv1.addWidget(self._dtw_features_frame)
+
+        # QC UMAP embedding of the DTW distance matrix. Display only: these never
+        # change the distance matrix or the cluster assignments.
+        self._dtw_umap_frame = QFrame()
+        dtw_umap_form = QFormLayout(self._dtw_umap_frame)
+        dtw_umap_form.setSpacing(3)
+        self.spin_dtw_umap_neighbors = QSpinBox()
+        self.spin_dtw_umap_neighbors.setRange(2, 200)
+        self.spin_dtw_umap_neighbors.setValue(15)
+        self.spin_dtw_umap_neighbors.setMaximumWidth(90)
+        dtw_umap_form.addRow("UMAP n_neighbors:", make_help_row(
+            self.spin_dtw_umap_neighbors, "UMAP n_neighbors",
+            "Number of neighbouring tracks used to build the UMAP graph. Lower values "
+            "(5-10) emphasise local structure and can split apart tight clumps; higher "
+            "values capture more global structure. Only affects the UMAP plot, not the clusters."
+        ))
+        self.spin_dtw_umap_min_dist = QDoubleSpinBox()
+        self.spin_dtw_umap_min_dist.setRange(0.0, 3.0)
+        self.spin_dtw_umap_min_dist.setSingleStep(0.05)
+        self.spin_dtw_umap_min_dist.setDecimals(3)
+        self.spin_dtw_umap_min_dist.setValue(0.1)
+        self.spin_dtw_umap_min_dist.setMaximumWidth(90)
+        dtw_umap_form.addRow("UMAP min_dist:", make_help_row(
+            self.spin_dtw_umap_min_dist, "UMAP min_dist",
+            "Minimum distance between points in the UMAP embedding. Raise it (0.3-0.8) "
+            "if points look too compact; lower it for tighter clusters. Must be <= spread. "
+            "Only affects the UMAP plot, not the clusters."
+        ))
+        self.spin_dtw_umap_spread = QDoubleSpinBox()
+        self.spin_dtw_umap_spread.setRange(0.1, 5.0)
+        self.spin_dtw_umap_spread.setSingleStep(0.25)
+        self.spin_dtw_umap_spread.setDecimals(2)
+        self.spin_dtw_umap_spread.setValue(1.0)
+        self.spin_dtw_umap_spread.setMaximumWidth(90)
+        dtw_umap_form.addRow("UMAP spread:", make_help_row(
+            self.spin_dtw_umap_spread, "UMAP spread",
+            "Overall scale of the UMAP embedding. Together with min_dist it controls how "
+            "spread out points are; raising it (1.5-3) spreads everything out. "
+            "Only affects the UMAP plot, not the clusters."
+        ))
+        # UMAP requires min_dist <= spread; keep the controls consistent.
+        self.spin_dtw_umap_spread.valueChanged.connect(self.spin_dtw_umap_min_dist.setMaximum)
+        self.spin_dtw_umap_min_dist.setMaximum(self.spin_dtw_umap_spread.value())
+        self.adv1.addWidget(self._dtw_umap_frame)
 
         self.spin_seed = QSpinBox()
         self.spin_seed.setRange(0, 99999)
@@ -3907,6 +4509,49 @@ class TrackClassificationSubTab(QWidget):
         self.btn_view_track_proportions = _make_view_btn()
         prop_row.addWidget(self.btn_view_track_proportions)
         g_prop.addLayout(prop_row)
+
+        self.grp_feature_heatmap = QGroupBox("Feature Heatmap")
+        g_fheat = QVBoxLayout(self.grp_feature_heatmap)
+        g_fheat.setSpacing(4)
+        g_fheat.addWidget(_make_info_label(
+            "Heatmap of trajectory clusters x features: each feature is averaged over "
+            "every track's trajectory timepoints, then per cluster. The features the "
+            "clustering / states used are preselected; add any other per-timepoint "
+            "feature. Cell labels show the unscaled cluster mean."
+        ))
+        g_fheat.addWidget(QLabel("Features (Ctrl/Cmd click for multiple):"))
+        self.list_feature_heatmap_features = QListWidget()
+        self.list_feature_heatmap_features.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        g_fheat.addWidget(self.list_feature_heatmap_features)
+        fheat_sel_row = QHBoxLayout()
+        self.btn_feature_heatmap_defaults = QPushButton("Select used features")
+        self.btn_feature_heatmap_all = QPushButton("Select all")
+        self.btn_feature_heatmap_clear = QPushButton("Clear")
+        for _b in (self.btn_feature_heatmap_defaults, self.btn_feature_heatmap_all,
+                   self.btn_feature_heatmap_clear):
+            fheat_sel_row.addWidget(_b)
+        g_fheat.addLayout(fheat_sel_row)
+        fheat_form = QFormLayout()
+        fheat_form.setSpacing(3)
+        self.combo_feature_heatmap_scaling = QComboBox()
+        self.combo_feature_heatmap_scaling.addItems(["z-score", "min-max"])
+        self.combo_feature_heatmap_scaling.setMaximumWidth(130)
+        fheat_form.addRow("Colour scaling:", make_help_row(
+            self.combo_feature_heatmap_scaling, "Colour scaling",
+            "'z-score': each feature is standardized across all tracks, then averaged per "
+            "cluster; 0 = the average track, red = higher, blue = lower. 'min-max': cluster "
+            "means rescaled 0-1 per feature, showing which cluster is highest/lowest."
+        ))
+        g_fheat.addLayout(fheat_form)
+        fheat_row = QHBoxLayout()
+        self.btn_feature_heatmap = QPushButton("▶ Create Feature Heatmap")
+        _style_secondary(self.btn_feature_heatmap)
+        fheat_row.addWidget(self.btn_feature_heatmap, stretch=1)
+        self.btn_view_feature_heatmap = _make_view_btn()
+        fheat_row.addWidget(self.btn_view_feature_heatmap)
+        g_fheat.addLayout(fheat_row)
+        self._feature_heatmap_defaults = []
+        self._feature_heatmap_cache_key = None
 
         self.grp_window_transitions = QGroupBox("Window Transitions")
         g_wintrans = QVBoxLayout(self.grp_window_transitions)
@@ -4246,6 +4891,7 @@ class TrackClassificationSubTab(QWidget):
         pipeline_content_lay.setSpacing(6)
         pipeline_content_lay.addWidget(self.grp_diag)
         pipeline_content_lay.addWidget(self.grp_track_proportions)
+        pipeline_content_lay.addWidget(self.grp_feature_heatmap)
         pipeline_content_lay.addWidget(self.grp_window_transitions)
         pipeline_content_lay.addWidget(self.grp_track_comparison)
         pipeline_content_lay.addWidget(self.grp_contact_analysis)
@@ -4357,6 +5003,7 @@ class TrackClassificationSubTab(QWidget):
 
     def _setup_signals(self):
         self.chk_apply_pretrained.toggled.connect(self._toggle_pretrained_mode)
+        self.combo_trajectory_source.currentIndexChanged.connect(self._apply_track_input_mode)
         self.combo_trajectory_basis.currentTextChanged.connect(self._apply_clustering_controls_mode)
         self.combo_clustering_method.currentTextChanged.connect(self._apply_clustering_controls_mode)
         self.chk_use_original.toggled.connect(self._on_original_toggled_from_adv)
@@ -4371,6 +5018,11 @@ class TrackClassificationSubTab(QWidget):
         _wire_view_btn(self.btn_view_diagnostics, self._on_view, "track_diagnostics")
         self.btn_track_proportions.clicked.connect(self._on_track_proportions)
         _wire_view_btn(self.btn_view_track_proportions, self._on_view, "track_proportions")
+        self.btn_feature_heatmap.clicked.connect(self._on_feature_heatmap)
+        _wire_view_btn(self.btn_view_feature_heatmap, self._on_view, "feature_heatmap")
+        self.btn_feature_heatmap_defaults.clicked.connect(self._select_feature_heatmap_defaults)
+        self.btn_feature_heatmap_all.clicked.connect(self.list_feature_heatmap_features.selectAll)
+        self.btn_feature_heatmap_clear.clicked.connect(self.list_feature_heatmap_features.clearSelection)
         self.btn_window_transitions.clicked.connect(self._on_window_transitions)
         _wire_view_btn(self.btn_view_window_transitions, self._on_view, "window_transitions")
         self.btn_track_condition_comparison.clicked.connect(self._on_track_condition_comparison)
@@ -4399,11 +5051,12 @@ class TrackClassificationSubTab(QWidget):
     def _check_prerequisites(self) -> bool:
         """Check if behavioral states h5ad exists; conditionally enable/disable steps.
 
-        - If state adata is absent: Step 1 (grp1) stays enabled but is locked into
-          'original BEHAV3D DTW' mode (chk_use_original forced True + disabled).
-          Steps 2-5 are disabled since they all require state adata.
-        - If state adata is present: all steps enabled; if the checkbox was previously
-          force-locked, it is automatically unchecked and re-enabled (standard mode).
+        - If state adata is absent: only '3. Features only' can be chosen in
+          'Trajectories from' (the state-based options are greyed out); the
+          state-only track classifier (grp3) is disabled.
+        - If state adata is present: all options are available again; if the basis
+          had only been switched to 'Features only' because states were missing, it
+          goes back to the saved choice (default: '1. Behavioral states').
         """
         ct = self._cell_type()
         out = self._out_dir()
@@ -4411,35 +5064,51 @@ class TrackClassificationSubTab(QWidget):
             self.warning_label.hide()
             return True
 
+        model = self.combo_trajectory_source.model()
+        state_items = [
+            model.item(i) for i in range(self.combo_trajectory_source.count())
+            if self.combo_trajectory_source.itemData(i) != "features only"
+        ]
         states_path = self._state_adata_path(ct)
-        if not states_path or not states_path.exists():
-            self.warning_label.setText(
-                f"⚠ Behavioral states not found for cell type '{ct}'.\n"
-                "Run State Classification first to unlock all steps.\n"
-                "You can still run the original BEHAV3D DTW clustering (Step 1) below."
-            )
-            self.warning_label.show()
-
-            # Step 1 stays available, but lock into 'original DTW' mode.
-            # NB: disable only the plotting page, not the whole `_subtab_stack`
-            # — grp1 lives on page 0 of that stack, so disabling the stack would
-            # also grey out Step 1's "Run Original BEHAV3D DTW" button despite
-            # the setEnabled(True) above.
-            self.grp1.setEnabled(True)
-            for grp in [self.grp2, self.grp3, self._plotting_page, self.grp_bp]:
-                grp.setEnabled(False)
-
-            # Force 'use original' on and prevent the user from unchecking it.
+        # Undo the legacy lock that forced 'original BEHAV3D' when states were missing.
+        if not self.chk_use_original.isEnabled():
             for chk in (self.chk_use_original, self.chk_use_original_top):
                 chk.blockSignals(True)
-                chk.setChecked(True)
-                chk.setEnabled(False)
+                chk.setChecked(False)
+                chk.setEnabled(True)
                 chk.blockSignals(False)
-            self._apply_original_mode(True)
-
-            return False
+        if not states_path or not states_path.exists():
+            self.warning_label.setText(
+                f"ℹ Behavioral states not found for cell type '{ct}'.\n"
+                "Only '3. Features only' is available: trajectories are built from the "
+                "features you select below. Run State Classification to also use the "
+                "state-based options 1 and 2."
+            )
+            self.warning_label.show()
+            for grp in [self.grp1, self.grp2, self._plotting_page, self.grp_bp]:
+                grp.setEnabled(True)
+            self.grp3.setEnabled(False)
+            for item in state_items:
+                if item is not None:
+                    item.setEnabled(False)
+            if not self._track_input_is_features():
+                self._basis_forced_to_features = True
+                self._set_basis("features only")
+            self._apply_original_mode(self.chk_use_original.isChecked())
+            _apply_group_tracked_gate(self.warning_label, self.grp_bp, self.metadata_loader, ct)
+            return True
         else:
             self.warning_label.hide()
+            for item in state_items:
+                if item is not None:
+                    item.setEnabled(True)
+            if getattr(self, "_basis_forced_to_features", False):
+                self._basis_forced_to_features = False
+                saved = (
+                    getattr(self.metadata_loader, "behav3d_parameters", {})
+                    .get("track_classification", {}).get(ct, {})
+                )
+                self._set_basis(self._saved_basis_code(saved) or "dtw")
             for grp in [self.grp1, self.grp2, self.grp3, self._plotting_page, self.grp_bp]:
                 grp.setEnabled(True)
 
@@ -4475,7 +5144,19 @@ class TrackClassificationSubTab(QWidget):
     def _max_available_track_length(self, ct: str):
         """Longest (sample_name, TrackID) track in this cell type's behavioral-states
         h5ad — the same file/keys the dtaidistance clustering step reads — so the
-        Trajectory size spinbox can never be pushed past what any track can supply."""
+        Trajectory size spinbox can never be pushed past what any track can supply.
+        In 'Directly from features' mode the track-features CSV is used instead."""
+        if ct and self._track_input_is_features():
+            try:
+                import pandas as pd
+                from behav3d.analysis.behavior.state.utils import _resolve_positions_csv_path
+                csv_path = _resolve_positions_csv_path(output_dir=str(self._out_dir()), cell_type=ct)
+                ids = pd.read_csv(csv_path, usecols=["sample_name", "TrackID"])
+                counts = ids.groupby(["sample_name", "TrackID"]).size()
+                max_len = int(counts.max()) if len(counts) else 0
+                return max_len if max_len > 0 else None
+            except Exception:
+                return None
         states_path = self._state_adata_path(ct) if ct else None
         if not states_path or not states_path.exists():
             return None
@@ -4529,12 +5210,14 @@ class TrackClassificationSubTab(QWidget):
         visible = {
             "track_diagnostics": {self.grp_diag},
             "track_proportions": {self.grp_track_proportions},
+            "track_feature_heatmap": {self.grp_feature_heatmap},
             "track_window_transitions": {self.grp_window_transitions},
             "track_comparison": {self.grp_track_comparison},
             "track_contact": {self.grp_contact_analysis},
             "track_exemplars": {self.grp_exemplar},
         }.get(pipeline_id, set())
-        for group in (self.grp_diag, self.grp_track_proportions, self.grp_window_transitions,
+        for group in (self.grp_diag, self.grp_track_proportions, self.grp_feature_heatmap,
+                      self.grp_window_transitions,
                       self.grp_track_comparison, self.grp_contact_analysis, self.grp_exemplar):
             group.setVisible(group in visible)
         title = next(
@@ -4591,7 +5274,7 @@ class TrackClassificationSubTab(QWidget):
         """Update visibility of basis/method-specific controls (Linkage vs Bouts
         linkage vs Leiden neighbors/resolution; DTW-only technical controls vs
         bouts feature toggles)."""
-        is_bouts = self.combo_trajectory_basis.currentText() == "bouts"
+        is_bouts = self._basis() == "bouts"
         is_leiden = self.combo_clustering_method.currentText() == "leiden"
 
         self._n_clusters_frame.setVisible(not is_leiden)
@@ -4603,6 +5286,8 @@ class TrackClassificationSubTab(QWidget):
         # regardless of is_bouts. Parallel/save-distance-matrix are DTW-distance-matrix
         # specific and bouts' own feature toggles are bouts-only.
         self._dtw_technical_frame.setVisible(not is_bouts)
+        self._dtw_umap_frame.setVisible(not is_bouts)
+        self._dtw_features_frame.setVisible(self._basis() in ("dtw features", "features only"))
         self._bouts_frame.setVisible(is_bouts)
 
         if not self.chk_use_original.isChecked():
@@ -4610,16 +5295,113 @@ class TrackClassificationSubTab(QWidget):
                 "▶ Run Bout/Proportion Clustering" if is_bouts else "▶ Run Track Clustering"
             )
 
+    def _basis(self) -> str:
+        """Combined trajectory code (also what the config stores): 'dtw' / 'bouts'
+        (1. Behavioral states + Basis), 'dtw features' (2. State features) or
+        'features only' (3)."""
+        source = self.combo_trajectory_source.currentData() or "states"
+        if source == "state features":
+            return "dtw features"
+        if source == "features only":
+            return "features only"
+        return self.combo_trajectory_basis.currentText() or "dtw"
+
+    def _set_basis(self, code: str) -> None:
+        source = {"dtw features": "state features", "features only": "features only"}.get(code, "states")
+        idx = self.combo_trajectory_source.findData(source)
+        if idx >= 0:
+            self.combo_trajectory_source.setCurrentIndex(idx)
+        if code in ("dtw", "bouts"):
+            self.combo_trajectory_basis.setCurrentText(code)
+
+    @staticmethod
+    def _saved_basis_code(cfg: dict):
+        """Basis code from a saved config, also reading the earlier two-dropdown
+        layout (trajectory_input='features' + trajectory_basis)."""
+        if not cfg:
+            return None
+        if cfg.get("trajectory_input") == "features":
+            return "features only"
+        basis = cfg.get("trajectory_basis")
+        return basis if basis in ("dtw", "dtw features", "features only", "bouts") else None
+
+    def _track_input_is_features(self) -> bool:
+        return self._basis() == "features only"
+
+    def _apply_track_input_mode(self, *_):
+        """'3. Features only' shows the feature selector; the Basis (dtw / bouts) row
+        only applies to '1. Behavioral states'."""
+        features_only = self._track_input_is_features()
+        self._traj_features_section.setVisible(features_only)
+        self._basis_row.setVisible(self.combo_trajectory_source.currentData() == "states")
+        if features_only and not self._last_selector_populated_ct_matches():
+            self._populate_trajectory_feature_selector()
+        self._apply_clustering_controls_mode()
+        self._apply_max_trajectory_size(self._cell_type())
+
+    def _last_selector_populated_ct_matches(self) -> bool:
+        return getattr(self, "_selector_ct", None) == self._cell_type()
+
+    def _populate_trajectory_feature_selector(self):
+        ct = self._cell_type()
+        out = self._out_dir()
+        if not ct or not out:
+            return
+        from behav3d.analysis.behavior.state.utils import _resolve_positions_csv_path
+        try:
+            csv_path = _resolve_positions_csv_path(output_dir=str(out), cell_type=ct)
+        except Exception:
+            csv_path = None
+        cfg = (
+            getattr(self.metadata_loader, "behav3d_parameters", {})
+            .get("track_classification", {}).get(ct, {}).get("trajectory_features", {})
+        )
+        md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
+        try:
+            self.traj_feature_selector.populate(csv_path, metadata=md, cfg=cfg)
+        except Exception as exc:
+            self._log(f"⚠ Could not list trajectory features: {exc}")
+        self._selector_ct = ct
+
+    def _model_has_states(self) -> bool:
+        """Whether the loaded trajectory model was built on behavioral states."""
+        if self._track_adata is None:
+            return False
+        meta = self._track_adata.uns.get("dtai_trajectory_clustering", {}) or {}
+        return bool(meta.get("has_behavioral_states", True))
+
+    def _per_timepoint_adata_path(self, ct: str, adata_tracks=None) -> Optional[Path]:
+        """Per-timepoint h5ad the trajectories were built from: the behavioral-state
+        file, or the features-only trajectory-features file."""
+        adata_tracks = adata_tracks if adata_tracks is not None else self._track_adata
+        if adata_tracks is not None:
+            meta = adata_tracks.uns.get("dtai_trajectory_clustering", {}) or {}
+            src = meta.get("source_adata_full_path")
+            if src and Path(str(src)).exists():
+                return Path(str(src))
+        state = self._state_adata_path(ct) if ct else None
+        if state and state.exists():
+            return state
+        out = self._out_dir()
+        if out and ct:
+            from behav3d.analysis.behavior.track.trajectory_features import trajectory_feature_adata_path
+            feat = trajectory_feature_adata_path(str(out), ct)
+            if feat.exists():
+                return feat
+        return state
+
     def _apply_original_mode(self, checked: bool):
         """Update visibility of UI sections for original vs dtaidistance/bouts mode."""
         self.chk_use_original_top.setVisible(checked)
         self.adv1.setVisible(not checked)
         self._basis_method_frame.setVisible(not checked)
         self._umap_frame.setVisible(checked)
+        self._track_input_frame.setVisible(not checked)
         if checked:
+            self._traj_features_section.setVisible(False)
             self.btn_run_track.setText("▶ Run Original BEHAV3D DTW")
         else:
-            self._apply_clustering_controls_mode()
+            self._apply_track_input_mode()
 
     def _show_original_dtw_disclaimer(self):
         """Warn the user that the original BEHAV3D DTW pipeline requires equal-length tracks."""
@@ -4680,7 +5462,8 @@ class TrackClassificationSubTab(QWidget):
         return {
             "behavioral_trajectory_size": int(self.spin_traj_size.value()),
             "n_clusters":                 int(self.spin_n_clusters.value()),
-            "trajectory_basis":           self.combo_trajectory_basis.currentText(),
+            "trajectory_basis":           self._basis(),
+            "trajectory_features":        self.traj_feature_selector.params(),
             "linkage":                    self.combo_linkage.currentText(),
             "clustering_method":          self.combo_clustering_method.currentText(),
             "leiden_n_neighbors":         int(self.spin_leiden_neighbors.value()),
@@ -4704,6 +5487,10 @@ class TrackClassificationSubTab(QWidget):
             "use_original":               self.chk_use_original.isChecked(),
             "umap_n_neighbors":           int(self.spin_umap_neighbors.value()),
             "umap_min_dist":              float(self.spin_umap_min_dist.value()),
+            "dtw_umap_n_neighbors":       int(self.spin_dtw_umap_neighbors.value()),
+            "dtw_umap_min_dist":          float(self.spin_dtw_umap_min_dist.value()),
+            "dtw_umap_spread":            float(self.spin_dtw_umap_spread.value()),
+            "binary_feature_weight":      float(self.spin_binary_weight.value()),
             "rf_n_estimators":            int(self.spin_track_n_est.value()),
             "rf_max_depth":               int(self.spin_track_max_depth.value()),
             "rf_test_size_pct":           float(self.spin_track_test_pct.value()),
@@ -4728,8 +5515,10 @@ class TrackClassificationSubTab(QWidget):
             self.spin_traj_size.setValue(int(cfg["behavioral_trajectory_size"]))
         if "n_clusters" in cfg:
             self.spin_n_clusters.setValue(int(cfg["n_clusters"]))
-        if "trajectory_basis" in cfg:
-            self.combo_trajectory_basis.setCurrentText(cfg["trajectory_basis"])
+        saved_basis = self._saved_basis_code(cfg)
+        if saved_basis:
+            self._basis_forced_to_features = False
+            self._set_basis(saved_basis)
         if "linkage" in cfg:
             self.combo_linkage.setCurrentText(cfg["linkage"])
         if "clustering_method" in cfg:
@@ -4775,6 +5564,15 @@ class TrackClassificationSubTab(QWidget):
             self.spin_umap_neighbors.setValue(int(cfg["umap_n_neighbors"]))
         if "umap_min_dist" in cfg:
             self.spin_umap_min_dist.setValue(float(cfg["umap_min_dist"]))
+        # Spread first: it caps min_dist's maximum.
+        if "dtw_umap_spread" in cfg:
+            self.spin_dtw_umap_spread.setValue(float(cfg["dtw_umap_spread"]))
+        if "dtw_umap_n_neighbors" in cfg:
+            self.spin_dtw_umap_neighbors.setValue(int(cfg["dtw_umap_n_neighbors"]))
+        if "dtw_umap_min_dist" in cfg:
+            self.spin_dtw_umap_min_dist.setValue(float(cfg["dtw_umap_min_dist"]))
+        if "binary_feature_weight" in cfg:
+            self.spin_binary_weight.setValue(float(cfg["binary_feature_weight"]))
         if "rf_n_estimators" in cfg:
             self.spin_track_n_est.setValue(int(cfg["rf_n_estimators"]))
         if "rf_max_depth" in cfg:
@@ -4832,9 +5630,12 @@ class TrackClassificationSubTab(QWidget):
             self.le_apply_states_path.setText(str(states_path))
             self.le_pretrained_states_path.setText(str(states_path))
 
+        self._selector_ct = None
         self._populate_track_settings(ct)
-        self._apply_max_trajectory_size(ct)
         self._check_prerequisites()
+        if self._track_input_is_features() and not self._last_selector_populated_ct_matches():
+            self._populate_trajectory_feature_selector()
+        self._apply_max_trajectory_size(ct)
         self._update_view_buttons()
         self._update_bp_buttons()
 
@@ -4977,9 +5778,17 @@ class TrackClassificationSubTab(QWidget):
     def _refresh_buttons(self):
         has_adata = self._track_adata is not None
         self.btn_rename_track.setEnabled(has_adata)
-        self.btn_train_track.setEnabled(has_adata)
-        self.btn_apply_track.setEnabled(has_adata)
+        ct_now = self._cell_type()
+        state_path = self._state_adata_path(ct_now) if ct_now else None
+        has_state_file = bool(state_path and state_path.exists())
+        # The track classifier is trained on state-derived track features.
+        state_model = has_adata and self._model_has_states()
+        self.btn_train_track.setEnabled(state_model)
+        self.btn_apply_track.setEnabled(state_model)
+        # Exemplar PDFs draw each track's behavioral-state bar.
+        self.btn_exemplars.setEnabled(has_adata and has_state_file)
         self.btn_track_proportions.setEnabled(has_adata)
+        self.btn_feature_heatmap.setEnabled(has_adata)
         if has_adata:
             self.rename_track_status.setText(
                 f"✅ Track adata loaded: {self._track_adata.n_obs} rows."
@@ -4992,6 +5801,60 @@ class TrackClassificationSubTab(QWidget):
             self.rename_track_status.setText("ℹ Run clustering first to enable renaming.")
         self._refresh_track_proportion_group_cols()
         self._refresh_contact_columns()
+        self._refresh_feature_heatmap_features()
+
+    def _refresh_feature_heatmap_features(self):
+        """Fill the feature-heatmap list; keeps the user's selection when possible."""
+        ct = self._cell_type()
+        out = self._out_dir()
+        if not ct or not out or self._track_adata is None:
+            self.list_feature_heatmap_features.clear()
+            self._feature_heatmap_cache_key = None
+            return
+        from behav3d.analysis.behavior.state.utils import _resolve_positions_csv_path
+        from behav3d.analysis.behavior.track.utils import _default_behavioral_states_path
+        mtimes = []
+        for resolve in (
+            lambda: _resolve_positions_csv_path(output_dir=str(out), cell_type=ct),
+            lambda: _default_behavioral_states_path(str(out), ct),
+        ):
+            try:
+                p = resolve()
+                mtimes.append(p.stat().st_mtime if p.exists() else None)
+            except Exception:
+                mtimes.append(None)
+        key = (str(out), ct, id(self._track_adata), tuple(mtimes))
+        if key == self._feature_heatmap_cache_key:
+            return
+        from behav3d.analysis.behavior.track.visualization.plots.feature_heatmap import (
+            list_track_feature_candidates,
+        )
+        try:
+            candidates, defaults = list_track_feature_candidates(
+                str(out), ct, track_adata=self._track_adata
+            )
+        except Exception as exc:
+            self._log(f"⚠ Could not list features for the heatmap: {exc}")
+            candidates, defaults = [], []
+        previous = {i.text() for i in self.list_feature_heatmap_features.selectedItems()}
+        keep_previous = self._feature_heatmap_cache_key is not None and key[:3] == self._feature_heatmap_cache_key[:3]
+        self._feature_heatmap_cache_key = key
+        self._feature_heatmap_defaults = list(defaults)
+        self.list_feature_heatmap_features.clear()
+        wanted = previous if keep_previous and previous else set(defaults)
+        for col in candidates:
+            self.list_feature_heatmap_features.addItem(col)
+            if col in wanted:
+                self.list_feature_heatmap_features.item(
+                    self.list_feature_heatmap_features.count() - 1
+                ).setSelected(True)
+        _fit_list_widget_height(self.list_feature_heatmap_features, max_rows=10)
+
+    def _select_feature_heatmap_defaults(self):
+        wanted = set(self._feature_heatmap_defaults)
+        for i in range(self.list_feature_heatmap_features.count()):
+            item = self.list_feature_heatmap_features.item(i)
+            item.setSelected(item.text() in wanted)
 
     def _track_proportion_candidate_columns(self):
         cols = []
@@ -5321,7 +6184,7 @@ class TrackClassificationSubTab(QWidget):
             for btn in (
                 self.btn_view_exemplars,
                 self.btn_view_diagnostics, self.btn_view_track_proportions,
-                self.btn_view_window_transitions,
+                self.btn_view_feature_heatmap, self.btn_view_window_transitions,
                 self.btn_view_track_condition_comparison, self.btn_view_contact_analysis,
                 self.btn_view_contact_state_shift, self.btn_view_track_contact_overview,
                 self.btn_view_duration_comparison,
@@ -5344,6 +6207,10 @@ class TrackClassificationSubTab(QWidget):
                 and proportions_dir.exists()
                 and any(proportions_dir.glob("*.pdf"))
             )
+        )
+        feature_heatmap_dir = traj_dir / "feature_heatmaps" if traj_dir else None
+        self.btn_view_feature_heatmap.setEnabled(
+            bool(feature_heatmap_dir and any(feature_heatmap_dir.glob("*.pdf")))
         )
         window_transitions_dir = traj_dir / "window_transitions" if traj_dir else None
         self.btn_view_window_transitions.setEnabled(
@@ -5396,9 +6263,12 @@ class TrackClassificationSubTab(QWidget):
         track_path = self._track_adata_path(ct) if ct else None
         state_path = self._state_adata_path(ct) if ct else None
         has_track = bool(track_path and track_path.exists())
-        has_state = bool(state_path and state_path.exists())
-        self.btn_show_track_bp.setEnabled(has_track and has_state)
-        self.btn_export_track_bp.setEnabled(has_track and has_state)
+        # Timepoints/positions come from the state file, or - for trajectories built
+        # directly from features - from the trajectory-features file.
+        tp_path = self._per_timepoint_adata_path(ct) if ct else state_path
+        has_timepoints = bool(tp_path and tp_path.exists())
+        self.btn_show_track_bp.setEnabled(has_track and has_timepoints)
+        self.btn_export_track_bp.setEnabled(has_track and has_timepoints)
 
     # ── Click handlers ───────────────────────────────────────────────────
 
@@ -5420,9 +6290,29 @@ class TrackClassificationSubTab(QWidget):
         self._log(f"▶ Running track clustering (dtaidistance) for '{ct}'…")
         self._dispatch_track_cluster(ct)
 
+    def _dtw_umap_params(self) -> dict:
+        """QC UMAP settings for the DTW basis (Advanced Configuration)."""
+        return {
+            "umap_n_neighbors": int(self.spin_dtw_umap_neighbors.value()),
+            "umap_min_dist": float(self.spin_dtw_umap_min_dist.value()),
+            "umap_spread": float(self.spin_dtw_umap_spread.value()),
+        }
+
     def _dispatch_track_cluster(self, ct: str, extra_callbacks=None):
         out = self._out_dir()
-        is_bouts = self.combo_trajectory_basis.currentText() == "bouts"
+        features_only = self._track_input_is_features()
+        is_bouts = self._basis() == "bouts"
+        feature_build_params = None
+        if features_only:
+            feature_build_params = self.traj_feature_selector.params()
+            if not (feature_build_params["features"] or feature_build_params["additional_window_features"]
+                    or feature_build_params["binary_features"]):
+                msg = "Select at least one trajectory feature."
+                if extra_callbacks and extra_callbacks.get("on_failed"):
+                    extra_callbacks["on_failed"](msg)
+                else:
+                    QMessageBox.warning(self, "No features", msg)
+                return
 
         if is_bouts:
             params = {
@@ -5466,6 +6356,13 @@ class TrackClassificationSubTab(QWidget):
                 "clustering_method": self.combo_clustering_method.currentText(),
                 "leiden_n_neighbors": int(self.spin_leiden_neighbors.value()),
                 "leiden_resolution": float(self.spin_leiden_resolution.value()),
+                **self._dtw_umap_params(),
+                "sequence_source": (
+                    "features"
+                    if self._basis() in ("dtw features", "features only")
+                    else "states"
+                ),
+                "binary_feature_weight": float(self.spin_binary_weight.value()),
                 "trajectory_trim_mode": self.combo_trim.currentText(),
                 "split_long_tracks": self.chk_split_long_tracks.isChecked(),
                 "parallel": self.chk_parallel.isChecked(),
@@ -5497,6 +6394,19 @@ class TrackClassificationSubTab(QWidget):
             from behav3d.analysis.behavior.track.state_dtw import (
                 run_categorical_dtaidistance_trajectory_clustering,
             )
+            if features_only:
+                # Build the per-timepoint feature file from the track-features CSV
+                # (no behavioral states) and cluster on it.
+                from behav3d.analysis.behavior.track.trajectory_features import (
+                    build_trajectory_feature_adata,
+                    trajectory_feature_adata_path,
+                )
+                build_trajectory_feature_adata(str(out), ct, **feature_build_params, verbose=True)
+                return run_categorical_dtaidistance_trajectory_clustering(
+                    **params,
+                    adata_full_path=str(trajectory_feature_adata_path(str(out), ct)),
+                    verbose=True,
+                )
             return run_categorical_dtaidistance_trajectory_clustering(**params, verbose=True)
 
         def _done(r):
@@ -5516,7 +6426,11 @@ class TrackClassificationSubTab(QWidget):
             # save_dtaidistance_medoid_overview, which need a DTW pairwise distance matrix — not
             # applicable to a bouts-derived model. The bouts pipeline already writes its own
             # diagnostics/exemplar PDFs inline (via plot_results/plot_exemplars above).
-            if is_bouts:
+            # Exemplar/medoid overviews draw state bars: nothing to show without states.
+            has_states = bool(
+                (r.uns.get("dtai_trajectory_clustering", {}) or {}).get("has_behavioral_states", True)
+            ) if not is_bouts else True
+            if is_bouts or not has_states:
                 if on_done_ext:
                     on_done_ext(r)
                 return
@@ -6219,6 +7133,9 @@ class TrackClassificationSubTab(QWidget):
         out = self._out_dir()
         self._log(f"▶ Creating diagnostics for '{ct}'…")
         track_adata = self._track_adata
+        # Read on the main thread; lets the user re-draw the QC UMAP with new
+        # settings without re-running the clustering.
+        umap_params = {**self._dtw_umap_params(), "random_state": int(self.spin_seed.value())}
 
         def _run(**kw):
             from behav3d.analysis.behavior.track.state_dtw import (
@@ -6261,8 +7178,14 @@ class TrackClassificationSubTab(QWidget):
                     adata_tracks=track_adata,
                     output_dir=str(out) if out else "",
                     cell_type=ct,
+                    **umap_params,
                     verbose=True,
                 )
+            # Exemplar / medoid overviews draw state bars; skip without states.
+            if not bool(
+                (track_adata.uns.get("dtai_trajectory_clustering", {}) or {}).get("has_behavioral_states", True)
+            ):
+                return result
             try:
                 save_dtaidistance_exemplar_overview(
                     track_adata,
@@ -6388,6 +7311,55 @@ class TrackClassificationSubTab(QWidget):
                 self._notify_results(),
             ),
             on_failed=lambda e: self._log(f"❌ Track proportion plots failed: {e}"),
+        )
+
+    def _on_feature_heatmap(self):
+        ct = self._cell_type()
+        if not ct:
+            return
+        if self._track_adata is None:
+            QMessageBox.warning(self, "No data", "Run track clustering first.")
+            return
+        if self._bg.is_running():
+            QMessageBox.warning(self, "Busy", "Another operation is running.")
+            return
+        features = [item.text() for item in self.list_feature_heatmap_features.selectedItems()]
+        if not features:
+            QMessageBox.warning(self, "No features", "Select at least one feature for the heatmap.")
+            return
+        out = self._out_dir()
+        track_adata = self._track_adata
+        scaling = "zscore" if self.combo_feature_heatmap_scaling.currentText() == "z-score" else "minmax"
+        self._log(f"▶ Creating feature heatmap for '{ct}' ({len(features)} features, {scaling})…")
+
+        def _run(**kw):
+            from behav3d.analysis.behavior.track.visualization.plots.feature_heatmap import (
+                save_track_feature_heatmap,
+            )
+            from behav3d.napari._rename_dialog import _track_cluster_col
+            return save_track_feature_heatmap(
+                track_adata,
+                str(out) if out else "",
+                ct,
+                features,
+                cluster_key=_track_cluster_col(track_adata) or "ClusterID",
+                scaling=scaling,
+                verbose=True,
+            )
+
+        self._bg.run(
+            fn=_run,
+            desc=f"Feature heatmap ({ct})…",
+            progress_row=self.progress_row,
+            buttons=[self.btn_feature_heatmap],
+            viewer=self.viewer,
+            inject_progress=False,
+            on_done=lambda r: (
+                self._log(f"✅ Feature heatmap done for '{ct}': {r.get('feature_heatmap_pdf')}"),
+                self._update_view_buttons(),
+                self._notify_results(),
+            ),
+            on_failed=lambda e: self._log(f"❌ Feature heatmap failed: {e}"),
         )
 
     def _on_window_transitions(self):
@@ -7032,12 +8004,13 @@ class TrackClassificationSubTab(QWidget):
             QMessageBox.warning(self, "No track adata", "Run Track Clustering first.")
             return
         opacity = self.spin_track_opacity.value() / 100.0
-        state_adata_path = self._state_adata_path(ct)
+        # States file, or the trajectory-features file for features-only models.
+        state_adata_path = self._per_timepoint_adata_path(ct)
         if not state_adata_path or not state_adata_path.exists():
             QMessageBox.warning(
-                self, "State Classification Required",
-                f"Full state adata not found at:\n{state_adata_path}\n\n"
-                "Run State Classification first."
+                self, "Per-timepoint data missing",
+                f"Per-timepoint data not found at:\n{state_adata_path}\n\n"
+                "Run State Classification or Track Clustering first."
             )
             return
         self._log(f"▶ Loading track backprojection for '{ct}' / sample '{sample}'…")
@@ -7070,6 +8043,7 @@ class TrackClassificationSubTab(QWidget):
             adata_tracks = sc.read_h5ad(str(track_path))
             self._sync_track_cluster_combo(adata_tracks)
             color_by = self.combo_track_color_by.currentText()
+            state_adata_path = self._per_timepoint_adata_path(ct, adata_tracks) or state_adata_path
             adata_full = sc.read_h5ad(str(state_adata_path))
             cluster_col = color_by if color_by else "ClusterID"
             output_col = "track_behavioral_cluster"
@@ -7146,7 +8120,9 @@ class TrackClassificationSubTab(QWidget):
             self._track_bp_preview = {
                 "tracked_path": Path(tracked_path),
                 "code_lookup": cluster_code_lookup,
-                "layer_name": "behavioral_state_class",
+                # Coloured by trajectory cluster (the 'Color by' column), not by
+                # behavioral state.
+                "layer_name": "track_cluster_class",
                 "opacity": opacity,
                 "code_colors": code_colors,
             }
@@ -7190,14 +8166,17 @@ class TrackClassificationSubTab(QWidget):
                 code_colors=code_colors,
                 title="Track Cluster Mapping",
             )
-            _add_track_statebar_click_dock(
-                self.viewer,
-                sample_name=sample_name,
-                adata_full=adata_full,
-                adata_tracks=adata_tracks,
-                cluster_col=cluster_col,
-                title="Track State Bar",
-            )
+            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+            if FULL_STATE_COL in adata_full.obs.columns:
+                _add_track_statebar_click_dock(
+                    self.viewer,
+                    sample_name=sample_name,
+                    adata_full=adata_full,
+                    adata_tracks=adata_tracks,
+                    cluster_col=cluster_col,
+                    clickable_layer_name="track_cluster_class",
+                    title="Track State Bar",
+                )
             self._log("✅ Track backprojection loaded (current timepoint; updates as you scrub).")
         except Exception as e:
             traceback.print_exc()
@@ -7228,11 +8207,11 @@ class TrackClassificationSubTab(QWidget):
             from behav3d.analysis.behavior.track.visualization.backprojection import (
                 export_track_cluster_backprojection as _track_bp_export,
             )
-            state_adata_path = self._state_adata_path(ct)
+            state_adata_path = self._per_timepoint_adata_path(ct, adata_tracks)
             if not state_adata_path or not state_adata_path.exists():
                 raise FileNotFoundError(
-                    f"Full state adata not found at '{state_adata_path}'. "
-                    "Run State Classification first."
+                    f"Per-timepoint data not found at '{state_adata_path}'. "
+                    "Run State Classification or Track Clustering first."
                 )
             adata_full = sc.read_h5ad(str(state_adata_path))
             cluster_col = color_by if color_by else "ClusterID"
@@ -7287,6 +8266,8 @@ class TrackClassificationSubTab(QWidget):
                 (f.stem, f)
                 for f in sorted(proportions_dir.glob("*.pdf"))
             ]
+        elif kind == "feature_heatmap" and traj_dir:
+            candidates = [(f.stem, f) for f in sorted((traj_dir / "feature_heatmaps").glob("*.pdf"))]
         elif kind == "window_transitions" and traj_dir:
             wt_dir = traj_dir / "window_transitions"
             candidates = [(f.stem, f) for f in sorted(wt_dir.glob("*.pdf"))]

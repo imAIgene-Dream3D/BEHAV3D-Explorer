@@ -437,14 +437,27 @@ def prepare_track_cluster_trajectory_data(
     ``scale=`` transform, so they live in pixel/array-index space and any
     trajectory overlay must match that.
 
+    A TrackID does not always carry one label: with 'Divide long tracks' each
+    window of a track is clustered on its own, so a cell can go A -> B -> A.
+    napari's Tracks layer joins every row sharing an id, so grouping naively by
+    label and using the TrackID as id would draw a straight line from the end of
+    the first A window to the start of the second one, cutting across wherever
+    the cell really went. Each track is therefore split into runs that are
+    contiguous in the track's own timeline and share one label; each run gets a
+    synthetic id (``__run_id``). Where the label changes between adjacent
+    timepoints, the run is extended by the next run's first point, so the path
+    stays continuous and only changes colour. A missing frame (an unclustered
+    window, or a timepoint without a state / position) ends the run instead of
+    bridging it (see ``_build_label_run_trajectories``).
+
     Returns
     -------
     dict[str, np.ndarray]
         Cluster label -> array of shape ``[N, 4]`` or ``[N, 5]`` with columns
-        ``[TrackID, position_t, (position_z), position_y, position_x]``,
+        ``[__run_id, position_t, (position_z), position_y, position_x]``,
         ready for one ``viewer.add_tracks(...)`` call per class (see
         ``add_track_cluster_trajectory_layers``). Rows are sorted by
-        ``(TrackID, position_t)`` within each label.
+        ``(__run_id, position_t)`` within each label.
     """
     pos_triplet = None
     for candidate in _PIXEL_POSITION_TRIPLETS:
@@ -470,29 +483,26 @@ def prepare_track_cluster_trajectory_data(
     obs["__track"] = pd.to_numeric(obs[str(track_col)], errors="coerce")
     obs["__time"] = pd.to_numeric(obs[str(time_col)], errors="coerce")
     obs = obs.dropna(subset=["__track", "__time"] + list(pos_triplet)).copy()
+    obs["__track"] = obs["__track"].astype(np.int64)
+    obs["__time"] = obs["__time"].astype(np.int64)
+    from behav3d.analysis.behavior.state.visualization.backprojection import (
+        _build_label_run_trajectories,
+    )
 
     labels = backproj_obs[[track_col, time_col, output_col]].copy()
     labels["__track"] = pd.to_numeric(labels[track_col], errors="coerce")
     labels["__time"] = pd.to_numeric(labels[time_col], errors="coerce")
     labels = labels.dropna(subset=["__track", "__time"]).copy()
+    labels["__track"] = labels["__track"].astype(np.int64)
+    labels["__time"] = labels["__time"].astype(np.int64)
+    labels["__label"] = labels[output_col].astype(str)
 
-    merged = labels.merge(
+    merged = labels[["__track", "__time", "__label"]].merge(
         obs[["__track", "__time"] + list(pos_triplet)],
         on=["__track", "__time"],
         how="inner",
     )
-    if len(merged) == 0:
-        return {}
-
-    merged["__track"] = merged["__track"].astype(np.int64)
-    merged["__time"] = merged["__time"].astype(np.int64)
-    merged = merged.sort_values([output_col, "__track", "__time"], kind="mergesort")
-
-    trajectory_data = {}
-    cols = ["__track", "__time"] + list(pos_triplet)
-    for label, group in merged.groupby(output_col, observed=True, sort=False):
-        trajectory_data[str(label)] = group[cols].to_numpy(dtype=np.float64, copy=True)
-    return trajectory_data
+    return _build_label_run_trajectories(merged, pos_triplet)
 
 
 def add_track_cluster_trajectory_layers(

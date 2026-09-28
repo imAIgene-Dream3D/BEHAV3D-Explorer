@@ -27,6 +27,10 @@ if (_ROOT_DIR / ".behav3d_dev").exists():
 def run_napari_payload():
     """Import napari, create viewer, add BEHAV3D widget, and start event loop."""
     print("Starting BEHAV3D Napari Plugin...")
+    # On a hard native crash (e.g. a Qt access violation), print the Python stack
+    # of every thread instead of exiting with just an error code.
+    import faulthandler
+    faulthandler.enable(all_threads=True)
     # Suppress PyOpenCL compiler cache warnings
     os.environ.setdefault('PYOPENCL_NO_CACHE', '1')
     # os.environ.setdefault('PYOPENCL_COMPILER_OUTPUT', '0')
