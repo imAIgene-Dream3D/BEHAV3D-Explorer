@@ -16,6 +16,7 @@ from behav3d.analysis.behavior.state.utils import (
     _apply_state_order,
     _get_classification_state_colors,
     _get_classification_state_order,
+    _resolve_state_paths,
     _set_classification_state_colors,
     _set_classification_state_order,
     _normalize_label_color_map,
@@ -62,8 +63,10 @@ from behav3d.analysis.behavior.track.visualization.plots.reports import (
     save_track_condition_comparison_report,
     save_track_contact_group_analysis,
 )
-from behav3d.analysis.behavior.track.visualization.plots.contact_state_shift_report import (
-    save_track_contact_state_shift_report,
+from behav3d.analysis.behavior.state.visualization.plots.contact_state_shift_report import (
+    save_state_contact_shift_report,
+)
+from behav3d.analysis.behavior.track.visualization.plots.track_contact_overview_report import (
     save_track_contact_overview_report,
 )
 from behav3d.analysis.behavior.track.contact_grouping import (
@@ -2530,15 +2533,13 @@ class TrackClassificationPanel:
                 state_col = (
                     FULL_STATE_COL if state_col_choice == "full_behavioral_cluster" else state_col_choice
                 )
-                adata_tracks = self._load_model_adata()
                 df_timepoints = pd.read_csv(self._original_track_features_path())
                 full_adata = ad.read_h5ad(str(self._state_adata_path()))
-                paths = _resolve_track_paths(self.output_dir, self._current_cell_type())
-                result = save_track_contact_state_shift_report(
-                    adata_tracks,
+                state_paths = _resolve_state_paths(self.output_dir, self._current_cell_type())
+                result = save_state_contact_shift_report(
                     df_timepoints,
                     full_adata,
-                    paths.outfolder,
+                    state_paths.state_outdir,
                     contact_col=contact_col,
                     min_bout_length=min_bout_length,
                     state_col=state_col,

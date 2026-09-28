@@ -25,7 +25,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
-from behav3d.analysis.behavior.utils import _mixed_label_sort_key
+from behav3d.analysis.behavior.utils import _contact_analysis_dir, _mixed_label_sort_key
 from behav3d.analysis.behavior.general.visualization.plots.proportion_bars import (
     hash_stable_label_color_map,
     welch_ttest_stars,
@@ -1054,8 +1054,8 @@ def save_track_contact_duration_comparison(
     minutes (when ``minutes_per_frame`` is given), and time-in-contact fraction side by side —
     paginated ``comparisons_per_page`` per page, plus the long-contact percentage page(s) when
     requested) plus a CSV with one row per comparison (a ``page_group`` column marks which section —
-    ``"(all)"`` for the pooled one — each row belongs to), into the same
-    ``{out_dir}/contact_analysis/{contact_col}/`` folder used by ``save_track_contact_group_analysis``.
+    ``"(all)"`` for the pooled one — each row belongs to), into
+    ``{out_dir}/contact_analysis/contact_duration_comparison/{contact_col}/``.
 
     Right after each of those pages (and the long-contact percentage page, when requested), a
     "connected by sample" companion page is rendered: the same comparison, but each dot is a
@@ -1181,8 +1181,7 @@ def save_track_contact_duration_comparison(
     sample_colors = hash_stable_label_color_map(all_sample_names)
     sample_markers = _sample_marker_map(all_sample_names)
 
-    out_dir = Path(out_dir) / "contact_analysis" / str(contact_col)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = _contact_analysis_dir(out_dir, "contact_duration_comparison", contact_col)
     csv_dir = out_dir / "csv"
     csv_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = out_dir / "contact_duration_comparison.pdf"

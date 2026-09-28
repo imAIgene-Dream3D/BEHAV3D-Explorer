@@ -137,6 +137,7 @@ from behav3d.analysis.behavior.state.utils import (
     _normalize_label_color_map,
 )
 from behav3d.analysis.behavior.utils import (
+    _contact_analysis_dir,
     _mixed_label_sort_key,
     _resolve_output_dir,
     _sanitize_filename_token,
@@ -1553,8 +1554,7 @@ def save_track_contact_group_analysis(
 
     # Own subfolder, named after the raw contact column (e.g. "macrophage_contact"), holding a
     # single combined report PDF and a "csv" subfolder for all underlying CSVs.
-    out_dir = Path(out_dir) / "contact_analysis" / str(contact_col)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = _contact_analysis_dir(out_dir, "contact_group_analysis", contact_col)
     csv_dir = out_dir / "csv"
     csv_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = out_dir / "contact_analysis.pdf"
@@ -1809,8 +1809,7 @@ def save_track_contact_rate_report(
             [str(c) for c in target_class_order] if target_class_order is not None else touched_classes
         )
 
-    out_dir = Path(out_dir) / "contact_analysis" / str(contact_col)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = _contact_analysis_dir(out_dir, "contact_rate", contact_col)
     csv_dir = out_dir / "csv"
     csv_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = out_dir / "contact_rate.pdf"
@@ -1940,8 +1939,7 @@ def save_track_contact_composition_report(
             [str(c) for c in target_class_order] if target_class_order is not None else touched_classes
         )
 
-    out_dir = Path(out_dir) / "contact_analysis" / str(contact_col)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = _contact_analysis_dir(out_dir, "contact_composition", contact_col)
     csv_dir = out_dir / "csv"
     csv_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = out_dir / "contact_composition.pdf"

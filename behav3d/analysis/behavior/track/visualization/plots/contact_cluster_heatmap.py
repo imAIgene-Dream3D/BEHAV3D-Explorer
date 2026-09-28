@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import seaborn as sns
 
-from behav3d.analysis.behavior.utils import _mixed_label_sort_key
+from behav3d.analysis.behavior.utils import _contact_analysis_dir, _mixed_label_sort_key
 from behav3d.analysis.behavior.state.utils import (
     _apply_state_order,
     _get_classification_state_colors,
@@ -200,8 +200,7 @@ def save_track_contact_cluster_heatmap(
     resolved_colors = dict(class_colors) if class_colors else _get_classification_state_colors(adata_tracks, class_col)
     resolved_colors = _normalize_label_color_map(resolved_class_order, colors=resolved_colors, cmap_name="tab20")
 
-    out_dir = Path(out_dir) / "contact_analysis" / str(contact_col)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = _contact_analysis_dir(out_dir, "contact_cluster_heatmap", contact_col)
     csv_dir = out_dir / "csv"
     csv_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = out_dir / "contact_cluster_heatmap.pdf"

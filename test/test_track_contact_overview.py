@@ -11,7 +11,7 @@ import pytest
 
 matplotlib.use("Agg", force=True)
 
-from behav3d.analysis.behavior.track.visualization.plots.contact_state_shift_report import (
+from behav3d.analysis.behavior.track.visualization.plots.track_contact_overview_report import (
     save_track_contact_overview_report,
     _compute_contact_bar_segments,
 )

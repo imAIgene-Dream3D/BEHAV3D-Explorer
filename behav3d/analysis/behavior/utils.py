@@ -38,6 +38,16 @@ def _resolve_output_dir(output_dir):
     return output_dir_path
 
 
+def _contact_analysis_dir(out_dir, report_type, subfolder):
+    """{out_dir}/contact_analysis/{report_type}/{subfolder}, created if missing.
+    `subfolder` is the contact_col for single-column reports, or a '+'-joined sorted
+    combination of contact_cols for the multi-column comparison report.
+    """
+    path = Path(out_dir) / "contact_analysis" / str(report_type) / str(subfolder)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def _mixed_label_sort_key(value):
     text = str(value)
     if re.fullmatch(r"-?\d+", text):

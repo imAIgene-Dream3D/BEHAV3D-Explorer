@@ -355,6 +355,40 @@ STATE_COMPARISON_REPORT = {
     ),
 }
 
+STATE_CONTACT_ANALYSIS = {
+    "id": "state_contact",
+    "title": "Contact analysis",
+    "subtitle": "Which behavioral states coincide with organoid contact, and does contact type matter?",
+    "color": "#4a90d9",
+    "what_does": (
+        "Two per-timepoint contact reports that need only behavioral-state "
+        "classification (no track-DTW classification): a mean-contact-fraction "
+        "comparison across several organoid-contact columns per state (e.g. healthy "
+        "vs. tumor organoid contact), and a before-vs-after state-shift comparison "
+        "around a track's first sufficiently long contact bout."
+    ),
+    "concept": {
+        "term": "Contiguous bout",
+        "text": (
+            "a track counts as 'contact' (for the state-shift comparison) only if it "
+            "has an unbroken run of consecutive contact timepoints at least as long "
+            "as the minimum you set — brief, isolated contacts don't count."
+        ),
+    },
+    "what_get": "A contact-type comparison PDF (mean ± SEM, no significance test) and/or a state-shift PDF.",
+    "decide": [
+        _decide("Which contact column(s) to compare", _ONLY_YOU),
+        _decide("Which state column to use", _SUGGESTED),
+        _decide("Minimum contiguous contact bout length (state-shift)", _ESTIMATED),
+    ],
+    "has_params": True,
+    "seed": (
+        "Explain the BEHAV3D state Contact analysis: the contact-type comparison "
+        "(mean contact fraction per state across contact columns, purely descriptive) "
+        "and the state-shift analysis (behavioral state before vs. after a contact bout)."
+    ),
+}
+
 TRACK_PLOTS_ENTRY = {
     "id": "track_plots",
     "title": "Reports & Plots",
@@ -607,7 +641,7 @@ TRACK_EXEMPLAR_TRACKS = {
 # Level-1 pipeline lists, in display order (matches existing widget order).
 STATE_REPORT_PIPELINES = [
     STATE_DIAGNOSTICS, STATE_COMPOSITION_REPORT, STATE_TRANSITION_REPORT, STATE_FEATURE_HEATMAP,
-    STATE_COMPARISON_REPORT,
+    STATE_COMPARISON_REPORT, STATE_CONTACT_ANALYSIS,
 ]
 TRACK_PLOT_PIPELINES = [
     TRACK_DIAGNOSTICS, TRACK_PROPORTIONS, TRACK_FEATURE_HEATMAP, TRACK_WINDOW_TRANSITIONS,

@@ -152,6 +152,17 @@ def compute_class_by_stack_proportions(df, *, class_col, stack_col, class_order,
     return props.reindex(index=list(class_order), columns=list(stack_order), fill_value=0.0)
 
 
+def compute_class_by_group_mean_sem(df, *, class_col, group_col, value_col, class_order, group_order):
+    """Pivot per-(class, group) mean/SEM/n of `value_col` — purely descriptive aggregation (no
+    significance test), feeding `draw_grouped_value_barh`. Returns `(mean_df, sem_df, n_df)`,
+    each indexed by `class_order` with `group_order` columns."""
+    grouped = df.groupby([class_col, group_col], observed=True)[value_col]
+    mean_df = grouped.mean().unstack(group_col).reindex(index=list(class_order), columns=list(group_order))
+    sem_df = grouped.apply(_sem).unstack(group_col).reindex(index=list(class_order), columns=list(group_order))
+    n_df = grouped.count().unstack(group_col).reindex(index=list(class_order), columns=list(group_order)).fillna(0).astype(int)
+    return mean_df, sem_df, n_df
+
+
 def _chunk_list(lst, n):
     """Split list into chunks of at most n items."""
     n = max(1, int(n))
@@ -455,6 +466,67 @@ def draw_diff_barh(
     ax.spines["left"].set_visible(False)
     ax.tick_params(axis="y", length=0)
     ax.set_xlabel("Cluster size difference (%)", fontsize=8)
+
+
+def draw_grouped_value_barh(
+    ax,
+    class_order,
+    mean_df,
+    sem_df,
+    group_order,
+    colors,
+    *,
+    xlabel="Mean value",
+    bar_height_frac=0.8,
+    label_fontsize=8,
+):
+    """Horizontal grouped bar chart: one row per class (cluster/state), one bar per
+    `group_order` entry (e.g. a selected contact column) within that row, bar length = mean,
+    error whisker = SEM. Purely descriptive — no significance test, no stars, no p-values
+    (same "descriptive only" convention as `plot_condition_time_series_grid`).
+
+    `mean_df`/`sem_df` : DataFrames indexed by `class_order`, columns `group_order` (as
+    returned by `compute_class_by_group_mean_sem`). class_order[0] is drawn at the top.
+    """
+    class_order = [str(c) for c in list(class_order)]
+    group_order = [str(g) for g in list(group_order)]
+    n_groups = max(1, len(group_order))
+    rows = list(reversed(class_order))
+    y_base = np.arange(len(rows), dtype=float)
+    bar_h = float(bar_height_frac) / n_groups
+
+    xmax = 0.0
+    for group_name in group_order:
+        means = mean_df[group_name].reindex(rows).to_numpy(dtype=float) if group_name in mean_df.columns else np.full(len(rows), np.nan)
+        sems = sem_df[group_name].reindex(rows).to_numpy(dtype=float) if group_name in sem_df.columns else np.full(len(rows), np.nan)
+        combined = means + np.nan_to_num(sems, nan=0.0)
+        if np.isfinite(combined).any():
+            xmax = max(xmax, float(np.nanmax(combined)))
+
+    for i, group_name in enumerate(group_order):
+        means = mean_df[group_name].reindex(rows).to_numpy(dtype=float) if group_name in mean_df.columns else np.full(len(rows), np.nan)
+        sems = sem_df[group_name].reindex(rows).to_numpy(dtype=float) if group_name in sem_df.columns else np.full(len(rows), np.nan)
+        offset = (i - (n_groups - 1) / 2.0) * bar_h
+        y = y_base + offset
+        color = colors.get(group_name, "#808080")
+        means_plot = np.nan_to_num(means, nan=0.0)
+        ax.barh(y, means_plot, height=bar_h * 0.92, color=color, edgecolor="none", linewidth=0.0, label=group_name)
+        valid = np.isfinite(means) & np.isfinite(sems)
+        if valid.any():
+            ax.errorbar(
+                means_plot[valid], y[valid], xerr=sems[valid], fmt="none",
+                ecolor="black", elinewidth=1.0, capsize=2, zorder=3,
+            )
+
+    ax.set_yticks(y_base)
+    ax.set_yticklabels(rows, fontsize=label_fontsize)
+    ax.set_ylim(-0.6, len(rows) - 0.4)
+    ax.set_xlim(0.0, xmax * 1.15 if xmax > 0 else 1.0)
+    ax.set_xlabel(xlabel, fontsize=8)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_visible(False)
+    ax.tick_params(axis="y", length=0)
 
 
 def _diff_df_has_data(diff_df):

@@ -276,7 +276,7 @@ A cluster × contact/no_contact composition grid, faceted by **Group in X / Y / 
 
 #### Contact Condition Comparison
 
-A Welch's t-test grid comparing class composition between the contact and no_contact groups — the contact-analysis counterpart of the plain [Condition Comparison Report](#condition-comparison-report) above, always run as a binary (2D-grid-eligible) comparison. Click **▶ Create Contact Condition Comparison**. Output: `condition_comparison_<condition>.pdf`, written into this report's own contact-analysis folder — same filename pattern as the plain Condition Comparison Report, kept in a different folder so the two never collide.
+A Welch's t-test grid comparing class composition between the contact and no_contact groups — the contact-analysis counterpart of the plain [Condition Comparison Report](#condition-comparison-report) above, always run as a binary (2D-grid-eligible) comparison. Click **▶ Create Contact Condition Comparison**. Output: `condition_comparison_<condition>.pdf`, written into `contact_analysis/contact_group_analysis/<contact_col>/` alongside `contact_analysis.pdf` — same filename pattern as the plain Condition Comparison Report, kept in a different folder so the two never collide.
 
 #### Contact Cluster Heatmap
 
@@ -302,8 +302,8 @@ Requires **Use contact cell classification** (in the shared settings above) to b
 Click **▶ Create Contact Duration Comparison**. Output:
 
 ```text
-<output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/contact_duration_comparison.pdf
-<output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/csv/contact_duration_comparison.csv
+<output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/contact_duration_comparison/<contact_col>/contact_duration_comparison.pdf
+<output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/contact_duration_comparison/<contact_col>/csv/contact_duration_comparison.csv
 ```
 
 #### Contact State-Shift Analysis
@@ -327,13 +327,15 @@ Click **▶ Run contact state-shift analysis** (**▶ Run State-Shift Analysis**
 Only once **State Classification has been run** for this cell type (it reads the behavioral-states `.h5ad`).
 ```
 
-Output:
+Since this is a state-based analysis (it only needs the behavioral-states classification, not
+track classification), its output lives under `behavioral_states/`, not `behavioral_trajectories/`,
+even though the button lives on this tab:
 
 ```text
-<output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/contact_state_shift.pdf
-<output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/csv/state_shift_track_windows.csv
-<output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/csv/state_shift_diff_bars.csv
-<output_dir>/analysis/<cell_type>/behavioral_trajectories/contact_analysis/<contact_col>/csv/state_shift_stacked_composition.csv
+<output_dir>/analysis/<cell_type>/behavioral_states/contact_analysis/contact_state_shift/<contact_col>/contact_state_shift.pdf
+<output_dir>/analysis/<cell_type>/behavioral_states/contact_analysis/contact_state_shift/<contact_col>/csv/state_shift_track_windows.csv
+<output_dir>/analysis/<cell_type>/behavioral_states/contact_analysis/contact_state_shift/<contact_col>/csv/state_shift_diff_bars.csv
+<output_dir>/analysis/<cell_type>/behavioral_states/contact_analysis/contact_state_shift/<contact_col>/csv/state_shift_stacked_composition.csv
 ```
 
 #### Track Contact Overview
@@ -346,7 +348,7 @@ Requires **State Classification** to have been run for this cell type (it reads 
 |---|---|---|
 | **Tracks per page** | 6 | How many track rows to place on each page before starting a new one. |
 
-Click **▶ Create Track Contact Overview**. Output: `track_contact_overview.pdf`, in the same `contact_analysis/<contact_col>/` folder as the other contact reports.
+Click **▶ Create Track Contact Overview**. Output: `track_contact_overview.pdf`, in `contact_analysis/contact_track_overview/<contact_col>/`.
 
 ## Step 5 — Backprojection
 
@@ -395,9 +397,15 @@ You will find there, depending on which steps you ran:
 - **Condition comparison reports** under `behavior_comparisons/`: `condition_comparison_<condition>.pdf`/`.csv`.
 - **Track Transition Report**: `transition_analysis.pdf` (pooled circular diagram + transition matrix for trajectory clusters).
 - **Window Transitions**: `window_transitions_all_samples.pdf` (merged pooled + per-sample Sankey), with individual per-sample pages also kept under `sankey_pdf_pages/`.
-- **Contact analysis** under `contact_analysis/<contact_col>/`, one file per report you ran: `contact_rate.pdf`, `contact_composition.pdf`, `condition_comparison_<condition>.pdf` (condition comparison, contact-analysis version), `contact_cluster_heatmap.pdf`, and `track_contact_overview.pdf`, plus a sibling `csv/` folder with the underlying tables.
-- **Contact duration comparison** in the same `contact_analysis/<contact_col>/` folder: `contact_duration_comparison.pdf` plus `csv/contact_duration_comparison.csv`.
-- **Contact state-shift analysis** in the same `contact_analysis/<contact_col>/` folder: `contact_state_shift.pdf` plus `csv/state_shift_track_windows.csv`, `csv/state_shift_diff_bars.csv` and `csv/state_shift_stacked_composition.csv`.
+- **Contact analysis** under `contact_analysis/`, one folder per report type, each holding a `<contact_col>/` (or, for the type comparison, a `<contact_col_a>+<contact_col_b>/`) subfolder with that report's PDF plus a sibling `csv/` folder:
+  - `contact_group_analysis/<contact_col>/`: `contact_analysis.pdf` (the bundled "Run Contact Analysis" report) plus `condition_comparison_<condition>.pdf`.
+  - `contact_rate/<contact_col>/`: `contact_rate.pdf`.
+  - `contact_composition/<contact_col>/`: `contact_composition.pdf`.
+  - `contact_cluster_heatmap/<contact_col>/`: `contact_cluster_heatmap.pdf`.
+  - `contact_duration_comparison/<contact_col>/`: `contact_duration_comparison.pdf` plus `csv/contact_duration_comparison.csv`.
+  - `contact_track_overview/<contact_col>/`: `track_contact_overview.pdf` (no `csv/`).
+  - `contact_type_comparison/<contact_col_a>+<contact_col_b>/`: `contact_type_comparison.pdf` plus `csv/contact_type_comparison.csv`.
+- **Contact state-shift analysis** is the one exception: since it only needs behavioral-state classification, it's written under `<output_dir>/analysis/<cell_type>/behavioral_states/contact_analysis/contact_state_shift/<contact_col>/` instead — `contact_state_shift.pdf` plus `csv/state_shift_track_windows.csv`, `csv/state_shift_diff_bars.csv` and `csv/state_shift_stacked_composition.csv`.
 - Optionally the **DTW distance matrix** CSV (if you ticked *Save distance matrix CSV*).
 
 The **Original feature-based BEHAV3D DTW** engine instead writes its UMAP cluster tables (`BEHAV3D_<cell_type>_UMAP_clusters.csv`, `..._combined_track_features_clustered.csv`, `..._UMAP_cluster_percentages.csv`) and diagnostic PDFs under `analysis/<cell_type>/results/`.
