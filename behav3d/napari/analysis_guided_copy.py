@@ -294,6 +294,38 @@ STATE_TRANSITION_REPORT = {
     ),
 }
 
+STATE_FEATURE_HEATMAP = {
+    "id": "state_feature_heatmap",
+    "title": "State Feature Heatmap",
+    "subtitle": "Which features characterize each behavioral state?",
+    "color": "#4a90d9",
+    "what_does": (
+        "Shows behavioral states x features as a heatmap of per-state feature means. "
+        "The features the states were built on are preselected; any other "
+        "per-timepoint feature can be added. States can be the full behavioral states "
+        "or the primary dynamic (HMM) states."
+    ),
+    "concept": {
+        "term": "Z-score",
+        "text": (
+            "a feature's value expressed as standard deviations from the average - 0 "
+            "means typical, positive higher, negative lower - so features with different "
+            "units can share one colour scale."
+        ),
+    },
+    "what_get": "A state x feature heatmap PDF, plus a CSV of the state means.",
+    "decide": [
+        _decide("Which features to include", _SUGGESTED),
+        _decide("Full or primary dynamic states", _SUGGESTED),
+        _decide("Averaging (every timepoint, or each track once) and colour scaling", _DEFAULTS),
+    ],
+    "has_params": True,
+    "seed": (
+        "Explain the BEHAV3D State Feature Heatmap: how per-state feature means are "
+        "computed, timepoint vs per-track averaging, and how to read the z-score colours."
+    ),
+}
+
 STATE_COMPARISON_REPORT = {
     "id": "state_comparison",
     "title": "Condition Comparison Report",
@@ -386,6 +418,37 @@ TRACK_PROPORTIONS = {
     "seed": (
         "Explain the BEHAV3D Track Proportions plot: what it shows and how "
         "to choose grouping columns."
+    ),
+}
+
+TRACK_FEATURE_HEATMAP = {
+    "id": "track_feature_heatmap",
+    "title": "Feature Heatmap",
+    "subtitle": "Which features characterize each movement-type cluster?",
+    "color": "#c98a2c",
+    "what_does": (
+        "Averages each selected per-timepoint feature over every track's trajectory, "
+        "then per trajectory cluster, and shows clusters x features as a heatmap. "
+        "The features the clustering / behavioral states were built on are "
+        "preselected; any other feature can be added."
+    ),
+    "concept": {
+        "term": "Z-score",
+        "text": (
+            "a feature's value expressed as standard deviations from the average "
+            "track - 0 means typical, positive higher, negative lower - so features "
+            "with different units can share one colour scale."
+        ),
+    },
+    "what_get": "A cluster x feature heatmap PDF, plus CSVs of the cluster and per-track means.",
+    "decide": [
+        _decide("Which features to include", _SUGGESTED),
+        _decide("Colour scaling (z-score or min-max)", _DEFAULTS),
+    ],
+    "has_params": True,
+    "seed": (
+        "Explain the BEHAV3D track Feature Heatmap: how the per-cluster feature "
+        "means are computed and how to read the z-score colours."
     ),
 }
 
@@ -543,11 +606,13 @@ TRACK_EXEMPLAR_TRACKS = {
 
 # Level-1 pipeline lists, in display order (matches existing widget order).
 STATE_REPORT_PIPELINES = [
-    STATE_DIAGNOSTICS, STATE_COMPOSITION_REPORT, STATE_TRANSITION_REPORT, STATE_COMPARISON_REPORT,
+    STATE_DIAGNOSTICS, STATE_COMPOSITION_REPORT, STATE_TRANSITION_REPORT, STATE_FEATURE_HEATMAP,
+    STATE_COMPARISON_REPORT,
 ]
 TRACK_PLOT_PIPELINES = [
-    TRACK_DIAGNOSTICS, TRACK_PROPORTIONS, TRACK_WINDOW_TRANSITIONS, TRACK_TRANSITION_ANALYSIS,
-    TRACK_COMPARISON_REPORT, TRACK_CONTACT_GROUPING, TRACK_EXEMPLAR_TRACKS,
+    TRACK_DIAGNOSTICS, TRACK_PROPORTIONS, TRACK_FEATURE_HEATMAP, TRACK_WINDOW_TRANSITIONS,
+    TRACK_TRANSITION_ANALYSIS, TRACK_COMPARISON_REPORT, TRACK_CONTACT_GROUPING,
+    TRACK_EXEMPLAR_TRACKS,
 ]
 
 

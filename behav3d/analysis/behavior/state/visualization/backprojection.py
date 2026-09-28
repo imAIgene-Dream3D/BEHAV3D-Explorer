@@ -166,6 +166,49 @@ _PIXEL_POSITION_TRIPLETS = (
 )
 
 
+def _build_label_run_trajectories(df, pos_triplet, *, label_col="__label", track_col="__track", time_col="__time"):
+    """Split per-timepoint rows into napari track pieces, one list per label.
+
+    ``df`` has integer ``track_col``/``time_col``, a string ``label_col`` and the
+    pixel ``pos_triplet``; rows without a label must already be dropped.
+
+    napari's Tracks layer joins every row sharing a track id, so each track is
+    cut into runs that (a) keep one label and (b) cover consecutive frames. A
+    run ends at a label change, and at any missing frame (no label / no state
+    there), so no straight line is ever drawn across time the path doesn't
+    cover. Where the label changes between consecutive frames, the ending run
+    gets the next run's first point as well, so the path stays continuous and
+    only changes colour there.
+
+    Returns ``{label: Nx4/5 array}`` with columns
+    ``[__run_id, time, (pixel_position_z), pixel_position_y, pixel_position_x]``.
+    """
+    if len(df) == 0:
+        return {}
+    df = df.sort_values([track_col, time_col], kind="mergesort").drop_duplicates(
+        subset=[track_col, time_col], keep="first"
+    ).reset_index(drop=True)
+    labels = df[label_col].astype(str)
+    consecutive = df[track_col].eq(df[track_col].shift()) & df[time_col].diff().eq(1)
+    changed = labels.ne(labels.shift())
+    df["__run_id"] = (~consecutive | changed).cumsum().astype(np.int64)
+
+    bridge_idx = np.flatnonzero((consecutive & changed).to_numpy())
+    if bridge_idx.size > 0:
+        bridge = df.iloc[bridge_idx].copy()
+        prev = df.iloc[bridge_idx - 1]
+        bridge["__run_id"] = prev["__run_id"].to_numpy()
+        bridge[label_col] = prev[label_col].to_numpy()
+        df = pd.concat([df, bridge], ignore_index=True)
+    df = df.sort_values(["__run_id", time_col], kind="mergesort")
+
+    cols = ["__run_id", time_col] + list(pos_triplet)
+    return {
+        str(label): group[cols].to_numpy(dtype=np.float64, copy=True)
+        for label, group in df.groupby(df[label_col].astype(str), sort=False)
+    }
+
+
 def prepare_state_trajectory_data(
     sample_obs,
     state_col,
@@ -187,6 +230,9 @@ def prepare_state_trajectory_data(
     (``__run_id``) in place of the real ``TrackID`` — napari's Tracks layer
     only connects rows sharing the same id, so non-adjacent runs of the same
     state naturally render as separate stretches instead of one bridged line.
+    Runs also end at missing frames (timepoints with no state), and consecutive
+    runs are joined at the state change so the path shows no holes (see
+    ``_build_label_run_trajectories``).
 
     Parameters
     ----------
@@ -227,18 +273,11 @@ def prepare_state_trajectory_data(
 
     obs["__track"] = obs["__track"].astype(np.int64)
     obs["__time"] = obs["__time"].astype(np.int64)
-    obs = obs.sort_values(["__track", "__time"], kind="mergesort")
-
-    state_str = obs[str(state_col)].astype(str)
-    new_run = obs["__track"].ne(obs["__track"].shift()) | state_str.ne(state_str.shift())
-    obs["__run_id"] = new_run.cumsum().astype(np.int64)
-    obs["__state"] = state_str
-
-    trajectory_data = {}
-    cols = ["__run_id", "__time"] + list(pos_triplet)
-    for label, group in obs.groupby("__state", observed=True, sort=False):
-        trajectory_data[str(label)] = group[cols].to_numpy(dtype=np.float64, copy=True)
-    return trajectory_data
+    # Unassigned timepoints (NA state) are gaps, not a grey "nan" state.
+    state_str = obs[str(state_col)].astype("string").str.strip()
+    obs = obs[state_str.notna() & (state_str != "")].copy()
+    obs["__label"] = state_str.loc[obs.index].astype(str)
+    return _build_label_run_trajectories(obs, pos_triplet)
 
 
 def backproject_state_at_timepoint(
