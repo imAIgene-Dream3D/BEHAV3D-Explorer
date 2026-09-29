@@ -36,7 +36,7 @@ try:
 except Exception:
     dtw_ndim = None
 from sklearn.metrics import silhouette_score
-from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+from behav3d.analysis.behavior.state.classification import FULL_STATE_COL, resolve_full_state_col
 from behav3d.analysis.behavior.track.feature_dtw import run_tcell_analysis
 from behav3d.analysis.behavior.track.visualization.plots.feature_dtw import (
     plot_cluster_percentage_bars,
@@ -1760,6 +1760,10 @@ def run_state_based_analysis(
         window_col=str(trajectory_window_col),
     )
     _vdone(verbose, "trajectory-clustering", "filter + truncate trajectories", filter_started)
+    if str(state_col) == FULL_STATE_COL and FULL_STATE_COL not in adata_filt.obs.columns:
+        legacy_state_col = resolve_full_state_col(adata_filt)
+        if legacy_state_col is not None:
+            state_col = legacy_state_col
     if str(state_col) not in adata_filt.obs.columns:
         raise ValueError(
             f"State-feature clustering requires state_col='{state_col}' in adata.obs, "

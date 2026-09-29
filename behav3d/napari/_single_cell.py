@@ -549,6 +549,31 @@ def _bp_save_channel_display(viewer, metadata_loader, out_dir_fn):
     _save_behav3d_params(metadata_loader, out_dir_fn)
 
 
+def _resolve_ui_state_col(adata, choice: str) -> str:
+    """Map a state-column combo box's current text to the actual adata.obs column.
+
+    The combo boxes offer the canonical column names (FULL_STATE_COL /
+    INTRINSIC_STATE_COL) as choices, but a state adata read back from a file
+    written before a column rename/consolidation may only have the legacy alias
+    on disk — fall back to it via resolve_full_state_col/resolve_intrinsic_state_col
+    so reports and backprojection still work against old files.
+    """
+    from behav3d.analysis.behavior.state.classification import (
+        FULL_STATE_COL,
+        INTRINSIC_STATE_COL,
+        HMM_INTRINSIC_RAW_STATE_COL,
+        resolve_full_state_col,
+        resolve_intrinsic_state_col,
+    )
+    if choice == FULL_STATE_COL:
+        return resolve_full_state_col(adata) or FULL_STATE_COL
+    if choice == INTRINSIC_STATE_COL:
+        return resolve_intrinsic_state_col(adata) or INTRINSIC_STATE_COL
+    if choice == "raw_hmm_state":
+        return HMM_INTRINSIC_RAW_STATE_COL
+    return choice
+
+
 def _save_behav3d_params(metadata_loader, out_dir_fn):
     params = getattr(metadata_loader, "behav3d_parameters", None)
     if not isinstance(params, dict):
@@ -2354,10 +2379,12 @@ class StateClassificationSubTab(QWidget):
             INTRINSIC_STATE_COL,
             save_hmm_quality_control_outputs,
             _resolve_hmm_quality_control_outdir,
+            resolve_intrinsic_state_col,
         )
         adata = model_adata if model_adata is not None else self._model_adata
         if adata is None:
             raise ValueError("No model adata loaded.")
+        cluster_col = resolve_intrinsic_state_col(adata) or INTRINSIC_STATE_COL
         out = self._out_dir()
         preprocessing_meta = adata.uns.get("preprocessing", {})
         if not isinstance(preprocessing_meta, dict):
@@ -2377,10 +2404,10 @@ class StateClassificationSubTab(QWidget):
             output_dir=qc_dir,
             model=hmm_model,
             selection_df=None,
-            cluster_col=INTRINSIC_STATE_COL,
+            cluster_col=cluster_col,
             scaler_mean=scaler_meta.get("mean", None) if isinstance(scaler_meta, dict) else None,
             scaler_scale=scaler_meta.get("scale", None) if isinstance(scaler_meta, dict) else None,
-            title=f"all_data | hmm | curated {INTRINSIC_STATE_COL}",
+            title=f"all_data | hmm | curated {cluster_col}",
             preprocessing_params=preprocessing_meta,
             verbose=verbose,
         )
@@ -2494,11 +2521,11 @@ class StateClassificationSubTab(QWidget):
             QMessageBox.warning(self, "No features", "Select at least one feature for the heatmap.")
             return
         out = self._out_dir()
-        state_col = self.combo_state_heatmap_state_col.currentData()
+        state_col_choice = self.combo_state_heatmap_state_col.currentData()
         weighting = self.combo_state_heatmap_weighting.currentData()
         scaling = "zscore" if self.combo_state_heatmap_scaling.currentText() == "z-score" else "minmax"
         self._log(
-            f"▶ Creating state feature heatmap for '{ct}' ({len(features)} features, {state_col}, {weighting})…"
+            f"▶ Creating state feature heatmap for '{ct}' ({len(features)} features, {state_col_choice}, {weighting})…"
         )
 
         def _run(**kw):
@@ -2507,6 +2534,7 @@ class StateClassificationSubTab(QWidget):
                 save_state_feature_heatmap,
             )
             adata = ad.read_h5ad(str(full_path))
+            state_col = _resolve_ui_state_col(adata, state_col_choice)
             return save_state_feature_heatmap(
                 adata, str(out), ct, features,
                 state_col=state_col, weighting=weighting, scaling=scaling, verbose=True,
@@ -3158,12 +3186,16 @@ class StateClassificationSubTab(QWidget):
 
         def _run(**kw):
             import anndata as ad
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+            from behav3d.analysis.behavior.state.classification import (
+                FULL_STATE_COL,
+                resolve_full_state_col,
+            )
             from behav3d.analysis.behavior.state.utils import _resolve_state_paths
             from behav3d.analysis.behavior.state.visualization.plots.state_composition import (
                 save_state_composition_report,
             )
             adata = ad.read_h5ad(str(full_path))
+            state_col = resolve_full_state_col(adata) or FULL_STATE_COL
 
             # Inject known metadata grouping columns from metadata CSV into obs (for
             # existing h5ad files that predate Fix 1 in classification.py).
@@ -3200,7 +3232,7 @@ class StateClassificationSubTab(QWidget):
                 output_pdf_path=composition_dir / "state_composition_report.pdf",
                 output_csv_path=composition_dir / "state_composition_report.csv",
                 time_col="position_t",
-                state_col=FULL_STATE_COL,
+                state_col=state_col,
                 sample_col="sample_name",
                 include_pooled_summary=True,
                 group_cols=selected_cols,
@@ -3208,8 +3240,8 @@ class StateClassificationSubTab(QWidget):
                 group_y=group_y,
                 group_x_levels_map=group_x_levels_map,
                 group_y_levels_map=group_y_levels_map,
-                state_colors=_get_classification_state_colors(adata, FULL_STATE_COL),
-                state_order=_get_classification_state_order(adata, FULL_STATE_COL),
+                state_colors=_get_classification_state_colors(adata, state_col),
+                state_order=_get_classification_state_order(adata, state_col),
                 time_bin_size=time_bin_size,
                 verbose=True,
             )
@@ -3255,26 +3287,12 @@ class StateClassificationSubTab(QWidget):
         def _run(**kw):
             import pandas as pd
             import anndata as ad
-            from behav3d.analysis.behavior.state.classification import (
-                FULL_STATE_COL,
-                INTRINSIC_STATE_COL,
-                HMM_INTRINSIC_RAW_STATE_COL,
-                resolve_full_state_col,
-                resolve_intrinsic_state_col,
-            )
             from behav3d.analysis.behavior.state.utils import _resolve_state_paths
             from behav3d.analysis.behavior.state.visualization.plots.contact_type_report import (
                 save_state_contact_type_comparison,
             )
             adata = ad.read_h5ad(str(full_path))
-            if state_col_choice == FULL_STATE_COL:
-                state_col = resolve_full_state_col(adata) or FULL_STATE_COL
-            elif state_col_choice == INTRINSIC_STATE_COL:
-                state_col = resolve_intrinsic_state_col(adata) or INTRINSIC_STATE_COL
-            elif state_col_choice == "raw_hmm_state":
-                state_col = HMM_INTRINSIC_RAW_STATE_COL
-            else:
-                state_col = state_col_choice
+            state_col = _resolve_ui_state_col(adata, state_col_choice)
             df_timepoints = pd.read_csv(csv_path)
             state_dir = _resolve_state_paths(out, ct).state_outdir
             return save_state_contact_type_comparison(
@@ -3334,8 +3352,8 @@ class StateClassificationSubTab(QWidget):
             from behav3d.analysis.behavior.state.visualization.plots.contact_state_shift_report import (
                 save_state_contact_shift_report,
             )
-            state_col = state_col_choice
             adata = ad.read_h5ad(str(full_path))
+            state_col = _resolve_ui_state_col(adata, state_col_choice)
             df_timepoints = pd.read_csv(csv_path)
             state_dir = _resolve_state_paths(out, ct).state_outdir
             return save_state_contact_shift_report(
@@ -3393,7 +3411,10 @@ class StateClassificationSubTab(QWidget):
 
         def _run(**kw):
             import anndata as ad
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+            from behav3d.analysis.behavior.state.classification import (
+                FULL_STATE_COL,
+                resolve_full_state_col,
+            )
             from behav3d.analysis.behavior.state.utils import _resolve_state_paths
             from behav3d.analysis.behavior.state.visualization.plots.state_transitions import (
                 save_state_transition_report,
@@ -3403,15 +3424,16 @@ class StateClassificationSubTab(QWidget):
                 _get_classification_state_order,
             )
             adata = ad.read_h5ad(str(full_path))
+            state_col = resolve_full_state_col(adata) or FULL_STATE_COL
             transition_dir = _resolve_state_paths(out, ct).state_transitions_outdir
             transition_dir.mkdir(parents=True, exist_ok=True)
             return save_state_transition_report(
                 adata=adata,
                 output_dir=transition_dir,
-                state_col=FULL_STATE_COL,
+                state_col=state_col,
                 time_col="position_t",
-                state_colors=_get_classification_state_colors(adata, FULL_STATE_COL),
-                state_order=_get_classification_state_order(adata, FULL_STATE_COL),
+                state_colors=_get_classification_state_colors(adata, state_col),
+                state_order=_get_classification_state_order(adata, state_col),
                 include_transition_matrix=include_transition_matrix,
                 include_circular_diagram=include_circular_diagram,
                 circular_min_prob_to_draw=circular_min_prob_to_draw,
@@ -3489,7 +3511,10 @@ class StateClassificationSubTab(QWidget):
 
         def _run(**kw):
             import anndata as ad
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+            from behav3d.analysis.behavior.state.classification import (
+                FULL_STATE_COL,
+                resolve_full_state_col,
+            )
             from behav3d.analysis.behavior.state.utils import (
                 _resolve_state_paths,
                 _get_classification_state_colors,
@@ -3502,6 +3527,7 @@ class StateClassificationSubTab(QWidget):
             from behav3d.core.utils import minutes_per_frame_from_metadata
             minutes_per_frame, minutes_valid = minutes_per_frame_from_metadata(md)
             adata = ad.read_h5ad(str(full_path))
+            state_col = resolve_full_state_col(adata) or FULL_STATE_COL
             state_paths = _resolve_state_paths(out, ct)
             comp_dir = state_paths.state_composition_outdir / "behavior_proportions"
             comp_dir.mkdir(parents=True, exist_ok=True)
@@ -3511,15 +3537,15 @@ class StateClassificationSubTab(QWidget):
                 adata=adata,
                 output_pdf_path=out_pdf,
                 output_csv_path=out_pdf.with_suffix(".csv"),
-                state_col=FULL_STATE_COL,
+                state_col=state_col,
                 sample_col="sample_name",
                 condition_col=condition_col,
                 group_cols=group_cols or None,
                 group_x=group_x,
                 group_x_levels_map=group_x_levels_map,
                 condition_groups=condition_groups,
-                state_colors=_get_classification_state_colors(adata, FULL_STATE_COL),
-                state_order=_get_classification_state_order(adata, FULL_STATE_COL),
+                state_colors=_get_classification_state_colors(adata, state_col),
+                state_order=_get_classification_state_order(adata, state_col),
                 include_over_time=True,
                 minutes_per_frame=minutes_per_frame if minutes_valid else None,
                 verbose=True,
@@ -3664,10 +3690,6 @@ class StateClassificationSubTab(QWidget):
                 _get_classification_state_order,
                 _normalize_label_color_map,
             )
-            from behav3d.analysis.behavior.state.classification import (
-                FULL_STATE_COL,
-                HMM_INTRINSIC_RAW_STATE_COL,
-            )
             from behav3d.analysis.backprojection import filter_track_image_to_ids
             from behav3d.io.images import load_image
             out_dir = self._out_dir()
@@ -3684,8 +3706,7 @@ class StateClassificationSubTab(QWidget):
                     )
                 except Exception as exc:
                     self._log(f"⚠️ Could not prepare trajectory positions: {exc}")
-            resolved_col = HMM_INTRINSIC_RAW_STATE_COL if color_by == "raw_hmm_state" else color_by
-            state_col = resolved_col if (resolved_col and resolved_col in adata.obs.columns) else FULL_STATE_COL
+            state_col = _resolve_ui_state_col(adata, color_by)
             obs_samples = adata.obs["sample_name"].astype(str)
             sample_name = sample if sample else obs_samples.iloc[0]
             sample_adata = adata[obs_samples == str(sample_name)]
@@ -3831,7 +3852,7 @@ class StateClassificationSubTab(QWidget):
                 export_behavioral_state_backprojection_zarrs,
             )
             adata = sc.read_h5ad(str(state_path))
-            state_col = color_by if color_by else FULL_STATE_COL
+            state_col = _resolve_ui_state_col(adata, color_by) if color_by else FULL_STATE_COL
             sample_name = sample if sample else None
             export_adata = (
                 adata[adata.obs["sample_name"].astype(str) == str(sample_name)]
@@ -8263,7 +8284,10 @@ class TrackClassificationSubTab(QWidget):
             from matplotlib.backends.backend_pdf import PdfPages
             import matplotlib.pyplot as plt
             import anndata as _ad
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+            from behav3d.analysis.behavior.state.classification import (
+                FULL_STATE_COL,
+                resolve_full_state_col,
+            )
             from behav3d.napari._rename_dialog import _track_cluster_col
 
             cluster_col = _track_cluster_col(track_adata) or "ClusterID"
@@ -8274,6 +8298,7 @@ class TrackClassificationSubTab(QWidget):
                     "Run State Clustering first."
                 )
             full_adata = _ad.read_h5ad(str(state_adata_path))
+            state_key = resolve_full_state_col(full_adata) or FULL_STATE_COL
 
             out_path = _Path(out) if out else _Path(".")
             from behav3d.analysis.behavior.track.utils import _resolve_track_paths
@@ -8289,7 +8314,7 @@ class TrackClassificationSubTab(QWidget):
                     sample_key="sample_name",
                     track_key="TrackID",
                     time_key="position_t",
-                    state_key=FULL_STATE_COL,
+                    state_key=state_key,
                     cluster_key=cluster_col,
                     tmin_key="position_t_min",
                     tmax_key="position_t_max",
@@ -8308,7 +8333,7 @@ class TrackClassificationSubTab(QWidget):
                     sample_key="sample_name",
                     track_key="TrackID",
                     time_key="position_t",
-                    state_key=FULL_STATE_COL,
+                    state_key=state_key,
                     cluster_key=cluster_col,
                     tmin_key="position_t_min",
                     tmax_key="position_t_max",
@@ -8326,7 +8351,7 @@ class TrackClassificationSubTab(QWidget):
                     sample_key="sample_name",
                     track_key="TrackID",
                     time_key="position_t",
-                    state_key=FULL_STATE_COL,
+                    state_key=state_key,
                     cluster_key=cluster_col,
                     tmin_key="position_t_min",
                     tmax_key="position_t_max",
@@ -8345,7 +8370,7 @@ class TrackClassificationSubTab(QWidget):
                     sample_key="sample_name",
                     track_key="TrackID",
                     time_key="position_t",
-                    state_key=FULL_STATE_COL,
+                    state_key=state_key,
                     cluster_key=cluster_col,
                     tmin_key="position_t_min",
                     tmax_key="position_t_max",
@@ -8926,7 +8951,7 @@ class TrackClassificationSubTab(QWidget):
                     time_varying = False
                 else:
                     adata_target = ad.read_h5ad(str(self._state_adata_path(target_ct)))
-                    state_col = target_state_choice
+                    state_col = _resolve_ui_state_col(adata_target, target_state_choice)
                     target_class_lookup = build_target_class_lookup_from_state_adata(
                         adata_target, state_col=state_col,
                     )
@@ -9077,7 +9102,7 @@ class TrackClassificationSubTab(QWidget):
                     time_varying = False
                 else:
                     adata_target = ad.read_h5ad(str(self._state_adata_path(target_ct)))
-                    state_col = target_state_choice
+                    state_col = _resolve_ui_state_col(adata_target, target_state_choice)
                     target_class_lookup = build_target_class_lookup_from_state_adata(
                         adata_target, state_col=state_col,
                     )
@@ -9255,7 +9280,7 @@ class TrackClassificationSubTab(QWidget):
                     time_varying = False
                 else:
                     adata_target = ad.read_h5ad(str(self._state_adata_path(target_ct)))
-                    state_col = target_state_choice
+                    state_col = _resolve_ui_state_col(adata_target, target_state_choice)
                     target_class_lookup = build_target_class_lookup_from_state_adata(
                         adata_target, state_col=state_col,
                     )
@@ -9465,7 +9490,7 @@ class TrackClassificationSubTab(QWidget):
                 time_varying = False
             else:
                 adata_target = ad.read_h5ad(str(self._state_adata_path(target_ct)))
-                state_col = target_state_choice
+                state_col = _resolve_ui_state_col(adata_target, target_state_choice)
                 target_class_lookup = build_target_class_lookup_from_state_adata(
                     adata_target, state_col=state_col,
                 )
@@ -9627,8 +9652,8 @@ class TrackClassificationSubTab(QWidget):
             from behav3d.analysis.behavior.track.visualization.plots.track_contact_overview_report import (
                 save_track_contact_overview_report,
             )
-            state_col = state_col_choice
             full_adata = _ad.read_h5ad(str(state_adata_path))
+            state_col = _resolve_ui_state_col(full_adata, state_col_choice)
             df_timepoints = pd.read_csv(csv_path)
             contact_dir = _resolve_track_paths(str(out) if out else "", ct).outfolder
             return save_track_contact_overview_report(
@@ -9953,14 +9978,16 @@ class TrackClassificationSubTab(QWidget):
             )
             if track_mapping_dock is not None:
                 track_mapping_dock.widget()._behav3d_backprojection_legend_dock = True
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
-            if FULL_STATE_COL in adata_full.obs.columns:
+            from behav3d.analysis.behavior.state.classification import resolve_full_state_col
+            resolved_full_state_col = resolve_full_state_col(adata_full)
+            if resolved_full_state_col is not None:
                 statebar_widget = _add_track_statebar_click_dock(
                     self.viewer,
                     sample_name=sample_name,
                     adata_full=adata_full,
                     adata_tracks=adata_tracks,
                     cluster_col=cluster_col,
+                    state_col=resolved_full_state_col,
                     clickable_layer_name="track_cluster_class",
                     title="Track State Bar",
                 )
