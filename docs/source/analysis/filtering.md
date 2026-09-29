@@ -80,7 +80,7 @@ Active Killing deliberately scans the **full, unfiltered** movie so that it neve
 
 > ☑ **Trim full time series to max timepoints** — *Max timepoints:* `350`
 
-Drops every row past the chosen experiment duration. Use the **Unit for time-based filters** dropdown at the bottom of the tab to interpret this value as `frames` or `hours`:
+Drops every row past the chosen experiment duration. Use **Unit for time-based filters** to interpret this value as `frames` or `hours`:
 
 - In `frames` mode, this is a 0-based timepoint cutoff applied to `position_t`.
 - In `hours` mode, this is applied to the `time` column that Feature Extraction already computed from your metadata's frame interval.

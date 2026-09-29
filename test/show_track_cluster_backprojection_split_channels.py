@@ -65,7 +65,7 @@ INTERACTIVE_SAMPLE_NAME = None
 INTERACTIVE_CELL_TYPE = "macrophage"
 INTERACTIVE_CLUSTER_COL = "ClusterID"
 # State column shown in the clicked-track state-bar dock.
-INTERACTIVE_STATE_COL = "behavioral_state"
+INTERACTIVE_STATE_COL = "full_behavioral_state"
 INTERACTIVE_OUTPUT_COL = "track_behavioral_cluster"
 INTERACTIVE_SHOW_TRAJECTORIES = True
 INTERACTIVE_RAW_IMAGE_PATH = None
@@ -494,7 +494,7 @@ def _add_track_statebar_click_dock_compat(
     adata_tracks=None,
     track_layer_name="filtered TrackID",
     clickable_layer_name="behavioral_state_class",
-    state_col="behavioral_state",
+    state_col="full_behavioral_state",
     sample_col="sample_name",
     track_col="TrackID",
     time_col="position_t",
@@ -954,7 +954,7 @@ def build_track_cluster_backprojection_payload(
     output_dir: str | Path,
     cell_type: str,
     cluster_col: str = "ClusterID",
-    state_col: str = "behavioral_state",
+    state_col: str = "full_behavioral_state",
     output_col: str = "track_behavioral_cluster",
     raw_image_path: str | Path | None = None,
     tracked_img_path: str | Path | None = None,
@@ -969,7 +969,7 @@ def build_track_cluster_backprojection_payload(
     sample_name_was_auto_selected = False
     cell_type = "" if cell_type is None else str(cell_type).strip()
     cluster_col = str(cluster_col).strip() or "ClusterID"
-    state_col = str(state_col).strip() or "behavioral_state"
+    state_col = str(state_col).strip() or "full_behavioral_state"
     output_col = str(output_col).strip() or "track_behavioral_cluster"
     output_dir = Path(output_dir).expanduser()
     _ = track_bp_img_path
@@ -1271,7 +1271,7 @@ def show_track_cluster_backprojection_split_channels(
     output_dir: str | Path,
     cell_type: str,
     cluster_col: str = "ClusterID",
-    state_col: str = "behavioral_state",
+    state_col: str = "full_behavioral_state",
     output_col: str = "track_behavioral_cluster",
     raw_image_path: str | Path | None = None,
     tracked_img_path: str | Path | None = None,
@@ -1307,7 +1307,7 @@ def build_track_cluster_backprojection_ui(
     default_cell_type: str | None = None,
     default_sample_name: str | None = None,
     cluster_col: str = "ClusterID",
-    state_col: str = "behavioral_state",
+    state_col: str = "full_behavioral_state",
     output_col: str = "track_behavioral_cluster",
     show_trajectories: bool = True,
     verbose: bool = True,

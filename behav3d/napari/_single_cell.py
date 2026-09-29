@@ -491,8 +491,12 @@ _DEFAULT_LOG_SCALE_FEATURES = {"speed"}
 
 _TECHNICAL_OBS_COLS = {
     "position_t", "sample_name", "TrackID",
+    # Legacy names (retired) kept here too, so files written before columns
+    # were consolidated never offer them as feature-selection checkboxes.
     "intrinsic_behavioral_cluster", "full_behavioral_cluster",
     "hmm_intrinsic_behavioral_state", "behavioral_state",
+    "full_behavioral_state", "hmm_intrinsic_behavioral_state_raw",
+    "hmm_intrinsic_behavioral_state_confidence", "full_behavioral_state_confidence",
 }
 
 _CHANNEL_COLORS = ["cyan", "yellow", "green", "red", "blue", "magenta"]
@@ -612,6 +616,10 @@ class StateClassificationSubTab(QWidget):
 
     def _init_ui(self):
         from behav3d.napari._guided import make_back_header
+        from behav3d.analysis.behavior.state.classification import (
+            FULL_STATE_COL,
+            INTRINSIC_STATE_COL,
+        )
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -688,12 +696,11 @@ class StateClassificationSubTab(QWidget):
         self.grp_apply.hide()
         lay.addWidget(self.grp_apply)
 
-        # ── Group: Training (Step 1) ─────────────────────────────────────
-        # Highlighted collapsible section (not a plain QGroupBox) so it reads
-        # as a main pipeline step, matching the other collapsible sections
-        # below (Feature Selection, Advanced Configuration, ...) rather than
-        # a checkbox toggle.
-        self.grp_train = CollapsibleSection("Step 1 — State Clustering", expanded=True, highlight=True)
+        # ── Group: Behavioral state clustering (config + rename) ─────────
+        # A single highlighted collapsible section (not a plain QGroupBox) so
+        # its title reads as an always-visible section header, with the whole
+        # configuration + rename workflow collapsing together as one unit.
+        self.grp_train = CollapsibleSection("Behavioral state clustering", expanded=True, highlight=True)
         train_lay = self.grp_train.contentLayout()
         train_lay.setSpacing(4)
 
@@ -704,11 +711,9 @@ class StateClassificationSubTab(QWidget):
         # equally reachable via the tab bar instead of one continuous
         # scrolling column. Timepoint features is tab 0 (shown by default)
         # since it's the primary feature set most configuration goes into.
-        feat_sel_sec = CollapsibleSection("Feature Selection", expanded=True)
-        self.feat_sel_scroll = QScrollArea()
-        self.feat_sel_scroll.setWidgetResizable(True)
-        self.feat_sel_scroll.setMinimumHeight(260)
+        feat_sel_sec = CollapsibleSection("Select features for HMM model fitting", expanded=True)
         self.feat_sel_tabs = QTabWidget()
+        self.feat_sel_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
         # ── Tab: Timepoint features ────────────────────────────────────
         timepoint_tab = QWidget()
@@ -759,15 +764,11 @@ class StateClassificationSubTab(QWidget):
         window_tab_lay.addStretch(1)
         self.feat_sel_tabs.addTab(window_tab, "Window Features")
 
-        self.feat_sel_scroll.setWidget(self.feat_sel_tabs)
-        feat_sel_sec.addWidget(self.feat_sel_scroll)
+        feat_sel_sec.addWidget(self.feat_sel_tabs)
         train_lay.addWidget(feat_sel_sec)
 
         # Feature Processing
-        feat_proc_sec = CollapsibleSection("Feature Processing", expanded=False)
-        self.feat_proc_scroll = QScrollArea()
-        self.feat_proc_scroll.setWidgetResizable(True)
-        self.feat_proc_scroll.setMinimumHeight(150)
+        feat_proc_sec = CollapsibleSection("(Optional) Process features before HMM fitting", expanded=False)
         feat_proc_content = QWidget()
         self.feat_proc_lay = QVBoxLayout(feat_proc_content)
 
@@ -822,23 +823,20 @@ class StateClassificationSubTab(QWidget):
         ))
         self.feat_proc_lay.addLayout(proc_form)
 
-        self.feat_proc_scroll.setWidget(feat_proc_content)
-        feat_proc_sec.addWidget(self.feat_proc_scroll)
+        feat_proc_sec.addWidget(feat_proc_content)
         train_lay.addWidget(feat_proc_sec)
 
         # Binary Group Selection
-        bin_grp_sec = CollapsibleSection("Binary Group Selection", expanded=False)
-        self.bin_grp_scroll = QScrollArea()
-        self.bin_grp_scroll.setWidgetResizable(True)
-        self.bin_grp_scroll.setMinimumHeight(100)
+        bin_grp_sec = CollapsibleSection(
+            "Assign groups based on binary features (e.g. contact, death)", expanded=False
+        )
         bin_grp_content = QWidget()
         self.bin_grp_lay = QVBoxLayout(bin_grp_content)
-        self.bin_grp_scroll.setWidget(bin_grp_content)
-        bin_grp_sec.addWidget(self.bin_grp_scroll)
+        bin_grp_sec.addWidget(bin_grp_content)
         train_lay.addWidget(bin_grp_sec)
 
         # Advanced Settings
-        adv_sec = CollapsibleSection("⚙ Advanced Configuration", expanded=False)
+        adv_sec = CollapsibleSection("(Optional) Advanced configuration", expanded=False)
         adv_form = QFormLayout()
 
         self.combo_hmm_n_states_mode = QComboBox()
@@ -998,27 +996,26 @@ class StateClassificationSubTab(QWidget):
         row_run.addWidget(self.btn_view_state)
         train_lay.addLayout(row_run)
 
-        lay.addWidget(self.grp_train)
-
-        # ── Step 2: Rename Clusters ──────────────────────────────────────
-        self.grp2 = QGroupBox("Step 2 — Rename State Clusters")
-        g2 = QVBoxLayout(self.grp2)
-        g2.setSpacing(4)
-
+        # ── Rename clusters (same collapsible card as the config above) ───
         self.rename_status_lbl = QLabel("ℹ Run state clustering first to enable renaming.")
         self.rename_status_lbl.setStyleSheet("color: #999; font-size: 11px;")
-        g2.addWidget(self.rename_status_lbl)
+        train_lay.addWidget(self.rename_status_lbl)
 
-        self.btn_rename_intrinsic = QPushButton("✏  Rename Primary Dynamic State Clusters")
+        self.btn_rename_intrinsic = QPushButton(
+            "✏  Rename intrinsic HMM behavioral states (e.g. morphodynamic)"
+        )
         _style_rename(self.btn_rename_intrinsic)
         self.btn_rename_intrinsic.setEnabled(False)
-        g2.addWidget(self.btn_rename_intrinsic)
+        train_lay.addWidget(self.btn_rename_intrinsic)
 
-        self.btn_rename_full = QPushButton("✏  Rename Full Behavioral Clusters (Binary Groups)")
+        self.btn_rename_full = QPushButton(
+            "✏  Rename full behavioral states (with binary features)"
+        )
         _style_rename(self.btn_rename_full)
         self.btn_rename_full.setEnabled(False)
-        g2.addWidget(self.btn_rename_full)
-        lay.addWidget(self.grp2)
+        train_lay.addWidget(self.btn_rename_full)
+
+        lay.addWidget(self.grp_train)
 
         # ── Step 3: Reports (built directly into per-pipeline group boxes) ──
         self.grp_state_diagnostics = QGroupBox("Diagnostic")
@@ -1201,13 +1198,13 @@ class StateClassificationSubTab(QWidget):
         sfheat_form = QFormLayout()
         sfheat_form.setSpacing(3)
         self.combo_state_heatmap_state_col = QComboBox()
-        self.combo_state_heatmap_state_col.addItem("Full behavioral state", "behavioral_state")
-        self.combo_state_heatmap_state_col.addItem("Primary dynamic state", "intrinsic_behavioral_cluster")
+        self.combo_state_heatmap_state_col.addItem(FULL_STATE_COL, FULL_STATE_COL)
+        self.combo_state_heatmap_state_col.addItem(INTRINSIC_STATE_COL, INTRINSIC_STATE_COL)
         self.combo_state_heatmap_state_col.setMinimumWidth(200)
         sfheat_form.addRow("States:", make_help_row(
             self.combo_state_heatmap_state_col, "States",
-            "'Full behavioral state': the final states, including the binary groups (e.g. "
-            "contact). 'Primary dynamic state': the HMM states before binary groups are merged in."
+            f"'{FULL_STATE_COL}': the final states, including the binary groups (e.g. "
+            f"contact). '{INTRINSIC_STATE_COL}': the HMM states before binary groups are merged in."
         ))
         self.combo_state_heatmap_weighting = QComboBox()
         self.combo_state_heatmap_weighting.addItem("Every timepoint counts", "timepoints")
@@ -1320,16 +1317,16 @@ class StateClassificationSubTab(QWidget):
             "behavioral-state classification plus the per-timepoint tracks CSV."
         ))
 
-        g_state_contact.addWidget(QLabel(
-            "Contact type comparison (mean contact fraction per state, side by side across "
-            "selected contact columns — e.g. healthy vs. tumor organoid contact; purely "
-            "descriptive, no significance test):"
+        g_state_contact.addWidget(_make_info_label(
+            "Contact type comparison — compares contacting-state proportions between "
+            "selected contact columns (e.g. healthy vs. tumor organoid contact): "
+            "cluster-size difference (Welch's t-test) plus stacked composition."
         ))
         state_contact_type_form = QFormLayout()
         state_contact_type_form.setSpacing(3)
         self.combo_state_contact_type_state_col = QComboBox()
         self.combo_state_contact_type_state_col.addItems(
-            ["full_behavioral_cluster", "intrinsic_behavioral_cluster", "raw_hmm_state"]
+            [FULL_STATE_COL, INTRINSIC_STATE_COL, "raw_hmm_state"]
         )
         state_contact_type_form.addRow("State column:", self.combo_state_contact_type_state_col)
         g_state_contact.addLayout(state_contact_type_form)
@@ -1383,7 +1380,7 @@ class StateClassificationSubTab(QWidget):
         ))
         self.combo_state_shift_state_col = QComboBox()
         self.combo_state_shift_state_col.addItems(
-            ["full_behavioral_cluster", "intrinsic_behavioral_cluster", "raw_hmm_state"]
+            [FULL_STATE_COL, INTRINSIC_STATE_COL, "raw_hmm_state"]
         )
         state_shift_form.addRow("State column:", self.combo_state_shift_state_col)
         g_state_contact.addLayout(state_shift_form)
@@ -1488,15 +1485,15 @@ class StateClassificationSubTab(QWidget):
 
         self.combo_state_color_by = QComboBox()
         self.combo_state_color_by.addItems(
-            ["full_behavioral_cluster", "intrinsic_behavioral_cluster", "raw_hmm_state"]
+            [FULL_STATE_COL, INTRINSIC_STATE_COL, "raw_hmm_state"]
         )
         self.combo_state_color_by.setMinimumWidth(220)
         bp_form.addRow("Color by:", make_help_row(
             self.combo_state_color_by, "Color by",
             "Which clustering label to use for coloring the backprojection overlay. "
-            "'full_behavioral_cluster' includes binary grouping; "
-            "'intrinsic_behavioral_cluster' shows only the HMM states; "
-            "'raw_hmm_state' shows the HMM output of Step 1 before any renaming."
+            f"'{FULL_STATE_COL}' includes binary grouping; "
+            f"'{INTRINSIC_STATE_COL}' shows only the HMM states; "
+            "'raw_hmm_state' shows the HMM output before any renaming."
         ))
 
         self.spin_state_opacity = QSpinBox()
@@ -1611,7 +1608,7 @@ class StateClassificationSubTab(QWidget):
 
         if csv_filtered.exists():
             self.warning_label.hide()
-            for grp in [self.grp_train, self.grp2, self._subtab_stack, self.grp_bp]:
+            for grp in [self.grp_train, self._subtab_stack, self.grp_bp]:
                 grp.setEnabled(True)
             _apply_group_tracked_gate(self.warning_label, self.grp_bp, self.metadata_loader, ct)
             return True
@@ -1622,7 +1619,7 @@ class StateClassificationSubTab(QWidget):
                 "Using unfiltered data as a fallback."
             )
             self.warning_label.show()
-            for grp in [self.grp_train, self.grp2, self._subtab_stack, self.grp_bp]:
+            for grp in [self.grp_train, self._subtab_stack, self.grp_bp]:
                 grp.setEnabled(True)
             _apply_group_tracked_gate(self.warning_label, self.grp_bp, self.metadata_loader, ct)
             return True
@@ -1632,7 +1629,7 @@ class StateClassificationSubTab(QWidget):
                 "Run Filtering first, then return here."
             )
             self.warning_label.show()
-            for grp in [self.grp_train, self.grp2, self._subtab_stack, self.grp_bp]:
+            for grp in [self.grp_train, self._subtab_stack, self.grp_bp]:
                 grp.setEnabled(False)
             return False
 
@@ -1697,9 +1694,8 @@ class StateClassificationSubTab(QWidget):
     # ── Toggle helpers ───────────────────────────────────────────────────
 
     def _toggle_apply_mode(self, checked):
-        """Hide Steps 1+2 when apply-existing mode is active."""
+        """Hide the clustering/rename card when apply-existing mode is active."""
         self.grp_train.setVisible(not checked)
-        self.grp2.setVisible(not checked)
         self.grp_apply.setVisible(checked)
 
     def _toggle_n_states_mode(self, mode):
@@ -2400,18 +2396,25 @@ class StateClassificationSubTab(QWidget):
     # ── Button state management ──────────────────────────────────────────
 
     def _refresh_buttons(self):
+        from behav3d.analysis.behavior.state.classification import (
+            resolve_full_state_col,
+            resolve_intrinsic_state_col,
+        )
+
         has_model = self._model_adata is not None
-        has_intrinsic = has_model and "intrinsic_behavioral_cluster" in self._model_adata.obs.columns
-        has_full = has_model and "full_behavioral_cluster" in self._model_adata.obs.columns
+        intrinsic_col = resolve_intrinsic_state_col(self._model_adata) if has_model else None
+        full_col = resolve_full_state_col(self._model_adata) if has_model else None
+        has_intrinsic = intrinsic_col is not None
+        has_full = full_col is not None
 
         self.btn_rename_intrinsic.setEnabled(has_intrinsic)
         self.btn_rename_full.setEnabled(has_full)
         self.btn_state_diagnostics.setEnabled(has_intrinsic)
 
         if has_intrinsic:
-            n_intr = self._model_adata.obs["intrinsic_behavioral_cluster"].astype(str).nunique()
+            n_intr = self._model_adata.obs[intrinsic_col].astype(str).nunique()
             n_full = (
-                self._model_adata.obs["full_behavioral_cluster"].astype(str).nunique()
+                self._model_adata.obs[full_col].astype(str).nunique()
                 if has_full else 0
             )
             self.rename_status_lbl.setText(
@@ -2970,7 +2973,9 @@ class StateClassificationSubTab(QWidget):
         if self._model_adata is None:
             QMessageBox.warning(self, "No model", "Run state classification first.")
             return
-        if "full_behavioral_cluster" not in self._model_adata.obs.columns:
+        from behav3d.analysis.behavior.state.classification import resolve_full_state_col
+
+        if resolve_full_state_col(self._model_adata) is None:
             QMessageBox.warning(
                 self, "No full clusters",
                 "Run intrinsic cluster renaming first (full clusters are created when "
@@ -3001,17 +3006,9 @@ class StateClassificationSubTab(QWidget):
             return
 
         from behav3d.analysis.behavior.state.classification import (
-            INTRINSIC_STATE_COL,
-            FULL_STATE_COL,
             save_hmm_deployment_artifact,
             apply_hmm_deployment_artifact_to_full_dataset,
             _resolve_hmm_deployment_artifact_path,
-        )
-        from behav3d.analysis.behavior.state.utils import (
-            _get_classification_state_colors,
-            _get_classification_state_order,
-            _set_classification_state_colors,
-            _set_classification_state_order,
         )
 
         artifact_path = _resolve_hmm_deployment_artifact_path(output_dir=str(out), cell_type=ct)
@@ -3021,36 +3018,14 @@ class StateClassificationSubTab(QWidget):
         if hmm_model is None:
             self._log(
                 "⚠ Cannot apply states to full dataset: HMM model not in memory and no saved artifact found. "
-                "Re-run Step 1 to regenerate."
+                "Re-run state clustering to regenerate."
             )
             return
 
-        # Sync columns so the artifact builder uses the renamed labels.
-        if "intrinsic_behavioral_cluster" in self._model_adata.obs.columns:
-            self._model_adata.obs[INTRINSIC_STATE_COL] = (
-                self._model_adata.obs["intrinsic_behavioral_cluster"].copy()
-            )
-        if "full_behavioral_cluster" in self._model_adata.obs.columns:
-            self._model_adata.obs[FULL_STATE_COL] = (
-                self._model_adata.obs["full_behavioral_cluster"].copy()
-            )
-
-        # Sync saved colors/order too — the rename dialog saves them under the raw
-        # dialog obs-column names, not the classification-constant column names the
-        # deployment artifact/full-dataset pipeline looks them up under.
-        raw_intrinsic_colors = _get_classification_state_colors(self._model_adata, "intrinsic_behavioral_cluster")
-        raw_intrinsic_order = _get_classification_state_order(self._model_adata, "intrinsic_behavioral_cluster")
-        if raw_intrinsic_colors:
-            _set_classification_state_colors(self._model_adata, INTRINSIC_STATE_COL, raw_intrinsic_colors)
-        if raw_intrinsic_order:
-            _set_classification_state_order(self._model_adata, INTRINSIC_STATE_COL, raw_intrinsic_order)
-
-        raw_full_colors = _get_classification_state_colors(self._model_adata, "full_behavioral_cluster")
-        raw_full_order = _get_classification_state_order(self._model_adata, "full_behavioral_cluster")
-        if raw_full_colors:
-            _set_classification_state_colors(self._model_adata, FULL_STATE_COL, raw_full_colors)
-        if raw_full_order:
-            _set_classification_state_order(self._model_adata, FULL_STATE_COL, raw_full_order)
+        # No column/color/order sync needed here: RenameClusterDialog now
+        # writes renamed labels, colors and order directly onto the
+        # canonical INTRINSIC_STATE_COL/FULL_STATE_COL columns, which
+        # self._model_adata already holds.
 
         try:
             save_hmm_deployment_artifact(
@@ -3280,13 +3255,26 @@ class StateClassificationSubTab(QWidget):
         def _run(**kw):
             import pandas as pd
             import anndata as ad
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+            from behav3d.analysis.behavior.state.classification import (
+                FULL_STATE_COL,
+                INTRINSIC_STATE_COL,
+                HMM_INTRINSIC_RAW_STATE_COL,
+                resolve_full_state_col,
+                resolve_intrinsic_state_col,
+            )
             from behav3d.analysis.behavior.state.utils import _resolve_state_paths
             from behav3d.analysis.behavior.state.visualization.plots.contact_type_report import (
                 save_state_contact_type_comparison,
             )
-            state_col = FULL_STATE_COL if state_col_choice == "full_behavioral_cluster" else state_col_choice
             adata = ad.read_h5ad(str(full_path))
+            if state_col_choice == FULL_STATE_COL:
+                state_col = resolve_full_state_col(adata) or FULL_STATE_COL
+            elif state_col_choice == INTRINSIC_STATE_COL:
+                state_col = resolve_intrinsic_state_col(adata) or INTRINSIC_STATE_COL
+            elif state_col_choice == "raw_hmm_state":
+                state_col = HMM_INTRINSIC_RAW_STATE_COL
+            else:
+                state_col = state_col_choice
             df_timepoints = pd.read_csv(csv_path)
             state_dir = _resolve_state_paths(out, ct).state_outdir
             return save_state_contact_type_comparison(
@@ -3342,12 +3330,11 @@ class StateClassificationSubTab(QWidget):
         def _run(**kw):
             import pandas as pd
             import anndata as ad
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
             from behav3d.analysis.behavior.state.utils import _resolve_state_paths
             from behav3d.analysis.behavior.state.visualization.plots.contact_state_shift_report import (
                 save_state_contact_shift_report,
             )
-            state_col = FULL_STATE_COL if state_col_choice == "full_behavioral_cluster" else state_col_choice
+            state_col = state_col_choice
             adata = ad.read_h5ad(str(full_path))
             df_timepoints = pd.read_csv(csv_path)
             state_dir = _resolve_state_paths(out, ct).state_outdir
@@ -3650,7 +3637,7 @@ class StateClassificationSubTab(QWidget):
         color_by = self.combo_state_color_by.currentText()
         if color_by == "raw_hmm_state":
             state_path = self._model_adata_path(ct)
-            err_hint = "Model adata not found. Run State Clustering (Step 1) first."
+            err_hint = "Model adata not found. Run State Clustering first."
         else:
             state_path = self._full_adata_path(ct)
             err_hint = f"State adata not found:\n{state_path}\n\nRun State Clustering first."
@@ -3677,6 +3664,10 @@ class StateClassificationSubTab(QWidget):
                 _get_classification_state_order,
                 _normalize_label_color_map,
             )
+            from behav3d.analysis.behavior.state.classification import (
+                FULL_STATE_COL,
+                HMM_INTRINSIC_RAW_STATE_COL,
+            )
             from behav3d.analysis.backprojection import filter_track_image_to_ids
             from behav3d.io.images import load_image
             out_dir = self._out_dir()
@@ -3693,8 +3684,8 @@ class StateClassificationSubTab(QWidget):
                     )
                 except Exception as exc:
                     self._log(f"⚠️ Could not prepare trajectory positions: {exc}")
-            resolved_col = "hmm_intrinsic_behavioral_state_raw" if color_by == "raw_hmm_state" else color_by
-            state_col = resolved_col if (resolved_col and resolved_col in adata.obs.columns) else "full_behavioral_cluster"
+            resolved_col = HMM_INTRINSIC_RAW_STATE_COL if color_by == "raw_hmm_state" else color_by
+            state_col = resolved_col if (resolved_col and resolved_col in adata.obs.columns) else FULL_STATE_COL
             obs_samples = adata.obs["sample_name"].astype(str)
             sample_name = sample if sample else obs_samples.iloc[0]
             sample_adata = adata[obs_samples == str(sample_name)]
@@ -3835,11 +3826,12 @@ class StateClassificationSubTab(QWidget):
 
         def _run(**kw):
             import scanpy as sc
+            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
             from behav3d.analysis.behavior.state.visualization.backprojection import (
                 export_behavioral_state_backprojection_zarrs,
             )
             adata = sc.read_h5ad(str(state_path))
-            state_col = color_by if color_by else "full_behavioral_cluster"
+            state_col = color_by if color_by else FULL_STATE_COL
             sample_name = sample if sample else None
             export_adata = (
                 adata[adata.obs["sample_name"].astype(str) == str(sample_name)]
@@ -4289,7 +4281,8 @@ class TrajectoryFeatureSelector(QWidget):
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TrackClassificationSubTab(QWidget):
-    """Steps 1-5 for DTW-based track trajectory classification + backprojection."""
+    """Track clustering (config + rename), classifier training, reports/plots and
+    backprojection for DTW-based track trajectory classification."""
 
     def __init__(self, viewer=None, metadata_loader=None, cell_type_getter=None,
                  parent=None):
@@ -4323,6 +4316,10 @@ class TrackClassificationSubTab(QWidget):
 
     def _init_ui(self):
         from behav3d.napari._guided import make_back_header
+        from behav3d.analysis.behavior.state.classification import (
+            FULL_STATE_COL,
+            INTRINSIC_STATE_COL,
+        )
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -4347,10 +4344,10 @@ class TrackClassificationSubTab(QWidget):
         content_lay.setContentsMargins(0, 0, 0, 0)
         content_lay.setSpacing(0)
         scroll.setWidget(content)
-
-        # Outer per-subtab stack: page 0 = clustering settings (Steps 1/2/4 +
-        # the "Generate analysis and plots" trigger), page 1 = the fully
-        # isolated plotting page, reached only via that trigger.
+        # Outer per-subtab stack: page 0 = clustering settings (track clustering,
+        # train classifier, backprojection + the "Generate analysis and plots"
+        # trigger), page 1 = the fully isolated plotting page, reached only via
+        # that trigger.
         self._subtab_stack = QStackedWidget()
         content_lay.addWidget(self._subtab_stack)
 
@@ -4381,7 +4378,8 @@ class TrackClassificationSubTab(QWidget):
         ap_lay.setSpacing(5)
 
         ap_lay.addWidget(_make_info_label("Load an existing trained classifier (.pkl) and behavioral states file (.h5ad)"
-                                           " to classify trajectories without running Steps 1–3."))
+                                           " to classify trajectories without running track clustering, renaming, or"
+                                           " classifier training first."))
 
         self.le_pretrained_clf_path = QLineEdit()
         self.le_pretrained_clf_path.setPlaceholderText("Path to trained classifier .pkl")
@@ -4408,9 +4406,9 @@ class TrackClassificationSubTab(QWidget):
         self.grp_apply_pretrained.hide()
         lay.addWidget(self.grp_apply_pretrained)
 
-        # ── Step 1: Track Clustering ─────────────────────────────────────
-        self.grp1 = QGroupBox("Step 1 — Track Clustering")
-        g1 = QVBoxLayout(self.grp1)
+        # ── Group: Track clustering (config + rename) ─────────────────────
+        self.grp_track = CollapsibleSection("Track clustering", expanded=True, highlight=True)
+        g1 = self.grp_track.contentLayout()
         g1.setSpacing(4)
 
         # Trajectory clustering method — the top-level choice between the
@@ -4439,14 +4437,15 @@ class TrackClassificationSubTab(QWidget):
             "Trajectory clustering method",
             "'State-based' clusters tracks using their behavioral-state sequence "
             "(from State Classification): choose the Basis below (dtw on the state "
-            "sequence, dtw on the numeric features behind the states, or "
-            "bouts/proportions). 'Feature-based' instead clusters tracks by dynamic "
-            "time warping over hand-picked raw per-timepoint features (Trajectory "
-            "Features below), and does not require State Classification to have "
-            "been run; an 'Advanced: run legacy BEHAV3D algorithm' option in "
-            "Advanced Configuration switches this to the original BEHAV3D "
-            "DTW+UMAP+KMeans pipeline instead of the newer DTW+Agglomerative/Leiden "
-            "one."
+            "sequence, or bouts/proportions). 'Feature-based' instead clusters "
+            "tracks by dynamic time warping over hand-picked raw per-timepoint "
+            "features (Trajectory Features below), and does not require State "
+            "Classification to have been run; tick 'Use features used in "
+            "behavioral state clustering' there to instead run DTW over the state "
+            "model's own numeric features with its exact scaling. An 'Advanced: "
+            "run legacy BEHAV3D algorithm' option in Advanced Configuration "
+            "switches Feature-based to the original BEHAV3D DTW+UMAP+KMeans "
+            "pipeline instead of the newer DTW+Agglomerative/Leiden one."
         ))
         g1.addWidget(method_frame)
 
@@ -4459,9 +4458,11 @@ class TrackClassificationSubTab(QWidget):
         self.chk_use_state_features_preset.setChecked(False)
         state_features_preset_lay.addLayout(_make_chk_help_row(
             self.chk_use_state_features_preset, "Use features used in behavioral state clustering",
-            "Pre-select (and lock) the same continuous and binary features the "
-            "behavioral-state model was built from, instead of hand-picking features "
-            "below. Requires State Classification to have been run for this cell type."
+            "Reuse the exact continuous and binary features -- and the exact saved "
+            "scaling/preprocessing -- the behavioral-state model was built from, "
+            "instead of hand-picking and re-scaling features below. Locks the "
+            "Trajectory Features selector below. Only shown once State "
+            "Classification has been run for this cell type."
         ))
         self.lbl_state_features_preset = QLabel("")
         self.lbl_state_features_preset.setWordWrap(True)
@@ -4555,19 +4556,19 @@ class TrackClassificationSubTab(QWidget):
         basis_row_form.setContentsMargins(0, 0, 0, 0)
         basis_row_form.setSpacing(3)
         self.combo_trajectory_basis = QComboBox()
-        self.combo_trajectory_basis.addItems(["dtw", "dtw features", "bouts"])
+        self.combo_trajectory_basis.addItems(["dtw", "bouts"])
         self.combo_trajectory_basis.setMaximumWidth(130)
         basis_row_form.addRow("Basis:", make_help_row(
             self.combo_trajectory_basis, "Trajectory basis",
             "'dtw' clusters tracks by dynamic time warping distance over their raw "
-            "per-timepoint behavioral-state sequences. 'dtw features' instead runs DTW "
-            "over the numeric features the states were built from (continuous features "
-            "with the state model's scaling, plus the binary grouping columns) rather "
-            "than the state labels themselves; exemplar tracks, state bars and "
-            "backprojection still show each track's states. 'bouts' describes each "
-            "track with bout/proportion features (fraction of time per state, bout "
+            "per-timepoint behavioral-state sequences. 'bouts' describes each track "
+            "with bout/proportion features (fraction of time per state, bout "
             "counts/lengths, state-transition probabilities, n-grams) and clusters "
-            "those feature vectors."
+            "those feature vectors. To instead run DTW over the numeric features the "
+            "states were built from (continuous features with the state model's exact "
+            "scaling, plus the binary grouping columns) rather than the state labels "
+            "themselves, switch 'Trajectory clustering method' to 'Feature-based' and "
+            "tick 'Use features used in behavioral state clustering' below."
         ))
         basis_method_form.addRow(self._basis_row)
 
@@ -4789,9 +4790,11 @@ class TrackClassificationSubTab(QWidget):
         ))
         self.adv1.addWidget(self._dtw_technical_frame)
 
-        # Feature-DTW only (State-based Basis: 'dtw features', or Feature-based's
-        # new pipeline): how much the binary (contact) columns count relative to
-        # the continuous features in the DTW distance.
+        # Feature-DTW only: Feature-based's DTW pipeline, including when the "Use
+        # features used in behavioral state clustering" preset is checked (which
+        # reuses the state model's own binary grouping columns) -- how much the
+        # binary (contact) columns count relative to the continuous features in
+        # the DTW distance.
         self._dtw_features_frame = QFrame()
         dtw_features_form = QFormLayout(self._dtw_features_frame)
         dtw_features_form.setSpacing(3)
@@ -4928,23 +4931,18 @@ class TrackClassificationSubTab(QWidget):
         run_row.addWidget(self.btn_queue_track_cluster)
         g1.addLayout(run_row)
 
-        lay.addWidget(self.grp1)
-
-        # ── Step 2: Rename ───────────────────────────────────────────────
-        self.grp2 = QGroupBox("Step 2 — Rename Track Clusters")
-        g2 = QVBoxLayout(self.grp2)
-        g2.setSpacing(4)
-
+        # ── Rename clusters (same collapsible card as the config above) ───
         self.rename_track_status = QLabel("ℹ Run clustering first to enable renaming.")
         self.rename_track_status.setStyleSheet("color: #999; font-size: 11px;")
         self.rename_track_status.setWordWrap(True)
-        g2.addWidget(self.rename_track_status)
+        g1.addWidget(self.rename_track_status)
 
         self.btn_rename_track = QPushButton("✏  Rename Track Clusters")
         _style_rename(self.btn_rename_track)
         self.btn_rename_track.setEnabled(False)
-        g2.addWidget(self.btn_rename_track)
-        lay.addWidget(self.grp2)
+        g1.addWidget(self.btn_rename_track)
+
+        lay.addWidget(self.grp_track)
 
         # ── Train Track Classifier (last step) ───────────────────────────
         self.grp3 = CollapsibleSection("Train track classifier", expanded=False)
@@ -5419,7 +5417,7 @@ class TrackClassificationSubTab(QWidget):
         contact_form.addRow("Target classification:", self.combo_target_class_source)
         self.combo_target_state_col = QComboBox()
         self.combo_target_state_col.addItems(
-            ["full_behavioral_cluster", "intrinsic_behavioral_cluster", "raw_hmm_state"]
+            [FULL_STATE_COL, INTRINSIC_STATE_COL, "raw_hmm_state"]
         )
         contact_form.addRow("Target state column:", self.combo_target_state_col)
         self.label_target_class_warning = QLabel("")
@@ -5610,7 +5608,7 @@ class TrackClassificationSubTab(QWidget):
         overview_form.setSpacing(3)
         self.combo_contact_shift_state_col = QComboBox()
         self.combo_contact_shift_state_col.addItems(
-            ["full_behavioral_cluster", "intrinsic_behavioral_cluster", "raw_hmm_state"]
+            [FULL_STATE_COL, INTRINSIC_STATE_COL, "raw_hmm_state"]
         )
         overview_form.addRow("State column:", self.combo_contact_shift_state_col)
         self.spin_track_overview_rows_per_page = QSpinBox()
@@ -5732,9 +5730,10 @@ class TrackClassificationSubTab(QWidget):
         self._plots_stack.setCurrentIndex(0)
         plotting_lay.addWidget(self._plots_stack)
         # Kept as an attribute so `_check_prerequisites` can disable *only* this
-        # plotting page (Steps 3/4 create-plots) when state adata is missing,
-        # without disabling the whole `_subtab_stack` — which would also grey out
-        # page 0's Step 1 (grp1) and its "Run Original BEHAV3D DTW" button.
+        # plotting page (create-plots) when state adata is missing, without
+        # disabling the whole `_subtab_stack` — which would also grey out
+        # page 0's track-clustering block (grp_track) and its "Run Original
+        # BEHAV3D DTW" button.
         self._plotting_page = plotting_page
         self._subtab_stack.addWidget(plotting_page)  # outer page 1
         reset_scroll_on_page_change(self._subtab_stack)
@@ -5893,9 +5892,10 @@ class TrackClassificationSubTab(QWidget):
     def _check_prerequisites(self) -> bool:
         """Check if behavioral states h5ad exists; conditionally enable/disable steps.
 
-        - If state adata is absent: Step 1 (grp1) stays enabled but is locked into
-          'Feature-based' mode (combo_clustering_family forced + disabled), since
-          State-based clustering cannot run without it. Steps 2-5 are disabled
+        - If state adata is absent: the track-clustering block (grp_track) stays
+          enabled but is locked into 'Feature-based' mode (combo_clustering_family
+          forced + disabled), since State-based clustering cannot run without it.
+          The train-classifier block, plotting page and backprojection are disabled
           since they all require state adata.
         - If state adata is present: all steps enabled; if the dropdown was previously
           force-locked, it is automatically reset to State-based and re-enabled.
@@ -5906,23 +5906,22 @@ class TrackClassificationSubTab(QWidget):
             self.warning_label.hide()
             return True
 
-        states_path = self._state_adata_path(ct)
-        if not states_path or not states_path.exists():
+        if not self._behavioral_states_available(ct):
             self.warning_label.setText(
                 f"⚠ Behavioral states not found for cell type '{ct}'.\n"
                 "State-based clustering requires running State Classification first "
                 "and is unavailable until then.\n"
-                "You can still run Feature-based clustering (Step 1) below."
+                "You can still run Feature-based clustering below."
             )
             self.warning_label.show()
 
-            # Step 1 stays available, but lock into Feature-based mode.
+            # Track clustering stays available, but lock into Feature-based mode.
             # NB: disable only the plotting page, not the whole `_subtab_stack`
-            # — grp1 lives on page 0 of that stack, so disabling the stack would
-            # also grey out Step 1's "Run Feature-based BEHAV3D Clustering" button
-            # despite the setEnabled(True) above.
-            self.grp1.setEnabled(True)
-            for grp in [self.grp2, self.grp3, self._plotting_page, self.grp_bp]:
+            # — grp_track lives on page 0 of that stack, so disabling the stack
+            # would also grey out its "Run Feature-based BEHAV3D Clustering"
+            # button despite the setEnabled(True) above.
+            self.grp_track.setEnabled(True)
+            for grp in [self.grp3, self._plotting_page, self.grp_bp]:
                 grp.setEnabled(False)
 
             # Force the method dropdown to Feature-based and prevent switching.
@@ -5937,7 +5936,7 @@ class TrackClassificationSubTab(QWidget):
             return False
         else:
             self.warning_label.hide()
-            for grp in [self.grp1, self.grp2, self.grp3, self._plotting_page, self.grp_bp]:
+            for grp in [self.grp_track, self.grp3, self._plotting_page, self.grp_bp]:
                 grp.setEnabled(True)
 
             # Only revert to State-based if the dropdown was previously force-locked
@@ -6076,9 +6075,9 @@ class TrackClassificationSubTab(QWidget):
     # ── Toggle helpers ───────────────────────────────────────────────────
 
     def _toggle_pretrained_mode(self, checked: bool):
-        """Hide Steps 1–2 and the train classifier box when apply-pretrained mode is active."""
-        self.grp1.setVisible(not checked)
-        self.grp2.setVisible(not checked)
+        """Hide the track-clustering block and the train classifier box when
+        apply-pretrained mode is active."""
+        self.grp_track.setVisible(not checked)
         self.grp3.setVisible(not checked)
         self.grp_apply_pretrained.setVisible(checked)
 
@@ -6098,9 +6097,11 @@ class TrackClassificationSubTab(QWidget):
         self._apply_clustering_family_mode(self.combo_clustering_family.currentData())
 
     def _on_use_state_features_preset_toggled(self, checked: bool):
-        """'Use features used in behavioral state clustering' toggled → pre-select
-        (and lock) the Trajectory Features selector to the state model's own
-        feature columns."""
+        """'Use features used in behavioral state clustering' toggled → locks
+        (for display) the Trajectory Features selector to the state model's own
+        feature columns. The actual clustering dispatch (_dispatch_track_cluster)
+        bypasses this selector entirely when checked, clustering directly on the
+        saved behavioral-state h5ad with its exact HMM preprocessing instead."""
         self.traj_feature_selector.setEnabled(not checked)
         if checked:
             self._apply_state_features_preset()
@@ -6108,6 +6109,11 @@ class TrackClassificationSubTab(QWidget):
             self.lbl_state_features_preset.hide()
 
     def _apply_state_features_preset(self):
+        """Populate the (locked) Trajectory Features selector display and the
+        preset label with the state model's own feature columns, for the user's
+        benefit -- dispatch itself (_dispatch_track_cluster) does not read this
+        selector when the preset is checked; see _behavioral_states_available /
+        use_state_preset there."""
         cont_cols, binary_cols = self._state_model_feature_columns()
         self.traj_feature_selector.set_params({
             "features": cont_cols,
@@ -6126,30 +6132,49 @@ class TrackClassificationSubTab(QWidget):
         self.lbl_state_features_preset.show()
         self._update_track_config_summary()
 
+    def _behavioral_states_available(self, ct: Optional[str] = None) -> bool:
+        """Whether a behavioral-states h5ad exists on disk for the given (or
+        current) cell type -- i.e. whether State Classification has been run."""
+        ct = ct if ct is not None else self._cell_type()
+        if not ct:
+            return False
+        states_path = self._state_adata_path(ct)
+        return bool(states_path and states_path.exists())
+
     def _state_model_feature_columns(self) -> tuple:
         """Continuous/binary feature column names the current cell type's
-        behavioral-state model was built from — the same columns Basis: 'dtw
-        features' uses (see `resolve_state_feature_matrix`), read directly from
-        the saved h5ad's preprocessing metadata without loading the full matrix."""
+        behavioral-state model was built from -- what the 'Use features used in
+        behavioral state clustering' checkbox (and the old, removed State-based
+        'dtw features' Basis) feeds into `resolve_state_feature_matrix`, read
+        directly from the saved h5ad's preprocessing metadata without loading
+        the full matrix."""
         ct = self._cell_type()
-        state_path = self._state_adata_path(ct) if ct else None
-        if not state_path or not state_path.exists():
+        if not self._behavioral_states_available(ct):
             return [], []
+        state_path = self._state_adata_path(ct)
         try:
             import anndata as ad
             adata = ad.read_h5ad(state_path, backed="r")
             pre = adata.uns.get("preprocessing", {}) or {}
             var_names = {str(v) for v in adata.var_names}
-            cont_cols = [
-                str(c) for c in (
-                    pre.get("continuous_feature_cols")
-                    or pre.get("kept_features")
-                    or list(adata.var_names)
-                )
-                if str(c) in var_names
-            ]
+
+            def _as_list(value):
+                # Lists round-trip through h5ad as numpy arrays, whose
+                # truthiness is ambiguous for more than one element -- so
+                # `value or fallback` can't be used directly here (mirrors
+                # dtw.resolve_state_feature_matrix's own _as_list).
+                if value is None:
+                    return []
+                return [str(v) for v in np.atleast_1d(np.asarray(value, dtype=object)).tolist()]
+
+            cont_source = (
+                _as_list(pre.get("continuous_feature_cols"))
+                or _as_list(pre.get("kept_features"))
+                or [str(v) for v in adata.var_names]
+            )
+            cont_cols = [str(c) for c in cont_source if str(c) in var_names]
             binary_cols = [
-                str(c) for c in (pre.get("binary_cols_to_merge") or [])
+                str(c) for c in _as_list(pre.get("binary_cols_to_merge"))
                 if str(c) in adata.obs.columns
             ]
             return cont_cols, binary_cols
@@ -6177,10 +6202,7 @@ class TrackClassificationSubTab(QWidget):
         # specific and bouts' own feature toggles are bouts-only.
         self._dtw_technical_frame.setVisible(not is_bouts)
         self._dtw_umap_frame.setVisible(not is_bouts)
-        self._dtw_features_frame.setVisible(
-            (is_state_based and self._basis() == "dtw features")
-            or self._track_input_is_features()
-        )
+        self._dtw_features_frame.setVisible(self._track_input_is_features())
         self._bouts_frame.setVisible(is_bouts)
 
         self.btn_run_track.setText(
@@ -6203,6 +6225,18 @@ class TrackClassificationSubTab(QWidget):
         so the choices made in Trajectory Features are visible at a glance."""
         if not self._shows_feature_selector():
             self.traj_config_summary_label.hide()
+            return
+        if self.chk_use_state_features_preset.isChecked() and self._behavioral_states_available():
+            cont_cols, binary_cols = self._state_model_feature_columns()
+            lines = [
+                "Using the behavioral-state model's own features AND its exact "
+                "saved scaling (reuses the HMM preprocessing) -- capping/"
+                "log-scale/window/smoothing settings below do not apply.",
+                f"Continuous features ({len(cont_cols)}): {', '.join(sorted(cont_cols)) or '—'}",
+                f"Binary features ({len(binary_cols)}): {', '.join(sorted(binary_cols)) or '—'}",
+            ]
+            self.traj_config_summary_label.setText("\n".join(lines))
+            self.traj_config_summary_label.show()
             return
         p = self.traj_feature_selector.params()
         lo = p["lower_quantile_cap"]
@@ -6232,12 +6266,23 @@ class TrackClassificationSubTab(QWidget):
         is_feature_based = family == "feature_based"
         is_legacy = is_feature_based and self.chk_run_legacy_behav3d.isChecked()
         shows_feature_selector = self._shows_feature_selector(family)
+        states_available = self._behavioral_states_available()
+        show_state_preset = shows_feature_selector and states_available
 
         self._basis_row.setVisible(not is_feature_based)
         self._method_row.setVisible(not is_legacy)
         self._basis_method_frame.setVisible(not is_legacy)
 
-        self._state_features_preset_frame.setVisible(shows_feature_selector)
+        # Don't leave the preset silently "checked but hidden and pointing at
+        # nothing" once its prerequisite disappears (cell type switched, states
+        # cleared) -- mirrors the force-lock/reset precedent already applied to
+        # combo_clustering_family in _check_prerequisites. Not blockSignals'd:
+        # the toggle handler's side effects (unlock the feature selector, hide
+        # its label) are wanted here.
+        if shows_feature_selector and not states_available and self.chk_use_state_features_preset.isChecked():
+            self.chk_use_state_features_preset.setChecked(False)
+
+        self._state_features_preset_frame.setVisible(show_state_preset)
         self._traj_features_section.setVisible(shows_feature_selector)
 
         self._feature_based_sep.setVisible(is_feature_based)
@@ -6247,7 +6292,7 @@ class TrackClassificationSubTab(QWidget):
         if shows_feature_selector:
             if not self._last_selector_populated_ct_matches():
                 self._populate_trajectory_feature_selector()
-            if self.chk_use_state_features_preset.isChecked():
+            if show_state_preset and self.chk_use_state_features_preset.isChecked():
                 self._apply_state_features_preset()
 
         if is_legacy:
@@ -6268,22 +6313,27 @@ class TrackClassificationSubTab(QWidget):
         self._update_track_config_summary()
 
     def _basis(self) -> str:
-        """Basis code for State-based clustering: 'dtw', 'dtw features' or 'bouts'."""
+        """Basis code for State-based clustering: 'dtw' or 'bouts'."""
         return self.combo_trajectory_basis.currentText() or "dtw"
 
     def _set_basis(self, code: str) -> None:
-        if code in ("dtw", "dtw features", "bouts"):
+        if code in ("dtw", "bouts"):
             self.combo_trajectory_basis.setCurrentText(code)
 
     @staticmethod
     def _saved_basis_code(cfg: dict):
         """State-based Basis value from a saved config (pre-merge 'features only'
         source configs are migrated separately, onto clustering_family/
-        run_legacy_behav3d, in _populate_track_settings)."""
+        run_legacy_behav3d, in _populate_track_settings). The removed 'dtw
+        features' Basis -- now covered by Feature-based's 'Use features used in
+        behavioral state clustering' checkbox -- resolves to 'dtw' for backward
+        compatibility with older saved configs."""
         if not cfg:
             return None
         basis = cfg.get("trajectory_basis")
-        return basis if basis in ("dtw", "dtw features", "bouts") else None
+        if basis == "dtw features":
+            return "dtw"
+        return basis if basis in ("dtw", "bouts") else None
 
     def _track_input_is_features(self) -> bool:
         """Whether the Trajectory Features selector feeds clustering directly:
@@ -6464,9 +6514,16 @@ class TrackClassificationSubTab(QWidget):
             self.spin_traj_size.setValue(int(cfg["behavioral_trajectory_size"]))
         if "n_clusters" in cfg:
             self.spin_n_clusters.setValue(int(cfg["n_clusters"]))
+        raw_saved_basis = cfg.get("trajectory_basis")
         saved_basis = self._saved_basis_code(cfg)
         if saved_basis:
             self._set_basis(saved_basis)
+            if raw_saved_basis == "dtw features":
+                self._log(
+                    "ℹ Saved config used the removed 'dtw features' Basis; falling back to "
+                    "'dtw'. To reproduce it, switch to Feature-based and check 'Use features "
+                    "used in behavioral state clustering' instead."
+                )
         if "linkage" in cfg:
             self.combo_linkage.setCurrentText(cfg["linkage"])
         if "clustering_method" in cfg:
@@ -7241,7 +7298,7 @@ class TrackClassificationSubTab(QWidget):
         from behav3d.analysis.behavior.track.utils import _peek_track_outfolder
         traj_dir = _peek_track_outfolder(out, ct) if out else None
         self.btn_view_exemplars.setEnabled(
-            bool(traj_dir and any(traj_dir.glob("exemplar_tracks*.pdf")))
+            bool(traj_dir and any((traj_dir / "example_tracks").glob("**/*.pdf")))
         )
         qc_dirs = self._track_diagnostics_qc_dirs(traj_dir)
         self.btn_view_diagnostics.setEnabled(
@@ -7382,8 +7439,20 @@ class TrackClassificationSubTab(QWidget):
         # stale "bouts" selection left over from a previous State-based session
         # while Feature-based is now selected.
         is_bouts = not features_only and self._basis() == "bouts"
+        # When checked (and usable), Feature-based clusters directly on the saved
+        # behavioral-state h5ad with its exact HMM preprocessing -- numerically
+        # identical to the removed State-based "dtw features" Basis -- instead of
+        # building a fresh adata from the Trajectory Features selector.
+        # _behavioral_states_available() re-checks defensively even though
+        # _apply_clustering_family_mode already force-unchecks/hides when state
+        # adata disappears.
+        use_state_preset = (
+            features_only
+            and self.chk_use_state_features_preset.isChecked()
+            and self._behavioral_states_available()
+        )
         feature_build_params = None
-        if features_only:
+        if features_only and not use_state_preset:
             feature_build_params = self.traj_feature_selector.params()
             if not (feature_build_params["features"] or feature_build_params["additional_window_features"]
                     or feature_build_params["binary_features"]):
@@ -7392,6 +7461,19 @@ class TrackClassificationSubTab(QWidget):
                     extra_callbacks["on_failed"](msg)
                 else:
                     QMessageBox.warning(self, "No features", msg)
+                return
+        elif use_state_preset:
+            cont_cols, binary_cols = self._state_model_feature_columns()
+            if not cont_cols and not binary_cols:
+                msg = (
+                    "No behavioral-state feature set found for this cell type. Run "
+                    "State Classification first, or uncheck 'Use features used in "
+                    "behavioral state clustering'."
+                )
+                if extra_callbacks and extra_callbacks.get("on_failed"):
+                    extra_callbacks["on_failed"](msg)
+                else:
+                    QMessageBox.warning(self, "No behavioral-state features", msg)
                 return
 
         if is_bouts:
@@ -7433,11 +7515,7 @@ class TrackClassificationSubTab(QWidget):
                 "leiden_n_neighbors": int(self.spin_leiden_neighbors.value()),
                 "leiden_resolution": float(self.spin_leiden_resolution.value()),
                 **self._dtw_umap_params(),
-                "sequence_source": (
-                    "features"
-                    if (features_only or self._basis() == "dtw features")
-                    else "states"
-                ),
+                "sequence_source": "features" if features_only else "states",
                 "binary_feature_weight": float(self.spin_binary_weight.value()),
                 "trajectory_trim_mode": self.combo_trim.currentText(),
                 "split_long_tracks": self.chk_split_long_tracks.isChecked(),
@@ -7476,7 +7554,7 @@ class TrackClassificationSubTab(QWidget):
             from behav3d.analysis.behavior.track.state_dtw import (
                 run_categorical_dtaidistance_trajectory_clustering,
             )
-            if features_only:
+            if features_only and not use_state_preset:
                 # Build the per-timepoint feature file from the track-features CSV
                 # (no behavioral states) and cluster on it.
                 from behav3d.analysis.behavior.track.trajectory_features import (
@@ -7489,6 +7567,10 @@ class TrackClassificationSubTab(QWidget):
                     adata_full_path=str(trajectory_feature_adata_path(str(out), ct)),
                     verbose=True,
                 )
+            # Plain State-based, and Feature-based with the state-features preset
+            # checked: no adata_full_path override, so this defaults to the
+            # behavioral-states h5ad -- sequence_source="features" then reuses the
+            # state model's exact saved scaler via resolve_state_feature_matrix.
             return run_categorical_dtaidistance_trajectory_clustering(**params, verbose=True)
 
         def _done(r):
@@ -8575,7 +8657,8 @@ class TrackClassificationSubTab(QWidget):
             QMessageBox.warning(
                 self, "No sub-track windows",
                 "This report needs tracks split into windows. Enable 'Divide long "
-                "tracks' in Step 1's Advanced Configuration and re-run track clustering.",
+                "tracks' in the Track clustering section's Advanced Configuration and "
+                "re-run track clustering.",
             )
             return
         if self._bg.is_running():
@@ -8625,7 +8708,8 @@ class TrackClassificationSubTab(QWidget):
             QMessageBox.warning(
                 self, "No sub-track windows",
                 "This report needs tracks split into windows. Enable 'Divide long "
-                "tracks' in Step 1's Advanced Configuration and re-run track clustering.",
+                "tracks' in the Track clustering section's Advanced Configuration and "
+                "re-run track clustering.",
             )
             return
         if self._bg.is_running():
@@ -8819,7 +8903,6 @@ class TrackClassificationSubTab(QWidget):
         def _run(**kw):
             import pandas as pd
             import anndata as ad
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
             from behav3d.analysis.behavior.track.contact_grouping import (
                 touching_column_name,
                 build_target_class_lookup_from_state_adata,
@@ -8843,9 +8926,7 @@ class TrackClassificationSubTab(QWidget):
                     time_varying = False
                 else:
                     adata_target = ad.read_h5ad(str(self._state_adata_path(target_ct)))
-                    state_col = (
-                        FULL_STATE_COL if target_state_choice == "full_behavioral_cluster" else target_state_choice
-                    )
+                    state_col = target_state_choice
                     target_class_lookup = build_target_class_lookup_from_state_adata(
                         adata_target, state_col=state_col,
                     )
@@ -8966,7 +9047,6 @@ class TrackClassificationSubTab(QWidget):
         def _run(**kw):
             import pandas as pd
             import anndata as ad
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
             from behav3d.analysis.behavior.track.contact_grouping import (
                 touching_column_name,
                 build_target_class_lookup_from_state_adata,
@@ -8997,9 +9077,7 @@ class TrackClassificationSubTab(QWidget):
                     time_varying = False
                 else:
                     adata_target = ad.read_h5ad(str(self._state_adata_path(target_ct)))
-                    state_col = (
-                        FULL_STATE_COL if target_state_choice == "full_behavioral_cluster" else target_state_choice
-                    )
+                    state_col = target_state_choice
                     target_class_lookup = build_target_class_lookup_from_state_adata(
                         adata_target, state_col=state_col,
                     )
@@ -9118,7 +9196,6 @@ class TrackClassificationSubTab(QWidget):
         def _run(**kw):
             import pandas as pd
             import anndata as ad
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
             from behav3d.analysis.behavior.track.contact_grouping import (
                 touching_column_name,
                 build_target_class_lookup_from_state_adata,
@@ -9178,9 +9255,7 @@ class TrackClassificationSubTab(QWidget):
                     time_varying = False
                 else:
                     adata_target = ad.read_h5ad(str(self._state_adata_path(target_ct)))
-                    state_col = (
-                        FULL_STATE_COL if target_state_choice == "full_behavioral_cluster" else target_state_choice
-                    )
+                    state_col = target_state_choice
                     target_class_lookup = build_target_class_lookup_from_state_adata(
                         adata_target, state_col=state_col,
                     )
@@ -9360,7 +9435,6 @@ class TrackClassificationSubTab(QWidget):
         def _run(**kw):
             import pandas as pd
             import anndata as ad
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
             from behav3d.analysis.behavior.track.contact_grouping import (
                 touching_column_name,
                 build_target_class_lookup_from_state_adata,
@@ -9391,9 +9465,7 @@ class TrackClassificationSubTab(QWidget):
                 time_varying = False
             else:
                 adata_target = ad.read_h5ad(str(self._state_adata_path(target_ct)))
-                state_col = (
-                    FULL_STATE_COL if target_state_choice == "full_behavioral_cluster" else target_state_choice
-                )
+                state_col = target_state_choice
                 target_class_lookup = build_target_class_lookup_from_state_adata(
                     adata_target, state_col=state_col,
                 )
@@ -9551,12 +9623,11 @@ class TrackClassificationSubTab(QWidget):
         def _run(**kw):
             import pandas as pd
             import anndata as _ad
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
             from behav3d.analysis.behavior.track.utils import _resolve_track_paths
             from behav3d.analysis.behavior.track.visualization.plots.track_contact_overview_report import (
                 save_track_contact_overview_report,
             )
-            state_col = FULL_STATE_COL if state_col_choice == "full_behavioral_cluster" else state_col_choice
+            state_col = state_col_choice
             full_adata = _ad.read_h5ad(str(state_adata_path))
             df_timepoints = pd.read_csv(csv_path)
             contact_dir = _resolve_track_paths(str(out) if out else "", ct).outfolder

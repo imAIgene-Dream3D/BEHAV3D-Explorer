@@ -16,9 +16,9 @@ When **no dead channel** is configured, Interaction Analysis still runs, but the
 - The active-killing dashboard (Interaction Overview)
 ```
 
-## Interaction settings (two collapsible panels)
+## Interaction settings
 
-Interaction Analysis has **two** collapsible settings panels — one per run — and their controls affect **different plots**. Both are collapsed by default and are saved to `behav3d_parameters.yml` when you run the corresponding step.
+Interaction Analysis has separate settings for each run, and their controls affect **different plots**. Settings are saved to `behav3d_parameters.yml` when you run the corresponding step.
 
 **Per-target settings** — apply to **▶ Run Interaction Analysis (per target)**:
 

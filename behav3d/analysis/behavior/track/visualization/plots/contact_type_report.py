@@ -61,10 +61,11 @@ def save_track_contact_type_comparison(
     per-track `{contact_col}_mean_fraction` columns to long form and aggregates to mean/SEM per
     (cluster, contact column) — no significance test, no p-values.
 
-    Writes `contact_analysis/contact_type_comparison/<contact_cols joined by "+">/contact_type_comparison.pdf`
+    Writes `contact_analysis/contact_type_comparison/<contact_cols joined by "_vs_">/contact_type_comparison.pdf`
     (one grouped bar chart page) and a sibling `csv/contact_type_comparison.csv` (the long-form
     per-track values, for the user's own statistics if wanted). The subfolder is named after the
-    sorted, `+`-joined `contact_cols` so different column combinations don't overwrite each other.
+    sorted, `_vs_`-joined `contact_cols` (no special characters, so it stays filesystem-safe)
+    so different column combinations don't overwrite each other.
 
     Returns a dict of artifact paths plus `class_order`/`contact_cols`.
     """
@@ -89,7 +90,7 @@ def save_track_contact_type_comparison(
     if class_col not in obs.columns:
         raise KeyError(f"class_col={class_col!r} not found in adata_tracks.obs.")
 
-    combo_subfolder = "+".join(sorted(contact_cols))
+    combo_subfolder = "_vs_".join(sorted(contact_cols))
     out_dir = _contact_analysis_dir(out_dir, "contact_type_comparison", combo_subfolder)
     csv_dir = out_dir / "csv"
     csv_dir.mkdir(parents=True, exist_ok=True)

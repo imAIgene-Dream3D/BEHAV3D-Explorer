@@ -95,10 +95,12 @@ def _behavioral_state_backprojection_dir(output_dir, cell_type):
     )
 
 
-def _behavioral_state_backprojection_path(output_dir, sample_name, cell_type):
+def _behavioral_state_backprojection_path(
+    output_dir, sample_name, cell_type, filename_suffix="behavioral_states"
+):
     return Path(
         _behavioral_state_backprojection_dir(output_dir=output_dir, cell_type=cell_type),
-        f"{sample_name}_{cell_type}_behavioral_states.zarr",
+        f"{sample_name}_{cell_type}_{filename_suffix}.zarr",
     )
 
 
@@ -746,7 +748,7 @@ def export_behavioral_state_backprojection_zarrs(
     adata,
     output_dir,
     cell_type,
-    state_col="full_behavioral_cluster",
+    state_col="full_behavioral_state",
     sample_col="sample_name",
     track_col="TrackID",
     time_col="position_t",
@@ -758,10 +760,11 @@ def export_behavioral_state_backprojection_zarrs(
     require_all_rows_present=False,
     n_workers=1,
     verbose=True,
+    filename_suffix="behavioral_states",
 ):
     """
     Export one behavioral-state label image per sample under:
-    output_dir/analysis/<cell_type>/behavioral_states/backprojection/<sample>_<cell_type>_behavioral_states.zarr
+    output_dir/analysis/<cell_type>/behavioral_states/backprojection/<sample>_<cell_type>_<filename_suffix>.zarr
     """
     if adata is None or not hasattr(adata, "obs"):
         raise ValueError("adata with .obs is required for behavioral-state backprojection.")
@@ -795,6 +798,7 @@ def export_behavioral_state_backprojection_zarrs(
 
     manifest = {
         "state_col": str(state_col),
+        "filename_suffix": str(filename_suffix),
         "background_value": int(background_value),
         "enforce_time_coverage": bool(enforce_time_coverage),
         "label_map": {str(v): str(k) for k, v in code_map.items()},
@@ -850,6 +854,7 @@ def export_behavioral_state_backprojection_zarrs(
             output_dir=output_dir,
             sample_name=str(sample_name),
             cell_type=cell_type,
+            filename_suffix=filename_suffix,
         )
         try:
             sample_result = backproject_single_sample_behavioral_states(
@@ -994,11 +999,13 @@ def _resolve_raw_image_path(output_dir, sample_name, verbose=False, metadata_csv
     return None
 
 
-def _resolve_behavioral_state_image_path(output_dir, sample_name, cell_type, verbose=False):
+def _resolve_behavioral_state_image_path(
+    output_dir, sample_name, cell_type, verbose=False, filename_suffix="behavioral_states"
+):
     out_dir = _behavioral_state_backprojection_dir(output_dir=output_dir, cell_type=cell_type)
     candidates = [
-        out_dir / f"{sample_name}_{cell_type}_behavioral_states.zarr",
-        out_dir / f"{sample_name}_{cell_type}_behavioral_states.zarr.zip",
+        out_dir / f"{sample_name}_{cell_type}_{filename_suffix}.zarr",
+        out_dir / f"{sample_name}_{cell_type}_{filename_suffix}.zarr.zip",
     ]
     for candidate in candidates:
         if candidate.exists():
@@ -1036,6 +1043,7 @@ def _ensure_behavioral_state_backprojection_for_sample(
     enforce_time_coverage=False,
     refresh_if_stale=True,
     verbose=True,
+    filename_suffix="behavioral_states",
 ):
     output_dir = Path(output_dir)
     sample_name = str(sample_name).strip()
@@ -1059,6 +1067,7 @@ def _ensure_behavioral_state_backprojection_for_sample(
         sample_name=sample_name,
         cell_type=cell_type,
         verbose=verbose,
+        filename_suffix=filename_suffix,
     )
     if existing_state_path is not None and Path(existing_state_path).exists():
         return Path(existing_state_path)
@@ -1118,7 +1127,7 @@ def _ensure_behavioral_state_backprojection_for_sample(
         else (
             str(applied_full_output_col)
             if applied_full_output_col is not None and len(str(applied_full_output_col)) > 0
-            else "full_behavioral_cluster"
+            else "full_behavioral_state"
         )
     )
 
@@ -1154,6 +1163,7 @@ def _ensure_behavioral_state_backprojection_for_sample(
         output_dir=output_dir,
         sample_name=sample_name,
         cell_type=cell_type,
+        filename_suffix=filename_suffix,
     )
     backproject_single_sample_behavioral_states(
         tracked_img_path=tracked_img_path,
@@ -1378,6 +1388,7 @@ def show_behavioral_state_backprojection(
     state_colors=None,
     run=True,
     verbose=True,
+    filename_suffix="behavioral_states",
 ):
     """
     Open a single-sample napari view with raw image, TrackID labels, and behavioral-state labels.
@@ -1433,12 +1444,13 @@ def show_behavioral_state_backprojection(
                     enforce_time_coverage=False,
                     refresh_if_stale=bool(refresh_if_stale),
                     verbose=verbose,
+                    filename_suffix=filename_suffix,
                 )
             else:
                 raise FileNotFoundError(
                     "Could not find behavioral-state image for sample "
                     f"'{sample_name}' and cell_type '{cell_type}'. Expected "
-                    f"'{_behavioral_state_backprojection_path(output_dir, sample_name, cell_type)}'."
+                    f"'{_behavioral_state_backprojection_path(output_dir, sample_name, cell_type, filename_suffix)}'."
                 )
     else:
         if bool(auto_create_if_missing):
@@ -1454,6 +1466,7 @@ def show_behavioral_state_backprojection(
                 enforce_time_coverage=False,
                 refresh_if_stale=bool(refresh_if_stale),
                 verbose=verbose,
+                filename_suffix=filename_suffix,
             )
         else:
             state_path = _resolve_behavioral_state_image_path(
@@ -1461,12 +1474,13 @@ def show_behavioral_state_backprojection(
                 sample_name=sample_name,
                 cell_type=cell_type,
                 verbose=verbose,
+                filename_suffix=filename_suffix,
             )
             if state_path is None or not Path(state_path).exists():
                 raise FileNotFoundError(
                     "Could not find behavioral-state image for sample "
                     f"'{sample_name}' and cell_type '{cell_type}'. Expected "
-                    f"'{_behavioral_state_backprojection_path(output_dir, sample_name, cell_type)}'."
+                    f"'{_behavioral_state_backprojection_path(output_dir, sample_name, cell_type, filename_suffix)}'."
                 )
 
     from behav3d.analysis.backprojection import filter_track_image_to_ids

@@ -33,7 +33,7 @@ from behav3d.analysis.behavior.state.visualization.plots.state_composition impor
     save_state_condition_comparison_report,
 )
 
-_STATE_COL = "behavioral_state"
+_STATE_COL = "full_behavioral_state"
 _CUSTOM_ORDER = ["mu", "zeta", "alpha"]
 
 

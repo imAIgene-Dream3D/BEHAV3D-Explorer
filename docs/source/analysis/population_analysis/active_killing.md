@@ -3,7 +3,7 @@
 Where Death Dynamics asks how a population's signal rises overall, **Active Killing attributes that rise to individual effector cells** — it flags the timepoints at which the target an effector touched shows a signal increase large enough to count as a killing event.
 
 ```{important}
-**Active Killing is configured and run in the [Feature Extraction](../feature_extraction) tab**, not in the Analysis tab, because it needs the per-timepoint contact and signal columns while they are being computed. Look for the collapsible **▶ Extended Analysis — Active Killing (Immune Cells)** section at the bottom of that tab. It appears only when the metadata contains at least one **immune** cell type, and it requires that cell type's combined feature CSV to exist already.
+**Active Killing is configured and run in the [Feature Extraction](../feature_extraction) tab**, not in the Analysis tab, because it needs the per-timepoint contact and signal columns while they are being computed. It requires at least one **immune** cell type in the metadata and that cell type's combined feature CSV.
 ```
 
 ```{note}

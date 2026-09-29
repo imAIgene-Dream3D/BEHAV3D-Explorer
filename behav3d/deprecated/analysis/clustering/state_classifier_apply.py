@@ -47,7 +47,7 @@ from behav3d.analysis.behavior.state.utils import (
     _mixed_label_sort_key,
     _normalize_label_color_map,
     _normalize_log_scale_feature_selectors,
-    _rebuild_full_behavioral_cluster_from_intrinsic,
+    _rebuild_full_behavioral_state_from_intrinsic,
     _require_columns,
     _resolve_log_scale_feature_cols,
     _resolve_positions_csv_path,
@@ -1679,7 +1679,7 @@ def apply_state_classifiers_to_full_dataset(
     if combine_binary_with_continuous and (label_classifier_selected is not None):
         if continuous_output_col != "intrinsic_behavioral_cluster":
             adata_full.obs["intrinsic_behavioral_cluster"] = adata_full.obs[continuous_output_col].astype("category")
-        _rebuild_full_behavioral_cluster_from_intrinsic(
+        _rebuild_full_behavioral_state_from_intrinsic(
             adata=adata_full,
             binary_cols_to_merge=binary_cols_to_merge,
             intrinsic_col="intrinsic_behavioral_cluster",

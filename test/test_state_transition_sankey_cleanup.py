@@ -20,7 +20,7 @@ from behav3d.analysis.behavior.state.visualization.plots.state_transitions impor
     save_state_transition_report,
 )
 
-_STATE_COL = "behavioral_state"
+_STATE_COL = "full_behavioral_state"
 
 
 def _build_obs():

@@ -221,7 +221,7 @@ def test_run_hmm_state_clustering_fixed_k_outputs(tmp_path):
     assert state_classification.HMM_INTRINSIC_RAW_STATE_COL in model_adata.obs.columns
     assert "binary_group" in model_adata.obs.columns
     assert state_classification.FULL_STATE_COL in model_adata.obs.columns
-    assert "full_behavioral_cluster" in model_adata.obs.columns
+    assert "full_behavioral_cluster" not in model_adata.obs.columns
     assert model_adata.uns["clustering"]["clustering_method"] == "hmm"
     assert model_adata.uns["clustering"]["hmm"]["selected_k"] == 3
     assert artifact["artifact_kind"] == "hmm_state_deployment"
@@ -714,9 +714,9 @@ def test_hmm_deployment_artifact_roundtrip_and_apply(tmp_path):
 
     assert state_classification.INTRINSIC_STATE_COL in adata_applied.obs.columns
     assert state_classification.FULL_STATE_COL in adata_applied.obs.columns
-    assert "full_behavioral_cluster" in adata_applied.obs.columns
-    assert "intrinsic_behavioral_cluster_confidence" in adata_applied.obs.columns
-    assert "full_behavioral_cluster_confidence" in adata_applied.obs.columns
+    assert "full_behavioral_cluster" not in adata_applied.obs.columns
+    assert state_classification.INTRINSIC_STATE_CONFIDENCE_COL in adata_applied.obs.columns
+    assert state_classification.FULL_STATE_CONFIDENCE_COL in adata_applied.obs.columns
     assert all(
         str(v).startswith("state_")
         for v in adata_applied.obs[state_classification.INTRINSIC_STATE_COL].astype(str).unique().tolist()
@@ -732,8 +732,8 @@ def test_hmm_deployment_artifact_roundtrip_and_apply(tmp_path):
         == expected_state_colors
     )
     assert np.allclose(
-        adata_applied.obs["full_behavioral_cluster_confidence"].to_numpy(dtype=float),
-        adata_applied.obs["intrinsic_behavioral_cluster_confidence"].to_numpy(dtype=float),
+        adata_applied.obs[state_classification.FULL_STATE_CONFIDENCE_COL].to_numpy(dtype=float),
+        adata_applied.obs[state_classification.INTRINSIC_STATE_CONFIDENCE_COL].to_numpy(dtype=float),
     )
 
 
@@ -1041,7 +1041,6 @@ def test_run_hmm_state_clustering_backfill_handles_track_shorter_than_start_offs
     for col in (
         state_classification.INTRINSIC_STATE_COL,
         state_classification.FULL_STATE_COL,
-        "full_behavioral_cluster",
     ):
         assert pd.Series(short_track[col], dtype="string").isna().all()
 
@@ -1092,8 +1091,9 @@ def test_hmm_deployment_apply_start_offset_leave_unassigned(tmp_path):
     multi_frame_first_rows = first_rows[first_rows["TrackID"].astype(int) != 0]
     assert pd.Series(multi_frame_first_rows[state_classification.INTRINSIC_STATE_COL], dtype="string").isna().all()
     assert pd.Series(multi_frame_first_rows[state_classification.FULL_STATE_COL], dtype="string").isna().all()
-    assert pd.Series(multi_frame_first_rows["full_behavioral_cluster"], dtype="string").isna().all()
-    assert pd.to_numeric(multi_frame_first_rows["intrinsic_behavioral_cluster_confidence"], errors="coerce").isna().all()
+    assert pd.to_numeric(
+        multi_frame_first_rows[state_classification.INTRINSIC_STATE_CONFIDENCE_COL], errors="coerce"
+    ).isna().all()
 
     scored_rows = obs.groupby(["sample_name", "TrackID"], sort=False, observed=False).nth(1)
     scored_rows = scored_rows[scored_rows["TrackID"].astype(int) != 0]
@@ -1104,7 +1104,6 @@ def test_hmm_deployment_apply_start_offset_leave_unassigned(tmp_path):
     assert len(short_track) == 1
     assert pd.Series(short_track[state_classification.INTRINSIC_STATE_COL], dtype="string").isna().all()
     assert pd.Series(short_track[state_classification.FULL_STATE_COL], dtype="string").isna().all()
-    assert pd.Series(short_track["full_behavioral_cluster"], dtype="string").isna().all()
 
 
 def test_hmm_deployment_apply_uses_track_lengths(tmp_path, monkeypatch):

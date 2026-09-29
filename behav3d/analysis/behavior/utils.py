@@ -40,8 +40,9 @@ def _resolve_output_dir(output_dir):
 
 def _contact_analysis_dir(out_dir, report_type, subfolder):
     """{out_dir}/contact_analysis/{report_type}/{subfolder}, created if missing.
-    `subfolder` is the contact_col for single-column reports, or a '+'-joined sorted
-    combination of contact_cols for the multi-column comparison report.
+    `subfolder` is the contact_col for single-column reports, or a '_vs_'-joined sorted
+    combination of contact_cols for the multi-column comparison report (no special
+    characters, so the folder name stays filesystem-safe).
     """
     path = Path(out_dir) / "contact_analysis" / str(report_type) / str(subfolder)
     path.mkdir(parents=True, exist_ok=True)

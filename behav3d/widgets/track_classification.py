@@ -11,7 +11,7 @@ import yaml
 from matplotlib.backends.backend_pdf import PdfPages
 import matplotlib.pyplot as plt
 
-from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+from behav3d.analysis.behavior.state.classification import FULL_STATE_COL, INTRINSIC_STATE_COL
 from behav3d.analysis.behavior.state.utils import (
     _apply_state_order,
     _get_classification_state_colors,
@@ -518,8 +518,8 @@ class TrackClassificationPanel:
             style={"description_width": "140px"}, layout=widgets.Layout(width="360px"),
         )
         self.target_state_col_dd = widgets.Dropdown(
-            options=["full_behavioral_cluster", "intrinsic_behavioral_cluster", "raw_hmm_state"],
-            value="full_behavioral_cluster",
+            options=[FULL_STATE_COL, INTRINSIC_STATE_COL, "raw_hmm_state"],
+            value=FULL_STATE_COL,
             description="Target state column:",
             style={"description_width": "140px"}, layout=widgets.Layout(width="360px"),
         )
@@ -542,9 +542,12 @@ class TrackClassificationPanel:
         )
         self.contact_group_cols_html = widgets.HTML(
             "<b>Also split by condition:</b><br>"
-            "<span style='color:#555;'>\"Group in X\"/\"Group in Y\" pick a single condition each to "
-            "arrange the grid. \"Group per page\" pools additional metadata columns into it instead — "
-            "hold Ctrl/Cmd to select multiple.</span>"
+            "<span style='color:#555;'>For \"Run contact-vs-no-contact analysis\": \"Group in X\"/"
+            "\"Group in Y\" pick a single condition each to arrange the grid, and \"Group per page\" "
+            "pools additional metadata columns into it instead. For \"Run contact state-shift analysis\" "
+            "and \"Create track contact overview\" (no grid to arrange), \"Group in X\"/\"Group in Y\" are "
+            "ignored — \"Group per page\" alone splits their output into one page (set) per unique "
+            "combination of the selected columns. Hold Ctrl/Cmd to select multiple.</span>"
         )
         self.btn_contact_analysis = widgets.Button(
             description="Run contact-vs-no-contact analysis",
@@ -564,8 +567,8 @@ class TrackClassificationPanel:
             style={"description_width": "260px"}, layout=widgets.Layout(width="360px"),
         )
         self.contact_shift_state_col_dd = widgets.Dropdown(
-            options=["full_behavioral_cluster", "intrinsic_behavioral_cluster", "raw_hmm_state"],
-            value="full_behavioral_cluster", description="State column:",
+            options=[FULL_STATE_COL, INTRINSIC_STATE_COL, "raw_hmm_state"],
+            value=FULL_STATE_COL, description="State column:",
             style={"description_width": "130px"}, layout=widgets.Layout(width="360px"),
         )
         self.btn_contact_state_shift = widgets.Button(
@@ -673,7 +676,9 @@ class TrackClassificationPanel:
                 "before vs. after its first sufficiently long contact bout (contact tracks), against a "
                 "timing-matched null before/after split for no-contact tracks. 'Create track contact "
                 "overview' plots each contact track's full, untrimmed state trajectory with a grey/green "
-                "bar marking every qualifying contact bout, grouped into pages by sample."
+                "bar marking every qualifying contact bout, grouped into pages by sample. "
+                "'Group per page' applies to all three buttons: it splits each one's output into a "
+                "separate page (or grid page) per unique combination of the selected metadata columns."
             ),
             run_row=widgets.VBox(
                 [
@@ -2469,7 +2474,7 @@ class TrackClassificationPanel:
                     else:
                         adata_target = ad.read_h5ad(str(self._state_adata_path(target_ct)))
                         state_choice = self.target_state_col_dd.value
-                        state_col = FULL_STATE_COL if state_choice == "full_behavioral_cluster" else state_choice
+                        state_col = state_choice
                         target_class_lookup = build_target_class_lookup_from_state_adata(
                             adata_target, state_col=state_col,
                         )
@@ -2529,12 +2534,15 @@ class TrackClassificationPanel:
                         "Behavioral states h5ad not found. Run State Classification first."
                     )
 
-                state_col_choice = self.contact_shift_state_col_dd.value
-                state_col = (
-                    FULL_STATE_COL if state_col_choice == "full_behavioral_cluster" else state_col_choice
-                )
+                state_col = self.contact_shift_state_col_dd.value
                 df_timepoints = pd.read_csv(self._original_track_features_path())
                 full_adata = ad.read_h5ad(str(self._state_adata_path()))
+                extra_group_cols = list(self.contact_group_cols_select.value) or None
+                md = getattr(self.metadata_loader, "metadata", None)
+                if extra_group_cols and md is not None:
+                    cols_to_merge = [c for c in extra_group_cols if c not in full_adata.obs.columns]
+                    if cols_to_merge:
+                        merge_condition_columns_into_obs(full_adata, md, cols_to_merge)
                 state_paths = _resolve_state_paths(self.output_dir, self._current_cell_type())
                 result = save_state_contact_shift_report(
                     df_timepoints,
@@ -2545,6 +2553,7 @@ class TrackClassificationPanel:
                     state_col=state_col,
                     window_mode=self.contact_shift_window_mode_dd.value.lower(),
                     fixed_window_length=int(self.contact_shift_window_length.value),
+                    extra_group_cols=extra_group_cols,
                     verbose=True,
                 )
                 self.plot_status_html.value = (
@@ -2582,13 +2591,16 @@ class TrackClassificationPanel:
                 if rows_per_page < 1:
                     raise ValueError("Tracks per page must be at least 1.")
 
-                state_col_choice = self.contact_shift_state_col_dd.value
-                state_col = (
-                    FULL_STATE_COL if state_col_choice == "full_behavioral_cluster" else state_col_choice
-                )
+                state_col = self.contact_shift_state_col_dd.value
                 adata_tracks = self._load_model_adata()
                 df_timepoints = pd.read_csv(self._original_track_features_path())
                 full_adata = ad.read_h5ad(str(self._state_adata_path()))
+                extra_group_cols = list(self.contact_group_cols_select.value) or None
+                md = getattr(self.metadata_loader, "metadata", None)
+                if extra_group_cols and md is not None:
+                    cols_to_merge = [c for c in extra_group_cols if c not in adata_tracks.obs.columns]
+                    if cols_to_merge:
+                        merge_condition_columns_into_obs(adata_tracks, md, cols_to_merge)
                 paths = _resolve_track_paths(self.output_dir, self._current_cell_type())
                 result = save_track_contact_overview_report(
                     adata_tracks,
@@ -2599,6 +2611,7 @@ class TrackClassificationPanel:
                     min_bout_length=min_bout_length,
                     state_col=state_col,
                     rows_per_page=rows_per_page,
+                    extra_group_cols=extra_group_cols,
                     verbose=True,
                 )
                 self.plot_status_html.value = (

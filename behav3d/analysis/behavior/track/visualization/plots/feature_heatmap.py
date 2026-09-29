@@ -26,7 +26,11 @@ from behav3d.analysis.behavior.state.utils import (
     _normalize_label_color_map,
     _resolve_positions_csv_path,
 )
-from behav3d.analysis.behavior.track.utils import _default_behavioral_states_path, _winfo
+from behav3d.analysis.behavior.track.utils import (
+    _default_behavioral_states_path,
+    _resolve_track_paths,
+    _winfo,
+)
 from behav3d.analysis.behavior.utils import _mixed_label_sort_key
 
 ID_COLS = ("sample_name", "TrackID")
@@ -105,8 +109,9 @@ def list_track_feature_candidates(output_dir, cell_type, track_adata=None):
     """Numeric per-timepoint columns that can be shown in the heatmap.
 
     Returns ``(candidates, defaults)``. ``defaults`` are the features the
-    trajectory model was clustered on when known ('dtw features' basis),
-    otherwise the features the behavioral states were built from.
+    trajectory model was clustered on when known (feature-based DTW,
+    including the "Use features used in behavioral state clustering"
+    preset), otherwise the features the behavioral states were built from.
     """
     candidates = []
     try:
@@ -355,10 +360,7 @@ def save_track_feature_heatmap(
     if cluster_key not in track_adata.obs.columns:
         raise KeyError(f"Cluster column '{cluster_key}' not found in the track model.")
     if outfolder is None:
-        outfolder = (
-            Path(output_dir).expanduser() / "analysis" / str(cell_type) / "behavorial_trajectories"
-            / FEATURE_HEATMAP_SUBDIR
-        )
+        outfolder = _resolve_track_paths(output_dir, cell_type).outfolder / FEATURE_HEATMAP_SUBDIR
 
     if verbose:
         _winfo("feature-heatmap", f"loading {len(features)} feature(s) for {track_adata.n_obs} tracks")
@@ -390,11 +392,15 @@ def save_track_feature_heatmap(
 STATE_FEATURE_HEATMAP_SUBDIR = "state_feature_heatmaps"
 
 # State-column choices -> obs columns that may hold them (first present wins).
+# Legacy aliases (full_behavioral_cluster, intrinsic_behavioral_cluster, and
+# the pre-consolidation value of FULL_STATE_COL, "behavioral_state") are kept
+# here so files written before columns were consolidated still resolve.
 STATE_COLUMN_ALIASES = {
-    "behavioral_state": ("behavioral_state", "full_behavioral_cluster"),
-    "full_behavioral_cluster": ("full_behavioral_cluster", "behavioral_state"),
-    "intrinsic_behavioral_cluster": ("intrinsic_behavioral_cluster", "hmm_intrinsic_behavioral_state"),
+    "full_behavioral_state": ("full_behavioral_state", "full_behavioral_cluster", "behavioral_state"),
+    "behavioral_state": ("full_behavioral_state", "full_behavioral_cluster", "behavioral_state"),
+    "full_behavioral_cluster": ("full_behavioral_state", "full_behavioral_cluster", "behavioral_state"),
     "hmm_intrinsic_behavioral_state": ("hmm_intrinsic_behavioral_state", "intrinsic_behavioral_cluster"),
+    "intrinsic_behavioral_cluster": ("hmm_intrinsic_behavioral_state", "intrinsic_behavioral_cluster"),
 }
 
 
@@ -443,7 +449,7 @@ def save_state_feature_heatmap(
     cell_type,
     features,
     *,
-    state_col="behavioral_state",
+    state_col="full_behavioral_state",
     weighting="timepoints",
     scaling="zscore",
     annotate=True,

@@ -18,7 +18,7 @@ from behav3d.analysis.behavior.track.visualization.plots.track_contact_overview_
 
 _N_TIMEPOINTS = 30
 _MIN_BOUT_LENGTH = 5
-_STATE_COL = "behavioral_state"
+_STATE_COL = "full_behavioral_state"
 
 # (sample_name, TrackID, is_contact, bout_start) — bout occupies
 # [bout_start, bout_start + _MIN_BOUT_LENGTH - 1] for contact tracks.
@@ -183,3 +183,35 @@ def test_track_contact_overview_pages_never_mix_samples(tmp_path):
         assert expected_sample in text
         other_sample = "sample_B" if expected_sample == "sample_A" else "sample_A"
         assert other_sample not in text
+
+
+def test_track_contact_overview_groups_by_extra_condition_column(tmp_path):
+    """`extra_group_cols` (metadata columns merged into `adata_tracks.obs`, e.g. by the widget's
+    "Group per page" multi-select) must annotate each page's title with its group combination,
+    on top of the existing per-sample page split."""
+    pypdf = pytest.importorskip("pypdf")
+
+    adata_tracks = _build_adata_tracks(_SPECS)
+    conditions = {"sample_A": "control", "sample_B": "treated"}
+    adata_tracks.obs["condition"] = [conditions[s] for s in adata_tracks.obs["sample_name"]]
+    df_timepoints = _build_df_timepoints(_SPECS)
+    adata_states = _build_adata_states(_SPECS)
+
+    result = save_track_contact_overview_report(
+        adata_tracks, df_timepoints, adata_states, tmp_path,
+        contact_col="macro_contact",
+        min_bout_length=_MIN_BOUT_LENGTH,
+        state_col=_STATE_COL,
+        rows_per_page=6,
+        extra_group_cols=["condition"],
+        verbose=False,
+    )
+
+    assert result["n_tracks"] == 6
+    assert result["n_samples"] == 2
+
+    reader = pypdf.PdfReader(result["pdf_path"])
+    assert len(reader.pages) == 2
+    page_texts = [page.extract_text() or "" for page in reader.pages]
+    assert any("condition=control" in text and "sample_A" in text for text in page_texts)
+    assert any("condition=treated" in text and "sample_B" in text for text in page_texts)

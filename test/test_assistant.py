@@ -64,7 +64,7 @@ def _make_dtaidistance_adata(track_lengths):
                     "sample_name": "sample_0",
                     "TrackID": int(track_id),
                     "position_t": int(t),
-                    "full_behavioral_cluster": "state_a" if t % 2 == 0 else "state_b",
+                    "full_behavioral_state": "state_a" if t % 2 == 0 else "state_b",
                 }
             )
     obs = pd.DataFrame(rows)

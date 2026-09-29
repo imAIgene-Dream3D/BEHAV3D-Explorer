@@ -294,6 +294,7 @@ def export_track_cluster_backprojection(
         enforce_time_coverage=False,
         n_workers=n_workers,
         verbose=verbose,
+        filename_suffix="track_clusters",
     )
     manifest["window_backprojection_rows"] = int(len(backproj_obs))
     manifest["window_backprojection_missing_tracks"] = int(missing_windows)
@@ -544,7 +545,7 @@ def add_track_cluster_trajectory_layers(
 def build_track_state_sequence_lookup(
     adata_full,
     sample_name=None,
-    state_col="behavioral_state",
+    state_col="full_behavioral_state",
     sample_col="sample_name",
     track_col="TrackID",
     time_col="position_t",
@@ -580,7 +581,7 @@ def build_track_state_sequence_lookup(
 def render_track_statebar_image(
     track_df,
     state_color_map,
-    state_col="behavioral_state",
+    state_col="full_behavioral_state",
     time_col="position_t",
     cursor_time=None,
     title=None,
@@ -724,7 +725,7 @@ def _add_track_statebar_click_dock(
     adata_tracks=None,
     track_layer_name="filtered TrackID",
     clickable_layer_name="behavioral_state_class",
-    state_col="behavioral_state",
+    state_col="full_behavioral_state",
     sample_col="sample_name",
     track_col="TrackID",
     time_col="position_t",
@@ -848,7 +849,7 @@ def show_track_cluster_backprojection(
     adata_full,
     adata_tracks=None,
     cluster_col="ClusterID",
-    state_col="behavioral_state",
+    state_col="full_behavioral_state",
     state_img_path=None,
     output_col="track_behavioral_cluster",
     show_trajectories=False,
@@ -875,6 +876,7 @@ def show_track_cluster_backprojection(
         refresh_if_stale=False,
         run=False,
         verbose=verbose,
+        filename_suffix="track_clusters",
     )
     if bool(show_trajectories) and adata_tracks is not None:
         from behav3d.analysis.behavior.state.visualization.backprojection import (

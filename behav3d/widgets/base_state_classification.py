@@ -9,6 +9,12 @@ import scanpy as sc
 import yaml
 
 from behav3d.analysis.behavior.general import relabel_cluster_ids
+from behav3d.analysis.behavior.state.classification import (
+    FULL_STATE_COL,
+    INTRINSIC_STATE_COL,
+    resolve_full_state_col,
+    resolve_intrinsic_state_col,
+)
 from behav3d.analysis.behavior.state.utils import build_identity_cluster_mapping
 from behav3d.analysis.behavior.state.visualization.backprojection import (
     show_behavioral_state_backprojection,
@@ -913,7 +919,8 @@ class BaseStateClassificationPanel:
 
     def _rebuild_intrinsic_rename_rows(self):
         self._intrinsic_name_boxes = {}
-        if self.model_adata is None or "intrinsic_behavioral_cluster" not in self.model_adata.obs.columns:
+        intrinsic_col = resolve_intrinsic_state_col(self.model_adata)
+        if intrinsic_col is None:
             self.rename_intrinsic_rows.children = []
             self.rename_intrinsic_status.value = "<i>Run clustering or load existing model first.</i>"
             self.btn_rename_intrinsic.disabled = True
@@ -921,7 +928,7 @@ class BaseStateClassificationPanel:
 
         mapping = build_identity_cluster_mapping(
             self.model_adata,
-            cluster_col="intrinsic_behavioral_cluster",
+            cluster_col=intrinsic_col,
         )
         rows = []
         for old_name in mapping.keys():
@@ -941,7 +948,8 @@ class BaseStateClassificationPanel:
         self._full_select_boxes = {}
         self._full_name_boxes = {}
         self.full_combine_name.value = ""
-        if self.model_adata is None or "full_behavioral_cluster" not in self.model_adata.obs.columns:
+        full_col = resolve_full_state_col(self.model_adata)
+        if full_col is None:
             self.rename_full_rows.children = []
             self.rename_full_status.value = "<i>Run primary dynamic state cluster rename first.</i>"
             self.btn_rename_full.disabled = True
@@ -951,7 +959,7 @@ class BaseStateClassificationPanel:
 
         mapping = build_identity_cluster_mapping(
             self.model_adata,
-            cluster_col="full_behavioral_cluster",
+            cluster_col=full_col,
         )
         rows = []
         for old_name in mapping.keys():
@@ -981,8 +989,8 @@ class BaseStateClassificationPanel:
         has_cell_type = self._current_cell_type() != ""
         has_features = len(self._selected_feature_columns()) > 0
         has_model = self.model_adata is not None
-        has_intrinsic = has_model and ("intrinsic_behavioral_cluster" in self.model_adata.obs.columns)
-        has_full = has_model and ("full_behavioral_cluster" in self.model_adata.obs.columns)
+        has_intrinsic = has_model and resolve_intrinsic_state_col(self.model_adata) is not None
+        has_full = has_model and resolve_full_state_col(self.model_adata) is not None
         has_backproj_sample = self.backproj_sample_dd.value is not None and len(str(self.backproj_sample_dd.value)) > 0
 
         self.btn_cluster.disabled = not (has_cell_type and has_features)
@@ -1062,7 +1070,7 @@ class BaseStateClassificationPanel:
                     sample_name=str(sample_name),
                     output_dir=self.output_dir,
                     cell_type=self._current_cell_type(),
-                    state_col="full_behavioral_cluster",
+                    state_col=FULL_STATE_COL,
                     auto_create_if_missing=True,
                     refresh_if_stale=True,
                     run=True,
@@ -1117,15 +1125,16 @@ class BaseStateClassificationPanel:
             new_s = str(new_name).strip()
             normalized_mapping[old_s] = new_s if new_s != "" else old_s
 
+        read_col = resolve_full_state_col(self.model_adata) or FULL_STATE_COL
         existing_labels = {
             str(x)
-            for x in self.model_adata.obs.get("full_behavioral_cluster", pd.Series(dtype="object")).astype(str)
+            for x in self.model_adata.obs.get(read_col, pd.Series(dtype="object")).astype(str)
         }
         has_changes = any(
             str(normalized_mapping.get(label, label)) != str(label)
             for label in existing_labels
         )
-        if not has_changes:
+        if not has_changes and read_col == FULL_STATE_COL:
             return {"changed": False, "relabel_s": 0.0, "save_s": 0.0, "rebuild_s": 0.0, "total_s": 0.0}
 
         t0 = perf_counter()
@@ -1133,7 +1142,8 @@ class BaseStateClassificationPanel:
         relabel_cluster_ids(
             adata=self.model_adata,
             mapping=normalized_mapping,
-            cluster_key="full_behavioral_cluster",
+            cluster_key=read_col,
+            new_key=FULL_STATE_COL,
             overwrite_original=True,
             keep_unmapped=True,
         )

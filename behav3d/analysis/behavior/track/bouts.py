@@ -479,7 +479,7 @@ def _drop_disabled_bout_features(
 def _build_track_feature_adata(
     adata_full,
     *,
-    state_col="full_behavioral_cluster",
+    state_col="full_behavioral_state",
     groupby_cols=("sample_name", "TrackID"),
     time_col="position_t",
     behavioral_trajectory_size=100,
@@ -818,7 +818,7 @@ def train_track_classifier(
     training_state_col = str(
         feat_cfg.get(
             "state_col",
-            filter_cfg.get("state_col", "full_behavioral_cluster"),
+            filter_cfg.get("state_col", "full_behavioral_state"),
         )
     )
     preprocessing_spec = _build_track_preprocessing_spec(
@@ -1607,7 +1607,7 @@ def run_state_based_analysis(
     
     # Input
     adata_full_path=None,  # if None, will look under output_dir/analysis/<cell_type>/behavioral_states/BEHAV3D_<cell_type>_behavioral_states.h5ad
-    state_col="full_behavioral_cluster",
+    state_col="full_behavioral_state",
     groupby_cols=("sample_name", "TrackID"),
     time_col="position_t",
 
@@ -1674,7 +1674,7 @@ def run_state_based_analysis(
     # Exemplar track plotting
     plot_exemplars=False,
     n_per_cluster=10,
-    exemplar_state_keys=("full_behavioral_cluster",),
+    exemplar_state_keys=("full_behavioral_state",),
     plot_exemplar_backprojection_videos=False,
     plot_exemplar_backprojection_pdfs=False,
     exemplar_video_fps=6,

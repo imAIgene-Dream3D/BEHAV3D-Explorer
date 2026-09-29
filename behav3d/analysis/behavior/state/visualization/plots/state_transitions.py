@@ -945,7 +945,7 @@ def save_state_transition_report(
     adata,
     output_dir,
     *,
-    state_col="full_behavioral_cluster",
+    state_col="full_behavioral_state",
     id_cols=("sample_name", "TrackID"),
     time_col="position_t",
     include_self_pairs=True,

@@ -11,7 +11,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from sklearn.metrics import silhouette_score
 from scipy.stats import chi2_contingency, ttest_rel, wilcoxon
 
-from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+from behav3d.analysis.behavior.state.classification import FULL_STATE_COL, resolve_full_state_col
 from behav3d.analysis.behavior.state.utils import (
     _apply_state_order,
     _get_classification_state_colors,
@@ -1140,7 +1140,6 @@ def run_categorical_dtaidistance_trajectory_clustering(
     if not adata_full_path.exists():
         raise FileNotFoundError(f"Could not find behavioral-state h5ad: {adata_full_path}")
 
-    state_cols = [str(FULL_STATE_COL)]
     trajectory_size = None if behavioral_trajectory_size is None else int(behavioral_trajectory_size)
     min_length = trajectory_size if min_track_length is None else int(min_track_length)
     trim_mode = str(trajectory_trim_mode).strip().lower()
@@ -1157,13 +1156,13 @@ def run_categorical_dtaidistance_trajectory_clustering(
     sequence_source = str(sequence_source).strip().lower()
     if sequence_source not in {"states", "features"}:
         raise ValueError("sequence_source must be 'states' or 'features'.")
-    # Features-only input (see trajectory_features.build_trajectory_feature_adata)
-    # has no behavioral-state column at all.
-    has_states = FULL_STATE_COL in adata_full.obs.columns
+    state_col = resolve_full_state_col(adata_full)
+    state_cols = [str(state_col)] if state_col is not None else [str(FULL_STATE_COL)]
+    has_states = state_col is not None
     if not has_states and sequence_source != "features":
         raise ValueError(
-            f"'{adata_full_path}' has no '{FULL_STATE_COL}' column; state-sequence DTW needs "
-            "behavioral states. Use sequence_source='features'."
+            f"'{adata_full_path}' has no '{FULL_STATE_COL}' column or supported legacy alias; "
+            "state-sequence DTW needs behavioral states. Use sequence_source='features'."
         )
     feature_info = {}
     if sequence_source == "features":
@@ -1195,7 +1194,7 @@ def run_categorical_dtaidistance_trajectory_clustering(
         _winfo(
             "trajectory-dtai",
             f"filtering tracks with min_length={min_length}, {action_text} {length_text} | "
-            f"state_col={FULL_STATE_COL}",
+            f"state_col={state_col if state_col is not None else 'none'}",
         )
     adata_filt = _filter_tracks_for_dtaidistance(
         adata_full,
@@ -1343,7 +1342,7 @@ def run_categorical_dtaidistance_trajectory_clustering(
         "groupby_cols": [str(c) for c in list(groupby_cols)],
         "sequence_groupby_cols": [str(c) for c in list(sequence_groupby_cols)],
         "time_col": str(time_col),
-        "state_col": str(FULL_STATE_COL),
+        "state_col": str(state_col) if state_col is not None else str(FULL_STATE_COL),
         "state_cols": list(state_cols),
         "behavioral_trajectory_size": None if trajectory_size is None else int(trajectory_size),
         "min_track_length": None if min_length is None else int(min_length),
@@ -1568,6 +1567,14 @@ def train_dtaidistance_trajectory_classifier(
     if bool(verbose):
         _winfo("trajectory-dtai-clf", f"loading behavioral states: {adata_full_path}")
     adata_full = sc.read_h5ad(adata_full_path)
+    state_col = str(meta.get("state_col", "") or "")
+    if state_col not in adata_full.obs.columns:
+        state_col = resolve_full_state_col(adata_full)
+    if state_col is None:
+        raise ValueError(
+            f"'{adata_full_path}' has no '{FULL_STATE_COL}' column or supported legacy alias; "
+            "cannot train a state-feature classifier."
+        )
 
     if bool(verbose):
         _winfo("trajectory-dtai-clf", f"building track features (trajectory_size={trajectory_size})")
@@ -1584,14 +1591,14 @@ def train_dtaidistance_trajectory_classifier(
         )
         feature_adata, _ = extract_descibing_track_state_features(
             adata_filt,
-            state_col=str(FULL_STATE_COL),
+            state_col=str(state_col),
             group_col=sequence_groupby_cols,
         )
         feature_adata.uns["track_filtering"] = {
             "groupby_cols": [str(c) for c in list(groupby_cols)],
             "sequence_groupby_cols": [str(c) for c in list(sequence_groupby_cols)],
             "time_col": str(time_col),
-            "state_col": str(FULL_STATE_COL),
+            "state_col": str(state_col),
             "behavioral_trajectory_size": int(trajectory_size),
             "min_track_length": None if min_track_length is None else int(min_track_length),
             "trajectory_trim_mode": trim_mode,
@@ -1601,7 +1608,7 @@ def train_dtaidistance_trajectory_classifier(
     else:
         feature_adata = _build_track_feature_adata(
             adata_full,
-            state_col=str(FULL_STATE_COL),
+            state_col=str(state_col),
             behavioral_trajectory_size=int(trajectory_size),
         )
 

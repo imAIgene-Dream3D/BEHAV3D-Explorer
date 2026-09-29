@@ -65,6 +65,7 @@ def _plot_contact_state_shift_page(
     colors,
     params_text,
     fixed_window_length,
+    group_label=None,
 ):
     """Build the combined report figure: rows = {composition over time (capped), diff-bars,
     stacked before/after composition}, columns = {contact tracks, no-contact tracks (null)}.
@@ -142,7 +143,10 @@ def _plot_contact_state_shift_page(
     legend_state_order = list(reversed(state_order))
     handles = [plt.Rectangle((0, 0), 1, 1, color=colors[s]) for s in legend_state_order]
     fig.legend(handles, legend_state_order, loc="lower center", ncol=min(len(state_order), 6), frameon=False, fontsize=8)
-    fig.suptitle("Contact-triggered behavioral-state shift (before vs. after)", fontsize=13, fontweight="bold")
+    title = "Contact-triggered behavioral-state shift (before vs. after)"
+    if group_label:
+        title += f" — {group_label}"
+    fig.suptitle(title, fontsize=13, fontweight="bold")
     return fig, long_rows
 
 
@@ -159,6 +163,7 @@ def save_state_contact_shift_report(
     min_window_timepoints=3,
     sample_col="sample_name",
     track_col="TrackID",
+    extra_group_cols=None,
     state_order=None,
     state_colors=None,
     null_seed=0,
@@ -172,10 +177,17 @@ def save_state_contact_shift_report(
     Writes a single combined PDF (2x2 grid: diff-bars / stacked composition x contact /
     no-contact) plus CSVs, into ``{out_dir}/contact_analysis/contact_state_shift/{contact_col}/``.
 
+    If ``extra_group_cols`` is given (condition columns already present in ``adata_states.obs``,
+    constant per sample), one such 2x2-grid page is written per unique combination of their
+    values instead of a single page for the whole dataset — each page restricted to the tracks in
+    that combination, labeled in its title and appended to the same PDF. The CSVs likewise gain
+    one column per ``extra_group_cols`` entry. With no ``extra_group_cols``, output is unchanged.
+
     Returns a dict of artifact paths plus ``n_contact_tracks``/``n_no_contact_tracks``/
     ``n_excluded_tracks``.
     """
     groupby_cols = [str(sample_col), str(track_col)]
+    extra_group_cols = [str(c) for c in extra_group_cols] if extra_group_cols else []
 
     if state_order is None or state_colors is None:
         resolved_order, resolved_colors = _build_state_color_map(adata_states, state_col)
@@ -205,35 +217,88 @@ def save_state_contact_shift_report(
     # by it directly, without juggling a mixed-depth MultiIndex.
     contact_group_by_track = state_timepoints.drop_duplicates(subset=groupby_cols)[groupby_cols + ["contact_group"]]
     fraction_df = fraction_df.merge(contact_group_by_track, on=groupby_cols, how="left")
+    track_windows_flat = track_windows.reset_index()
+
+    if extra_group_cols:
+        missing_group_cols = [c for c in extra_group_cols if c not in adata_states.obs.columns]
+        if missing_group_cols:
+            raise KeyError(f"Missing group-by columns in adata_states.obs: {missing_group_cols}")
+        group_lookup = adata_states.obs[[sample_col] + extra_group_cols].copy()
+        group_lookup[sample_col] = group_lookup[sample_col].astype(str)
+        group_lookup = group_lookup.drop_duplicates(subset=[sample_col])
+        state_timepoints = state_timepoints.merge(group_lookup, on=sample_col, how="left")
+        fraction_df = fraction_df.merge(group_lookup, on=sample_col, how="left")
+        track_windows_flat = track_windows_flat.merge(group_lookup, on=sample_col, how="left")
 
     out_dir = _contact_analysis_dir(out_dir, "contact_state_shift", contact_col)
     csv_dir = out_dir / "csv"
     csv_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = out_dir / "contact_state_shift.pdf"
 
-    params_text = (
+    base_params_text = (
         f"contact_col={contact_col}  min_bout_length={min_bout_length}  "
         f"state_col={state_col}  window_mode={window_mode}"
         + (f"  fixed_window_length={fixed_window_length}" if window_mode == "fixed" else "")
-        + f"  min_window_timepoints={min_window_timepoints}  null_seed={null_seed}\n"
-        f"n_contact_tracks={features['n_contact_tracks']}  "
-        f"n_no_contact_tracks={features['n_no_contact_tracks']}  "
-        f"n_excluded_tracks={features['n_excluded_tracks']}"
+        + f"  min_window_timepoints={min_window_timepoints}  null_seed={null_seed}"
     )
 
-    fig, long_rows = _plot_contact_state_shift_page(
-        state_timepoints, fraction_df,
-        state_col=state_col, state_order=state_order, colors=state_colors, params_text=params_text,
-        fixed_window_length=fixed_window_length,
-    )
+    if extra_group_cols:
+        group_combos = (
+            fraction_df[extra_group_cols]
+            .drop_duplicates()
+            .sort_values(extra_group_cols)
+            .to_dict("records")
+        )
+    else:
+        group_combos = [{}]
+
+    all_long_rows = []
     with PdfPages(pdf_path) as pdf:
-        pdf.savefig(fig, bbox_inches="tight")
-    plt.close(fig)
+        for group_vals in group_combos:
+            if group_vals:
+                st_mask = pd.Series(True, index=state_timepoints.index)
+                fr_mask = pd.Series(True, index=fraction_df.index)
+                tw_mask = pd.Series(True, index=track_windows_flat.index)
+                for col, val in group_vals.items():
+                    st_mask &= state_timepoints[col] == val
+                    fr_mask &= fraction_df[col] == val
+                    tw_mask &= track_windows_flat[col] == val
+                group_state_tp = state_timepoints[st_mask]
+                group_fraction_df = fraction_df[fr_mask]
+                group_windows = track_windows_flat[tw_mask]
+                group_label = ", ".join(f"{c}={v}" for c, v in group_vals.items())
+            else:
+                group_state_tp = state_timepoints
+                group_fraction_df = fraction_df
+                group_windows = track_windows_flat
+                group_label = None
+
+            group_tracks = group_fraction_df.drop_duplicates(subset=groupby_cols)
+            n_contact = int((group_tracks["contact_group"] == "contact").sum())
+            n_no_contact = int((group_tracks["contact_group"] == "no_contact").sum())
+            n_excluded = int(group_windows["excluded"].sum())
+            group_params_text = (
+                base_params_text
+                + f"\nn_contact_tracks={n_contact}  n_no_contact_tracks={n_no_contact}  "
+                f"n_excluded_tracks={n_excluded}"
+            )
+
+            fig, group_long_rows = _plot_contact_state_shift_page(
+                group_state_tp, group_fraction_df,
+                state_col=state_col, state_order=state_order, colors=state_colors,
+                params_text=group_params_text, fixed_window_length=fixed_window_length,
+                group_label=group_label,
+            )
+            pdf.savefig(fig, bbox_inches="tight")
+            plt.close(fig)
+            for row in group_long_rows:
+                row.update(group_vals)
+            all_long_rows.extend(group_long_rows)
 
     windows_csv = csv_dir / "state_shift_track_windows.csv"
-    track_windows.reset_index().to_csv(windows_csv, index=False)
+    track_windows_flat.to_csv(windows_csv, index=False)
 
-    long_df = pd.DataFrame(long_rows)
+    long_df = pd.DataFrame(all_long_rows)
     diff_csv = csv_dir / "state_shift_diff_bars.csv"
     stacked_csv = csv_dir / "state_shift_stacked_composition.csv"
     if len(long_df) > 0:

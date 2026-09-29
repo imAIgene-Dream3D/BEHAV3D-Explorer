@@ -29,7 +29,7 @@ from behav3d.analysis.behavior.state.utils import (
     _get_classification_state_order,
     _mixed_label_sort_key,
     _normalize_label_color_map,
-    _rebuild_full_behavioral_cluster_from_intrinsic,
+    _rebuild_full_behavioral_state_from_intrinsic,
     _resolve_state_paths,
     _set_classification_state_colors,
     _set_classification_state_order,
@@ -856,11 +856,16 @@ class StateClassificationHMMPanel(BaseStateClassificationPanel):
                 pd.Series(obs["intrinsic_behavioral_cluster"], index=obs.index, dtype="string")
             )
             changes.append(INTRINSIC_STATE_COL)
-        if FULL_STATE_COL not in obs.columns and "full_behavioral_cluster" in obs.columns:
-            obs[FULL_STATE_COL] = pd.Categorical(
-                pd.Series(obs["full_behavioral_cluster"], index=obs.index, dtype="string")
+        if FULL_STATE_COL not in obs.columns:
+            legacy_full_col = next(
+                (c for c in ("full_behavioral_cluster", "behavioral_state") if c in obs.columns),
+                None,
             )
-            changes.append(FULL_STATE_COL)
+            if legacy_full_col is not None:
+                obs[FULL_STATE_COL] = pd.Categorical(
+                    pd.Series(obs[legacy_full_col], index=obs.index, dtype="string")
+                )
+                changes.append(FULL_STATE_COL)
         if (
             HMM_INTRINSIC_RAW_STATE_COL not in obs.columns
             and INTRINSIC_STATE_COL in obs.columns
@@ -2390,19 +2395,13 @@ class StateClassificationHMMPanel(BaseStateClassificationPanel):
             if FULL_STATE_COL in self.model_adata.obs.columns
             else None
         )
-        _rebuild_full_behavioral_cluster_from_intrinsic(
+        _rebuild_full_behavioral_state_from_intrinsic(
             adata=self.model_adata,
             binary_cols_to_merge=binary_cols_to_merge,
             intrinsic_col=INTRINSIC_STATE_COL,
+            full_state_col=FULL_STATE_COL,
             binary_group_constraints=binary_group_constraints,
             enforce_binary_group_constraints=enforce_binary_group_constraints,
-        )
-        self.model_adata.obs[FULL_STATE_COL] = pd.Categorical(
-            pd.Series(
-                self.model_adata.obs["full_behavioral_cluster"],
-                index=self.model_adata.obs.index,
-                dtype="string",
-            )
         )
         adata_full = getattr(self, "adata_full", None)
         if adata_full is not None and INTRINSIC_STATE_COL in getattr(adata_full, "obs", {}).columns:

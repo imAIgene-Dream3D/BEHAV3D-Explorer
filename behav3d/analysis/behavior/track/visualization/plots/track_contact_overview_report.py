@@ -54,7 +54,7 @@ def _compute_contact_bar_segments(times, is_contact, min_bout_length):
     return segments
 
 
-def _plot_track_contact_overview_page(page_rows, *, sample_name, contact_col, min_bout_length):
+def _plot_track_contact_overview_page(page_rows, *, sample_name, contact_col, min_bout_length, group_label=None):
     """One PDF page: each track gets its state-over-time bar (top) with the matching contact bar
     (bottom, grey/green) directly underneath. All rows share one page-wide time axis (rather than
     each track being independently stretched to the same width), so a track's bar width in the
@@ -94,10 +94,10 @@ def _plot_track_contact_overview_page(page_rows, *, sample_name, contact_col, mi
         Patch(facecolor=_NO_CONTACT_BAR_COLOR, edgecolor="k", label="no contact"),
     ]
     fig.legend(handles=legend_handles, loc="lower center", ncol=2, frameon=False, fontsize=8)
-    fig.suptitle(
-        f"Track contact overview | sample: {sample_name} | contact_col={contact_col}",
-        fontsize=11, fontweight="bold",
-    )
+    title = f"Track contact overview | sample: {sample_name} | contact_col={contact_col}"
+    if group_label:
+        title += f" | {group_label}"
+    fig.suptitle(title, fontsize=11, fontweight="bold")
     return fig
 
 
@@ -112,6 +112,7 @@ def save_track_contact_overview_report(
     state_col=FULL_STATE_COL,
     sample_col="sample_name",
     track_col="TrackID",
+    extra_group_cols=None,
     rows_per_page=6,
     state_order=None,
     state_colors=None,
@@ -125,6 +126,11 @@ def save_track_contact_overview_report(
     `min_bout_length` timepoints. Pages are grouped by sample -- a sample's tracks are never
     split across a page shared with the next sample's, even if that leaves the page under-full.
 
+    If `extra_group_cols` is given (condition columns already present in `adata_tracks.obs`,
+    constant per sample), tracks are also never split across a page shared with a different
+    combination of those columns' values -- pages are grouped by (group combination, sample)
+    instead of just sample, with each page's title annotated with its group combination.
+
     Writes into `{out_dir}/contact_analysis/contact_track_overview/{contact_col}/` as
     `track_contact_overview.pdf`.
 
@@ -132,6 +138,7 @@ def save_track_contact_overview_report(
     """
     sample_col = str(sample_col)
     track_col = str(track_col)
+    extra_group_cols = [str(c) for c in extra_group_cols] if extra_group_cols else []
     groupby_cols = [sample_col, track_col]
     time_col = "position_t"
 
@@ -157,8 +164,13 @@ def save_track_contact_overview_report(
     )
     key_cols = groupby_cols + ([_TRACK_OVERVIEW_WINDOW_COL] if has_window_col else [])
 
+    missing_group_cols = [c for c in extra_group_cols if c not in adata_tracks.obs.columns]
+    if missing_group_cols:
+        raise KeyError(f"Missing group-by columns in adata_tracks.obs: {missing_group_cols}")
+    window_cols = key_cols + ["position_t_min", "position_t_max"] + [c for c in extra_group_cols if c not in key_cols]
+
     windows = (
-        adata_tracks.obs[key_cols + ["position_t_min", "position_t_max"]]
+        adata_tracks.obs[window_cols]
         .drop_duplicates(subset=key_cols)
         .copy()
     )
@@ -219,6 +231,8 @@ def save_track_contact_overview_report(
             min_bout_length,
         )
 
+        group_key = tuple(row[c] for c in extra_group_cols) if extra_group_cols else ()
+
         prepared_rows.append(
             {
                 "sample_name": sample_name,
@@ -226,20 +240,41 @@ def save_track_contact_overview_report(
                 "state_segments": state_segments,
                 "xlim": xlim,
                 "contact_segments": contact_segments,
+                "group_key": group_key,
             }
         )
 
+    if extra_group_cols:
+        seen_combos = []
+        for r in prepared_rows:
+            if r["group_key"] not in seen_combos:
+                seen_combos.append(r["group_key"])
+        group_combos = sorted(seen_combos)
+    else:
+        group_combos = [()]
+
     rows_per_page = max(1, int(rows_per_page))
     with PdfPages(pdf_path) as pdf:
-        for sample_name in sample_order:
-            sample_rows = [r for r in prepared_rows if r["sample_name"] == sample_name]
-            for page_rows in _chunk_list(sample_rows, rows_per_page):
-                fig = _plot_track_contact_overview_page(
-                    page_rows, sample_name=sample_name, contact_col=contact_col,
-                    min_bout_length=min_bout_length,
-                )
-                pdf.savefig(fig, dpi=int(plot_dpi), bbox_inches="tight")
-                plt.close(fig)
+        for combo in group_combos:
+            combo_rows = (
+                [r for r in prepared_rows if r["group_key"] == combo] if extra_group_cols else prepared_rows
+            )
+            group_label = (
+                ", ".join(f"{c}={v}" for c, v in zip(extra_group_cols, combo)) if extra_group_cols else None
+            )
+            combo_sample_order = []
+            for r in combo_rows:
+                if r["sample_name"] not in combo_sample_order:
+                    combo_sample_order.append(r["sample_name"])
+            for sample_name in combo_sample_order:
+                sample_rows = [r for r in combo_rows if r["sample_name"] == sample_name]
+                for page_rows in _chunk_list(sample_rows, rows_per_page):
+                    fig = _plot_track_contact_overview_page(
+                        page_rows, sample_name=sample_name, contact_col=contact_col,
+                        min_bout_length=min_bout_length, group_label=group_label,
+                    )
+                    pdf.savefig(fig, dpi=int(plot_dpi), bbox_inches="tight")
+                    plt.close(fig)
 
     if verbose:
         print(f"Saved track contact overview report: {pdf_path}")

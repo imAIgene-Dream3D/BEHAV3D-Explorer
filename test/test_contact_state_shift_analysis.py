@@ -24,7 +24,7 @@ from behav3d.analysis.behavior.state.visualization.plots.contact_state_shift_rep
 
 _N_TIMEPOINTS = 40
 _MIN_BOUT_LENGTH = 5
-_STATE_COL = "behavioral_state"
+_STATE_COL = "full_behavioral_state"
 
 # (TrackID, contact_group, bout_start) — bout occupies [bout_start, bout_start + _MIN_BOUT_LENGTH - 1]
 # for "contact" tracks; "no_contact" tracks never have any contact timepoints.
@@ -259,6 +259,62 @@ def test_state_shift_features_and_report(tmp_path):
         (stacked_csv["contact_group"] == "contact") & (stacked_csv["period"] == BEFORE_LABEL)
     ].set_index("state")
     assert contact_before.loc["static", "proportion"] == pytest.approx(1.0)
+
+
+def test_state_shift_report_groups_by_extra_condition_column(tmp_path):
+    """`extra_group_cols` (metadata columns merged into `adata_states.obs`, e.g. by the widget's
+    "Group per page" multi-select) must write one 2x2-layout page per unique combination of their
+    values, labeled in its title, and tag the CSV rows with those columns — restricted to the
+    tracks in that combination rather than pooling the whole dataset into a single page."""
+    pypdf = pytest.importorskip("pypdf")
+
+    conditions = {"sample_1": "control", "sample_2": "treated"}
+    rows_time, rows_states = [], []
+    for sample_name in conditions:
+        for track_id, group, bout_start in _TRACK_SPECS:
+            contact = np.zeros(_N_TIMEPOINTS, dtype=int)
+            if group == "contact":
+                bout_end = bout_start + _MIN_BOUT_LENGTH - 1
+                contact[bout_start : bout_end + 1] = 1
+            for t in range(_N_TIMEPOINTS):
+                rows_time.append({
+                    "sample_name": sample_name, "TrackID": track_id, "position_t": t,
+                    "macro_contact": int(contact[t]),
+                })
+                state = _state_for_contact_track(t, bout_start) if group == "contact" else "static"
+                rows_states.append({
+                    "sample_name": sample_name, "TrackID": track_id, "position_t": t,
+                    _STATE_COL: state, "condition": conditions[sample_name],
+                })
+    df_timepoints = pd.DataFrame(rows_time)
+    obs = pd.DataFrame(rows_states)
+    obs.index = [str(i) for i in range(len(obs))]
+    adata_states = ad.AnnData(X=np.zeros((len(obs), 1)), obs=obs)
+
+    result = save_state_contact_shift_report(
+        df_timepoints, adata_states, tmp_path,
+        contact_col="macro_contact",
+        min_bout_length=_MIN_BOUT_LENGTH,
+        state_col=_STATE_COL,
+        window_mode="fixed",
+        fixed_window_length=5,
+        min_window_timepoints=3,
+        extra_group_cols=["condition"],
+        verbose=False,
+    )
+
+    reader = pypdf.PdfReader(result["pdf_path"])
+    assert len(reader.pages) == 2
+    page_texts = [page.extract_text() or "" for page in reader.pages]
+    assert any("condition=control" in text for text in page_texts)
+    assert any("condition=treated" in text for text in page_texts)
+
+    diff_csv = pd.read_csv(result["diff_bars_csv"])
+    assert set(diff_csv["condition"].unique()) == {"control", "treated"}
+    stacked_csv = pd.read_csv(result["stacked_composition_csv"])
+    assert set(stacked_csv["condition"].unique()) == {"control", "treated"}
+    windows_csv = pd.read_csv(result["track_windows_csv"])
+    assert set(windows_csv["condition"].unique()) == {"control", "treated"}
 
 
 def test_track_missing_from_csv_raises():
