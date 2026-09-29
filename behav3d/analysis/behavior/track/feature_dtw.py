@@ -10,6 +10,7 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
 from behav3d.analysis.behavior.general.umap import fit_umap
+from behav3d.analysis.behavior.track.utils import _resolve_track_paths
 from behav3d.analysis.behavior.track.visualization.plots.feature_dtw import (
     plot_cluster_percentage_bars,
     plot_clustering_feature_heatmap,
@@ -20,7 +21,7 @@ from behav3d.analysis.behavior.utils import (
     _handle_nan_in_distance_matrix,
     _save_adata_obs_csv,
 )
-from behav3d.core.utils import expand_column_patterns, format_time
+from behav3d.core.utils import expand_column_patterns, format_time, rmtree_ignore_missing
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +452,7 @@ def cluster_umap(
     cluster_percentage_group_by=None,
     plot_results=True,
     output_subdir_name="results",
+    clear_outputs=True,
     plot_feature_cols=None,
 ):
     assert config is not None or all(
@@ -467,6 +469,9 @@ def cluster_umap(
     results_outdir = Path(analysis_outdir, str(output_subdir_name).strip() or "results")
     analysis_outdir.mkdir(parents=True, exist_ok=True)
     feature_outdir.mkdir(parents=True, exist_ok=True)
+    if bool(clear_outputs) and results_outdir.exists():
+        rmtree_ignore_missing(results_outdir)
+        print(f"- Cleared previous results directory: {results_outdir}")
     results_outdir.mkdir(parents=True, exist_ok=True)
 
     if df_tracks is None:
@@ -619,6 +624,7 @@ def run_tcell_analysis(
     plot_results=True,
     seed=42,
     output_subdir_name="results",
+    clear_outputs=True,
     feature_scaling_preset=None,
     min_track_length=None,
     max_track_length=None,
@@ -726,6 +732,7 @@ def run_tcell_analysis(
         plot_results=plot_results,
         random_state=seed,
         output_subdir_name=output_subdir_name,
+        clear_outputs=clear_outputs,
         plot_feature_cols=plot_feature_cols,
     )
     end_time = time.time()
@@ -739,11 +746,7 @@ def run_tcell_analysis(
 # ---------------------------------------------------------------------------
 
 def _feature_dtw_outdir(output_dir, cell_type):
-    return (
-        Path(output_dir).expanduser()
-        / "analysis" / str(cell_type)
-        / "behavorial_trajectories" / "original_behav3d"
-    )
+    return _resolve_track_paths(output_dir, cell_type).original_behav3d_outfolder
 
 
 def _feature_dtw_raw_outdir(output_dir, cell_type):
@@ -907,11 +910,11 @@ def _save_feature_dtw_quality_control(
 ):
     """Regenerate the original-BEHAV3D QC plots ("Create diagnostics").
 
-    Reads the raw clustered UMAP CSV (behavorial_trajectories/original_behav3d/raw/)
+    Reads the raw clustered UMAP CSV (behavioral_trajectories/original_behav3d/raw/)
     and writes the refreshed plots — reflecting any cluster renaming — directly
-    into behavorial_trajectories/original_behav3d/ (unless `outfolder` overrides it).
+    into behavioral_trajectories/original_behav3d/ (unless `outfolder` overrides it).
     The cluster-percentage (proportion) plot is written into `proportions_outfolder`
-    when given (e.g. the shared behavorial_trajectories/behavior_proportions folder),
+    when given (e.g. the shared behavioral_trajectories/behavior_proportions folder),
     falling back to `qc_outdir` otherwise.
 
     Known limitation: colors/order come from this pipeline's standalone YAML mapping
@@ -993,7 +996,7 @@ def _create_original_behav3d_adata(output_dir, cell_type):
     way it works with the dtaidistance method.
 
     The file is saved to:
-        behavorial_trajectories/BEHAV3D_{cell_type}_behavioral_trajectories.h5ad
+        behavioral_trajectories/BEHAV3D_{cell_type}_behavioral_trajectories.h5ad
     """
     import anndata as ad
     from behav3d.analysis.behavior.track.utils import get_dtaidistance_track_trajectories_filename

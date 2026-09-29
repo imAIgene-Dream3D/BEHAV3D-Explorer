@@ -27,6 +27,10 @@ if (_ROOT_DIR / ".behav3d_dev").exists():
 def run_napari_payload():
     """Import napari, create viewer, add BEHAV3D widget, and start event loop."""
     print("Starting BEHAV3D Napari Plugin...")
+    # On a hard native crash (e.g. a Qt access violation), print the Python stack
+    # of every thread instead of exiting with just an error code.
+    import faulthandler
+    faulthandler.enable(all_threads=True)
     # Suppress PyOpenCL compiler cache warnings
     os.environ.setdefault('PYOPENCL_NO_CACHE', '1')
     # os.environ.setdefault('PYOPENCL_COMPILER_OUTPUT', '0')
@@ -43,11 +47,29 @@ def run_napari_payload():
     if os.environ.get("BEHAV3D_DEV_MODE") == "1":
         window_title += " [DEV MODE]"
     viewer = napari.Viewer(title=window_title)
-    
+
+    # napari's vispy Qt canvas backend installs its own qInstallMessageHandler
+    # as a side effect of being imported, which happens during Viewer()
+    # construction above — *after* behav3d.napari's own package-import-time
+    # install, silently taking over. Re-install now that vispy has definitely
+    # already loaded, so crash diagnostics stay the active handler for the
+    # actual running session (see behav3d/napari/_crash_diagnostics.py).
+    from behav3d.napari._crash_diagnostics import install_crash_diagnostics
+    install_crash_diagnostics()
+
     # Add our dock widget
     widget = BEHAV3DWidget(viewer)
-    viewer.window.add_dock_widget(widget, name="BEHAV3D Explorer", area="right")
-    
+    dock_widget = viewer.window.add_dock_widget(widget, name="BEHAV3D Explorer", area="right")
+    # Closing just this dock (its native 'x') doesn't call .close() on
+    # `widget` or destroy it — it only reparents/deletes the dock wrapper —
+    # but destroyed() still fires once that teardown actually happens, so
+    # this is a real (if secondary) point to sweep for background threads
+    # that would otherwise be left racing app quit later. See
+    # BEHAV3DWidget._shutdown_background_operations for the primary
+    # (aboutToQuit-driven) sweep.
+    if dock_widget is not None:
+        dock_widget.destroyed.connect(widget._shutdown_background_operations)
+
     # Start the event loop
     napari.run()
 
@@ -170,14 +192,45 @@ def run_launcher():
     print(f"  Command: {cmd_display}")
     print()
 
+    from datetime import datetime
+
+    log_dir = _ROOT_DIR / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"launch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    print(f"  Full output also saved to: {log_path}")
+    print()
+
+    # Popen (not run()) so output can be streamed to the terminal live *and*
+    # saved to a file — subprocess.run only gives us the inherited terminal,
+    # which is gone by the time a crash needs investigating.
+    returncode = 1
     try:
-        subprocess.run(cmd, shell=use_shell, check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"\nERROR: napari exited with error code {e.returncode}")
-        input("Press Enter to close...")
-        sys.exit(e.returncode)
+        with open(log_path, "ab", buffering=0) as log_f:
+            proc = subprocess.Popen(
+                cmd, shell=use_shell,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                bufsize=0,
+            )
+            # Raw byte passthrough — no text mode. text=True's universal-newline
+            # translation treats a bare '\r' as a line break, which shreds a
+            # tqdm progress bar's carriage-return-based in-place redraws into
+            # one emitted line per refresh (visible as the bar being "pasted"
+            # repeatedly instead of updating). Copying bytes untouched keeps
+            # '\r' intact so the terminal redraws in place, same as running
+            # the payload directly (without this relay) would look.
+            for chunk in iter(lambda: proc.stdout.read(4096), b""):
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.buffer.flush()
+                log_f.write(chunk)
+            returncode = proc.wait()
     except KeyboardInterrupt:
-        pass
+        return
+
+    if returncode != 0:
+        print(f"\nERROR: napari exited with error code {returncode}")
+        print(f"Full output saved to: {log_path}")
+        input("Press Enter to close...")
+        sys.exit(returncode)
 
 
 def main():

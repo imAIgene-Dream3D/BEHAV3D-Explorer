@@ -6,14 +6,20 @@ by state classification (intrinsic / full binary-group) and track
 classification steps.  Three modes share a single implementation:
 
 - ``"intrinsic"``  — rename primary dynamic state clusters
-                     (obs column ``intrinsic_behavioral_cluster``)
+                     (obs column ``hmm_intrinsic_behavioral_state``)
 - ``"full"``       — rename clusters produced by crossing the intrinsic
                      state with binary group values, e.g. organoid contact
-                     (obs column ``full_behavioral_cluster``).
+                     (obs column ``full_behavioral_state``).
                      Adds checkbox selection + combine-to-one-label feature.
 - ``"track"``      — rename DTW trajectory clusters
                      (obs column ``behavioral_trajectory_cluster`` or
                      ``dtaidistance_cluster``, whichever is present)
+
+Files written before intrinsic/full columns were consolidated (legacy
+``intrinsic_behavioral_cluster`` / ``full_behavioral_cluster`` / the old
+value of ``FULL_STATE_COL``, ``"behavioral_state"``) are still read via a
+fallback (see ``_read_state_col()``); saving upgrades them to the
+canonical column name.
 
 All modes:
   • Save   → applies ``relabel_cluster_ids()`` in-place on the adata,
@@ -26,6 +32,7 @@ import traceback
 from pathlib import Path
 from typing import Dict, Optional
 
+import pandas as pd
 from qtpy.QtCore import Qt, QMimeData, Signal
 from qtpy.QtGui import QColor, QDrag
 from qtpy.QtWidgets import (
@@ -48,6 +55,14 @@ from qtpy.QtWidgets import (
 )
 
 from behav3d.analysis.behavior.utils import _mixed_label_sort_key
+from behav3d.analysis.behavior.state.classification import (
+    FULL_STATE_COL,
+    HMM_INTRINSIC_RAW_STATE_COL,
+    INTRINSIC_STATE_COL,
+    _format_hmm_raw_state_series_for_key,
+    resolve_full_state_col,
+    resolve_intrinsic_state_col,
+)
 from behav3d.analysis.behavior.state.utils import (
     _apply_state_order,
     _get_classification_state_order,
@@ -192,8 +207,8 @@ class RenameClusterDialog(QDialog):
         ),
     }
     _OBS_COLS = {
-        "intrinsic": "intrinsic_behavioral_cluster",
-        "full":      "full_behavioral_cluster",
+        "intrinsic": INTRINSIC_STATE_COL,
+        "full":      FULL_STATE_COL,
     }
 
     def __init__(
@@ -521,9 +536,23 @@ class RenameClusterDialog(QDialog):
         self._rows_layout.addItem(stretch_item)
 
     def _state_col(self) -> Optional[str]:
+        """Column to WRITE renamed labels to — always the canonical name."""
         if self._mode == "track":
             return _track_cluster_col(self._adata)
         return self._OBS_COLS.get(self._mode)
+
+    def _read_state_col(self) -> Optional[str]:
+        """Column to READ current labels from — falls back to a legacy
+        alias for files written before intrinsic/full columns were
+        consolidated. Writing always targets the canonical name
+        (``_state_col()``), so an old file self-upgrades on save."""
+        if self._mode == "track":
+            return self._state_col()
+        if self._mode == "intrinsic":
+            return resolve_intrinsic_state_col(self._adata)
+        if self._mode == "full":
+            return resolve_full_state_col(self._adata)
+        return None
 
     def _apply_saved_colors_to_buttons(self, clusters: list):
         from behav3d.analysis.behavior.state.utils import (
@@ -532,7 +561,7 @@ class RenameClusterDialog(QDialog):
         )
         if self._adata is None:
             return
-        state_col = self._state_col()
+        state_col = self._read_state_col()
         if state_col is None:
             return
         saved = _get_classification_state_colors(self._adata, state_col)
@@ -544,7 +573,7 @@ class RenameClusterDialog(QDialog):
     def _get_cluster_names(self) -> list:
         if self._adata is None:
             return []
-        col = self._state_col()
+        col = self._read_state_col()
         if col is None or col not in self._adata.obs.columns:
             return []
         base_order = sorted(
@@ -622,50 +651,57 @@ class RenameClusterDialog(QDialog):
             _set_classification_state_colors,
         )
 
-        col = self._state_col()
-        if col is None or col not in self._adata.obs.columns:
+        read_col = self._read_state_col()
+        write_col = self._state_col()
+        if read_col is None or write_col is None or read_col not in self._adata.obs.columns:
             return  # nothing to do
 
-        # Save colors first (remap: color follows the renamed label)
+        # Save colors first (remap: color follows the renamed label). Always
+        # saved under the canonical column so old files' colors migrate too.
         new_colors = {}
         for old_name, btn in self._color_buttons.items():
             new_label = mapping.get(old_name, old_name)
             new_colors[new_label] = _coerce_hex_color(self._get_button_color(btn))
         if new_colors:
-            _set_classification_state_colors(self._adata, col, new_colors)
+            _set_classification_state_colors(self._adata, write_col, new_colors)
 
         # Save the user-defined display order (remapped through the rename)
         new_order = list(dict.fromkeys(mapping.get(n, n) for n in self._row_order))
-        _set_classification_state_order(self._adata, col, new_order)
+        _set_classification_state_order(self._adata, write_col, new_order)
 
-        # Only apply renaming if there are actual label changes
-        existing = set(self._adata.obs[col].astype(str).unique())
+        # Apply renaming whenever labels actually changed, or when reading
+        # from a legacy column that must be migrated into the canonical one
+        # even if no label text changed (so the file self-upgrades on save).
+        existing = set(self._adata.obs[read_col].astype(str).unique())
         changed = any(
             str(mapping.get(lbl, lbl)) != str(lbl) for lbl in existing
         )
-        if changed:
+        if changed or read_col != write_col:
             relabel_cluster_ids(
                 adata=self._adata,
                 mapping=mapping,
-                cluster_key=col,
+                cluster_key=read_col,
+                new_key=write_col,
                 overwrite_original=True,
                 keep_unmapped=True,
                 categories=new_order,
             )
 
-        # Rebuild full_behavioral_cluster so its prefix reflects the renamed intrinsic labels
-        if self._mode == "intrinsic" and "full_behavioral_cluster" in self._adata.obs.columns:
+        # Rebuild the full state column so its prefix reflects the renamed intrinsic labels
+        if self._mode == "intrinsic" and resolve_full_state_col(self._adata) is not None:
             from behav3d.analysis.behavior.state.utils import (
-                _rebuild_full_behavioral_cluster_from_intrinsic,
+                _rebuild_full_behavioral_state_from_intrinsic,
             )
             import copy
             clustering_meta = self._adata.uns.get("clustering", {})
             binary_cols = clustering_meta.get("binary_cols_to_merge", [])
             bgc = copy.deepcopy(clustering_meta.get("binary_group_constraints", None))
             enforce = isinstance(bgc, dict) and "forbidden_binary_combinations" in bgc
-            _rebuild_full_behavioral_cluster_from_intrinsic(
+            _rebuild_full_behavioral_state_from_intrinsic(
                 self._adata,
                 binary_cols_to_merge=binary_cols,
+                intrinsic_col=INTRINSIC_STATE_COL,
+                full_state_col=FULL_STATE_COL,
                 binary_group_constraints=bgc,
                 enforce_binary_group_constraints=enforce,
             )
@@ -687,10 +723,11 @@ class RenameClusterDialog(QDialog):
         if self._adata is None:
             return False
         if self._mode == "intrinsic":
-            from behav3d.analysis.behavior.state.classification import INTRINSIC_STATE_COL
-            return INTRINSIC_STATE_COL in self._adata.obs.columns
+            # Reset re-derives from the raw (never renamed) HMM output, not
+            # from INTRINSIC_STATE_COL itself — see _reset_intrinsic().
+            return HMM_INTRINSIC_RAW_STATE_COL in self._adata.obs.columns
         if self._mode == "full":
-            return "intrinsic_behavioral_cluster" in self._adata.obs.columns
+            return resolve_intrinsic_state_col(self._adata) is not None
         col = self._state_col()
         return bool(col) and f"{col}_raw" in self._adata.obs.columns
 
@@ -746,22 +783,27 @@ class RenameClusterDialog(QDialog):
         self._persist_adata()
 
     def _reset_intrinsic(self):
-        from behav3d.analysis.behavior.state.classification import INTRINSIC_STATE_COL
         from behav3d.analysis.behavior.state.utils import _set_classification_state_colors
 
-        col = "intrinsic_behavioral_cluster"
-        if INTRINSIC_STATE_COL not in self._adata.obs.columns:
-            raise ValueError(f"Raw column '{INTRINSIC_STATE_COL}' not found; cannot reset.")
+        if HMM_INTRINSIC_RAW_STATE_COL not in self._adata.obs.columns:
+            raise ValueError(
+                f"Raw column '{HMM_INTRINSIC_RAW_STATE_COL}' not found; cannot reset."
+            )
 
-        self._adata.obs[col] = (
-            self._adata.obs[INTRINSIC_STATE_COL].astype(str).astype("category")
+        # Re-derive from the raw, never-renamed HMM output — matches how
+        # INTRINSIC_STATE_COL is populated on a fresh clustering run.
+        self._adata.obs[INTRINSIC_STATE_COL] = pd.Categorical(
+            _format_hmm_raw_state_series_for_key(
+                self._adata.obs[HMM_INTRINSIC_RAW_STATE_COL],
+                label=HMM_INTRINSIC_RAW_STATE_COL,
+            )
         )
-        _set_classification_state_order(self._adata, col, [])
-        _set_classification_state_colors(self._adata, col, {})
+        _set_classification_state_order(self._adata, INTRINSIC_STATE_COL, [])
+        _set_classification_state_colors(self._adata, INTRINSIC_STATE_COL, {})
 
-        if "full_behavioral_cluster" in self._adata.obs.columns:
+        if resolve_full_state_col(self._adata) is not None:
             from behav3d.analysis.behavior.state.utils import (
-                _rebuild_full_behavioral_cluster_from_intrinsic,
+                _rebuild_full_behavioral_state_from_intrinsic,
             )
             import copy
 
@@ -769,38 +811,42 @@ class RenameClusterDialog(QDialog):
             binary_cols = clustering_meta.get("binary_cols_to_merge", [])
             bgc = copy.deepcopy(clustering_meta.get("binary_group_constraints", None))
             enforce = isinstance(bgc, dict) and "forbidden_binary_combinations" in bgc
-            _rebuild_full_behavioral_cluster_from_intrinsic(
+            _rebuild_full_behavioral_state_from_intrinsic(
                 self._adata,
                 binary_cols_to_merge=binary_cols,
+                intrinsic_col=INTRINSIC_STATE_COL,
+                full_state_col=FULL_STATE_COL,
                 binary_group_constraints=bgc,
                 enforce_binary_group_constraints=enforce,
             )
-            _set_classification_state_order(self._adata, "full_behavioral_cluster", [])
-            _set_classification_state_colors(self._adata, "full_behavioral_cluster", {})
+            _set_classification_state_order(self._adata, FULL_STATE_COL, [])
+            _set_classification_state_colors(self._adata, FULL_STATE_COL, {})
 
     def _reset_full(self):
         from behav3d.analysis.behavior.state.utils import (
-            _rebuild_full_behavioral_cluster_from_intrinsic,
+            _rebuild_full_behavioral_state_from_intrinsic,
             _set_classification_state_colors,
         )
         import copy
 
-        intrinsic_col = "intrinsic_behavioral_cluster"
-        if intrinsic_col not in self._adata.obs.columns:
-            raise ValueError(f"'{intrinsic_col}' not found; cannot rebuild full clusters.")
+        intrinsic_col = resolve_intrinsic_state_col(self._adata)
+        if intrinsic_col is None:
+            raise ValueError(f"'{INTRINSIC_STATE_COL}' not found; cannot rebuild full clusters.")
 
         clustering_meta = self._adata.uns.get("clustering", {})
         binary_cols = clustering_meta.get("binary_cols_to_merge", [])
         bgc = copy.deepcopy(clustering_meta.get("binary_group_constraints", None))
         enforce = isinstance(bgc, dict) and "forbidden_binary_combinations" in bgc
-        _rebuild_full_behavioral_cluster_from_intrinsic(
+        _rebuild_full_behavioral_state_from_intrinsic(
             self._adata,
             binary_cols_to_merge=binary_cols,
+            intrinsic_col=intrinsic_col,
+            full_state_col=FULL_STATE_COL,
             binary_group_constraints=bgc,
             enforce_binary_group_constraints=enforce,
         )
-        _set_classification_state_order(self._adata, "full_behavioral_cluster", [])
-        _set_classification_state_colors(self._adata, "full_behavioral_cluster", {})
+        _set_classification_state_order(self._adata, FULL_STATE_COL, [])
+        _set_classification_state_colors(self._adata, FULL_STATE_COL, {})
 
     def _reset_track(self):
         from behav3d.analysis.behavior.state.utils import _set_classification_state_colors

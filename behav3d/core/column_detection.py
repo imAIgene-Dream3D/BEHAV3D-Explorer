@@ -45,13 +45,19 @@ def normalize_binary_value(value, tol=1e-9):
     return None
 
 
-def detect_binary_columns_from_csv(csv_path, cols, chunksize=50000):
+def detect_binary_columns_from_csv(csv_path, cols, chunksize=50000, cancel_check=None):
     """Value-based binary-column detection over the *full* CSV.
 
     A column is binary only if every non-NA value normalizes (via
     :func:`normalize_binary_value`) to ``{0, 1}``. This replaces fragile
     dtype sniffing over a small row sample, which mis-classifies numeric
     columns as binary whenever the sampled rows happen to be NaN/blank.
+
+    ``cancel_check``, when given, is a zero-arg callable polled once per
+    chunk; when it returns true the scan stops early and returns whatever
+    was classified so far. Lets a caller running this on a background
+    thread (see ``behav3d.napari._background_runner.BackgroundOperation``)
+    interrupt a long scan instead of blocking teardown indefinitely.
     """
     if csv_path is None or len(cols) == 0:
         return []
@@ -59,6 +65,8 @@ def detect_binary_columns_from_csv(csv_path, cols, chunksize=50000):
     states = {str(c): {"seen": set(), "invalid": False} for c in cols}
     try:
         for chunk in pd.read_csv(csv_path, usecols=cols, chunksize=chunksize, low_memory=False):
+            if cancel_check is not None and cancel_check():
+                break
             for col in cols:
                 st = states[str(col)]
                 if st["invalid"]:
@@ -88,7 +96,7 @@ def detect_binary_columns_from_csv(csv_path, cols, chunksize=50000):
     )
 
 
-def detect_non_numeric_columns_from_csv(csv_path, cols, chunksize=50000):
+def detect_non_numeric_columns_from_csv(csv_path, cols, chunksize=50000, cancel_check=None):
     """Value-based detection of columns unsuitable as continuous HMM features.
 
     A column is flagged if any non-NA value fails to parse as a finite float --
@@ -100,6 +108,10 @@ def detect_non_numeric_columns_from_csv(csv_path, cols, chunksize=50000):
     strings -- crashes with "Can't implicitly convert non-string objects to
     strings" the moment it hits the actual float values. These columns must be
     excluded before they are ever offered as selectable timepoint features.
+
+    ``cancel_check``, when given, is a zero-arg callable polled once per
+    chunk; when it returns true the scan stops early and returns whatever
+    was classified so far (see ``detect_binary_columns_from_csv``).
     """
     if csv_path is None or len(cols) == 0:
         return []
@@ -107,6 +119,8 @@ def detect_non_numeric_columns_from_csv(csv_path, cols, chunksize=50000):
     invalid = {str(c): False for c in cols}
     try:
         for chunk in pd.read_csv(csv_path, usecols=cols, chunksize=chunksize, low_memory=False):
+            if cancel_check is not None and cancel_check():
+                break
             for col in cols:
                 key = str(col)
                 if invalid[key]:

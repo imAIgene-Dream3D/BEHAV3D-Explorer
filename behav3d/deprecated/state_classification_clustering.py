@@ -5,7 +5,8 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 from anndata import AnnData
-from behav3d.analysis.behavior.state.legacy_clustering import *
+from behav3d.analysis.behavior.state.utils import build_identity_cluster_mapping
+from behav3d.deprecated.analysis.clustering.state_classifier_apply import *
 from behav3d.core.utils import rmtree_ignore_missing
 
 def rename_intrinsic_behavioral_clusters(

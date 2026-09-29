@@ -726,7 +726,7 @@ def run_apoc_segmentation(
                             prob_map = np.asarray(
                                 prob_clf.predict(image=imgs_to_pass)
                             ).astype(np.float32)
-                            if _diag: print(f"    ⏱ {ct} predict (prob): {time.time()-_t0:.2f}s  range=[{prob_map.min():.3f}, {prob_map.max():.3f}]")
+                            if _diag: tqdm.write(f"    ⏱ {ct} predict (prob): {time.time()-_t0:.2f}s  range=[{prob_map.min():.3f}, {prob_map.max():.3f}]")
 
                             _t0 = time.time()
                             mask_thr = float(_cfg_val(cfg, ct, "prob_mask_threshold", 0.5))
@@ -736,14 +736,14 @@ def run_apoc_segmentation(
                                 opening_nr_pixels=opening_nr_pixels,
                             ).astype(np.uint16)
                             zarr_masks[ct][t] = mask_out
-                            if _diag: print(f"    ⏱ {ct} mask threshold + opening + write: {time.time()-_t0:.2f}s")
+                            if _diag: tqdm.write(f"    ⏱ {ct} mask threshold + opening + write: {time.time()-_t0:.2f}s")
                         else:
                             mask_out = np.asarray(zarr_masks[ct][t])
                             prob_map = None
 
                         seed_thr = float(_cfg_val(cfg, ct, "prob_seed_threshold", 0.8))
                         segment_size_min = int(_cfg_val(cfg, ct, "segment_size_min", 10))
-                        if _diag: print(f"    ⚙ {ct} params: mask_thr={mask_thr if not only_segment else 'n/a'}, seed_thr={seed_thr}, min_size={segment_size_min}, opening_px={opening_nr_pixels}")
+                        if _diag: tqdm.write(f"    ⚙ {ct} params: mask_thr={mask_thr if not only_segment else 'n/a'}, seed_thr={seed_thr}, min_size={segment_size_min}, opening_px={opening_nr_pixels}")
 
                         if prob_map is not None:
                             _t0 = time.time()
@@ -775,16 +775,16 @@ def run_apoc_segmentation(
                                     for s in range(1, sub_result.max() + 1):
                                         next_id += 1
                                         segments[slc][sub_result == s] = next_id
-                            if _diag: print(f"    ⏱ {ct} per-component watershed: {time.time()-_t0:.2f}s ({n_comps} components, {n_split} split)")
+                            if _diag: tqdm.write(f"    ⏱ {ct} per-component watershed: {time.time()-_t0:.2f}s ({n_comps} components, {n_split} split)")
                         else:
                             segments = segment_mask(mask_out.astype(bool), edt_thr=seed_thr, segment_size_min=segment_size_min, use_dims=3, n_workers=1)
 
                         _t0 = time.time()
                         segments = segment_size_filter(segments, size_min=segment_size_min)
-                        if _diag: print(f"    ⏱ {ct} size_filter: {time.time()-_t0:.2f}s")
+                        if _diag: tqdm.write(f"    ⏱ {ct} size_filter: {time.time()-_t0:.2f}s")
                         _t0 = time.time()
                         segments = segment_2d_filter(segments)
-                        if _diag: print(f"    ⏱ {ct} 2d_filter: {time.time()-_t0:.2f}s")
+                        if _diag: tqdm.write(f"    ⏱ {ct} 2d_filter: {time.time()-_t0:.2f}s")
                         zarr_segs[ct][t] = np.asarray(segments).astype(np.uint16)
 
                     elif effective_strategy in {
@@ -812,7 +812,7 @@ def run_apoc_segmentation(
                         _raw_peak_dist = _cfg_val(cfg, ct, "peak_min_distance", 0)
                         peak_min_distance = None if (not _raw_peak_dist or float(_raw_peak_dist) <= 0) else float(_raw_peak_dist)
                         peak_min_ratio = float(_cfg_val(cfg, ct, "peak_min_ratio", 0.35))
-                        if _diag: print(f"    ⚙ {ct} params: edt_thr={edt_thr}, min_size={segment_size_min}, fill_holes={fill_holes}, opening_px={opening_nr_pixels}, peak_min_distance={peak_min_distance}, peak_min_ratio={peak_min_ratio}")
+                        if _diag: tqdm.write(f"    ⚙ {ct} params: edt_thr={edt_thr}, min_size={segment_size_min}, fill_holes={fill_holes}, opening_px={opening_nr_pixels}, peak_min_distance={peak_min_distance}, peak_min_ratio={peak_min_ratio}")
                         seg_refined = segment_mask(
                             proc_mask,
                             edt_thr=edt_thr,
@@ -833,7 +833,7 @@ def run_apoc_segmentation(
                     else:
                         # ── Default: Direct APOC (or unknown strategy) ────
                         if i == 0:
-                            print(f"    ⚙ {ct}: Direct APOC strategy — no postprocessing parameters applied")
+                            tqdm.write(f"    ⚙ {ct}: Direct APOC strategy — no postprocessing parameters applied")
                         if not only_segment:
                             seg_out = np.asarray(classifiers[ct].predict(image=imgs_to_pass)).astype(np.uint16)
                             mask_out = (seg_out > 0).astype(np.uint16)
@@ -842,7 +842,7 @@ def run_apoc_segmentation(
                             mask_out = np.asarray(zarr_masks[ct][t])
                             seg_out = mask_out
                             if t == 0:
-                                print(f"⚠️ Warning: 'Only resegment' selected but strategy is Direct APOC. Cannot tweak instance rules without EDT method. Resaving {ct} instances.")
+                                tqdm.write(f"⚠️ Warning: 'Only resegment' selected but strategy is Direct APOC. Cannot tweak instance rules without EDT method. Resaving {ct} instances.")
                         zarr_segs[ct][t] = seg_out
 
                     # Mark this timepoint done, per array, before moving on: the

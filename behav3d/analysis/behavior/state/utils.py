@@ -659,10 +659,11 @@ def _add_clean_binary_annotation_columns(df: pd.DataFrame, binary_cols: list[str
     return out
 
 
-def _rebuild_full_behavioral_cluster_from_intrinsic(
+def _rebuild_full_behavioral_state_from_intrinsic(
     adata,
     binary_cols_to_merge,
-    intrinsic_col="intrinsic_behavioral_cluster",
+    intrinsic_col="hmm_intrinsic_behavioral_state",
+    full_state_col="full_behavioral_state",
     binary_group_constraints=None,
     enforce_binary_group_constraints=False,
 ):
@@ -680,12 +681,52 @@ def _rebuild_full_behavioral_cluster_from_intrinsic(
         binary_group_constraints=binary_group_constraints,
         enforce_binary_group_constraints=bool(enforce_binary_group_constraints),
     ).astype("category")
-    full_behavioral_cluster = (
+    full_behavioral_state = (
         adata.obs["binary_group"].astype(str) + "_" + adata.obs["behavioral_clusterid"].astype(str)
     ).where(~missing_intrinsic_mask, pd.NA)
-    adata.obs["full_behavioral_cluster"] = full_behavioral_cluster.astype("category")
+    adata.obs[full_state_col] = full_behavioral_state.astype("category")
     adata.obs["behavioral_clusterid"] = adata.obs["behavioral_clusterid"].astype("category")
     return adata
+
+
+def _resolve_obs_column_with_legacy_fallback(adata, canonical_col, legacy_aliases=()):
+    """Return the first of [canonical_col, *legacy_aliases] present in adata.obs.columns, or None.
+
+    Lets read sites recognise files written before an obs column was renamed
+    or consolidated, without forcing a rewrite of the file on read.
+    """
+    if adata is None or not hasattr(adata, "obs"):
+        return None
+    for col in (canonical_col, *legacy_aliases):
+        if col in adata.obs.columns:
+            return col
+    return None
+
+
+def build_identity_cluster_mapping(
+    adata,
+    cluster_col="hmm_intrinsic_behavioral_state",
+):
+    """
+    Build an identity mapping dict from unique values in a cluster column.
+
+    Example:
+        {"dead": "dead", "scanner": "scanner", "static": "static"}
+    """
+    if not hasattr(adata, "obs"):
+        raise ValueError("adata must have an .obs attribute.")
+    if cluster_col not in adata.obs.columns:
+        raise ValueError(f"Missing '{cluster_col}' in adata.obs.")
+
+    labels = (
+        pd.Series(adata.obs[cluster_col])
+        .astype("string")
+        .dropna()
+        .unique()
+        .tolist()
+    )
+    labels = sorted([str(x) for x in labels], key=_mixed_label_sort_key)
+    return {label: label for label in labels}
 
 
 @dataclass(frozen=True)
@@ -709,15 +750,6 @@ class StatePaths:
     full_classifier_default_path: Path
     state_composition_outdir: Path
     state_transitions_outdir: Path
-
-
-def _resolve_state_outdir(output_dir, cell_type):
-    if cell_type is None or len(str(cell_type).strip()) == 0:
-        raise ValueError("cell_type is required.")
-    root = _resolve_output_dir(output_dir)
-    state_outdir = root / "analysis" / str(cell_type) / "behavioral_states"
-    state_outdir.mkdir(parents=True, exist_ok=True)
-    return state_outdir
 
 
 def _resolve_state_paths(output_dir, cell_type):

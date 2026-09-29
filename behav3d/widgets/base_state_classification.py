@@ -9,11 +9,13 @@ import scanpy as sc
 import yaml
 
 from behav3d.analysis.behavior.general import relabel_cluster_ids
-from behav3d.analysis.behavior.state.legacy_clustering import (
-    apply_state_classifiers_to_full_dataset,
-    build_identity_cluster_mapping,
-    load_state_classifier_artifact,
+from behav3d.analysis.behavior.state.classification import (
+    FULL_STATE_COL,
+    INTRINSIC_STATE_COL,
+    resolve_full_state_col,
+    resolve_intrinsic_state_col,
 )
+from behav3d.analysis.behavior.state.utils import build_identity_cluster_mapping
 from behav3d.analysis.behavior.state.visualization.backprojection import (
     show_behavioral_state_backprojection,
 )
@@ -29,7 +31,6 @@ from behav3d.core.metadata import (
 )
 from behav3d.core.utils import expand_column_patterns
 from behav3d.widgets.utils import (
-    PathPicker,
     behav3d_calculated_features,
     excluded_non_behavior_columns,
     spinning_loader,
@@ -138,8 +139,6 @@ class BaseStateClassificationPanel:
 
         self.cell_type_dd.observe(self._on_cell_type_changed, names="value")
         self.refresh_btn.on_click(self._on_refresh_clicked)
-        self.apply_full_pkl_picker.text.observe(self._on_apply_path_changed, names="value")
-        self.apply_intrinsic_pkl_picker.text.observe(self._on_apply_path_changed, names="value")
         self._refresh_context()
 
     def _build_steps(self):
@@ -169,43 +168,12 @@ class BaseStateClassificationPanel:
         self._step_accordions[index].selected_index = 0
 
     def _build_apply_section(self):
-        self.apply_full_pkl_picker = PathPicker(
-            mode="file",
-            start_dir=self.output_dir or ".",
-            default="",
-            description="Full PKL",
-            placeholder="Path to full classification .pkl (required)",
-            width="100%",
-        )
-        self.apply_intrinsic_pkl_picker = PathPicker(
-            mode="file",
-            start_dir=self.output_dir or ".",
-            default="",
-            description="Intrinsic PKL",
-            placeholder="Path to intrinsic classification .pkl (optional)",
-            width="100%",
-        )
-        self.apply_full_pkl_picker.filter_pattern = "*.pkl"
-        self.apply_intrinsic_pkl_picker.filter_pattern = "*.pkl"
-        self.apply_default_paths_html = widgets.HTML("")
-        self.btn_apply = widgets.Button(
-            description="Apply classification",
-            button_style="success",
-            layout=widgets.Layout(width="170px"),
-        )
-        self.btn_apply.on_click(self._on_apply_clicked)
-        self.apply_spinner = widgets.HTML(value=spinning_loader)
-        self.apply_spinner.layout.display = "none"
-        self.out_apply = widgets.Output()
-        self.apply_section = widgets.VBox(
-            [
-                self.apply_full_pkl_picker,
-                self.apply_intrinsic_pkl_picker,
-                self.apply_default_paths_html,
-                widgets.HBox([self.btn_apply, self.apply_spinner]),
-                self.out_apply,
-            ]
-        )
+        # Subclasses (HMM) populate this with their own apply-existing-artifact controls.
+        self.apply_section = widgets.VBox([])
+
+    def _refresh_apply_default_paths(self):
+        """Hook for subclasses to prefill/refresh their apply-artifact picker defaults."""
+        pass
 
     def _build_clustering_section(self):
         self.feature_groups_status = widgets.HTML("<i>No features loaded yet.</i>")
@@ -606,41 +574,6 @@ class BaseStateClassificationPanel:
             f"BEHAV3D_{ct}_behavioral_states_modeldata.h5ad",
         )
 
-    def _default_classifier_paths(self, cell_type=None):
-        ct = self._current_cell_type() if cell_type is None else str(cell_type)
-        base = Path(self.output_dir, "analysis", ct, "behavioral_states", "processing")
-        return {
-            "intrinsic": base
-            / "intrinsic_behavioral_classification"
-            / f"intrinsic_state_classification_random_forest_{ct}.pkl",
-            "full": base
-            / "full_behavioral_classification"
-            / f"state_classification_random_forest_{ct}.pkl",
-        }
-
-    def _refresh_apply_default_paths(self):
-        if self.output_dir is None or str(self.output_dir).strip() == "":
-            self.apply_default_paths_html.value = ""
-            return
-
-        paths = self._default_classifier_paths()
-        full_path = paths["full"]
-        intrinsic_path = paths["intrinsic"]
-        full_exists = full_path.exists()
-        intrinsic_exists = intrinsic_path.exists()
-
-        if str(self.apply_full_pkl_picker.value).strip() == "" and full_exists:
-            self.apply_full_pkl_picker.value = str(full_path)
-        if str(self.apply_intrinsic_pkl_picker.value).strip() == "" and intrinsic_exists:
-            self.apply_intrinsic_pkl_picker.value = str(intrinsic_path)
-
-        if full_exists or intrinsic_exists:
-            self.apply_default_paths_html.value = (
-                "<b style='color:#080;'>Default classifier path(s) detected and prefilled.</b>"
-            )
-        else:
-            self.apply_default_paths_html.value = ""
-
     def _resolve_track_features_csv(self, cell_type=None):
         ct = self._current_cell_type() if cell_type is None else str(cell_type)
         base = Path(self.output_dir, "analysis", ct, "track_features")
@@ -734,10 +667,6 @@ class BaseStateClassificationPanel:
         )
         self.random_state.value = int(cfg.get("random_state", self.random_state.value))
         self.reuse_prepared_dataset.value = bool(cfg.get("reuse_prepared_dataset", self.reuse_prepared_dataset.value))
-        self.apply_full_pkl_picker.value = str(cfg.get("apply_full_classifier_path", self.apply_full_pkl_picker.value))
-        self.apply_intrinsic_pkl_picker.value = str(
-            cfg.get("apply_intrinsic_classifier_path", self.apply_intrinsic_pkl_picker.value)
-        )
         saved_desc = cfg.get("descriptive_features", None)
         if isinstance(saved_desc, (list, tuple)) and len(saved_desc) > 0:
             for cb in self.describe_window_feature_cbs.values():
@@ -771,8 +700,6 @@ class BaseStateClassificationPanel:
                 "incomplete_window_policy": str(self.incomplete_window_policy.value),
                 "random_state": int(self.random_state.value),
                 "reuse_prepared_dataset": bool(self.reuse_prepared_dataset.value),
-                "apply_full_classifier_path": str(self.apply_full_pkl_picker.value),
-                "apply_intrinsic_classifier_path": str(self.apply_intrinsic_pkl_picker.value),
                 "descriptive_features": list(self._selected_descriptive_features()),
                 "selected_features": self._selected_feature_columns(),
                 "binary_features_to_group": self._selected_binary_columns(),
@@ -992,7 +919,8 @@ class BaseStateClassificationPanel:
 
     def _rebuild_intrinsic_rename_rows(self):
         self._intrinsic_name_boxes = {}
-        if self.model_adata is None or "intrinsic_behavioral_cluster" not in self.model_adata.obs.columns:
+        intrinsic_col = resolve_intrinsic_state_col(self.model_adata)
+        if intrinsic_col is None:
             self.rename_intrinsic_rows.children = []
             self.rename_intrinsic_status.value = "<i>Run clustering or load existing model first.</i>"
             self.btn_rename_intrinsic.disabled = True
@@ -1000,7 +928,7 @@ class BaseStateClassificationPanel:
 
         mapping = build_identity_cluster_mapping(
             self.model_adata,
-            cluster_col="intrinsic_behavioral_cluster",
+            cluster_col=intrinsic_col,
         )
         rows = []
         for old_name in mapping.keys():
@@ -1020,7 +948,8 @@ class BaseStateClassificationPanel:
         self._full_select_boxes = {}
         self._full_name_boxes = {}
         self.full_combine_name.value = ""
-        if self.model_adata is None or "full_behavioral_cluster" not in self.model_adata.obs.columns:
+        full_col = resolve_full_state_col(self.model_adata)
+        if full_col is None:
             self.rename_full_rows.children = []
             self.rename_full_status.value = "<i>Run primary dynamic state cluster rename first.</i>"
             self.btn_rename_full.disabled = True
@@ -1030,7 +959,7 @@ class BaseStateClassificationPanel:
 
         mapping = build_identity_cluster_mapping(
             self.model_adata,
-            cluster_col="full_behavioral_cluster",
+            cluster_col=full_col,
         )
         rows = []
         for old_name in mapping.keys():
@@ -1060,12 +989,10 @@ class BaseStateClassificationPanel:
         has_cell_type = self._current_cell_type() != ""
         has_features = len(self._selected_feature_columns()) > 0
         has_model = self.model_adata is not None
-        has_intrinsic = has_model and ("intrinsic_behavioral_cluster" in self.model_adata.obs.columns)
-        has_full = has_model and ("full_behavioral_cluster" in self.model_adata.obs.columns)
-        has_full_classifier_input = str(self.apply_full_pkl_picker.value).strip() != ""
+        has_intrinsic = has_model and resolve_intrinsic_state_col(self.model_adata) is not None
+        has_full = has_model and resolve_full_state_col(self.model_adata) is not None
         has_backproj_sample = self.backproj_sample_dd.value is not None and len(str(self.backproj_sample_dd.value)) > 0
 
-        self.btn_apply.disabled = not (has_cell_type and has_full_classifier_input)
         self.btn_cluster.disabled = not (has_cell_type and has_features)
         self.btn_rename_intrinsic.disabled = not has_intrinsic
         self.btn_rename_full.disabled = not has_full
@@ -1081,10 +1008,6 @@ class BaseStateClassificationPanel:
     def _refresh_context(self):
         self.output_dir = str(Path(getattr(self.metadata_loader, "output_dir", "")).expanduser())
         self.output_dir_html.value = f"<b>Output dir:</b> {self.output_dir}"
-        if hasattr(self.apply_full_pkl_picker, "_start_dir"):
-            self.apply_full_pkl_picker._start_dir = self.output_dir or "."
-        if hasattr(self.apply_intrinsic_pkl_picker, "_start_dir"):
-            self.apply_intrinsic_pkl_picker._start_dir = self.output_dir or "."
 
         # Refresh cell-type options from metadata/filesystem while preserving current selection.
         current_value = self._current_cell_type()
@@ -1147,7 +1070,7 @@ class BaseStateClassificationPanel:
                     sample_name=str(sample_name),
                     output_dir=self.output_dir,
                     cell_type=self._current_cell_type(),
-                    state_col="full_behavioral_cluster",
+                    state_col=FULL_STATE_COL,
                     auto_create_if_missing=True,
                     refresh_if_stale=True,
                     run=True,
@@ -1158,72 +1081,6 @@ class BaseStateClassificationPanel:
             finally:
                 self._set_busy(self.btn_open_backprojection, self.backprojection_spinner, busy=False)
                 self._refresh_enablement()
-
-    def _on_apply_clicked(self, _):
-        self._set_busy(self.btn_apply, self.apply_spinner, busy=True)
-        self.out_apply.clear_output()
-        with self.out_apply:
-            try:
-                self._persist_current_settings()
-                full_pkl_path = str(self.apply_full_pkl_picker.value).strip()
-                intrinsic_pkl_path = str(self.apply_intrinsic_pkl_picker.value).strip()
-                if full_pkl_path == "":
-                    raise ValueError("Please provide a full classification .pkl path.")
-                if not Path(full_pkl_path).exists():
-                    raise FileNotFoundError(f"Full classifier file not found: {full_pkl_path}")
-
-                full_artifact = load_state_classifier_artifact(full_pkl_path)
-                if not (isinstance(full_artifact, dict) and ("continuous_feature_cols" in full_artifact)):
-                    raise ValueError(
-                        "The supplied full classifier path is not a full-classifier artifact. "
-                        "Please provide the full classifier .pkl."
-                    )
-                intrinsic_artifact = None
-                if intrinsic_pkl_path != "":
-                    if not Path(intrinsic_pkl_path).exists():
-                        raise FileNotFoundError(f"Intrinsic classifier file not found: {intrinsic_pkl_path}")
-                    intrinsic_artifact = load_state_classifier_artifact(intrinsic_pkl_path)
-                    if isinstance(intrinsic_artifact, dict) and ("continuous_feature_cols" in intrinsic_artifact):
-                        raise ValueError(
-                            "The supplied intrinsic classifier path appears to be a full-classifier artifact. "
-                            "Provide an intrinsic classifier .pkl or leave intrinsic empty."
-                        )
-
-                ct = self._current_cell_type()
-                self.adata_full = apply_state_classifiers_to_full_dataset(
-                    output_dir=self.output_dir,
-                    cell_type=ct,
-                    label_classifier_artifact=intrinsic_artifact,
-                    full_label_classifier_artifact=full_artifact,
-                    combine_binary_with_continuous=False,
-                    verbose=True,
-                )
-
-                n_rows = int(self.adata_full.n_obs)
-                n_intrinsic = (
-                    int(self.adata_full.obs["intrinsic_behavioral_cluster"].astype(str).nunique())
-                    if "intrinsic_behavioral_cluster" in self.adata_full.obs.columns
-                    else 0
-                )
-                n_full = (
-                    int(self.adata_full.obs["full_behavioral_cluster"].astype(str).nunique())
-                    if "full_behavioral_cluster" in self.adata_full.obs.columns
-                    else 0
-                )
-                _winfo(
-                    "state-widget",
-                    (
-                        "Apply finished: "
-                        f"rows={n_rows}, intrinsic_clusters={n_intrinsic}, full_clusters={n_full}"
-                    ),
-                )
-            except Exception:
-                traceback.print_exc()
-            finally:
-                self._set_busy(self.btn_apply, self.apply_spinner, busy=False)
-                self._refresh_enablement()
-
-
 
     def _on_rename_full_clicked(self, _):
         self._set_busy(
@@ -1268,15 +1125,16 @@ class BaseStateClassificationPanel:
             new_s = str(new_name).strip()
             normalized_mapping[old_s] = new_s if new_s != "" else old_s
 
+        read_col = resolve_full_state_col(self.model_adata) or FULL_STATE_COL
         existing_labels = {
             str(x)
-            for x in self.model_adata.obs.get("full_behavioral_cluster", pd.Series(dtype="object")).astype(str)
+            for x in self.model_adata.obs.get(read_col, pd.Series(dtype="object")).astype(str)
         }
         has_changes = any(
             str(normalized_mapping.get(label, label)) != str(label)
             for label in existing_labels
         )
-        if not has_changes:
+        if not has_changes and read_col == FULL_STATE_COL:
             return {"changed": False, "relabel_s": 0.0, "save_s": 0.0, "rebuild_s": 0.0, "total_s": 0.0}
 
         t0 = perf_counter()
@@ -1284,7 +1142,8 @@ class BaseStateClassificationPanel:
         relabel_cluster_ids(
             adata=self.model_adata,
             mapping=normalized_mapping,
-            cluster_key="full_behavioral_cluster",
+            cluster_key=read_col,
+            new_key=FULL_STATE_COL,
             overwrite_original=True,
             keep_unmapped=True,
         )

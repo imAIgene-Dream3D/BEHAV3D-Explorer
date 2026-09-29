@@ -2798,6 +2798,28 @@ class ActiveKillingPanel(QWidget):
         )
         layout.addWidget(params_group)
 
+        # ── Advanced Configuration ───────────────────────────────────────────
+        adv_killing_section = CollapsibleSection("⚙ Advanced Configuration", expanded=False)
+        self.check_persistent_death_signal = QCheckBox("Persistent death signal (running max)")
+        self.check_persistent_death_signal.setChecked(
+            bool(self._saved_cfg.get("persistent_death_signal", True))
+        )
+        adv_killing_row = make_help_row(
+            self.check_persistent_death_signal,
+            "Persistent Death Signal",
+            "ON (default): each target's death signal is read as a running maximum\n"
+            "over its own track before measuring the increase used for the killing\n"
+            "decision -- e.g. raw values 0,10,20,200,150,100,200,200,250 are read as\n"
+            "0,10,20,200,200,200,200,200,250.\n\n"
+            "Segmentation is sometimes unstable: a target's dead-mask segment can be\n"
+            "included/excluded from frame to frame, making the raw death signal dip\n"
+            "and rise instead of monotonically increasing as the cell actually dies.\n"
+            "This prevents that flicker from being misread as the target un-dying.\n\n"
+            "OFF: use the raw, possibly non-monotonic signal as-is.",
+        )
+        adv_killing_section.addLayout(adv_killing_row)
+        layout.addWidget(adv_killing_section)
+
         # ── Viewer preview ─────────────────────────────────────────────────
         viewer_group = QGroupBox("Viewer Preview — Top Active Killers")
         viewer_form = QFormLayout(viewer_group)
@@ -3038,6 +3060,7 @@ class ActiveKillingPanel(QWidget):
         return {
             "observation_window": int(self.spin_obs_window.value()),
             "death_signal_column": self.death_signal_combo.currentText(),
+            "persistent_death_signal": bool(self.check_persistent_death_signal.isChecked()),
             "killing_threshold_multiplier": float(self.spin_threshold_mult.value()),
             # Persist the checkbox state alongside the value. ``_persist()``
             # merges this dict into the saved config, and the checkbox is
@@ -3090,6 +3113,25 @@ class ActiveKillingPanel(QWidget):
         self.immune_combo.blockSignals(False)
         self._validate()
 
+    def refresh_target_types(self, target_types: list):
+        """Update the target-type list when metadata is reloaded."""
+        previously_selected = {item.text() for item in self.target_list.selectedItems()}
+        self.target_types = list(target_types)
+        self.target_list.blockSignals(True)
+        self.target_list.clear()
+        if self.target_types:
+            self.target_list.addItems(self.target_types)
+            surviving = previously_selected & set(self.target_types)
+            for i in range(self.target_list.count()):
+                item = self.target_list.item(i)
+                item.setSelected(item.text() in surviving if surviving else True)
+            self.target_list.setEnabled(True)
+        else:
+            self.target_list.addItem("(no targets detected)")
+            self.target_list.setEnabled(False)
+        self.target_list.blockSignals(False)
+        self._validate()
+
     # ── Run ──────────────────────────────────────────────────────────────────
     def _on_run_clicked(self):
         """Run Active Killing Analysis in the background (indeterminate)."""
@@ -3114,6 +3156,7 @@ class ActiveKillingPanel(QWidget):
             f"\u25b6 Active Killing Analysis: {immune} vs {targets}  "
             f"(window={params['observation_window']}, "
             f"signal={params['death_signal_column']}, "
+            f"persistent_signal={params['persistent_death_signal']}, "
             f"multiplier={params['killing_threshold_multiplier']}, "
             f"contact_column={params['contact_column']})\u2026"
         )
@@ -3129,6 +3172,7 @@ class ActiveKillingPanel(QWidget):
                     target_cell_types=t_list,
                     observation_window=params["observation_window"],
                     death_signal_column=params["death_signal_column"],
+                    persistent_death_signal=params["persistent_death_signal"],
                     killing_threshold_multiplier=params["killing_threshold_multiplier"],
                     absolute_killing_threshold=params.get("absolute_killing_threshold"),
                     min_contact_duration=params["min_contact_duration"],
@@ -3344,6 +3388,7 @@ class ActiveKillingPanel(QWidget):
                 f"▶ Active Killing Analysis: {immune} vs {targets}  "
                 f"(window={params['observation_window']}, "
                 f"signal={params['death_signal_column']}, "
+                f"persistent_signal={params['persistent_death_signal']}, "
                 f"multiplier={params['killing_threshold_multiplier']}, "
                 f"contact_column={params['contact_column']})…"
             )
@@ -3359,6 +3404,7 @@ class ActiveKillingPanel(QWidget):
                     target_cell_types=t_list,
                     observation_window=params["observation_window"],
                     death_signal_column=params["death_signal_column"],
+                    persistent_death_signal=params["persistent_death_signal"],
                     killing_threshold_multiplier=params["killing_threshold_multiplier"],
                     absolute_killing_threshold=params.get("absolute_killing_threshold"),
                     min_contact_duration=params["min_contact_duration"],
@@ -3971,6 +4017,7 @@ class FeatureExtractionTab(QWidget):
                 self.active_killing_panel.metadata_loader = self.metadata_loader
                 self.active_killing_panel.viewer = self.viewer
                 self.active_killing_panel.refresh_immune_types(list(imm))
+                self.active_killing_panel.refresh_target_types(list(org) + list(oth))
             self.active_killing_panel.set_queue_callback(
                 self._queue_active_killing if self._queue_panel is not None else None
             )

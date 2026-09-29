@@ -16,6 +16,7 @@ from behav3d.analysis.behavior.utils import (
     _mixed_label_sort_key,
     _sanitize_filename_token,
 )
+from behav3d.core.utils import rmtree_ignore_missing
 
 from behav3d.analysis.behavior.state.visualization.videos.track_max_projection import (
     create_fulltrack_max_projection_stacks_with_track,
@@ -238,7 +239,16 @@ def plot_tracks_bars_on_ax(
             mask = mask & (obs[window_key] == row[window_key])
         df = obs[mask]
         if df.empty:
-            continue
+            key_desc = f"{sample_key}={row[sample_key]!r}, {track_key}={row[track_key]!r}"
+            if has_window_key:
+                key_desc += f", {window_key}={row[window_key]!r}"
+            raise ValueError(
+                f"No rows found in adata_full.obs for exemplar tracklet ({key_desc}) - "
+                "this tracklet was selected for plotting but its data could not be "
+                "resolved, which indicates an upstream inconsistency (e.g. adata_full "
+                "does not match the data the tracklet was selected from) rather than "
+                "something safe to silently skip."
+            )
 
         x = df["_x"].to_numpy()
         st = df[state_key].to_numpy()
@@ -546,28 +556,6 @@ def _plot_projected_track_state_colored_on_ax(
         ax.set_title(title)
 
 
-def _plot_track_state_colored_on_ax(
-    ax,
-    track_df,
-    *,
-    state_key,
-    state_color_map,
-    x_col="pixel_position_x",
-    y_col="pixel_position_y",
-    z_col="pixel_position_z",
-    title=None,
-    fixed_lim=None,
-):
-    xyz = track_df[[x_col, y_col, z_col]].to_numpy(dtype=float, copy=False)
-    proj2 = _project_xyz_to_pc12(xyz)
-    _plot_projected_track_state_colored_on_ax(
-        ax=ax,
-        proj2=proj2,
-        states=track_df[state_key].astype(str).to_numpy(),
-        state_color_map=state_color_map,
-        title=title,
-        fixed_lim=fixed_lim,
-    )
 
 
 def _resolve_trajectory_coordinate_columns(obs):
@@ -811,6 +799,7 @@ def save_exemplar_statebar_track_pdf_per_cluster(
                 plt.close(fig)
 
     if mode in {"per_cluster", "both"}:
+        rmtree_ignore_missing(per_cluster_dir)
         per_cluster_dir.mkdir(parents=True, exist_ok=True)
         for cluster_val in cluster_vals:
             cluster_token = _sanitize_filename_token(cluster_val, fallback="cluster")
@@ -822,6 +811,7 @@ def save_exemplar_statebar_track_pdf_per_cluster(
             paths_by_cluster[str(cluster_val)] = str(pdf_path)
 
     if mode in {"per_example", "both"}:
+        rmtree_ignore_missing(per_example_dir)
         per_example_dir.mkdir(parents=True, exist_ok=True)
         rank_limit = max(1, int(num_example_ranks))
         rank_groups = {int(r): [] for r in range(1, rank_limit + 1)}
@@ -1735,6 +1725,7 @@ def save_exemplar_statebar_backprojection_pdf(
                 _save_rgb_page_to_pdf(pdf, page, dpi=plot_dpi)
 
     if mode in {"per_cluster", "both"}:
+        rmtree_ignore_missing(per_cluster_dir)
         per_cluster_dir.mkdir(parents=True, exist_ok=True)
         cluster_keys, rows_by_cluster = _group_rows_by_cluster(rows_info, cluster_order)
         for cluster_text in cluster_keys:
@@ -1745,6 +1736,7 @@ def save_exemplar_statebar_backprojection_pdf(
             paths_by_cluster[str(cluster_text)] = str(pdf_path)
 
     if mode in {"per_example", "both"}:
+        rmtree_ignore_missing(per_example_dir)
         per_example_dir.mkdir(parents=True, exist_ok=True)
         rows_by_rank = _group_rows_by_rank(
             rows_info=rows_info,
@@ -1997,6 +1989,7 @@ def save_exemplar_statebar_backprojection_video_per_cluster(
             )
 
     if mode in {"per_cluster", "both"}:
+        rmtree_ignore_missing(per_cluster_dir)
         per_cluster_dir.mkdir(parents=True, exist_ok=True)
         cluster_keys, rows_by_cluster = _group_rows_by_cluster(rows_info, cluster_order)
         for cluster_text in cluster_keys:
@@ -2006,6 +1999,7 @@ def save_exemplar_statebar_backprojection_video_per_cluster(
             paths_by_cluster[str(cluster_text)] = str(video_path)
 
     if mode in {"per_example", "both"}:
+        rmtree_ignore_missing(per_example_dir)
         per_example_dir.mkdir(parents=True, exist_ok=True)
         rows_by_rank = _group_rows_by_rank(
             rows_info=rows_info,

@@ -127,7 +127,6 @@ def plot_top_ranking_features(
         for label, score in zip(ax.get_yticklabels(), top["scores"]):
             label.set_color("blue" if score > 0 else "red")
 
-    # Disable unused axes
     for ax in axes.flat[len(groups):]:
         ax.axis("off")
 
@@ -234,7 +233,6 @@ def plot_umap_feature_grid(
         ax.set_xlabel("")
         ax.set_ylabel("")
 
-    # Hide any unused axes (if grid not full)
     total_cells = axes.size
     for j in range(len(feats), total_cells):
         r, c = divmod(j, ncols)

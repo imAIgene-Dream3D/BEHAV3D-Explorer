@@ -28,26 +28,14 @@ def _on_main_thread() -> bool:
 
 
 def _make_figure(figsize=None):
-    """Create a Figure suitable for the current thread.
-
-    On the main thread we keep the historical ``plt.figure(...)`` path so
-    notebook callers (e.g. :func:`preview_track_length_before_filtering`)
-    can still display the result with ``plt.show()``.  On worker threads
-    we return a bare :class:`matplotlib.figure.Figure` so no Qt figure
-    manager is constructed; the figure is still fully usable for
-    ``PdfPages.savefig`` since that routes through a PDF canvas.
-    """
+    """Build a Figure without touching the Qt backend off the main thread (see `_on_main_thread`)."""
     if _on_main_thread():
         return plt.figure(figsize=figsize)
     return Figure(figsize=figsize)
 
 
 def _maybe_show():
-    """Call ``plt.show()`` only when on the main thread.
-
-    Worker threads cannot meaningfully display GUI windows and would
-    instead trigger Matplotlib's main-thread warning.
-    """
+    """No-op off the main thread — see `_on_main_thread`."""
     if _on_main_thread():
         try:
             plt.show()
@@ -1124,7 +1112,6 @@ def plot_touching_nontouching_distribution(
     nr_pages = (n_rows // rows_per_page) + (1 if n_rows % rows_per_page != 0 else 0)
         
     with PdfPages(outpath) as pdf:
-        # organoid_lines = df_tracks["organoid_line"].unique()
         plot_idx = 0  # Track which plot we are adding
         for page in range(nr_pages):
             fig = _make_figure(figsize=figsize)
@@ -1182,7 +1169,6 @@ def plot_touching_nontouching_distribution(
 def round_legend_ticks(value):
     import numpy as np
     if value <= 1.0:
-        # return np.ceil(value * 10) / 10
         return 1.0
     elif value <= 100:
         return np.ceil(value / 10) * 10

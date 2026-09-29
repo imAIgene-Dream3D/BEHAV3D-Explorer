@@ -1049,9 +1049,13 @@ def _analysis_bindings(main_widget) -> list[dict]:
             (lambda ct=cell_type: track._persist_track_cfg(ct))
             if cell_type else None
         )
-        original = bool(_safe(
-            getattr(track, "chk_use_original", None).isChecked, False
-        )) if getattr(track, "chk_use_original", None) is not None else False
+        family_combo = getattr(track, "combo_clustering_family", None)
+        family_text = (
+            _safe(family_combo.currentText, "State-based") if family_combo is not None else "State-based"
+        )
+        original = "feature" in (family_text or "").lower()
+        legacy_chk = getattr(track, "chk_run_legacy_behav3d", None)
+        legacy = original and bool(_safe(legacy_chk.isChecked, False)) if legacy_chk is not None else False
         for suffix, label, attr, unit, relevant in [
             ("trajectory_size", "Trajectory size", "spin_traj_size", "timepoints", True),
             ("number_of_clusters", "Number of trajectory clusters",
@@ -1064,12 +1068,18 @@ def _analysis_bindings(main_widget) -> list[dict]:
              "chk_parallel", None, not original),
             ("save_distance_matrix", "Save distance matrix CSV",
              "chk_save_dist", None, not original),
-            ("use_original_behav3d", "Use original feature-based BEHAV3D mode",
-             "chk_use_original", None, True),
+            ("clustering_method", "Trajectory clustering method",
+             "combo_clustering_family", None, True),
+            ("use_state_features_preset", "Use features used in behavioral state clustering",
+             "chk_use_state_features_preset", None, original and not legacy),
+            ("run_legacy_behav3d", "Advanced: run legacy BEHAV3D algorithm",
+             "chk_run_legacy_behav3d", None, original),
+            ("use_exact_original_settings", "Use exact original BEHAV3D settings",
+             "chk_use_exact_original_settings", None, legacy),
             ("umap_neighbors", "UMAP neighbours",
-             "spin_umap_neighbors", None, original),
+             "spin_umap_neighbors", None, legacy),
             ("umap_minimum_distance", "UMAP minimum distance",
-             "spin_umap_min_dist", None, original),
+             "spin_umap_min_dist", None, legacy),
             ("random_seed", "Random seed", "spin_seed", None, not original),
         ]:
             widget = getattr(track, attr, None)

@@ -36,12 +36,6 @@ def _format_state_token(row_values, missing_token="missing"):
     return "|".join(tokens)
 
 
-def _local_dissimilarity_name(value):
-    if callable(value):
-        return getattr(value, "__name__", value.__class__.__name__)
-    return str(value)
-
-
 def extract_categorical_track_sequences(
     adata,
     *,
@@ -116,6 +110,46 @@ def extract_categorical_track_sequences(
     return sequences, pd.DataFrame(meta_rows)
 
 
+def extract_track_metadata(
+    adata,
+    *,
+    groupby_cols=("sample_name", "TrackID"),
+    time_col="position_t",
+    extra_meta_cols=(),
+):
+    """Track-level metadata (one row per track) for data without behavioral states.
+
+    Same columns and track order as ``extract_categorical_track_sequences``,
+    minus the state-derived ``distance_sequence``.
+    """
+    groupby_cols = [str(c) for c in list(groupby_cols)]
+    extra_meta_cols = [
+        str(c) for c in list(extra_meta_cols) if str(c) not in groupby_cols and str(c) in adata.obs.columns
+    ]
+    missing = [c for c in groupby_cols + [str(time_col)] if c not in adata.obs.columns]
+    if missing:
+        raise KeyError(f"Missing required columns for distance clustering: {missing}")
+    obs = adata.obs[groupby_cols + [str(time_col)] + extra_meta_cols].copy()
+    obs["_orig_idx"] = np.arange(len(obs))
+    obs = obs.sort_values(groupby_cols + [str(time_col), "_orig_idx"])
+    rows = []
+    for track_id, df_track in obs.groupby(groupby_cols, sort=False, observed=True):
+        if len(df_track) == 0:
+            continue
+        values = list(track_id) if isinstance(track_id, tuple) else [track_id]
+        meta = {col: values[i] for i, col in enumerate(groupby_cols)}
+        for col in extra_meta_cols:
+            vals = df_track[col].dropna().unique()
+            meta[col] = vals[0] if len(vals) > 0 else pd.NA
+        meta["position_t_min"] = df_track[str(time_col)].min()
+        meta["position_t_max"] = df_track[str(time_col)].max()
+        meta["n_timepoints"] = int(len(df_track))
+        rows.append(meta)
+    if not rows:
+        raise ValueError("No valid tracks were available for clustering.")
+    return pd.DataFrame(rows)
+
+
 def _one_hot_encode_sequences(sequences, *, dtype=np.double):
     n_tracks = len(sequences)
     if n_tracks == 0:
@@ -149,6 +183,153 @@ def _validate_distance_matrix(distances, n_expected):
     return distances
 
 
+def _zscore_columns(X):
+    X = np.asarray(X, dtype=float).copy()
+    mean = np.nanmean(X, axis=0) if X.size else np.zeros(X.shape[1])
+    std = np.nanstd(X, axis=0) if X.size else np.ones(X.shape[1])
+    mean = np.where(np.isfinite(mean), mean, 0.0)
+    std = np.where(np.isfinite(std) & (std > 0), std, 1.0)
+    return (X - mean) / std
+
+
+def resolve_state_feature_matrix(adata, *, feature_cols=None, binary_cols=None, binary_weight=1.0):
+    """Per-timepoint numeric matrix built from the features behind the behavioral states.
+
+    Continuous features come from ``adata.X`` and get the same capping / log1p /
+    scaling the HMM saw when it assigned states (read from ``uns["preprocessing"]``);
+    if that metadata is missing or doesn't match, they are z-scored instead. Binary
+    columns (e.g. contacts) come from ``adata.obs``, are z-scored so each column
+    carries the same variance as a continuous feature, then multiplied by
+    ``binary_weight`` (0 drops them). Remaining NaNs become 0, i.e. the feature mean.
+
+    Returns ``(matrix, continuous_cols, binary_cols, preprocessing_source)``.
+    """
+    from behav3d.analysis.behavior.state.classification import _apply_hmm_saved_preprocessing_to_matrix
+
+    pre = adata.uns.get("preprocessing", {})
+    pre = pre if isinstance(pre, dict) else {}
+    var_names = [str(v) for v in adata.var_names]
+
+    def _as_list(value):
+        # Lists round-trip through h5ad as numpy arrays.
+        return [] if value is None else [str(v) for v in np.atleast_1d(np.asarray(value, dtype=object)).tolist()]
+
+    saved_cols = _as_list(pre.get("continuous_feature_cols"))
+    if feature_cols is None:
+        feature_cols = saved_cols or _as_list(pre.get("kept_features")) or var_names
+    cont_cols = [str(c) for c in list(feature_cols) if str(c) in set(var_names)]
+
+    X_cont = np.empty((adata.n_obs, 0), dtype=float)
+    source = "none"
+    if len(cont_cols) > 0:
+        X_raw = adata[:, cont_cols].X
+        X_raw = np.asarray(X_raw.toarray() if hasattr(X_raw, "toarray") else X_raw, dtype=float)
+        X_cont = None
+        if saved_cols == cont_cols and isinstance(pre.get("scaler"), dict):
+            try:
+                X_cont = _apply_hmm_saved_preprocessing_to_matrix(
+                    X_raw, preprocessing_meta=pre, feature_cols=cont_cols
+                )
+                source = "state_model_preprocessing"
+            except Exception:
+                X_cont = None
+        if X_cont is None:
+            X_cont = _zscore_columns(X_raw)
+            source = "zscore"
+
+    if binary_cols is None:
+        binary_cols = _as_list(pre.get("binary_cols_to_merge"))
+    binary_cols = [str(c) for c in list(binary_cols) if str(c) in adata.obs.columns]
+    X_bin = np.empty((adata.n_obs, 0), dtype=float)
+    if len(binary_cols) > 0 and float(binary_weight) > 0:
+        B = adata.obs[binary_cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+        X_bin = _zscore_columns(B) * float(binary_weight)
+    else:
+        binary_cols = []
+
+    matrix = np.hstack([X_cont, X_bin])
+    if matrix.shape[1] == 0:
+        raise ValueError("No usable numeric features for feature-based DTW.")
+    matrix = np.where(np.isfinite(matrix), matrix, 0.0)
+    return np.ascontiguousarray(matrix, dtype=np.double), cont_cols, binary_cols, source
+
+
+def extract_numeric_track_sequences(
+    adata,
+    matrix,
+    *,
+    groupby_cols=("sample_name", "TrackID"),
+    time_col="position_t",
+):
+    """Split a per-timepoint matrix into per-track (n_timepoints, n_features) arrays.
+
+    Uses the same ordering as ``extract_categorical_track_sequences`` and returns
+    each track's groupby key so the caller can align both.
+    """
+    groupby_cols = [str(c) for c in list(groupby_cols)]
+    obs = adata.obs[groupby_cols + [str(time_col)]].copy()
+    obs["_orig_idx"] = np.arange(len(obs))
+    obs = obs.sort_values(groupby_cols + [str(time_col), "_orig_idx"])
+    sequences, keys = [], []
+    for track_id, df_track in obs.groupby(groupby_cols, sort=False, observed=True):
+        if len(df_track) == 0:
+            continue
+        sequences.append(np.ascontiguousarray(matrix[df_track["_orig_idx"].to_numpy()], dtype=np.double))
+        keys.append(tuple(track_id) if isinstance(track_id, tuple) else (track_id,))
+    return sequences, keys
+
+
+def _dtaidistance_ndim_matrix(
+    sequences, *, window=None, max_dist=None, max_length_diff=None, penalty=None, psi=None,
+    parallel=True, inner_dist="squared euclidean",
+):
+    if dtw_ndim is None:
+        raise ImportError(
+            "dtaidistance is required for behavioral trajectory classification. "
+            "Install the BEHAV3D requirements in the active notebook kernel."
+        )
+    distances = dtw_ndim.distance_matrix_fast(
+        sequences,
+        compact=False,
+        parallel=bool(parallel),
+        inner_dist=str(inner_dist),
+        window=None if window is None else int(window),
+        max_dist=max_dist,
+        max_length_diff=max_length_diff,
+        penalty=penalty,
+        psi=psi,
+    )
+    return _validate_distance_matrix(distances, len(sequences))
+
+
+def compute_dtaidistance_numeric_distance_matrix(
+    sequences,
+    *,
+    window=None,
+    max_dist=None,
+    max_length_diff=None,
+    penalty=None,
+    psi=None,
+    parallel=True,
+    inner_dist="squared euclidean",
+    verbose=True,
+):
+    """Compute a multivariate DTW distance matrix over numeric per-track feature arrays."""
+    if len(sequences) == 0:
+        raise ValueError("No sequences available for distance computation.")
+    if bool(verbose):
+        _winfo(
+            "trajectory-dtai",
+            "dtaidistance distance matrix | "
+            f"tracks={len(sequences)} | features={sequences[0].shape[1]} | "
+            f"inner_dist={inner_dist} | window={window} | parallel={bool(parallel)}",
+        )
+    return _dtaidistance_ndim_matrix(
+        sequences, window=window, max_dist=max_dist, max_length_diff=max_length_diff,
+        penalty=penalty, psi=psi, parallel=parallel, inner_dist=inner_dist,
+    )
+
+
 def compute_dtaidistance_onehot_distance_matrix(
     sequences,
     *,
@@ -162,11 +343,6 @@ def compute_dtaidistance_onehot_distance_matrix(
     verbose=True,
 ):
     """Compute a DTW distance matrix using dtaidistance over one-hot vectors."""
-    if dtw_ndim is None:
-        raise ImportError(
-            "dtaidistance is required for behavioral trajectory classification. "
-            "Install the BEHAV3D requirements in the active notebook kernel."
-        )
     encoded_sequences, categories = _one_hot_encode_sequences(sequences)
     if bool(verbose):
         _winfo(
@@ -175,18 +351,11 @@ def compute_dtaidistance_onehot_distance_matrix(
             f"tracks={len(encoded_sequences)} | states={len(categories)} | "
             f"inner_dist={inner_dist} | window={window} | parallel={bool(parallel)}",
         )
-    distances = dtw_ndim.distance_matrix_fast(
-        encoded_sequences,
-        compact=False,
-        parallel=bool(parallel),
-        inner_dist=str(inner_dist),
-        window=None if window is None else int(window),
-        max_dist=max_dist,
-        max_length_diff=max_length_diff,
-        penalty=penalty,
-        psi=psi,
+    distances = _dtaidistance_ndim_matrix(
+        encoded_sequences, window=window, max_dist=max_dist, max_length_diff=max_length_diff,
+        penalty=penalty, psi=psi, parallel=parallel, inner_dist=inner_dist,
     )
-    return _validate_distance_matrix(distances, len(encoded_sequences)), categories
+    return distances, categories
 
 
 def compute_transition_profile_distance_matrix(sequences, *, use_bigrams=True, use_trigrams=False, verbose=True):
@@ -309,19 +478,27 @@ def _cluster_precomputed_distances_leiden(
     return raw_labels, None
 
 
-def _ensure_dtaidistance_umap(adata_tracks, distances, *, random_state=123, n_neighbors=15, min_dist=0.1):
+def _ensure_dtaidistance_umap(
+    adata_tracks, distances, *, random_state=123, n_neighbors=15, min_dist=0.1, spread=1.0
+):
     """Compute (or reuse) the 2D UMAP embedding for a dtaidistance track adata.
 
     The cached embedding is only reused when the requested UMAP parameters
     match those it was computed with — otherwise a stale embedding from a
-    previous n_neighbors/min_dist would silently be returned even after the
-    user changed those controls.
+    previous n_neighbors/min_dist/spread would silently be returned even after
+    the user changed those controls.
     """
     requested_params = {
         "n_neighbors": int(n_neighbors),
         "min_dist": float(min_dist),
+        "spread": float(spread),
         "random_state": int(random_state),
     }
+    if requested_params["min_dist"] > requested_params["spread"]:
+        raise ValueError(
+            f"UMAP min_dist ({requested_params['min_dist']}) must be <= spread "
+            f"({requested_params['spread']})."
+        )
     cached_params = adata_tracks.uns.get("_umap_params")
     if "X_umap" in adata_tracks.obsm and cached_params == requested_params:
         return np.asarray(adata_tracks.obsm["X_umap"], dtype=float)
@@ -335,6 +512,7 @@ def _ensure_dtaidistance_umap(adata_tracks, distances, *, random_state=123, n_ne
         metric="precomputed",
         n_neighbors=max(2, min(requested_params["n_neighbors"], n_obs - 1)),
         min_dist=requested_params["min_dist"],
+        spread=requested_params["spread"],
         random_state=requested_params["random_state"],
     )
     embedding = reducer.fit_transform(np.asarray(distances, dtype=float))

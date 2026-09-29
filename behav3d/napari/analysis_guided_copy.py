@@ -266,16 +266,63 @@ STATE_TRANSITION_REPORT = {
     "color": "#4a90d9",
     "what_does": (
         "Plots state-to-state transition probabilities, showing which "
-        "behavioral states cells move into and out of."
+        "behavioral states cells move into and out of: a transition-matrix "
+        "heatmap, a circular inter-state transition diagram, n-gram "
+        "rankings, and Sankey diagrams for every state pair."
     ),
-    "concept": None,
-    "what_get": "A transition-probability plot — no further configuration needed.",
-    "decide": [],
-    "has_params": False,
-    "start_label": "Generate State Transition plots  ▸",
+    "concept": {
+        "term": "Inter-cluster transition probability",
+        "text": (
+            "given a cell is currently in state A, how likely is its next "
+            "timepoint to be state B rather than A again? Self-transitions "
+            "are excluded from the circular diagram so it shows only "
+            "genuine switches between states."
+        ),
+    },
+    "what_get": (
+        "A transition-matrix heatmap + circular transition diagram PDF, "
+        "n-gram rankings, and all-pairs Sankey diagrams."
+    ),
+    "decide": [
+        _decide("Minimum probability to draw, emphasis, and which pages to include", _DEFAULTS),
+    ],
+    "has_params": True,
     "seed": (
         "Explain the BEHAV3D State Transition Report: what a state-to-state "
-        "transition probability plot shows."
+        "transition probability plot shows, and how the circular diagram's "
+        "probability cutoff/emphasis settings change what's drawn."
+    ),
+}
+
+STATE_FEATURE_HEATMAP = {
+    "id": "state_feature_heatmap",
+    "title": "State Feature Heatmap",
+    "subtitle": "Which features characterize each behavioral state?",
+    "color": "#4a90d9",
+    "what_does": (
+        "Shows behavioral states x features as a heatmap of per-state feature means. "
+        "The features the states were built on are preselected; any other "
+        "per-timepoint feature can be added. States can be the full behavioral states "
+        "or the primary dynamic (HMM) states."
+    ),
+    "concept": {
+        "term": "Z-score",
+        "text": (
+            "a feature's value expressed as standard deviations from the average - 0 "
+            "means typical, positive higher, negative lower - so features with different "
+            "units can share one colour scale."
+        ),
+    },
+    "what_get": "A state x feature heatmap PDF, plus a CSV of the state means.",
+    "decide": [
+        _decide("Which features to include", _SUGGESTED),
+        _decide("Full or primary dynamic states", _SUGGESTED),
+        _decide("Averaging (every timepoint, or each track once) and colour scaling", _DEFAULTS),
+    ],
+    "has_params": True,
+    "seed": (
+        "Explain the BEHAV3D State Feature Heatmap: how per-state feature means are "
+        "computed, timepoint vs per-track averaging, and how to read the z-score colours."
     ),
 }
 
@@ -308,9 +355,43 @@ STATE_COMPARISON_REPORT = {
     ),
 }
 
+STATE_CONTACT_ANALYSIS = {
+    "id": "state_contact",
+    "title": "Contact analysis",
+    "subtitle": "Which behavioral states coincide with organoid contact, and does contact type matter?",
+    "color": "#4a90d9",
+    "what_does": (
+        "Two per-timepoint contact reports that need only behavioral-state "
+        "classification (no track-DTW classification): a mean-contact-fraction "
+        "comparison across several organoid-contact columns per state (e.g. healthy "
+        "vs. tumor organoid contact), and a before-vs-after state-shift comparison "
+        "around a track's first sufficiently long contact bout."
+    ),
+    "concept": {
+        "term": "Contiguous bout",
+        "text": (
+            "a track counts as 'contact' (for the state-shift comparison) only if it "
+            "has an unbroken run of consecutive contact timepoints at least as long "
+            "as the minimum you set — brief, isolated contacts don't count."
+        ),
+    },
+    "what_get": "A contact-type comparison PDF (mean ± SEM, no significance test) and/or a state-shift PDF.",
+    "decide": [
+        _decide("Which contact column(s) to compare", _ONLY_YOU),
+        _decide("Which state column to use", _SUGGESTED),
+        _decide("Minimum contiguous contact bout length (state-shift)", _ESTIMATED),
+    ],
+    "has_params": True,
+    "seed": (
+        "Explain the BEHAV3D state Contact analysis: the contact-type comparison "
+        "(mean contact fraction per state across contact columns, purely descriptive) "
+        "and the state-shift analysis (behavioral state before vs. after a contact bout)."
+    ),
+}
+
 TRACK_PLOTS_ENTRY = {
     "id": "track_plots",
-    "title": "Create Plots",
+    "title": "Reports & Plots",
     "subtitle": "Turn your track clustering into diagnostics and figures.",
     "color": "#c98a2c",
     "show_explainer": False,
@@ -355,7 +436,7 @@ TRACK_DIAGNOSTICS = {
 
 TRACK_PROPORTIONS = {
     "id": "track_proportions",
-    "title": "Track Proportions",
+    "title": "Track Composition Report",
     "subtitle": "How do movement-type proportions vary across samples?",
     "color": "#c98a2c",
     "what_does": (
@@ -371,6 +452,37 @@ TRACK_PROPORTIONS = {
     "seed": (
         "Explain the BEHAV3D Track Proportions plot: what it shows and how "
         "to choose grouping columns."
+    ),
+}
+
+TRACK_FEATURE_HEATMAP = {
+    "id": "track_feature_heatmap",
+    "title": "Feature Heatmap",
+    "subtitle": "Which features characterize each movement-type cluster?",
+    "color": "#c98a2c",
+    "what_does": (
+        "Averages each selected per-timepoint feature over every track's trajectory, "
+        "then per trajectory cluster, and shows clusters x features as a heatmap. "
+        "The features the clustering / behavioral states were built on are "
+        "preselected; any other feature can be added."
+    ),
+    "concept": {
+        "term": "Z-score",
+        "text": (
+            "a feature's value expressed as standard deviations from the average "
+            "track - 0 means typical, positive higher, negative lower - so features "
+            "with different units can share one colour scale."
+        ),
+    },
+    "what_get": "A cluster x feature heatmap PDF, plus CSVs of the cluster and per-track means.",
+    "decide": [
+        _decide("Which features to include", _SUGGESTED),
+        _decide("Colour scaling (z-score or min-max)", _DEFAULTS),
+    ],
+    "has_params": True,
+    "seed": (
+        "Explain the BEHAV3D track Feature Heatmap: how the per-cluster feature "
+        "means are computed and how to read the z-score colours."
     ),
 }
 
@@ -401,6 +513,40 @@ TRACK_WINDOW_TRANSITIONS = {
         "Explain the BEHAV3D Window Transitions Sankey: what a track window is, "
         "and how to read a track moving from one trajectory cluster to another "
         "across its own windows."
+    ),
+}
+
+TRACK_TRANSITION_ANALYSIS = {
+    "id": "track_transition_analysis",
+    "title": "Track Transition Report",
+    "subtitle": "Pooled across every window, how often does one trajectory cluster become another?",
+    "color": "#c98a2c",
+    "what_does": (
+        "Collapses window index out of the same window-to-window trajectory-cluster "
+        "transitions Window Transitions tracks, pooling every sample and every window "
+        "into one population-level view: a circular diagram of inter-cluster transition "
+        "probability, plus the row-normalized transition-probability matrix."
+    ),
+    "concept": {
+        "term": "Inter-cluster transition probability",
+        "text": (
+            "given a track is currently in cluster A, how likely is its next window to "
+            "be cluster B rather than A again? Self-transitions are excluded from the "
+            "circular diagram so it shows only genuine switches between clusters."
+        ),
+    },
+    "what_get": (
+        "A transition-matrix heatmap + circular transition diagram PDF, and the "
+        "underlying count/probability CSVs."
+    ),
+    "decide": [
+        _decide("Minimum probability to draw, emphasis, and which pages to include", _DEFAULTS),
+    ],
+    "has_params": True,
+    "seed": (
+        "Explain the BEHAV3D Transition Analysis report: what the circular inter-cluster "
+        "transition diagram and its matrix show, and how the probability cutoff/emphasis "
+        "settings change what's drawn."
     ),
 }
 
@@ -494,11 +640,13 @@ TRACK_EXEMPLAR_TRACKS = {
 
 # Level-1 pipeline lists, in display order (matches existing widget order).
 STATE_REPORT_PIPELINES = [
-    STATE_DIAGNOSTICS, STATE_COMPOSITION_REPORT, STATE_TRANSITION_REPORT, STATE_COMPARISON_REPORT,
+    STATE_DIAGNOSTICS, STATE_COMPOSITION_REPORT, STATE_TRANSITION_REPORT, STATE_FEATURE_HEATMAP,
+    STATE_COMPARISON_REPORT, STATE_CONTACT_ANALYSIS,
 ]
 TRACK_PLOT_PIPELINES = [
-    TRACK_DIAGNOSTICS, TRACK_PROPORTIONS, TRACK_WINDOW_TRANSITIONS, TRACK_COMPARISON_REPORT,
-    TRACK_CONTACT_GROUPING, TRACK_EXEMPLAR_TRACKS,
+    TRACK_DIAGNOSTICS, TRACK_PROPORTIONS, TRACK_FEATURE_HEATMAP, TRACK_WINDOW_TRANSITIONS,
+    TRACK_TRANSITION_ANALYSIS, TRACK_COMPARISON_REPORT, TRACK_CONTACT_GROUPING,
+    TRACK_EXEMPLAR_TRACKS,
 ]
 
 

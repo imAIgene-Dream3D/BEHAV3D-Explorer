@@ -1500,7 +1500,7 @@ class DataPreparationTab(QWidget):
         self.metadata_info_label.setText("⏳ Loading metadata…")
 
         self._metadata_load_worker = _MetadataLoadWorker(csv_path, out_dir, parent=self)
-        self._metadata_load_worker.progress.connect(lambda msg: self._log(msg))
+        self._metadata_load_worker.progress.connect(self._log, Qt.QueuedConnection)
         self._metadata_load_worker.finished.connect(self._on_metadata_load_finished)
         self._metadata_load_worker.start()
         return True
@@ -2008,25 +2008,20 @@ class DataPreparationTab(QWidget):
                     self.zarr_btn.setEnabled(False)
                     self.zarr_status.setText("⏳ Clipping already-converted zarr files…")
                     self._log(f"Clipping {len(already_converted)} already-converted sample(s)…")
+                    self._zarr_clip_ctx = (out_dir, t_start, t_end, originals)
                     self._zarr_clip_worker = _ZarrClipWorker(
                         already_converted, t_start, t_end, parent=self
                     )
-                    self._zarr_clip_worker.progress.connect(lambda msg: self._log(msg))
-                    self._zarr_clip_worker.finished.connect(
-                        lambda success, message, records: self._on_zarr_clip_done(
-                            success, message, out_dir, t_start, t_end,
-                            records, originals,
-                        )
-                    )
+                    self._zarr_clip_worker.progress.connect(self._log, Qt.QueuedConnection)
+                    self._zarr_clip_worker.finished.connect(self._on_zarr_clip_done, Qt.QueuedConnection)
                     self._zarr_clip_worker.start()
                     return
                 # else: "Leave As-Is" clicked — fall through to normal conversion
 
         self._start_zarr_conversion(out_dir, t_start, t_end, originals)
 
-    def _on_zarr_clip_done(self, success: bool, message: str,
-                            out_dir: str, t_start, t_end,
-                            sample_records=None, originals=None):
+    def _on_zarr_clip_done(self, success: bool, message: str, sample_records=None):
+        out_dir, t_start, t_end, originals = self._zarr_clip_ctx
         self._log(message)
         if not success:
             self.zarr_btn.setEnabled(True)
@@ -2050,7 +2045,7 @@ class DataPreparationTab(QWidget):
             n_workers=self.zarr_workers_spin.value(),
             originals=originals, parent=self
         )
-        self._zarr_worker.progress.connect(lambda msg: self._log(msg))
+        self._zarr_worker.progress.connect(self._log, Qt.QueuedConnection)
         self._zarr_worker.finished.connect(self._on_zarr_done)
         self._zarr_worker.start()
 

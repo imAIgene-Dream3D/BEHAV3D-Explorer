@@ -95,10 +95,12 @@ def _behavioral_state_backprojection_dir(output_dir, cell_type):
     )
 
 
-def _behavioral_state_backprojection_path(output_dir, sample_name, cell_type):
+def _behavioral_state_backprojection_path(
+    output_dir, sample_name, cell_type, filename_suffix="behavioral_states"
+):
     return Path(
         _behavioral_state_backprojection_dir(output_dir=output_dir, cell_type=cell_type),
-        f"{sample_name}_{cell_type}_behavioral_states.zarr",
+        f"{sample_name}_{cell_type}_{filename_suffix}.zarr",
     )
 
 
@@ -166,6 +168,49 @@ _PIXEL_POSITION_TRIPLETS = (
 )
 
 
+def _build_label_run_trajectories(df, pos_triplet, *, label_col="__label", track_col="__track", time_col="__time"):
+    """Split per-timepoint rows into napari track pieces, one list per label.
+
+    ``df`` has integer ``track_col``/``time_col``, a string ``label_col`` and the
+    pixel ``pos_triplet``; rows without a label must already be dropped.
+
+    napari's Tracks layer joins every row sharing a track id, so each track is
+    cut into runs that (a) keep one label and (b) cover consecutive frames. A
+    run ends at a label change, and at any missing frame (no label / no state
+    there), so no straight line is ever drawn across time the path doesn't
+    cover. Where the label changes between consecutive frames, the ending run
+    gets the next run's first point as well, so the path stays continuous and
+    only changes colour there.
+
+    Returns ``{label: Nx4/5 array}`` with columns
+    ``[__run_id, time, (pixel_position_z), pixel_position_y, pixel_position_x]``.
+    """
+    if len(df) == 0:
+        return {}
+    df = df.sort_values([track_col, time_col], kind="mergesort").drop_duplicates(
+        subset=[track_col, time_col], keep="first"
+    ).reset_index(drop=True)
+    labels = df[label_col].astype(str)
+    consecutive = df[track_col].eq(df[track_col].shift()) & df[time_col].diff().eq(1)
+    changed = labels.ne(labels.shift())
+    df["__run_id"] = (~consecutive | changed).cumsum().astype(np.int64)
+
+    bridge_idx = np.flatnonzero((consecutive & changed).to_numpy())
+    if bridge_idx.size > 0:
+        bridge = df.iloc[bridge_idx].copy()
+        prev = df.iloc[bridge_idx - 1]
+        bridge["__run_id"] = prev["__run_id"].to_numpy()
+        bridge[label_col] = prev[label_col].to_numpy()
+        df = pd.concat([df, bridge], ignore_index=True)
+    df = df.sort_values(["__run_id", time_col], kind="mergesort")
+
+    cols = ["__run_id", time_col] + list(pos_triplet)
+    return {
+        str(label): group[cols].to_numpy(dtype=np.float64, copy=True)
+        for label, group in df.groupby(df[label_col].astype(str), sort=False)
+    }
+
+
 def prepare_state_trajectory_data(
     sample_obs,
     state_col,
@@ -187,6 +232,9 @@ def prepare_state_trajectory_data(
     (``__run_id``) in place of the real ``TrackID`` — napari's Tracks layer
     only connects rows sharing the same id, so non-adjacent runs of the same
     state naturally render as separate stretches instead of one bridged line.
+    Runs also end at missing frames (timepoints with no state), and consecutive
+    runs are joined at the state change so the path shows no holes (see
+    ``_build_label_run_trajectories``).
 
     Parameters
     ----------
@@ -227,18 +275,11 @@ def prepare_state_trajectory_data(
 
     obs["__track"] = obs["__track"].astype(np.int64)
     obs["__time"] = obs["__time"].astype(np.int64)
-    obs = obs.sort_values(["__track", "__time"], kind="mergesort")
-
-    state_str = obs[str(state_col)].astype(str)
-    new_run = obs["__track"].ne(obs["__track"].shift()) | state_str.ne(state_str.shift())
-    obs["__run_id"] = new_run.cumsum().astype(np.int64)
-    obs["__state"] = state_str
-
-    trajectory_data = {}
-    cols = ["__run_id", "__time"] + list(pos_triplet)
-    for label, group in obs.groupby("__state", observed=True, sort=False):
-        trajectory_data[str(label)] = group[cols].to_numpy(dtype=np.float64, copy=True)
-    return trajectory_data
+    # Unassigned timepoints (NA state) are gaps, not a grey "nan" state.
+    state_str = obs[str(state_col)].astype("string").str.strip()
+    obs = obs[state_str.notna() & (state_str != "")].copy()
+    obs["__label"] = state_str.loc[obs.index].astype(str)
+    return _build_label_run_trajectories(obs, pos_triplet)
 
 
 def backproject_state_at_timepoint(
@@ -444,30 +485,9 @@ def backproject_single_sample_behavioral_states(
     verbose=True,
 ):
     """
-    Replace tracked segment labels by behavioral-state integer codes for one sample.
-
-    Parameters
-    ----------
-    tracked_img_path : str | pathlib.Path
-        Path to sample tracked image (*.zarr or *.zarr.zip).
-    sample_obs : pandas.DataFrame
-        One-sample subset of adata.obs with at least state/track/time columns.
-    state_col, track_col, time_col : str
-        Column names in sample_obs.
-    output_path : str | pathlib.Path
-        Destination path for behavioral-state zarr image.
-    code_map : dict[str, int]
-        Mapping from state label to integer code (0 reserved for background).
-    raw_image_path : str | pathlib.Path | None, default None
-        Optional raw image path. If supplied, only compatibility is validated.
-        Output is always stored in tracked-image shape.
-    background_value : int, default 0
-        Output value for unmatched voxels.
-    verbose : bool, default True
-        Print progress messages.
-    require_all_rows_present : bool, default False
-        If True, every (time_col, track_col) entry in sample_obs must be present
-        in the tracked segmentation at that frame; otherwise raise ValueError.
+    Replace tracked segment labels with behavioral-state integer codes for one
+    sample. `require_all_rows_present=True` raises if any `(time, track)` in
+    `sample_obs` is missing from the segmentation.
     """
     tracked_img_path = Path(tracked_img_path)
     output_path = Path(output_path)
@@ -728,7 +748,7 @@ def export_behavioral_state_backprojection_zarrs(
     adata,
     output_dir,
     cell_type,
-    state_col="full_behavioral_cluster",
+    state_col="full_behavioral_state",
     sample_col="sample_name",
     track_col="TrackID",
     time_col="position_t",
@@ -740,10 +760,11 @@ def export_behavioral_state_backprojection_zarrs(
     require_all_rows_present=False,
     n_workers=1,
     verbose=True,
+    filename_suffix="behavioral_states",
 ):
     """
     Export one behavioral-state label image per sample under:
-    output_dir/analysis/<cell_type>/behavioral_states/backprojection/<sample>_<cell_type>_behavioral_states.zarr
+    output_dir/analysis/<cell_type>/behavioral_states/backprojection/<sample>_<cell_type>_<filename_suffix>.zarr
     """
     if adata is None or not hasattr(adata, "obs"):
         raise ValueError("adata with .obs is required for behavioral-state backprojection.")
@@ -777,6 +798,7 @@ def export_behavioral_state_backprojection_zarrs(
 
     manifest = {
         "state_col": str(state_col),
+        "filename_suffix": str(filename_suffix),
         "background_value": int(background_value),
         "enforce_time_coverage": bool(enforce_time_coverage),
         "label_map": {str(v): str(k) for k, v in code_map.items()},
@@ -832,6 +854,7 @@ def export_behavioral_state_backprojection_zarrs(
             output_dir=output_dir,
             sample_name=str(sample_name),
             cell_type=cell_type,
+            filename_suffix=filename_suffix,
         )
         try:
             sample_result = backproject_single_sample_behavioral_states(
@@ -976,11 +999,13 @@ def _resolve_raw_image_path(output_dir, sample_name, verbose=False, metadata_csv
     return None
 
 
-def _resolve_behavioral_state_image_path(output_dir, sample_name, cell_type, verbose=False):
+def _resolve_behavioral_state_image_path(
+    output_dir, sample_name, cell_type, verbose=False, filename_suffix="behavioral_states"
+):
     out_dir = _behavioral_state_backprojection_dir(output_dir=output_dir, cell_type=cell_type)
     candidates = [
-        out_dir / f"{sample_name}_{cell_type}_behavioral_states.zarr",
-        out_dir / f"{sample_name}_{cell_type}_behavioral_states.zarr.zip",
+        out_dir / f"{sample_name}_{cell_type}_{filename_suffix}.zarr",
+        out_dir / f"{sample_name}_{cell_type}_{filename_suffix}.zarr.zip",
     ]
     for candidate in candidates:
         if candidate.exists():
@@ -1018,6 +1043,7 @@ def _ensure_behavioral_state_backprojection_for_sample(
     enforce_time_coverage=False,
     refresh_if_stale=True,
     verbose=True,
+    filename_suffix="behavioral_states",
 ):
     output_dir = Path(output_dir)
     sample_name = str(sample_name).strip()
@@ -1041,6 +1067,7 @@ def _ensure_behavioral_state_backprojection_for_sample(
         sample_name=sample_name,
         cell_type=cell_type,
         verbose=verbose,
+        filename_suffix=filename_suffix,
     )
     if existing_state_path is not None and Path(existing_state_path).exists():
         return Path(existing_state_path)
@@ -1100,7 +1127,7 @@ def _ensure_behavioral_state_backprojection_for_sample(
         else (
             str(applied_full_output_col)
             if applied_full_output_col is not None and len(str(applied_full_output_col)) > 0
-            else "full_behavioral_cluster"
+            else "full_behavioral_state"
         )
     )
 
@@ -1136,6 +1163,7 @@ def _ensure_behavioral_state_backprojection_for_sample(
         output_dir=output_dir,
         sample_name=sample_name,
         cell_type=cell_type,
+        filename_suffix=filename_suffix,
     )
     backproject_single_sample_behavioral_states(
         tracked_img_path=tracked_img_path,
@@ -1274,24 +1302,6 @@ def _add_mapping_dock_widget(viewer, mapping_text=None, title="State Class Mappi
         return None
 
 
-def _is_dask_array(arr):
-    try:
-        import dask.array as da
-
-        return isinstance(arr, da.Array)
-    except Exception:
-        return False
-
-
-def _broadcast_to_shape(arr, target_shape):
-    target_shape = tuple(int(v) for v in target_shape)
-    if _is_dask_array(arr):
-        import dask.array as da
-
-        return da.broadcast_to(arr, target_shape)
-    return np.broadcast_to(arr, target_shape)
-
-
 def _align_labels_to_raw_shape_for_view(labels_img, raw_img, layer_name, verbose=False):
     """Return a 4-D TZYX labels array aligned to the raw image's T and ZYX dimensions.
 
@@ -1378,6 +1388,7 @@ def show_behavioral_state_backprojection(
     state_colors=None,
     run=True,
     verbose=True,
+    filename_suffix="behavioral_states",
 ):
     """
     Open a single-sample napari view with raw image, TrackID labels, and behavioral-state labels.
@@ -1433,12 +1444,13 @@ def show_behavioral_state_backprojection(
                     enforce_time_coverage=False,
                     refresh_if_stale=bool(refresh_if_stale),
                     verbose=verbose,
+                    filename_suffix=filename_suffix,
                 )
             else:
                 raise FileNotFoundError(
                     "Could not find behavioral-state image for sample "
                     f"'{sample_name}' and cell_type '{cell_type}'. Expected "
-                    f"'{_behavioral_state_backprojection_path(output_dir, sample_name, cell_type)}'."
+                    f"'{_behavioral_state_backprojection_path(output_dir, sample_name, cell_type, filename_suffix)}'."
                 )
     else:
         if bool(auto_create_if_missing):
@@ -1454,6 +1466,7 @@ def show_behavioral_state_backprojection(
                 enforce_time_coverage=False,
                 refresh_if_stale=bool(refresh_if_stale),
                 verbose=verbose,
+                filename_suffix=filename_suffix,
             )
         else:
             state_path = _resolve_behavioral_state_image_path(
@@ -1461,12 +1474,13 @@ def show_behavioral_state_backprojection(
                 sample_name=sample_name,
                 cell_type=cell_type,
                 verbose=verbose,
+                filename_suffix=filename_suffix,
             )
             if state_path is None or not Path(state_path).exists():
                 raise FileNotFoundError(
                     "Could not find behavioral-state image for sample "
                     f"'{sample_name}' and cell_type '{cell_type}'. Expected "
-                    f"'{_behavioral_state_backprojection_path(output_dir, sample_name, cell_type)}'."
+                    f"'{_behavioral_state_backprojection_path(output_dir, sample_name, cell_type, filename_suffix)}'."
                 )
 
     from behav3d.analysis.backprojection import filter_track_image_to_ids

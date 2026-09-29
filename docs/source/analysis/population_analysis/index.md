@@ -41,7 +41,7 @@ The buttons in this sub-tab enable themselves only when their inputs already exi
 | **Contact columns** for the chosen effectors in the target's CSV | Make sure Feature Extraction was run with the **Contact** family on, for both cell types | Interaction Analysis |
 
 ```{important}
-Death Dynamics is **completely hidden** until a `dead_channel` is configured in the metadata. If you see only the Interaction step, your dataset has no such channel declared — that is expected. If you do have a rising reporter you want to analyse this way, declare its channel as `dead_channel` and the step will appear.
+Death Dynamics requires a `dead_channel` in the metadata. If only the Interaction step is available, your dataset has no such channel declared — that is expected. If you have a rising reporter you want to analyse this way, declare its channel as `dead_channel`.
 ```
 
 ## Selecting cells
@@ -71,7 +71,7 @@ The big **▶▶ Run All Available** button runs every step that is currently po
 
 ## The Results panel
 
-A shared **Results** panel sits below the sub-tabs (and is visible from Single Cell too). It scans the output directory for result PDFs and lets you re-open any of them in napari without hunting through folders. It refreshes automatically after each run and when you switch sub-tabs; the **DPI** spinner controls the rendering resolution when a PDF is opened in the viewer.
+The shared **Results** panel scans the output directory for result PDFs and lets you re-open any of them in napari without hunting through folders. It refreshes automatically after each run and when you switch sub-tabs; the **DPI** spinner controls the rendering resolution when a PDF is opened in the viewer.
 
 ## Tips & best practices
 

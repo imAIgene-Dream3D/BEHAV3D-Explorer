@@ -158,6 +158,7 @@ _DESCRIPTIONS: dict[str, str] = {
     # active killing
     "observation_window": "Timepoints counted forward from contact in which a death-signal increase is assessed. Choose it from the expected biological delay and imaging cadence.",
     "death_signal_column": "Death or reporter signal. Dead-mask pixel count with an absolute threshold is the general default; percentage assumes comparable target sizes, and mean intensity suits diffuse reporters.",
+    "persistent_death_signal": "Reads each target's death signal as a running maximum over its track before scoring, so segmentation flicker (a dead-mask segment dropping in/out of frame) can't be misread as a target un-dying. Turn off only to inspect the raw, possibly non-monotonic signal.",
     "killing_threshold_multiplier": "Relative increase over the target's own baseline. Reserve it for a single target line or heterogeneous within-well baselines; it can bias comparisons across target lines.",
     "min_contact_duration": "Minimum effector-target contact timepoints required for active killing. Choose it from biological plausibility and acquisition cadence.",
     "absolute_killing_threshold": "Fixed signal increase used for active killing. Calibrate a dead-pixel threshold from cell diameter and XY pixel size, then validate visually.",

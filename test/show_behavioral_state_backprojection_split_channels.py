@@ -33,7 +33,7 @@ INTERACTIVE_BEHAV3D_FOLDER = r"F:\BHVD_BEHAV3D\BEHAV3D_python\runs\NatureBriefCo
 INTERACTIVE_SAMPLE_NAME = "BHVD_SB1_Exp009_Img001"
 INTERACTIVE_OUTPUT_DIR = None
 INTERACTIVE_CELL_TYPE = "tcell"
-INTERACTIVE_STATE_COL = "full_behavioral_cluster"
+INTERACTIVE_STATE_COL = "full_behavioral_state"
 INTERACTIVE_RAW_IMAGE_PATH = None
 INTERACTIVE_TRACKED_IMG_PATH = None
 INTERACTIVE_STATE_IMG_PATH = None
@@ -160,7 +160,7 @@ def build_split_channel_backprojection_payload(
     sample_name: str,
     output_dir: str | Path,
     cell_type: str,
-    state_col: str = "full_behavioral_cluster",
+    state_col: str = "full_behavioral_state",
     raw_image_path: str | None = None,
     tracked_img_path: str | None = None,
     state_img_path: str | None = None,
@@ -280,7 +280,7 @@ def show_behavioral_state_backprojection_split_channels(
     sample_name: str,
     output_dir: str | Path,
     cell_type: str,
-    state_col: str = "full_behavioral_cluster",
+    state_col: str = "full_behavioral_state",
     raw_image_path: str | None = None,
     tracked_img_path: str | None = None,
     state_img_path: str | None = None,

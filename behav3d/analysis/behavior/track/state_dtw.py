@@ -11,7 +11,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from sklearn.metrics import silhouette_score
 from scipy.stats import chi2_contingency, ttest_rel, wilcoxon
 
-from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+from behav3d.analysis.behavior.state.classification import FULL_STATE_COL, resolve_full_state_col
 from behav3d.analysis.behavior.state.utils import (
     _apply_state_order,
     _get_classification_state_colors,
@@ -26,13 +26,17 @@ from behav3d.analysis.behavior.track.dtw import (
     _ensure_dtaidistance_umap,
     _relabel_by_cluster_size,
     _validate_distance_matrix,
+    compute_dtaidistance_numeric_distance_matrix,
     compute_dtaidistance_onehot_distance_matrix,
     extract_categorical_track_sequences,
+    extract_numeric_track_sequences,
+    extract_track_metadata,
+    resolve_state_feature_matrix,
 )
 from behav3d.analysis.behavior.track.utils import (
     _default_behavioral_states_path,
     _filter_tracks_for_dtaidistance,
-    _resolve_dtaidistance_paths,
+    _resolve_track_paths,
     _winfo,
     get_dtaidistance_track_trajectories_filename,
 )
@@ -192,6 +196,9 @@ def _save_diagnostics(
     max_heatmap_tracks=200,
     random_state=123,
     group_col=None,
+    umap_n_neighbors=15,
+    umap_min_dist=0.1,
+    umap_spread=1.0,
 ):
     outfolder = Path(outfolder)
     outfolder.mkdir(parents=True, exist_ok=True)
@@ -313,6 +320,9 @@ def _save_diagnostics(
             adata_tracks,
             distances,
             random_state=int(random_state),
+            n_neighbors=int(umap_n_neighbors),
+            min_dist=float(umap_min_dist),
+            spread=float(umap_spread),
         )
         umap_df = adata_tracks.obs.copy()
         umap_df["UMAP1"] = umap_embedding[:, 0]
@@ -320,6 +330,15 @@ def _save_diagnostics(
         umap_df.to_csv(umap_csv, index=False)
     except Exception as exc:
         umap_error = str(exc)
+    basis_label = (
+        "State-feature DTW"
+        if _dtai_meta(adata_tracks).get("sequence_source") == "features"
+        else "One-hot dtaidistance"
+    )
+    umap_param_text = (
+        f"n_neighbors={int(umap_n_neighbors)}, min_dist={float(umap_min_dist):g}, "
+        f"spread={float(umap_spread):g}"
+    )
 
     with PdfPages(pdf_path) as pdf:
         if umap_embedding is not None:
@@ -337,7 +356,7 @@ def _save_diagnostics(
                 )
             ax.set_xlabel("UMAP1")
             ax.set_ylabel("UMAP2")
-            ax.set_title("One-hot dtaidistance UMAP by cluster")
+            ax.set_title(f"{basis_label} UMAP by cluster\n({umap_param_text})")
             ax.legend(title=str(cluster_key), loc="best", frameon=False, markerscale=1.4)
             fig.tight_layout()
             pdf.savefig(fig, bbox_inches="tight")
@@ -362,7 +381,7 @@ def _save_diagnostics(
                     )
                 ax.set_xlabel("UMAP1")
                 ax.set_ylabel("UMAP2")
-                ax.set_title(f"One-hot dtaidistance UMAP by {resolved_group_col}")
+                ax.set_title(f"{basis_label} UMAP by {resolved_group_col}\n({umap_param_text})")
                 ax.legend(title=str(resolved_group_col), loc="best", frameon=False, markerscale=1.4)
                 fig.tight_layout()
                 pdf.savefig(fig, bbox_inches="tight")
@@ -387,7 +406,7 @@ def _save_diagnostics(
         ax.invert_yaxis()
         ax.set_xlabel("N tracks")
         ax.set_ylabel(str(cluster_key))
-        ax.set_title("One-hot dtaidistance cluster counts")
+        ax.set_title(f"{basis_label} cluster counts")
         ax.grid(axis="x", alpha=0.2)
         fig.tight_layout()
         pdf.savefig(fig, bbox_inches="tight")
@@ -416,7 +435,7 @@ def _save_diagnostics(
             ax.invert_yaxis()
             ax.set_xlabel("N tracks")
             ax.set_ylabel(str(cluster_key))
-            ax.set_title(f"One-hot dtaidistance cluster counts by {resolved_group_col} (stacked)")
+            ax.set_title(f"{basis_label} cluster counts by {resolved_group_col} (stacked)")
             ax.legend(title=str(resolved_group_col), loc="best", frameon=False)
             ax.grid(axis="x", alpha=0.2)
             fig.tight_layout()
@@ -436,7 +455,7 @@ def _save_diagnostics(
             ax.set_xlim(0, 1)
             ax.set_xlabel(f"Fraction of cluster ({resolved_group_col})")
             ax.set_ylabel(str(cluster_key))
-            ax.set_title(f"One-hot dtaidistance cluster composition by {resolved_group_col}")
+            ax.set_title(f"{basis_label} cluster composition by {resolved_group_col}")
             ax.legend(title=str(resolved_group_col), loc="lower right", frameon=False)
             fig.tight_layout()
             pdf.savefig(fig, bbox_inches="tight")
@@ -540,7 +559,7 @@ def _save_diagnostics(
                 title_suffix = f"{n} tracks"
             fig, ax = plt.subplots(figsize=(8, 7))
             im = ax.imshow(heat, aspect="auto", interpolation="nearest", cmap="viridis")
-            ax.set_title(f"One-hot dtaidistance matrix ({title_suffix})")
+            ax.set_title(f"{basis_label} matrix ({title_suffix})")
             ax.set_xlabel("Track")
             ax.set_ylabel("Track")
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -584,7 +603,7 @@ def _resolve_cluster_key(adata_tracks, cluster_key=None):
 
 def _write_model_if_requested(adata_tracks, output_dir, cell_type, *, save_outputs=True):
     output_path = (
-        _resolve_dtaidistance_paths(output_dir, cell_type)["outfolder"]
+        _resolve_track_paths(output_dir, cell_type).outfolder
         / get_dtaidistance_track_trajectories_filename(cell_type)
     )
     if bool(save_outputs):
@@ -603,6 +622,9 @@ def save_dtaidistance_diagnostics(
     max_heatmap_tracks=200,
     random_state=123,
     group_col=None,
+    umap_n_neighbors=None,
+    umap_min_dist=None,
+    umap_spread=None,
     save_outputs=True,
     verbose=True,
 ):
@@ -610,10 +632,19 @@ def save_dtaidistance_diagnostics(
 
     group_col optionally breaks the cluster-count/UMAP diagnostics down by a
     per-track grouping column (default: auto-detects "origin_cell_type" if present).
+    UMAP parameters left as None fall back to the values the model was clustered
+    with (or the UMAP defaults 15 / 0.1 / 1.0 for older models).
     """
-    paths = _resolve_dtaidistance_paths(output_dir, cell_type)
+    paths = _resolve_track_paths(output_dir, cell_type)
     resolved_cluster_key = _resolve_cluster_key(adata_tracks, cluster_key=cluster_key)
-    if _dtai_meta(adata_tracks).get("method") in FEATURE_ONLY_METHODS:
+    meta = _dtai_meta(adata_tracks)
+    if umap_n_neighbors is None:
+        umap_n_neighbors = meta.get("umap_n_neighbors", 15)
+    if umap_min_dist is None:
+        umap_min_dist = meta.get("umap_min_dist", 0.1)
+    if umap_spread is None:
+        umap_spread = meta.get("umap_spread", 1.0)
+    if meta.get("method") in FEATURE_ONLY_METHODS:
         raise ValueError(
             "Diagnostics are not available for this clustering model — no pairwise "
             "distance matrix is stored for feature-based clustering methods (e.g. "
@@ -624,11 +655,14 @@ def save_dtaidistance_diagnostics(
     plot_paths = _save_diagnostics(
         adata_tracks,
         distances,
-        paths["quality_control_outfolder"] if outfolder is None else outfolder,
+        paths.clustering_outfolder if outfolder is None else outfolder,
         cluster_key=resolved_cluster_key,
         max_heatmap_tracks=int(max_heatmap_tracks),
         random_state=int(random_state),
         group_col=group_col,
+        umap_n_neighbors=int(umap_n_neighbors),
+        umap_min_dist=float(umap_min_dist),
+        umap_spread=float(umap_spread),
     )
     adata_tracks.uns.setdefault("visualization", {})
     adata_tracks.uns["visualization"].update(plot_paths)
@@ -651,16 +685,18 @@ def save_dtaidistance_exemplar_overview(
     cell_type,
     *,
     outfolder=None,
-    n_per_cluster=10,
+    n_per_cluster=None,
     random_state=None,
     verbose=True,
 ):
-    """Save only the exemplar overview grid PDF to outfolder (default: quality_control/)."""
-    paths = _resolve_dtaidistance_paths(output_dir, cell_type)
+    """Save only the exemplar overview grid PDF to outfolder (default: clustering/)."""
+    paths = _resolve_track_paths(output_dir, cell_type)
     meta = _dtai_meta(adata_tracks)
     resolved_cluster_key = _resolve_cluster_key(adata_tracks)
     state_col = str(meta.get("state_col", FULL_STATE_COL))
     time_col = str(meta.get("time_col", "position_t"))
+    if n_per_cluster is None:
+        n_per_cluster = int(meta.get("n_per_cluster", 10))
     if random_state is None:
         random_state = int(meta.get("random_state", 123))
     adata_filt = _load_filtered_state_adata_for_model(
@@ -669,7 +705,7 @@ def save_dtaidistance_exemplar_overview(
     _ensure_exemplar_coordinate_columns(
         adata_filt, output_dir=output_dir, cell_type=cell_type, require_pixel_for_video=False,
     )
-    dest = Path(outfolder) if outfolder is not None else paths["quality_control_outfolder"]
+    dest = Path(outfolder) if outfolder is not None else paths.clustering_outfolder
     dest.mkdir(parents=True, exist_ok=True)
     fig, _, _ = plot_exemplar_tracks_by_cluster(
         adata_filt, adata_tracks,
@@ -745,7 +781,7 @@ def save_dtaidistance_medoid_overview(
     that cluster's medoid track - the single track closest (on average) to every
     other track in its cluster under the DTW distance used for clustering.
     """
-    paths = _resolve_dtaidistance_paths(output_dir, cell_type)
+    paths = _resolve_track_paths(output_dir, cell_type)
     meta = _dtai_meta(adata_tracks)
     resolved_cluster_key = _resolve_cluster_key(adata_tracks)
     state_col = str(meta.get("state_col", FULL_STATE_COL))
@@ -756,7 +792,7 @@ def save_dtaidistance_medoid_overview(
     _ensure_exemplar_coordinate_columns(
         adata_filt, output_dir=output_dir, cell_type=cell_type, require_pixel_for_video=False,
     )
-    dest = Path(outfolder) if outfolder is not None else paths["quality_control_outfolder"]
+    dest = Path(outfolder) if outfolder is not None else paths.clustering_outfolder
     dest.mkdir(parents=True, exist_ok=True)
     fig = _build_medoid_overview_figure(
         adata_filt,
@@ -837,7 +873,7 @@ def save_dtaidistance_exemplar_plots(
     verbose=True,
 ):
     """Write exemplar overview and per-cluster statebar PDFs for a DTAI model."""
-    paths = _resolve_dtaidistance_paths(output_dir, cell_type)
+    paths = _resolve_track_paths(output_dir, cell_type)
     meta = _dtai_meta(adata_tracks)
     resolved_cluster_key = _resolve_cluster_key(adata_tracks, cluster_key=cluster_key)
     state_col = str(meta.get("state_col", FULL_STATE_COL))
@@ -854,8 +890,10 @@ def save_dtaidistance_exemplar_plots(
         adata_full_path=adata_full_path,
         verbose=verbose,
     )
-    exemplar_root = paths["outfolder"] / "example_tracks"
+    exemplar_root = paths.example_tracks_outfolder
     exemplar_root.mkdir(parents=True, exist_ok=True)
+    clustering_outfolder = paths.clustering_outfolder
+    clustering_outfolder.mkdir(parents=True, exist_ok=True)
 
     coord_enrichment = _ensure_exemplar_coordinate_columns(
         adata_filt,
@@ -900,7 +938,7 @@ def save_dtaidistance_exemplar_plots(
             seed=int(random_state),
             window_key=str(meta.get("trajectory_window_col", "trajectory_window_id")),
         )
-        overview_pdf = exemplar_root / "example_tracks_overview.pdf"
+        overview_pdf = clustering_outfolder / "example_tracks_overview.pdf"
         with PdfPages(overview_pdf) as pdf:
             pdf.savefig(fig_exemplar, bbox_inches="tight", dpi=300)
         plt.close(fig_exemplar)
@@ -914,7 +952,7 @@ def save_dtaidistance_exemplar_plots(
                 time_col=time_col,
                 window_key=str(meta.get("trajectory_window_col", "trajectory_window_id")),
             )
-            medoid_overview_pdf = exemplar_root / "medoid_tracks_overview.pdf"
+            medoid_overview_pdf = clustering_outfolder / "medoid_tracks_overview.pdf"
             with PdfPages(medoid_overview_pdf) as pdf:
                 pdf.savefig(fig_medoid, bbox_inches="tight", dpi=300)
             plt.close(fig_medoid)
@@ -1054,6 +1092,13 @@ def run_categorical_dtaidistance_trajectory_clustering(
     clustering_method="agglomerative",
     leiden_n_neighbors=15,
     leiden_resolution=1.0,
+    umap_n_neighbors=15,
+    umap_min_dist=0.1,
+    umap_spread=1.0,
+    sequence_source="states",
+    feature_cols=None,
+    binary_cols=None,
+    binary_feature_weight=1.0,
     missing_policy="keep",
     cluster_key="ClusterID",
     save_outputs=True,
@@ -1066,7 +1111,7 @@ def run_categorical_dtaidistance_trajectory_clustering(
     exemplar_pdf_rows_per_page=6,
     exemplar_layout_mode="both",
     exemplar_num_example_ranks=5,
-    output_subdir_name="behavorial_trajectories",
+    output_subdir_name=None,
     random_state=123,
     verbose=True,
 ):
@@ -1077,22 +1122,24 @@ def run_categorical_dtaidistance_trajectory_clustering(
     clustering (leiden_n_neighbors/leiden_resolution) on the same precomputed distance
     matrix that the QC UMAP embedding is built from, so the emergent number of clusters
     tends to track the density blobs visible in that plot rather than a fixed split.
+
+    umap_n_neighbors/umap_min_dist/umap_spread only shape the 2D QC UMAP embedding;
+    they never change the distance matrix or the cluster assignments.
     """
     started = time.perf_counter()
     if bool(clear_outputs):
-        outfolder = Path(output_dir).expanduser() / "analysis" / str(cell_type) / str(output_subdir_name)
-        if outfolder.exists():
-            shutil.rmtree(outfolder, ignore_errors=True)
+        existing_paths = _resolve_track_paths(output_dir, cell_type, output_subdir_name=output_subdir_name)
+        if existing_paths.outfolder.exists():
+            shutil.rmtree(existing_paths.outfolder, ignore_errors=True)
             if bool(verbose):
-                _winfo("trajectory-dtai", f"cleared previous outputs: {outfolder}")
-    paths = _resolve_dtaidistance_paths(output_dir, cell_type, output_subdir_name=output_subdir_name)
+                _winfo("trajectory-dtai", f"cleared previous outputs: {existing_paths.outfolder}")
+    paths = _resolve_track_paths(output_dir, cell_type, output_subdir_name=output_subdir_name)
     if adata_full_path is None:
         adata_full_path = _default_behavioral_states_path(output_dir, cell_type)
     adata_full_path = Path(adata_full_path).expanduser()
     if not adata_full_path.exists():
         raise FileNotFoundError(f"Could not find behavioral-state h5ad: {adata_full_path}")
 
-    state_cols = [str(FULL_STATE_COL)]
     trajectory_size = None if behavioral_trajectory_size is None else int(behavioral_trajectory_size)
     min_length = trajectory_size if min_track_length is None else int(min_track_length)
     trim_mode = str(trajectory_trim_mode).strip().lower()
@@ -1103,8 +1150,43 @@ def run_categorical_dtaidistance_trajectory_clustering(
         sequence_groupby_cols = list(groupby_cols) + [trajectory_window_col]
 
     if bool(verbose):
-        _winfo("trajectory-dtai", f"loading behavioral states: {adata_full_path}")
+        _winfo("trajectory-dtai", f"loading per-timepoint data: {adata_full_path}")
     adata_full = sc.read_h5ad(adata_full_path)
+
+    sequence_source = str(sequence_source).strip().lower()
+    if sequence_source not in {"states", "features"}:
+        raise ValueError("sequence_source must be 'states' or 'features'.")
+    state_col = resolve_full_state_col(adata_full)
+    state_cols = [str(state_col)] if state_col is not None else [str(FULL_STATE_COL)]
+    has_states = state_col is not None
+    if not has_states and sequence_source != "features":
+        raise ValueError(
+            f"'{adata_full_path}' has no '{FULL_STATE_COL}' column or supported legacy alias; "
+            "state-sequence DTW needs behavioral states. Use sequence_source='features'."
+        )
+    feature_info = {}
+    if sequence_source == "features":
+        # Scaled on all timepoints before trimming, so feature scaling doesn't depend
+        # on the trajectory size; carried through the track filter in obsm.
+        feature_matrix, used_cont, used_bin, feature_source = resolve_state_feature_matrix(
+            adata_full,
+            feature_cols=feature_cols,
+            binary_cols=binary_cols,
+            binary_weight=float(binary_feature_weight),
+        )
+        adata_full.obsm["_dtw_features"] = feature_matrix
+        feature_info = {
+            "continuous_feature_cols": list(used_cont),
+            "binary_feature_cols": list(used_bin),
+            "binary_feature_weight": float(binary_feature_weight),
+            "feature_preprocessing": str(feature_source),
+        }
+        if bool(verbose):
+            _winfo(
+                "trajectory-dtai",
+                f"feature-based DTW | continuous={used_cont} | binary={used_bin} "
+                f"(weight={float(binary_feature_weight):g}) | scaling={feature_source}",
+            )
 
     if bool(verbose):
         length_text = "all timepoints" if trajectory_size is None else f"{trim_mode} {trajectory_size} timepoints"
@@ -1112,7 +1194,7 @@ def run_categorical_dtaidistance_trajectory_clustering(
         _winfo(
             "trajectory-dtai",
             f"filtering tracks with min_length={min_length}, {action_text} {length_text} | "
-            f"state_col={FULL_STATE_COL}",
+            f"state_col={state_col if state_col is not None else 'none'}",
         )
     adata_filt = _filter_tracks_for_dtaidistance(
         adata_full,
@@ -1126,30 +1208,53 @@ def run_categorical_dtaidistance_trajectory_clustering(
     )
 
     line_condition_cols = [c for c in adata_filt.obs.columns if c.endswith("_line_condition")]
-    sequences, track_obs = extract_categorical_track_sequences(
-        adata_filt,
-        state_cols=state_cols,
-        groupby_cols=sequence_groupby_cols,
-        time_col=time_col,
-        missing_policy=missing_policy,
-        extra_meta_cols=("origin_cell_type", "well", *line_condition_cols),
-    )
+    extra_meta_cols = ("origin_cell_type", "well", *line_condition_cols)
+    if has_states:
+        sequences, track_obs = extract_categorical_track_sequences(
+            adata_filt,
+            state_cols=state_cols,
+            groupby_cols=sequence_groupby_cols,
+            time_col=time_col,
+            missing_policy=missing_policy,
+            extra_meta_cols=extra_meta_cols,
+        )
+    else:
+        track_obs = extract_track_metadata(
+            adata_filt,
+            groupby_cols=sequence_groupby_cols,
+            time_col=time_col,
+            extra_meta_cols=extra_meta_cols,
+        )
+        sequences = [[] for _ in range(len(track_obs))]
+
+    # Feature basis: the state sequences above still provide track metadata and the
+    # state timelines used in plots; the distances come from the numeric features.
+    numeric_sequences = None
+    if sequence_source == "features":
+        numeric_all, numeric_keys = extract_numeric_track_sequences(
+            adata_filt,
+            adata_filt.obsm["_dtw_features"],
+            groupby_cols=sequence_groupby_cols,
+            time_col=time_col,
+        )
+        by_key = dict(zip(numeric_keys, numeric_all))
+        track_keys = list(track_obs[sequence_groupby_cols].itertuples(index=False, name=None))
+        missing_keys = [k for k in track_keys if k not in by_key]
+        if missing_keys:
+            raise ValueError(f"Feature sequences missing for {len(missing_keys)} tracks, e.g. {missing_keys[:3]}")
+        numeric_sequences = [by_key[k] for k in track_keys]
 
     if max_tracks is not None and int(max_tracks) > 0 and len(sequences) > int(max_tracks):
         rng = np.random.default_rng(int(random_state))
         keep = np.sort(rng.choice(len(sequences), size=int(max_tracks), replace=False))
         sequences = [sequences[i] for i in keep]
+        if numeric_sequences is not None:
+            numeric_sequences = [numeric_sequences[i] for i in keep]
         track_obs = track_obs.iloc[keep].reset_index(drop=True)
         if bool(verbose):
             _winfo("trajectory-dtai", f"sampled {len(sequences)} tracks for distance clustering")
 
-    if bool(verbose):
-        _winfo(
-            "trajectory-dtai",
-            f"computing pairwise one-hot dtaidistance distances for {len(sequences)} tracks",
-        )
-    distances, categories = compute_dtaidistance_onehot_distance_matrix(
-        sequences,
+    dtw_kwargs = dict(
         window=window,
         max_dist=max_dist,
         max_length_diff=max_length_diff,
@@ -1158,6 +1263,21 @@ def run_categorical_dtaidistance_trajectory_clustering(
         parallel=parallel,
         verbose=verbose,
     )
+    if sequence_source == "features":
+        if bool(verbose):
+            _winfo(
+                "trajectory-dtai",
+                f"computing pairwise feature dtaidistance distances for {len(numeric_sequences)} tracks",
+            )
+        distances = compute_dtaidistance_numeric_distance_matrix(numeric_sequences, **dtw_kwargs)
+        categories = sorted({str(v) for seq in sequences for v in seq})
+    else:
+        if bool(verbose):
+            _winfo(
+                "trajectory-dtai",
+                f"computing pairwise one-hot dtaidistance distances for {len(sequences)} tracks",
+            )
+        distances, categories = compute_dtaidistance_onehot_distance_matrix(sequences, **dtw_kwargs)
     dtw_backend = "dtaidistance"
 
     clustering_method = str(clustering_method).strip().lower()
@@ -1205,16 +1325,24 @@ def run_categorical_dtaidistance_trajectory_clustering(
         silhouette = None
 
     adata_tracks.uns["dtai_trajectory_clustering"] = {
-        "method": f"categorical_onehot_dtaidistance_{clustering_method}",
+        "method": (
+            f"feature_dtaidistance_{clustering_method}"
+            if sequence_source == "features"
+            else f"categorical_onehot_dtaidistance_{clustering_method}"
+        ),
+        "sequence_source": str(sequence_source),
+        # False = trajectories built directly from features, without behavioral states.
+        "has_behavioral_states": bool(has_states),
+        **feature_info,
         "clustering_method": str(clustering_method),
         "dtw_backend": str(dtw_backend),
-        "local_encoding": "one_hot",
+        "local_encoding": "state_features" if sequence_source == "features" else "one_hot",
         "inner_dist": "squared euclidean",
         "one_hot_categories": [str(c) for c in categories],
         "groupby_cols": [str(c) for c in list(groupby_cols)],
         "sequence_groupby_cols": [str(c) for c in list(sequence_groupby_cols)],
         "time_col": str(time_col),
-        "state_col": str(FULL_STATE_COL),
+        "state_col": str(state_col) if state_col is not None else str(FULL_STATE_COL),
         "state_cols": list(state_cols),
         "behavioral_trajectory_size": None if trajectory_size is None else int(trajectory_size),
         "min_track_length": None if min_length is None else int(min_length),
@@ -1233,6 +1361,9 @@ def run_categorical_dtaidistance_trajectory_clustering(
         "linkage": str(linkage) if clustering_method == "agglomerative" else None,
         "leiden_n_neighbors": int(leiden_n_neighbors) if clustering_method == "leiden" else None,
         "leiden_resolution": leiden_resolution if clustering_method == "leiden" else None,
+        "umap_n_neighbors": int(umap_n_neighbors),
+        "umap_min_dist": float(umap_min_dist),
+        "umap_spread": float(umap_spread),
         "missing_policy": str(missing_policy),
         "cluster_key": str(cluster_key),
         "raw_label_size_mapping": dict(size_mapping),
@@ -1243,7 +1374,7 @@ def run_categorical_dtaidistance_trajectory_clustering(
     }
 
     if bool(plot_results):
-        raw_qc_dir = paths["quality_control_outfolder"] / "raw"
+        raw_qc_dir = paths.clustering_outfolder / "raw"
         raw_qc_dir.mkdir(parents=True, exist_ok=True)
         plot_paths = _save_diagnostics(
             adata_tracks,
@@ -1252,13 +1383,19 @@ def run_categorical_dtaidistance_trajectory_clustering(
             cluster_key=cluster_key,
             max_heatmap_tracks=int(max_heatmap_tracks),
             random_state=int(random_state),
+            umap_n_neighbors=int(umap_n_neighbors),
+            umap_min_dist=float(umap_min_dist),
+            umap_spread=float(umap_spread),
         )
         adata_tracks.uns.setdefault("visualization", {})
         adata_tracks.uns["visualization"].update(plot_paths)
 
-    if bool(plot_exemplars):
-        exemplar_root = paths["outfolder"] / "example_tracks"
+    # Exemplar state bars need behavioral states.
+    if bool(plot_exemplars) and has_states:
+        exemplar_root = paths.example_tracks_outfolder
         exemplar_root.mkdir(parents=True, exist_ok=True)
+        clustering_outfolder = paths.clustering_outfolder
+        clustering_outfolder.mkdir(parents=True, exist_ok=True)
         try:
             _ensure_exemplar_coordinate_columns(
                 adata_filt,
@@ -1295,7 +1432,7 @@ def run_categorical_dtaidistance_trajectory_clustering(
                 tmax_key="position_t_max",
                 seed=int(random_state),
             )
-            overview_pdf = exemplar_root / "example_tracks_overview.pdf"
+            overview_pdf = clustering_outfolder / "example_tracks_overview.pdf"
             with PdfPages(overview_pdf) as pdf:
                 pdf.savefig(fig_exemplar, bbox_inches="tight", dpi=300)
             plt.close(fig_exemplar)
@@ -1309,7 +1446,7 @@ def run_categorical_dtaidistance_trajectory_clustering(
                     state_key=str(state_cols[0]),
                     time_col=str(time_col),
                 )
-                medoid_overview_pdf = exemplar_root / "medoid_tracks_overview.pdf"
+                medoid_overview_pdf = clustering_outfolder / "medoid_tracks_overview.pdf"
                 with PdfPages(medoid_overview_pdf) as pdf:
                     pdf.savefig(fig_medoid, bbox_inches="tight", dpi=300)
                 plt.close(fig_medoid)
@@ -1364,18 +1501,18 @@ def run_categorical_dtaidistance_trajectory_clustering(
                 _winfo("trajectory-dtai", f"skipping exemplar PDFs due to error: {exc}")
 
     if bool(save_distance_matrix):
-        paths["clustering_outfolder"].mkdir(parents=True, exist_ok=True)
-        distance_csv = paths["clustering_outfolder"] / "categorical_dtai_distance_matrix.csv"
+        paths.clustering_outfolder.mkdir(parents=True, exist_ok=True)
+        distance_csv = paths.clustering_outfolder / "categorical_dtai_distance_matrix.csv"
         pd.DataFrame(distances, index=adata_tracks.obs.index, columns=adata_tracks.obs.index).to_csv(distance_csv)
         adata_tracks.uns.setdefault("dtai_trajectory_clustering", {})
         adata_tracks.uns["dtai_trajectory_clustering"]["distance_matrix_csv"] = str(distance_csv)
 
-    output_path = paths["outfolder"] / get_dtaidistance_track_trajectories_filename(cell_type)
+    output_path = paths.outfolder / get_dtaidistance_track_trajectories_filename(cell_type)
     if bool(save_outputs):
         adata_tracks.write(output_path, compression="gzip")
         _save_adata_obs_csv(adata_tracks, output_path)
         if bool(verbose):
-            _winfo("trajectory-dtai", f"saved one-hot dtaidistance model: {output_path}")
+            _winfo("trajectory-dtai", f"saved trajectory model: {output_path}")
 
     elapsed = time.perf_counter() - started
     if bool(verbose):
@@ -1430,6 +1567,14 @@ def train_dtaidistance_trajectory_classifier(
     if bool(verbose):
         _winfo("trajectory-dtai-clf", f"loading behavioral states: {adata_full_path}")
     adata_full = sc.read_h5ad(adata_full_path)
+    state_col = str(meta.get("state_col", "") or "")
+    if state_col not in adata_full.obs.columns:
+        state_col = resolve_full_state_col(adata_full)
+    if state_col is None:
+        raise ValueError(
+            f"'{adata_full_path}' has no '{FULL_STATE_COL}' column or supported legacy alias; "
+            "cannot train a state-feature classifier."
+        )
 
     if bool(verbose):
         _winfo("trajectory-dtai-clf", f"building track features (trajectory_size={trajectory_size})")
@@ -1446,14 +1591,14 @@ def train_dtaidistance_trajectory_classifier(
         )
         feature_adata, _ = extract_descibing_track_state_features(
             adata_filt,
-            state_col=str(FULL_STATE_COL),
+            state_col=str(state_col),
             group_col=sequence_groupby_cols,
         )
         feature_adata.uns["track_filtering"] = {
             "groupby_cols": [str(c) for c in list(groupby_cols)],
             "sequence_groupby_cols": [str(c) for c in list(sequence_groupby_cols)],
             "time_col": str(time_col),
-            "state_col": str(FULL_STATE_COL),
+            "state_col": str(state_col),
             "behavioral_trajectory_size": int(trajectory_size),
             "min_track_length": None if min_track_length is None else int(min_track_length),
             "trajectory_trim_mode": trim_mode,
@@ -1463,7 +1608,7 @@ def train_dtaidistance_trajectory_classifier(
     else:
         feature_adata = _build_track_feature_adata(
             adata_full,
-            state_col=str(FULL_STATE_COL),
+            state_col=str(state_col),
             behavioral_trajectory_size=int(trajectory_size),
         )
 
@@ -1490,9 +1635,7 @@ def train_dtaidistance_trajectory_classifier(
     feature_adata = feature_adata[has_label.values].copy()
     feature_adata.obs[cluster_col] = feat_obs.loc[has_label, "_cluster"].astype(str).values
 
-    classifier_path = _resolve_track_classifier_path(
-        output_dir, cell_type, output_subdir_name="behavorial_trajectories"
-    )
+    classifier_path = _resolve_track_classifier_path(output_dir, cell_type)
 
     result = train_track_classifier(
         output_dir=output_dir,
@@ -1510,7 +1653,6 @@ def train_dtaidistance_trajectory_classifier(
         random_state=int(random_state),
         save_classifier=bool(save_classifier),
         classifier_path=classifier_path,
-        output_subdir_name="behavorial_trajectories",
         verbose=bool(verbose),
     )
     return result

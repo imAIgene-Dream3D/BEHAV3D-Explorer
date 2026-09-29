@@ -44,7 +44,7 @@ from behav3d.analysis.behavior.track.visualization.plots.feature_dtw import (
 from behav3d.analysis.behavior.general.visualization.plots.proportion_bars import (
     hash_stable_label_color_map,
 )
-from behav3d.analysis.behavior.track.utils import _resolve_dtaidistance_paths
+from behav3d.analysis.behavior.track.utils import _resolve_track_paths
 from behav3d.analysis.behavior.track.visualization.plots.exemplar_track_per_cluster import (
     save_exemplar_statebar_backprojection_pdf,
     save_exemplar_statebar_backprojection_video_per_cluster,
@@ -3977,7 +3977,7 @@ class MotileCellAnalysisPanel:
         return Path(self.output_dir, "analysis", self.cell_type, "timepoint_feature_dtw")
 
     def _feature_dtw_behavior_proportions_outdir(self):
-        return _resolve_dtaidistance_paths(self.output_dir, self.cell_type)["behavior_proportions_outfolder"]
+        return _resolve_track_paths(self.output_dir, self.cell_type).behavior_proportions_outfolder
 
     def _snapshot_feature_dtw_before_renaming(self):
         outdir = self._feature_dtw_outdir()

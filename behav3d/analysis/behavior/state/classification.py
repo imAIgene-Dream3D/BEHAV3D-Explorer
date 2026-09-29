@@ -14,6 +14,7 @@ from matplotlib.figure import Figure
 from sklearn.preprocessing import StandardScaler
 
 from behav3d.core.anndata import df_to_adata
+from behav3d.core.utils import rmtree_ignore_missing
 from behav3d.features.rolling_window_features import create_descriptive_track_dataset
 from behav3d.analysis.behavior.state.hmm import (
     run_hmm_state_classification,
@@ -30,9 +31,10 @@ from behav3d.analysis.behavior.state.utils import (
     _mixed_label_sort_key,
     _normalize_label_color_map,
     _normalize_log_scale_feature_selectors,
-    _rebuild_full_behavioral_cluster_from_intrinsic,
+    _rebuild_full_behavioral_state_from_intrinsic,
     _require_columns,
     _resolve_log_scale_feature_cols,
+    _resolve_obs_column_with_legacy_fallback,
     _resolve_positions_csv_path,
     _resolve_state_paths,
     _save_adata_obs_csv,
@@ -61,8 +63,32 @@ HMM_OPTIONAL_WINDOW_FEATURES = (
 )
 INTRINSIC_STATE_COL = "hmm_intrinsic_behavioral_state"
 HMM_INTRINSIC_RAW_STATE_COL = "hmm_intrinsic_behavioral_state_raw"
-FULL_STATE_COL = "behavioral_state"
+FULL_STATE_COL = "full_behavioral_state"
 BINARY_GROUP_COL = "binary_group"
+INTRINSIC_STATE_CONFIDENCE_COL = f"{INTRINSIC_STATE_COL}_confidence"
+FULL_STATE_CONFIDENCE_COL = f"{FULL_STATE_COL}_confidence"
+
+# Legacy obs-column names retired by this refactor; still checked as a
+# fallback when loading files written before columns were consolidated.
+_LEGACY_INTRINSIC_STATE_ALIASES = ("intrinsic_behavioral_cluster",)
+_LEGACY_FULL_STATE_ALIASES = ("full_behavioral_cluster", "behavioral_state")
+
+
+def resolve_intrinsic_state_col(adata):
+    """Return the obs column holding intrinsic state labels, falling back to
+    the pre-consolidation legacy column name for old files."""
+    return _resolve_obs_column_with_legacy_fallback(
+        adata, INTRINSIC_STATE_COL, _LEGACY_INTRINSIC_STATE_ALIASES
+    )
+
+
+def resolve_full_state_col(adata):
+    """Return the obs column holding full (intrinsic x binary-group) state
+    labels, falling back to pre-consolidation legacy column names (including
+    the old value of FULL_STATE_COL itself, "behavioral_state") for old files."""
+    return _resolve_obs_column_with_legacy_fallback(
+        adata, FULL_STATE_COL, _LEGACY_FULL_STATE_ALIASES
+    )
 
 
 def _obs_label_values(adata, col):
@@ -443,20 +469,16 @@ def _rebuild_hmm_full_behavioral_state_from_intrinsic(
     binary_group_constraints=None,
     enforce_binary_group_constraints=False,
 ):
-    _rebuild_full_behavioral_cluster_from_intrinsic(
+    _rebuild_full_behavioral_state_from_intrinsic(
         adata=adata,
         binary_cols_to_merge=binary_cols_to_merge,
         intrinsic_col=intrinsic_col,
+        full_state_col=full_state_col,
         binary_group_constraints=binary_group_constraints,
         enforce_binary_group_constraints=enforce_binary_group_constraints,
     )
-    if "full_behavioral_cluster" not in adata.obs.columns:
+    if full_state_col not in adata.obs.columns:
         raise ValueError("Could not rebuild HMM full behavioral state labels.")
-    adata.obs[full_state_col] = pd.Categorical(
-        pd.Series(adata.obs["full_behavioral_cluster"], index=adata.obs.index, dtype="string")
-    )
-    if intrinsic_col != "intrinsic_behavioral_cluster":
-        adata.obs["intrinsic_behavioral_cluster"] = adata.obs[intrinsic_col].copy()
     return adata
 
 
@@ -1450,7 +1472,11 @@ def _plot_hmm_state_diagnostics_pdf(
             cluster_series = pd.Series(ad_heat.obs[cluster_col], index=ad_heat.obs.index, dtype="string")
             valid_mask = cluster_series.notna()
             if not bool(valid_mask.all()):
-                ad_heat = ad_heat[valid_mask.to_numpy()].copy()
+                # pandas' copy-on-write can hand back a read-only ndarray from
+                # to_numpy(); anndata's boolean-mask indexing round-trips
+                # through DLPack, which can't signal readonly and raises a
+                # BufferError. Force a writable copy to avoid that.
+                ad_heat = ad_heat[valid_mask.to_numpy(copy=True)].copy()
                 cluster_series = cluster_series[valid_mask]
             cluster_order = sorted(cluster_series.unique().tolist(), key=_mixed_label_sort_key)
             ad_heat.obs[cluster_col] = pd.Categorical(
@@ -1593,11 +1619,15 @@ def run_hmm_state_clustering(
     random_state=123,
     df_positions=None,
     state_paths=None,
+    clear_outputs=True,
     return_details=False,
     verbose=True,
 ):
     hmm_started = _vstart(verbose, "state-hmm", "run HMM state clustering")
     state_paths = state_paths or _resolve_state_paths(output_dir, cell_type)
+    if bool(clear_outputs) and state_paths.state_outdir.exists():
+        rmtree_ignore_missing(state_paths.state_outdir)
+        _vinfo(verbose, "state-hmm", f"cleared previous outputs: {state_paths.state_outdir}")
     state_clustering_outdir = _resolve_hmm_quality_control_outdir(state_paths=state_paths) / "raw"
     state_clustering_outdir.mkdir(parents=True, exist_ok=True)
 
@@ -1825,7 +1855,6 @@ def run_hmm_state_clustering(
             for col in [
                 INTRINSIC_STATE_COL,
                 "behavioral_clusterid",
-                "full_behavioral_cluster",
                 FULL_STATE_COL,
             ]:
                 if col in model_adata.obs.columns:
@@ -2116,7 +2145,7 @@ def _finalize_hmm_apply_outputs(
         if not bool(report_mask.any()):
             report_adata = adata_full[:0].copy()
         elif not bool(report_mask.all()):
-            report_adata = adata_full[report_mask.to_numpy(dtype=bool)].copy()
+            report_adata = adata_full[report_mask.to_numpy(dtype=bool, copy=True)].copy()
 
     adata_full.uns["preprocessing"] = dict(preprocessing_meta)
     adata_full.uns["classification"] = dict(classification_meta)
@@ -2362,7 +2391,7 @@ def apply_hmm_deployment_artifact_to_full_dataset(
         index=adata_full.obs.index,
         dtype="string",
     )
-    adata_full.obs["intrinsic_behavioral_cluster_confidence"] = pd.Series(
+    adata_full.obs[INTRINSIC_STATE_CONFIDENCE_COL] = pd.Series(
         np.nan,
         index=adata_full.obs.index,
         dtype=float,
@@ -2390,7 +2419,7 @@ def apply_hmm_deployment_artifact_to_full_dataset(
             )
         adata_full.obs.loc[adata_full.obs.index[score_mask], HMM_INTRINSIC_RAW_STATE_COL] = raw_state_scored
         adata_full.obs.loc[adata_full.obs.index[score_mask], INTRINSIC_STATE_COL] = intrinsic_scored
-        adata_full.obs.loc[adata_full.obs.index[score_mask], "intrinsic_behavioral_cluster_confidence"] = state_confidence
+        adata_full.obs.loc[adata_full.obs.index[score_mask], INTRINSIC_STATE_CONFIDENCE_COL] = state_confidence
 
         if str(prepared["resolved_start_offset_fill_mode"]) == "backfill" and int(prepared["resolved_start_offset"]) > 0:
             for _, group_idx in adata_full.obs.groupby(["sample_name", "TrackID"], sort=False, observed=False).groups.items():
@@ -2401,13 +2430,13 @@ def apply_hmm_deployment_artifact_to_full_dataset(
                     continue
                 first_raw = scored_group[HMM_INTRINSIC_RAW_STATE_COL].iloc[0]
                 first_intrinsic = scored_group[INTRINSIC_STATE_COL].iloc[0]
-                first_conf = pd.to_numeric(pd.Series(scored_group["intrinsic_behavioral_cluster_confidence"]), errors="coerce").iloc[0]
+                first_conf = pd.to_numeric(pd.Series(scored_group[INTRINSIC_STATE_CONFIDENCE_COL]), errors="coerce").iloc[0]
                 if not pd.isna(first_raw):
                     adata_full.obs.loc[skipped_group.index, HMM_INTRINSIC_RAW_STATE_COL] = first_raw
                 if not pd.isna(first_intrinsic):
                     adata_full.obs.loc[skipped_group.index, INTRINSIC_STATE_COL] = first_intrinsic
                 if np.isfinite(first_conf):
-                    adata_full.obs.loc[skipped_group.index, "intrinsic_behavioral_cluster_confidence"] = first_conf
+                    adata_full.obs.loc[skipped_group.index, INTRINSIC_STATE_CONFIDENCE_COL] = first_conf
 
     adata_full.obs[HMM_INTRINSIC_RAW_STATE_COL] = _coerce_hmm_raw_state_series(
         adata_full.obs[HMM_INTRINSIC_RAW_STATE_COL],
@@ -2431,7 +2460,7 @@ def apply_hmm_deployment_artifact_to_full_dataset(
             index=adata_full.obs.index,
             dtype="string",
         ).isna()
-        for col in ["behavioral_clusterid", "full_behavioral_cluster", FULL_STATE_COL]:
+        for col in ["behavioral_clusterid", FULL_STATE_COL]:
             if col in adata_full.obs.columns:
                 adata_full.obs[col] = pd.Series(adata_full.obs[col], index=adata_full.obs.index, dtype="string").where(
                     ~unassigned_mask,
@@ -2475,9 +2504,8 @@ def apply_hmm_deployment_artifact_to_full_dataset(
             f"{missing_labels[:20]}"
         )
     adata_full.obs[FULL_STATE_COL] = pd.Categorical(curated_full_labels)
-    adata_full.obs["full_behavioral_cluster"] = pd.Categorical(curated_full_labels)
-    adata_full.obs["full_behavioral_cluster_confidence"] = adata_full.obs[
-        "intrinsic_behavioral_cluster_confidence"
+    adata_full.obs[FULL_STATE_CONFIDENCE_COL] = adata_full.obs[
+        INTRINSIC_STATE_CONFIDENCE_COL
     ].astype(float)
 
     if continuous_output_col != INTRINSIC_STATE_COL:
@@ -2485,14 +2513,14 @@ def apply_hmm_deployment_artifact_to_full_dataset(
             pd.Series(adata_full.obs[INTRINSIC_STATE_COL], index=adata_full.obs.index, dtype="string")
         )
         adata_full.obs[f"{str(continuous_output_col)}_confidence"] = adata_full.obs[
-            "intrinsic_behavioral_cluster_confidence"
+            INTRINSIC_STATE_CONFIDENCE_COL
         ].astype(float)
     if full_output_col != FULL_STATE_COL:
         adata_full.obs[str(full_output_col)] = pd.Categorical(
             pd.Series(adata_full.obs[FULL_STATE_COL], index=adata_full.obs.index, dtype="string")
         )
         adata_full.obs[f"{str(full_output_col)}_confidence"] = adata_full.obs[
-            "full_behavioral_cluster_confidence"
+            FULL_STATE_CONFIDENCE_COL
         ].astype(float)
 
     classification_meta = dict(class_meta)

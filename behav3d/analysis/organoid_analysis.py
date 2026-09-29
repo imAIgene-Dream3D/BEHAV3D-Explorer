@@ -305,11 +305,8 @@ def run_organoid_analysis(
         
     if df_tracks_path is None:
         df_tracks_path = Path(feature_outdir, f"BEHAV3D_{org_type}_combined_track_features_filtered.csv")
-    # if df_tracks_summarized_path is None:
-    #     df_tracks_summarized_path = Path(feature_outdir, f"BEHAV3D_organoid_combined_track_features_summarized.csv")
-    
+
     df_tracks = pd.read_csv(df_tracks_path)
-    # df_tracks_summarized = pd.read_csv(df_tracks_summarized_path)
     df_tracks=df_tracks.sort_values(by=["sample_name", "TrackID", "relative_time"])
     df_tracks["TrackID"] = df_tracks["TrackID"].astype(str)
 
@@ -469,15 +466,7 @@ def run_organoid_analysis(
         smoothing={"window_size": 5, "min_periods": 1},
     )
 
-    ## TODO PLOT A STACKED BARPLOT OVER TIME WHERE THE TOTAL BAR IS 
-    # THE DETECTED ORGANOIDS AT THAT TIMEPOINT. 
-    # STACK ALIVE AND DEAD. 
-    # THIS CAN SHOW IF ORGANOIDS DISSAPPEAR OR ACTUALLY DIE OVER TIME
-    
     for sample_name in df_tracks["sample_name"].unique():
-        """
-        Create a analysis pdf for each sample separately
-        """
         analysis_sample_outdir = Path(sample_outdir, sample_name, org_type)
         if not analysis_sample_outdir.exists():
             analysis_sample_outdir.mkdir(parents=True)
@@ -1885,21 +1874,8 @@ def plot_multi_organoid_death_dynamics(
     show_in_notebook=True,
     ):
     """
-    Generate comparison plots for death dynamics across multiple organoid types.
-    
-    Parameters
-    ----------
-    output_dir : str or Path
-        Base output directory containing analysis results
-    organoid_types : list
-        List of organoid type names (e.g., ['organoid1', 'organoid2'])
-    figsize : tuple
-        Figure size for plots
-    
-    Returns
-    -------
-    Path or None
-        Path to generated PDF, or None if insufficient data
+    Comparison plots for death dynamics across multiple organoid types.
+    Returns the PDF path, or None if there's insufficient data.
     """
     print(f"--------------- Multi-Organoid Death Dynamics Comparison ---------------")
     
@@ -2926,25 +2902,11 @@ def run_organoid_morphology_dead_analysis(
 
     Parameters
     ----------
-    output_dir : str or Path
-        Base output directory containing track features.
-    organoid_types : list of str
-        List of organoid types to analyze (e.g. ["organoid1"]).
     initial_window : int or tuple(int, int), default=5
         Window for baseline morphology. If int, uses 0 <= t <= N.
         If tuple, uses t_start <= t <= t_end. Features are averaged over this window.
-    umap_n_neighbors : int, default=15
-        Number of local neighbors used for graph construction.
-    umap_min_dist : float, default=0.1
-        Minimum distance between points in UMAP embedding.
-    umap_spread : float, default=1.0
-        The effective scale of embedded points.
     distance_metric : str, default="euclidean"
-        Distance metric for UMAP/neighbors. Valid options include: euclidean,
-        manhattan, chebyshev, cosine, correlation, canberra, braycurtis, etc.
-        See umap-learn documentation for full list.
-    leiden_resolution : float, default=1.0
-        Controls cluster granularity. Higher values lead to more clusters.
+        Any umap-learn-supported metric.
     metadata : pd.DataFrame or None, default=None
         Metadata table (needed for organoid snapshot generation).
         If None, snapshots are skipped.
@@ -3135,18 +3097,6 @@ def run_organoid_morphology_dead_analysis(
         for _, row in df_type_dist.iterrows():
             print(f"    - {row['sample_name']}: {row['n_organoids']} organoids")
 
-    #log transformation of any feature????
-    '''print("\nLog transformation")
-    df_feats[feature_cols] = np.log1p(df_feats[feature_cols])
-
-    # Verify log transformation
-    print("\nLog transformation verification")
-    for col in feature_cols:
-        mean_log = df_feats[col].mean()
-        std_log = df_feats[col].std(ddof=0)
-        status = "✓" if abs(mean_log) < 0.01 and abs(std_log - 1.0) < 0.1 else "⚠"
-        print(f"    {status} {col}_log: μ={mean_log:10.7f}, σ={std_log:10.7f}")
-    '''
     # Z-score standardization
     print("\nZ-score standardization")
     

@@ -94,6 +94,10 @@ from behav3d.analysis.behavior.general.visualization.plots.proportion_bars impor
     _make_group_label,
     _chunk_list,
     _wrap_row_label,
+    hash_stable_label_color_map,
+    build_condition_time_series_raw_table,
+    compute_condition_time_series_stats,
+    plot_condition_time_series_grid,
 )
 from behav3d.analysis.behavior.general.visualization.plots.feature_box import (
     plot_feature_box_by_group,
@@ -124,6 +128,7 @@ from behav3d.analysis.behavior.state.visualization.plots.state_composition impor
     _build_overall_summary_plot_data_table,
     _panels_per_a4_page,
     _paginate_samples,
+    _apply_time_binning,
 )
 from behav3d.analysis.behavior.state.utils import (
     _apply_state_order,
@@ -132,6 +137,7 @@ from behav3d.analysis.behavior.state.utils import (
     _normalize_label_color_map,
 )
 from behav3d.analysis.behavior.utils import (
+    _contact_analysis_dir,
     _mixed_label_sort_key,
     _resolve_output_dir,
     _sanitize_filename_token,
@@ -150,31 +156,6 @@ _GRID_HEADER_W_IN = 1.2          # space for row-header labels (2D grid) — hor
 _GRID_ROW_LABEL_MAX_CHARS = 13   # chars/line at _GRID_HEADER_W_IN, fontsize=9 bold
 _GRID_TOP_MARGIN_IN = 0.5        # space reserved above the grid for the suptitle
 _GRID_BOTTOM_MARGIN_IN = 0.55    # space reserved below the grid for the legend
-
-
-def archive_track_clustering_pdfs(outfolder, archive_dir_name="clustering_originals"):
-    outfolder = Path(outfolder)
-    outfolder.mkdir(parents=True, exist_ok=True)
-
-    pdf_paths = sorted([p for p in outfolder.glob("*.pdf") if p.is_file()])
-    if len(pdf_paths) == 0:
-        return {"archive_dir": None, "archived_paths": []}
-
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    archive_dir = outfolder / str(archive_dir_name) / ts
-    archive_dir.mkdir(parents=True, exist_ok=True)
-
-    archived_paths = []
-    for src in pdf_paths:
-        dst = archive_dir / src.name
-        suffix_idx = 1
-        while dst.exists():
-            dst = archive_dir / f"{src.stem}_{suffix_idx}{src.suffix}"
-            suffix_idx += 1
-        src.replace(dst)
-        archived_paths.append(dst)
-
-    return {"archive_dir": archive_dir, "archived_paths": archived_paths}
 
 
 def _apply_best_pdf_orientation(fig, default_orientation="landscape"):
@@ -838,6 +819,7 @@ def save_track_class_proportions_by_sample_plot(
     time_col="position_t",
     tmin_col="position_t_min",
     tmax_col="position_t_max",
+    time_bin_size=None,
 ):
     """
     Save one horizontal stacked bar per sample showing track-class proportions,
@@ -850,6 +832,13 @@ def save_track_class_proportions_by_sample_plot(
         as ``condition_groups`` in ``compute_condition_diff_stats_pairwise``) - when
         given, that axis is pooled into the merged labels instead of showing one panel
         per raw level. Rows whose raw level isn't in the mapping are dropped.
+
+    ``time_bin_size`` : int, optional
+        Groups timepoints into fixed-width buckets (bucket start value) before
+        computing the track-class proportions *over time* section below, to reduce
+        noise from many raw per-frame timepoints. ``None`` or ``<= 1`` means no
+        binning (raw per-frame resolution). Does not affect the static (non-time)
+        proportion bars above.
 
     If ``tmin_col``/``tmax_col`` (each track's active timepoint window) are present
     in ``adata_tracks.obs``, this also adds track-class proportions *over time*:
@@ -1063,6 +1052,7 @@ def save_track_class_proportions_by_sample_plot(
             expanded_df = _expand_track_windows_to_timepoints(
                 time_plot_df, time_col=time_col, tmin_col=tmin_col, tmax_col=tmax_col,
             )
+            expanded_df = _apply_time_binning(expanded_df, time_col=time_col, time_bin_size=time_bin_size)
 
             if len(expanded_df) > 0:
                 panels_per_page, ncols_eff, max_rows = _panels_per_a4_page(grid_ncols)
@@ -1217,6 +1207,11 @@ def save_track_condition_comparison_report(
     condition_groups=None,
     class_order=None,
     class_colors=None,
+    include_over_time=False,
+    time_col="position_t",
+    tmin_col="position_t_min",
+    tmax_col="position_t_max",
+    minutes_per_frame=None,
     verbose=False,
     pdf_pages=None,
     csv_dir=None,
@@ -1243,6 +1238,19 @@ def save_track_condition_comparison_report(
     ``group_x_levels_map``/``group_y_levels_map`` : dict[str, str], optional
         Maps raw ``group_x``/``group_y`` levels to merged group labels — when given, that axis
         is pooled into the merged labels instead of showing one row/column per raw level.
+
+    include_over_time : bool, optional
+        When True, appends an extra page (per group_cols section) showing each cluster's
+        prevalence over time, one line + shaded SE ribbon per condition_col level (or merged
+        condition_groups label), expanding each track across its `[tmin_col, tmax_col]` window
+        at raw per-frame resolution. Purely descriptive - no significance test is computed; the
+        underlying per-unit, per-timepoint values are written to a companion CSV so a
+        significance test can be run externally. Silently skipped (with a verbose note) if
+        `tmin_col`/`tmax_col` aren't available.
+
+    minutes_per_frame : float, optional
+        When given (and include_over_time=True), the over-time page's x-axis and raw CSV are
+        converted to minutes; otherwise they stay in raw frame units.
     """
     obs = adata_tracks.obs
     extra_group_cols = [c for c in (group_cols or []) if c in obs.columns]
@@ -1298,6 +1306,48 @@ def save_track_condition_comparison_report(
     metadata_cols = [unit_col, condition_col] + valid_group_cols
     sample_metadata = df[metadata_cols].drop_duplicates(subset=[unit_col]).set_index(unit_col)
 
+    has_time_cols = bool(include_over_time) and tmin_col in obs.columns and tmax_col in obs.columns
+    if bool(include_over_time) and not has_time_cols and bool(verbose):
+        print(f"  Note: '{tmin_col}'/'{tmax_col}' not found in adata_tracks.obs — skipping over-time dynamics page.")
+
+    raw_time_table = None
+    time_series_stats = None
+    if has_time_cols:
+        time_df = df.join(obs[[tmin_col, tmax_col]], how="left").dropna(subset=[tmin_col, tmax_col])
+        if len(time_df) == 0:
+            if bool(verbose):
+                print(f"  Note: no valid {tmin_col}/{tmax_col} rows — skipping over-time dynamics page.")
+        else:
+            expanded_df = _expand_track_windows_to_timepoints(
+                time_df, time_col=time_col, tmin_col=tmin_col, tmax_col=tmax_col,
+            )
+            unit_order = expanded_df[unit_col].drop_duplicates().tolist()
+            relative_by_unit_time, _ = _compute_relative_matrices_by_sample(
+                expanded_df,
+                time_col=time_col,
+                state_col=class_col,
+                sample_col=unit_col,
+                state_order=resolved_class_order,
+                sample_order=unit_order,
+            )
+            raw_long = _build_relative_plot_data_table(relative_by_unit_time, label_col_name="comparison_unit")
+            raw_time_table = build_condition_time_series_raw_table(
+                raw_long,
+                sample_metadata,
+                condition_col=condition_col,
+                group_cols=valid_group_cols,
+                condition_groups=condition_groups,
+                unit_col_name="comparison_unit",
+                minutes_per_frame=minutes_per_frame,
+            )
+            time_series_stats = compute_condition_time_series_stats(
+                raw_time_table,
+                class_order=resolved_class_order,
+                condition_col=condition_col,
+                group_cols=valid_group_cols,
+                time_col=("time_minutes" if minutes_per_frame else "time"),
+            )
+
     resolved_colors = dict(class_colors) if class_colors else _get_classification_state_colors(adata_tracks, class_col)
     resolved_colors = _normalize_label_color_map(resolved_class_order, colors=resolved_colors, cmap_name="tab20")
 
@@ -1308,43 +1358,76 @@ def save_track_condition_comparison_report(
     csv_dir = Path(csv_dir) if csv_dir is not None else out_dir
     csv_dir.mkdir(parents=True, exist_ok=True)
     out_csv = csv_dir / out_pdf.with_suffix(".csv").name
+    raw_csv_path = csv_dir / f"{out_pdf.stem}_over_time_raw.csv"
+    summary_csv_path = csv_dir / f"{out_pdf.stem}_over_time_summary.csv"
+    if raw_time_table is not None:
+        raw_time_table.to_csv(raw_csv_path, index=False)
 
     title = f"{class_col} — {condition_col} pairwise comparison"
     n_condition_levels = sample_metadata[condition_col].astype(str).nunique()
     use_2d_grid = bool(group_x) and bool(group_y) and n_condition_levels == 2 and not condition_groups
 
-    if use_2d_grid:
-        result = plot_condition_diff_grid_2d(
-            per_sample_df,
-            sample_metadata,
-            class_order=resolved_class_order,
-            colors=resolved_colors,
-            condition_col=condition_col,
-            grid_axis_cols=grid_axis_cols,
-            extra_group_cols=extra_group_cols,
-            title=title,
-            out_pdf=out_pdf,
-            out_csv=out_csv,
-            pdf_pages=pdf_pages,
-        )
-    else:
-        diff_stats_by_group = compute_condition_diff_stats_pairwise(
-            per_sample_df,
-            sample_metadata,
-            class_order=resolved_class_order,
-            condition_col=condition_col,
-            group_cols=valid_group_cols,
-            condition_groups=condition_groups,
-        )
-        result = plot_condition_diff_grid(
-            diff_stats_by_group,
-            class_order=resolved_class_order,
-            colors=resolved_colors,
-            title=title,
-            out_pdf=out_pdf,
-            out_csv=out_csv,
-            pdf_pages=pdf_pages,
-        )
+    with (nullcontext(pdf_pages) if pdf_pages is not None else PdfPages(out_pdf)) as pdf:
+        if use_2d_grid:
+            result = plot_condition_diff_grid_2d(
+                per_sample_df,
+                sample_metadata,
+                class_order=resolved_class_order,
+                colors=resolved_colors,
+                condition_col=condition_col,
+                grid_axis_cols=grid_axis_cols,
+                extra_group_cols=extra_group_cols,
+                title=title,
+                out_pdf=out_pdf,
+                out_csv=out_csv,
+                pdf_pages=pdf,
+            )
+        else:
+            diff_stats_by_group = compute_condition_diff_stats_pairwise(
+                per_sample_df,
+                sample_metadata,
+                class_order=resolved_class_order,
+                condition_col=condition_col,
+                group_cols=valid_group_cols,
+                condition_groups=condition_groups,
+            )
+            result = plot_condition_diff_grid(
+                diff_stats_by_group,
+                class_order=resolved_class_order,
+                colors=resolved_colors,
+                title=title,
+                out_pdf=out_pdf,
+                out_csv=out_csv,
+                pdf_pages=pdf,
+            )
+
+        if time_series_stats is not None:
+            condition_levels = sample_metadata[condition_col].astype(str).drop_duplicates().tolist()
+            if condition_groups:
+                condition_levels = list(dict.fromkeys(
+                    condition_groups[lvl] for lvl in condition_levels if lvl in condition_groups
+                ))
+            condition_colors = hash_stable_label_color_map(condition_levels)
+            time_label = "Time (minutes)" if minutes_per_frame else "Time (frame)"
+            ot_title = f"{class_col} — {condition_col} dynamics over time"
+            if minutes_per_frame is None:
+                ot_title += "  (minutes unavailable — no time metadata)"
+            over_time_result = plot_condition_time_series_grid(
+                time_series_stats,
+                class_order=resolved_class_order,
+                condition_levels=condition_levels,
+                colors=condition_colors,
+                title=ot_title,
+                out_pdf=out_pdf,
+                out_csv=summary_csv_path,
+                time_label=time_label,
+                pdf_pages=pdf,
+            )
+            result["over_time_raw_csv_path"] = str(raw_csv_path)
+            result["over_time_summary_csv_path"] = over_time_result["csv_path"]
+        else:
+            result["over_time_raw_csv_path"] = None
+            result["over_time_summary_csv_path"] = None
     if bool(verbose):
         print(f"Saved track condition comparison report: {result['pdf_path']}")
     return result
@@ -1471,8 +1554,7 @@ def save_track_contact_group_analysis(
 
     # Own subfolder, named after the raw contact column (e.g. "macrophage_contact"), holding a
     # single combined report PDF and a "csv" subfolder for all underlying CSVs.
-    out_dir = Path(out_dir) / "contact_analysis" / str(contact_col)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = _contact_analysis_dir(out_dir, "contact_group_analysis", contact_col)
     csv_dir = out_dir / "csv"
     csv_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = out_dir / "contact_analysis.pdf"
@@ -1653,6 +1735,283 @@ def save_track_contact_group_analysis(
             "composition_grid": target_class_composition_grid,
             "comparison": target_class_comparison,
         }
+    return result
+
+
+def save_track_contact_rate_report(
+    adata_tracks,
+    df_timepoints,
+    out_dir,
+    *,
+    contact_col,
+    min_bout_length,
+    sample_col="sample_name",
+    verbose=False,
+    target_class_lookup=None,
+    touching_col=None,
+    time_varying=True,
+    target_class_order=None,
+    target_class_colors=None,
+    target_cell_type_label=None,
+):
+    """Contact-rate proportions per sample (one thin bar per sample, contact vs. no_contact) —
+    plus, when ``target_class_lookup`` is given, a violin of mean contact fraction per touched
+    target class. That violin is the one metric from the old combined contact-analysis bundle
+    that isn't already covered elsewhere: per-cluster contact fraction/duration is covered by
+    ``contact_cluster_heatmap.save_track_contact_cluster_heatmap`` and per-target-class contact
+    *duration* is covered (in more depth) by
+    ``contact_duration_report.save_track_contact_duration_comparison``.
+
+    See ``save_track_contact_group_analysis`` for the shared ``target_class_lookup``/
+    ``touching_col``/``time_varying`` conventions.
+
+    Returns a dict of output artifact paths.
+    """
+    group_col = _contact_group_col_name(contact_col)
+
+    contact_features = compute_track_contact_features(
+        df_timepoints,
+        adata_tracks,
+        contact_col=contact_col,
+        min_bout_length=min_bout_length,
+        verbose=verbose,
+    )
+    merge_track_contact_features_into_obs(
+        adata_tracks,
+        contact_features,
+        contact_col=contact_col,
+        min_bout_length=min_bout_length,
+    )
+
+    use_target_class = target_class_lookup is not None
+    long_target_df = None
+    target_class_mean_col = None
+    resolved_target_class_order = []
+    if use_target_class:
+        if touching_col is None:
+            raise ValueError("touching_col is required when target_class_lookup is given.")
+        long_target_df, _target_group_df = compute_track_contact_target_class_features(
+            df_timepoints,
+            adata_tracks,
+            target_class_lookup,
+            contact_col=contact_col,
+            touching_col=touching_col,
+            time_varying=bool(time_varying),
+            contact_group_col=group_col,
+            verbose=verbose,
+        )
+        target_class_mean_col = _contact_class_mean_col_name(contact_col)
+        target_cell_type_label = target_cell_type_label or contact_col_target_cell_type(contact_col)
+        touched_classes = sorted(
+            long_target_df["target_class"].dropna().astype(str).unique().tolist(), key=_mixed_label_sort_key,
+        )
+        resolved_target_class_order = (
+            [str(c) for c in target_class_order] if target_class_order is not None else touched_classes
+        )
+
+    out_dir = _contact_analysis_dir(out_dir, "contact_rate", contact_col)
+    csv_dir = out_dir / "csv"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = out_dir / "contact_rate.pdf"
+
+    with PdfPages(pdf_path) as pdf:
+        contact_rate_by_cluster = save_track_class_proportions_by_sample_plot(
+            adata_tracks,
+            out_dir,
+            sample_col=sample_col,
+            class_col=group_col,
+            group_cols=None,
+            verbose=verbose,
+            pdf_pages=pdf,
+            csv_dir=csv_dir,
+        )
+
+        if use_target_class:
+            resolved_target_class_colors = _normalize_label_color_map(
+                resolved_target_class_order, colors=target_class_colors, cmap_name="tab20",
+            )
+            long_flat = long_target_df.reset_index()
+            fig = plot_feature_box_by_group(
+                long_flat, target_class_mean_col, "target_class",
+                group_order=resolved_target_class_order, colors=resolved_target_class_colors,
+                ylabel=f"Mean fraction of timepoints in contact ({contact_col})",
+                title=f"Mean contact fraction by {target_cell_type_label} class",
+            )
+            pdf.savefig(fig, bbox_inches="tight")
+            plt.close(fig)
+
+    contact_rate_by_cluster["pdf_path"] = str(pdf_path)
+
+    if bool(verbose):
+        print(f"Saved contact rate report for '{contact_col}' to: {pdf_path}")
+
+    return {
+        "contact_col": str(contact_col),
+        "min_bout_length": int(min_bout_length),
+        "group_col": group_col,
+        "pdf_path": str(pdf_path),
+        "csv_dir": str(csv_dir),
+        "contact_rate_by_cluster": contact_rate_by_cluster,
+        "use_target_class": use_target_class,
+    }
+
+
+def save_track_contact_composition_report(
+    adata_tracks,
+    df_timepoints,
+    out_dir,
+    *,
+    contact_col,
+    min_bout_length,
+    class_col="ClusterID",
+    class_order=None,
+    class_colors=None,
+    extra_group_cols=None,
+    group_x=None,
+    group_y=None,
+    group_x_levels_map=None,
+    group_y_levels_map=None,
+    verbose=False,
+    target_class_lookup=None,
+    touching_col=None,
+    time_varying=True,
+    target_class_order=None,
+    target_class_colors=None,
+    target_cell_type_label=None,
+):
+    """``class_col``-on-x-axis grid of contact/no_contact composition, faceted by ``group_x``/
+    ``group_y`` (true 2D grid) with ``extra_group_cols`` paginating into separate grid pages —
+    plus, when ``target_class_lookup`` is given, a second grid stacked by which target class each
+    track touched instead of the plain contact/no_contact split.
+
+    Raises ``ValueError`` if none of ``group_x``/``group_y``/``extra_group_cols`` are set, since
+    the grid has nothing to facet by in that case — use ``save_track_contact_rate_report`` for
+    the plain per-sample contact rate instead.
+
+    Returns a dict of output artifact paths.
+    """
+    extra_group_cols = list(extra_group_cols) if extra_group_cols else []
+    if not extra_group_cols and not group_x and not group_y:
+        raise ValueError(
+            "At least one of extra_group_cols/group_x/group_y is required to build a contact "
+            "composition grid — there is nothing to facet by otherwise."
+        )
+
+    group_col = _contact_group_col_name(contact_col)
+
+    contact_features = compute_track_contact_features(
+        df_timepoints,
+        adata_tracks,
+        contact_col=contact_col,
+        min_bout_length=min_bout_length,
+        verbose=verbose,
+    )
+    merge_track_contact_features_into_obs(
+        adata_tracks,
+        contact_features,
+        contact_col=contact_col,
+        min_bout_length=min_bout_length,
+    )
+
+    use_target_class = target_class_lookup is not None
+    target_group_col = None
+    resolved_target_class_order = []
+    if use_target_class:
+        if touching_col is None:
+            raise ValueError("touching_col is required when target_class_lookup is given.")
+        long_target_df, target_group_df = compute_track_contact_target_class_features(
+            df_timepoints,
+            adata_tracks,
+            target_class_lookup,
+            contact_col=contact_col,
+            touching_col=touching_col,
+            time_varying=bool(time_varying),
+            contact_group_col=group_col,
+            verbose=verbose,
+        )
+        merge_track_target_class_group_into_obs(adata_tracks, target_group_df, contact_col=contact_col)
+        target_group_col = _contact_target_class_group_col_name(contact_col)
+        target_cell_type_label = target_cell_type_label or contact_col_target_cell_type(contact_col)
+        touched_classes = sorted(
+            long_target_df["target_class"].dropna().astype(str).unique().tolist(), key=_mixed_label_sort_key,
+        )
+        resolved_target_class_order = (
+            [str(c) for c in target_class_order] if target_class_order is not None else touched_classes
+        )
+
+    out_dir = _contact_analysis_dir(out_dir, "contact_composition", contact_col)
+    csv_dir = out_dir / "csv"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = out_dir / "contact_composition.pdf"
+
+    obs = adata_tracks.obs
+    resolved_class_order = (
+        [str(c) for c in class_order] if class_order is not None
+        else sorted(obs[class_col].dropna().astype(str).unique().tolist(), key=_mixed_label_sort_key)
+    )
+    resolved_class_order = _apply_state_order(resolved_class_order, _get_classification_state_order(adata_tracks, class_col))
+    resolved_colors = dict(class_colors) if class_colors else _get_classification_state_colors(adata_tracks, class_col)
+    resolved_colors = _normalize_label_color_map(resolved_class_order, colors=resolved_colors, cmap_name="tab20")
+
+    with PdfPages(pdf_path) as pdf:
+        cluster_stack_grid = _save_contact_cluster_stack_grid_page(
+            pdf,
+            adata_tracks,
+            class_col=class_col,
+            group_col=group_col,
+            extra_group_cols=extra_group_cols,
+            group_x=group_x,
+            group_y=group_y,
+            group_x_levels_map=group_x_levels_map,
+            group_y_levels_map=group_y_levels_map,
+            class_order=resolved_class_order,
+            csv_dir=csv_dir,
+            verbose=verbose,
+        )
+
+        target_class_composition_grid = None
+        if use_target_class:
+            resolved_target_class_colors = _normalize_label_color_map(
+                resolved_target_class_order, colors=target_class_colors, cmap_name="tab20",
+            )
+            target_stack_order = [_NO_CONTACT_LABEL] + resolved_target_class_order + [_MULTIPLE_CLASSES_LABEL]
+            target_stack_colors = {_NO_CONTACT_LABEL: _CONTACT_STACK_COLORS[_NO_CONTACT_LABEL]}
+            target_stack_colors.update(resolved_target_class_colors)
+            target_stack_colors[_MULTIPLE_CLASSES_LABEL] = "#4C4C4C"
+
+            target_class_composition_grid = _save_contact_cluster_stack_grid_page(
+                pdf,
+                adata_tracks,
+                class_col=class_col,
+                group_col=target_group_col,
+                extra_group_cols=extra_group_cols,
+                group_x=group_x,
+                group_y=group_y,
+                group_x_levels_map=group_x_levels_map,
+                group_y_levels_map=group_y_levels_map,
+                class_order=resolved_class_order,
+                csv_dir=csv_dir,
+                stack_order=target_stack_order,
+                stack_colors=target_stack_colors,
+                title_prefix=f"{target_cell_type_label}-Class Composition",
+                verbose=verbose,
+            )
+
+    if bool(verbose):
+        print(f"Saved contact composition report for '{contact_col}' to: {pdf_path}")
+
+    result = {
+        "contact_col": str(contact_col),
+        "min_bout_length": int(min_bout_length),
+        "group_col": group_col,
+        "extra_group_cols": extra_group_cols,
+        "pdf_path": str(pdf_path),
+        "csv_dir": str(csv_dir),
+        "cluster_stack_grid": cluster_stack_grid,
+        "use_target_class": use_target_class,
+    }
+    if use_target_class:
+        result["target_class_composition_grid"] = target_class_composition_grid
     return result
 
 

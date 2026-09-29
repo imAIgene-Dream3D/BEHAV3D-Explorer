@@ -64,7 +64,7 @@ def _make_dtaidistance_adata(track_lengths):
                     "sample_name": "sample_0",
                     "TrackID": int(track_id),
                     "position_t": int(t),
-                    "full_behavioral_cluster": "state_a" if t % 2 == 0 else "state_b",
+                    "full_behavioral_state": "state_a" if t % 2 == 0 else "state_b",
                 }
             )
     obs = pd.DataFrame(rows)
@@ -3660,7 +3660,8 @@ def test_analysis_registry_exposes_only_active_trajectory_controls():
         chk_split_long_tracks=_FakeCheck(False),
         chk_parallel=_FakeCheck(True),
         chk_save_dist=_FakeCheck(False),
-        chk_use_original=_FakeCheck(False),
+        combo_clustering_family=_FakeCombo(["state_based", "feature_based"]),
+        chk_use_exact_original_settings=_FakeCheck(True),
         spin_seed=_FakeSpin(12345),
         _persist_track_cfg=lambda cell_type: persisted.append(cell_type),
     )
