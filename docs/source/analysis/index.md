@@ -34,7 +34,7 @@ The **📊 Analysis** tab has two sub-tabs:
 - **👥 Population Dynamics** — the population analyses: signal dynamics across target populations (Death Dynamics), target–effector interaction, and effector invasiveness (organoid/other vs immune/other). **Active Killing** completes this group but is configured in the 🧪 Feature Extraction tab.
 - **🧬 Single Cell** — per-cell behavioural classification: **🔬 State Classification** (per-timepoint HMM states) and **🛤️ Track Classification** (whole-trajectory DTW clustering with a trainable classifier).
 
-**Backprojection** — painting state / track-cluster labels back onto the raw images — is  the final step inside each Single Cell workflow (**State Classification → Step 4** and **Track Classification → Step 5**).
+**Backprojection** — painting state / track-cluster labels back onto the raw images — is  the final step inside each Single Cell workflow (**[State Classification → Backprojection](single_cell/state_classification.md#backprojection)** and **[Track Classification → Backprojection](single_cell/track_classification.md#backprojection)**).
 ```
 
 ```{toctree}

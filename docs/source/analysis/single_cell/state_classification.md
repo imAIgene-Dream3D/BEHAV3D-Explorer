@@ -10,6 +10,15 @@ The analysis runs on the **cell type chosen in the dropdown at the top of the Si
 *Screenshot placeholder.*
 ```
 
+## Workflow at a glance
+
+1. [Two ways to run](#two-ways-to-run) — decide whether to train a fresh model or apply a previously saved classification.
+2. [Behavioral state clustering](#behavioral-state-clustering) — choose features, set the number of states, and fit the HMM.
+3. [Renaming clusters](#renaming-clusters) — give the intrinsic and full behavioral states meaningful biological names.
+4. [Reports](#reports) — generate composition, transition, feature-heatmap and condition-comparison reports.
+5. [Contact Analysis](#contact-analysis) — compare contact types and behavioral-state shifts around contact.
+6. [Backprojection](#backprojection) — paint the states back onto the raw images to validate them.
+
 ## Two ways to run
 
 At the very top is a checkbox: **Apply existing behavioral state classification**.
@@ -197,7 +206,7 @@ For example, if a cell is both **dead** and **organoid_contacting**, and the bac
 
 In other words: use the binary flags as clues, but let the **combination of QC plots and backprojection** decide the final name.
 
-## Step 3 — Reports
+## Reports
 
 Use **Generate analysis and plots ▸** to create reports. Each report has a **👁** button to reopen its PDF.
 
@@ -330,7 +339,7 @@ Output:
 <output_dir>/analysis/<cell_type>/behavioral_states/contact_analysis/contact_state_shift/<contact_col>/csv/state_shift_stacked_composition.csv
 ```
 
-## Step 4 — Backprojection
+## Backprojection
 
 The final step paints the behavioural states **back onto the raw images**, so you can verify frame by frame that the computed labels match what the cells are actually doing. It is built directly into this sub-tab and works on the cell type selected at the top of Single Cell. In practice, this is the **final validation step** of the whole curation workflow: use it to confirm that the names you assigned when renaming clusters correspond to what the cells really look like.
 
@@ -380,7 +389,7 @@ If the PDFs suggest a difference but the backprojection does not, revisit the na
 <output_dir>/analysis/<cell_type>/behavioral_states/
 ```
 
-It is stored as an `.h5ad` data file that holds, for every cell at every timepoint, its assigned **intrinsic state** and its **full behavioural state** — using your chosen names after renaming. This is the file the Reports and the **Step 4 — Backprojection** step read.
+It is stored as an `.h5ad` data file that holds, for every cell at every timepoint, its assigned **intrinsic state** and its **full behavioural state** — using your chosen names after renaming. This is the file the Reports and the **Backprojection** step read.
 
 The HMM fit diagnostics used for state curation are saved under:
 
@@ -415,7 +424,7 @@ The five reports on the **Generate analysis and plots ▸** page are each saved 
 - **Pooled per-sample summary bars** of overall state proportions.
 - Any **metadata groupings** you chose via **Group in X / Group in Y / Group per page**.
 
-**The State Transition Report** answers *"how do cells move between states?"*. Depending on the Advanced Configuration toggles (Step 3, above), it contains:
+**The State Transition Report** answers *"how do cells move between states?"*. Depending on the Advanced Configuration toggles above, it contains:
 
 - **Transition-matrix heatmaps** as both raw counts and row-normalised probabilities, plus versions that exclude self-transitions (state → same state) so the switching pattern stands out.
 - **Circular transition diagrams** — two pages (outgoing/incoming), each showing the full/unfiltered diagram side by side with the diagram at the configured cutoff, plus two per-state breakdown-grid pages.
@@ -443,7 +452,7 @@ Reopen any report at any time with its **👁** button or from the shared **Resu
 - **Use a fixed seed for reproducibility.** Leave **Random seed** at its default (or note the value you used) so re-runs and collaborators get the same states.
 - **Save and reuse a model across experiments.** Once you have a state definition you trust, apply it to new datasets via **Apply existing behavioral state classification** so states stay comparable.
 - **Let images overrule labels.** If a state name sounds convincing from the PDFs but does not hold up in backprojection, trust the image-level evidence and rename or merge the cluster.
-- **Pair with Backprojection.** After classifying, use **Step 4 — Backprojection** above to paint the states back onto the raw images and sanity-check that they correspond to real behaviour.
+- **Pair with Backprojection.** After classifying, use **Backprojection** above to paint the states back onto the raw images and sanity-check that they correspond to real behaviour.
 
 ## See also
 

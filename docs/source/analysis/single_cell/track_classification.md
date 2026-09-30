@@ -10,6 +10,16 @@ It runs on the **cell type chosen in the dropdown** at the top of the Single Cel
 *Screenshot placeholder.*
 ```
 
+## Workflow at a glance
+
+1. [How it works](#how-it-works) — understand the State-based vs. Feature-based clustering families and their bases/methods.
+2. [Choosing a clustering method](#choosing-a-clustering-method) — decide which method fits your data, using the decision flowchart.
+3. [Track clustering](#track-clustering) — configure the trajectory features and run the clustering.
+4. [Renaming clusters](#renaming-clusters) — give the trajectory clusters meaningful biological names.
+5. [Reports & Plots](#reports-plots) — generate composition, transition, contact and exemplar reports.
+6. [Backprojection](#backprojection) — paint the clusters back onto the raw images to validate them.
+7. [Train track classifier](#train-track-classifier) — fit a reusable classifier to apply the same clusters to new data.
+
 ## How it works
 
 Trajectory clustering groups whole tracks by how their behaviour unfolds over time, using one of two families of methods, set by the **Trajectory clustering method** dropdown:
@@ -168,7 +178,7 @@ The status line above the rename button reads **"ℹ Run clustering first to ena
 
 Click **✏ Rename Track Clusters** to open a dialog ("Rename Track Trajectory Clusters") where you can combine biologically similar clusters and give each trajectory cluster a meaningful name (e.g. *super-engager*, *engager*, *killer*, *scanner*, *static*). Giving two clusters the same name merges them. **👁** reopens the renamed result.
 
-The cluster label lives in the **`ClusterID`** column; renaming overwrites it in place and keeps the original values as `ClusterID_original`. Downstream reports and **Step 5 — Backprojection** use whichever names/order/colors you set here.
+The cluster label lives in the **`ClusterID`** column; renaming overwrites it in place and keeps the original values as `ClusterID_original`. Downstream reports and **Backprojection** use whichever names/order/colors you set here.
 
 Colors default to a **hash-stable** palette — a cluster keeps the same color across reruns and even when only a subset of clusters is plotted — unless you assign one manually here, in which case your choice is remembered instead.
 
@@ -177,10 +187,10 @@ Treat renaming as the **curation step** that follows the overview PDF. First ins
 The goal here is **interpretable trajectory classes**, not preserving every split made by the clustering algorithm. If two clusters would end up with the same biological description, it is usually better to give them the same final name and merge them than to keep two labels that nobody can explain consistently.
 
 ```{tip}
-Clicking **Apply cluster names** automatically regenerates the **diagnostics** and **track-class-proportion** plots (Step 4) with the new names, order and colors — no separate "regenerate" step needed for those two. The **Condition Comparison Report** and **contact-analysis** plots depend on which condition/contact column you pick, so re-run those from their own buttons after a rename.
+Clicking **Apply cluster names** automatically regenerates the **diagnostics** and **track-class-proportion** plots (in Reports & Plots, below) with the new names, order and colors — no separate "regenerate" step needed for those two. The **Condition Comparison Report** and **contact-analysis** plots depend on which condition/contact column you pick, so re-run those from their own buttons after a rename.
 ```
 
-## Step 4 — Reports & Plots
+## Reports & Plots
 
 Use **Generate analysis and plots ▸** to create reports and plots.
 
@@ -236,7 +246,7 @@ Click **▶ Create Window Transition Sankey** to run it. Output: `window_transit
 
 ### Track Transition Report
 
-Pooled, inter-cluster transition analysis for trajectory clusters — the trajectory-cluster counterpart of [State Classification's State Transition Report](state_classification.md#step-3-reports). It uses the **same circular-diagram / Sankey engine and Advanced Configuration options** described there (min probability cutoff, emphasis gamma, node-label style, and the matrix/circular/self-transitions/per-cluster-grid/Sankey toggles) — see that page for what each control does. What's different here:
+Pooled, inter-cluster transition analysis for trajectory clusters — the trajectory-cluster counterpart of [State Classification's State Transition Report](state_classification.md#reports). It uses the **same circular-diagram / Sankey engine and Advanced Configuration options** described there (min probability cutoff, emphasis gamma, node-label style, and the matrix/circular/self-transitions/per-cluster-grid/Sankey toggles) — see that page for what each control does. What's different here:
 
 - It operates on **trajectory clusters** instead of per-timepoint states, and the window index is collapsed — every track's windows are pooled together, so this is a population-wide view, not a per-window one (see **Window Transitions** above for the per-window view).
 - It **requires "Divide long tracks"** (in the **Track clustering controls**, above) to have been used when clustering. Without split windows, each track only ever has one cluster label, so there is nothing to transition between.
@@ -343,7 +353,7 @@ Select **Contact columns to compare** (Ctrl/Cmd-click for 2 or more), then click
 
 #### Track Contact Overview
 
-A **QC / sanity-check view**, in the same spirit as [Backprojection](#step-5-backprojection) below — not a figure meant for a manuscript, but a way to visually confirm that the contact bouts driving all the reports above actually line up with real behavioural changes. For every track whose contact meets the **Min. contiguous contact bout** threshold, it plots that track's full (untrimmed, classified-window) behavioural-state trajectory as a coloured bar, with a grey/green bar directly beneath marking every contact bout of at least that length. Pages are grouped by sample — a sample's tracks are never split across a page shared with the next sample's, even if that leaves the page under-full.
+A **QC / sanity-check view**, in the same spirit as [Backprojection](#backprojection) below — not a figure meant for a manuscript, but a way to visually confirm that the contact bouts driving all the reports above actually line up with real behavioural changes. For every track whose contact meets the **Min. contiguous contact bout** threshold, it plots that track's full (untrimmed, classified-window) behavioural-state trajectory as a coloured bar, with a grey/green bar directly beneath marking every contact bout of at least that length. Pages are grouped by sample — a sample's tracks are never split across a page shared with the next sample's, even if that leaves the page under-full.
 
 **Group per page** works here too: tracks are never split across a page shared with a different combination of the selected columns' values, and each page's title is annotated with its group combination.
 
@@ -366,7 +376,7 @@ Click **▶ Create Track Contact Overview**. Output: `track_contact_overview.pdf
 
 Click **▶ Create Exemplar PDFs** to produce a PDF of representative tracks per cluster (optionally with state bars and backprojection figures/movies). The most important cluster-count QC file here is the overview PDF `example_tracks_overview.pdf`, which by default shows **10 exemplars per cluster** — see **How to judge whether `N clusters` is sensible** above. **👁** reopens the PDF.
 
-## Step 5 — Backprojection
+## Backprojection
 
 The final step paints the **trajectory clusters back onto the raw images**, so you can confirm that cells assigned to the same cluster really do behave alike. It is built directly into this sub-tab and works on the cell type selected at the top of Single Cell. It behaves exactly like State Backprojection, only it colours by trajectory cluster rather than per-timepoint state.
 
