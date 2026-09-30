@@ -16,7 +16,6 @@ from behav3d.analysis.behavior.utils import _natural_sort_key
 from behav3d.analysis.behavior.general.visualization.plots.proportion_bars import (
     draw_thin_stacked_proportion_barh,
     compute_condition_diff_stats_pairwise,
-    legend_layout,
     plot_condition_diff_grid,
     plot_page_stacked_proportion_barh_grid,
     stacked_proportion_barh_rows_per_page,
@@ -76,6 +75,14 @@ def _wrap_title(text, max_chars=28):
     if line and len(lines) < 2:
         lines.append(line)
     return "\n".join(lines)
+
+
+def _right_legend_width_in(labels, *, char_width_in=0.05, swatch_pad_in=0.55, min_width_in=0.9, max_width_in=2.2):
+    """Inches needed for a vertical, one-entry-per-state legend docked to the right edge,
+    sized to the longest label so it doesn't get clipped."""
+    max_len = max((len(str(label)) for label in labels), default=0)
+    width_in = swatch_pad_in + char_width_in * max_len
+    return float(min(max(width_in, min_width_in), max_width_in))
 
 
 def plot_state_composition_over_time(
@@ -264,6 +271,22 @@ def _apply_time_binning(df, *, time_col, time_bin_size):
     df = df.copy()
     df[time_col] = (df[time_col] // bin_size) * bin_size
     return df
+
+
+def _plot_composition_stack(ax, x, y_arrays, colors, labels, *, time_bin_size=None, alpha=0.85):
+    """Draw a stacked composition series as an area (unbinned) or as discrete
+    per-bin bars (time_bin_size > 1), matching `_apply_time_binning`'s bucket
+    start values in `x`."""
+    if time_bin_size is None or int(time_bin_size) <= 1:
+        ax.stackplot(x, *y_arrays, labels=labels, colors=colors, alpha=alpha)
+        return
+    bottom = np.zeros(len(x))
+    for v, color, label in zip(y_arrays, colors, labels):
+        ax.bar(
+            x, v, bottom=bottom, width=int(time_bin_size), align="edge",
+            linewidth=0, color=color, label=label, alpha=alpha,
+        )
+        bottom = bottom + v
 
 
 def _prepare_state_composition_df(
@@ -597,6 +620,7 @@ def _plot_page_relative_stacked_grid(
     state_colors,
     sample_title_fontsize=8,
     sample_title_pad=2,
+    time_bin_size=None,
 ):
     """One A4 page: relative stacked composition per sample (grid)."""
     samples = list(relative_by_sample.keys())
@@ -625,7 +649,8 @@ def _plot_page_relative_stacked_grid(
             continue
         y_arrays = [mat[state].to_numpy(dtype=float) for state in reversed(list(state_order))]
         colors = [state_colors[state] for state in reversed(list(state_order))]
-        ax.stackplot(x, *y_arrays, labels=[str(s) for s in reversed(list(state_order))], colors=colors, alpha=0.85)
+        labels = [str(s) for s in reversed(list(state_order))]
+        _plot_composition_stack(ax, x, y_arrays, colors, labels, time_bin_size=time_bin_size)
         ax.set_ylim(0.0, 1.0)
         ax.set_title(
             _wrap_title(sample),
@@ -650,16 +675,17 @@ def _plot_page_relative_stacked_grid(
         ax_empty.axis("off")
 
     if len(first_labels) > 0:
-        legend_ncol, _, legend_margin_in = legend_layout(len(first_labels), base_margin_in=0.82)
+        legend_width_in = _right_legend_width_in(first_labels)
         fig.legend(
             first_handles,
             first_labels,
-            loc="lower center",
-            ncol=legend_ncol,
+            loc="center right",
+            ncol=1,
             frameon=False,
             fontsize=7,
         )
-        fig.tight_layout(rect=(0.03, legend_margin_in / A4_PORTRAIT[1], 1, 0.93))
+        right_margin = 1.0 - (legend_width_in / A4_PORTRAIT[0])
+        fig.tight_layout(rect=(0.03, 0, right_margin, 0.93))
     else:
         fig.tight_layout(rect=(0.03, 0, 1, 0.93))
     fig.suptitle("Relative State Composition (Stacked) by Sample", y=0.97, fontsize=12, fontweight="bold")
@@ -678,6 +704,7 @@ def _plot_page_count_stacked_grid(
     state_colors,
     sample_title_fontsize=8,
     sample_title_pad=2,
+    time_bin_size=None,
 ):
     """One A4 page: absolute cell count stacked composition per sample (grid)."""
     samples = list(count_by_sample.keys())
@@ -715,7 +742,8 @@ def _plot_page_count_stacked_grid(
             continue
         y_arrays = [mat[state].to_numpy(dtype=float) for state in reversed(list(state_order))]
         colors = [state_colors[state] for state in reversed(list(state_order))]
-        ax.stackplot(x, *y_arrays, labels=[str(s) for s in reversed(list(state_order))], colors=colors, alpha=0.85)
+        labels = [str(s) for s in reversed(list(state_order))]
+        _plot_composition_stack(ax, x, y_arrays, colors, labels, time_bin_size=time_bin_size)
         ax.set_ylim(0.0, global_ymax)
         ax.set_title(
             _wrap_title(sample),
@@ -740,16 +768,17 @@ def _plot_page_count_stacked_grid(
         ax_empty.axis("off")
 
     if len(first_labels) > 0:
-        legend_ncol, _, legend_margin_in = legend_layout(len(first_labels), base_margin_in=0.82)
+        legend_width_in = _right_legend_width_in(first_labels)
         fig.legend(
             first_handles,
             first_labels,
-            loc="lower center",
-            ncol=legend_ncol,
+            loc="center right",
+            ncol=1,
             frameon=False,
             fontsize=7,
         )
-        fig.tight_layout(rect=(0.03, legend_margin_in / A4_PORTRAIT[1], 1, 0.93))
+        right_margin = 1.0 - (legend_width_in / A4_PORTRAIT[0])
+        fig.tight_layout(rect=(0.03, 0, right_margin, 0.93))
     else:
         fig.tight_layout(rect=(0.03, 0, 1, 0.93))
     fig.suptitle("Absolute Cell Count (Stacked) by Sample", y=0.97, fontsize=12, fontweight="bold")
@@ -1053,6 +1082,7 @@ def _plot_page_grouped_stacked_grid(
     state_colors,
     sample_title_fontsize=8,
     sample_title_pad=2,
+    time_bin_size=None,
 ):
     """One A4 page: relative stacked composition per group (flat grid, for 3+ group_cols)."""
     groups = list(relative_by_group.keys())
@@ -1076,7 +1106,8 @@ def _plot_page_grouped_stacked_grid(
             continue
         y_arrays = [mat[state].to_numpy(dtype=float) for state in reversed(list(state_order))]
         colors = [state_colors[state] for state in reversed(list(state_order))]
-        ax.stackplot(x, *y_arrays, labels=[str(s) for s in reversed(list(state_order))], colors=colors, alpha=0.85)
+        labels = [str(s) for s in reversed(list(state_order))]
+        _plot_composition_stack(ax, x, y_arrays, colors, labels, time_bin_size=time_bin_size)
         ax.set_ylim(0.0, 1.0)
         ax.set_title(grp, fontsize=sample_title_fontsize, fontweight="bold", pad=sample_title_pad)
         ax.set_xlabel(time_col, fontsize=8)
@@ -1096,16 +1127,17 @@ def _plot_page_grouped_stacked_grid(
         ax_empty.axis("off")
 
     if len(first_labels) > 0:
-        legend_ncol, _, legend_margin_in = legend_layout(len(first_labels), base_margin_in=0.82)
+        legend_width_in = _right_legend_width_in(first_labels)
         fig.legend(
             first_handles,
             first_labels,
-            loc="lower center",
-            ncol=legend_ncol,
+            loc="center right",
+            ncol=1,
             frameon=False,
             fontsize=7,
         )
-        fig.tight_layout(rect=(0.03, legend_margin_in / A4_PORTRAIT[1], 1, 0.93))
+        right_margin = 1.0 - (legend_width_in / A4_PORTRAIT[0])
+        fig.tight_layout(rect=(0.03, 0, right_margin, 0.93))
     else:
         fig.tight_layout(rect=(0.03, 0, 1, 0.93))
     fig.suptitle(
@@ -1130,6 +1162,7 @@ def _plot_page_grouped_count_stacked_grid(
     global_ymax=None,
     sample_title_fontsize=8,
     sample_title_pad=2,
+    time_bin_size=None,
 ):
     """One A4 page: absolute cell count stacked composition per group (flat grid, for 3+ group_cols)."""
     groups = list(count_by_group.keys())
@@ -1163,7 +1196,8 @@ def _plot_page_grouped_count_stacked_grid(
             continue
         y_arrays = [mat[state].to_numpy(dtype=float) for state in reversed(list(state_order))]
         colors = [state_colors[state] for state in reversed(list(state_order))]
-        ax.stackplot(x, *y_arrays, labels=[str(s) for s in reversed(list(state_order))], colors=colors, alpha=0.85)
+        labels = [str(s) for s in reversed(list(state_order))]
+        _plot_composition_stack(ax, x, y_arrays, colors, labels, time_bin_size=time_bin_size)
         ax.set_ylim(0.0, global_ymax)
         ax.set_title(grp, fontsize=sample_title_fontsize, fontweight="bold", pad=sample_title_pad)
         ax.set_xlabel(time_col, fontsize=8)
@@ -1183,16 +1217,17 @@ def _plot_page_grouped_count_stacked_grid(
         ax_empty.axis("off")
 
     if len(first_labels) > 0:
-        legend_ncol, _, legend_margin_in = legend_layout(len(first_labels), base_margin_in=0.82)
+        legend_width_in = _right_legend_width_in(first_labels)
         fig.legend(
             first_handles,
             first_labels,
-            loc="lower center",
-            ncol=legend_ncol,
+            loc="center right",
+            ncol=1,
             frameon=False,
             fontsize=7,
         )
-        fig.tight_layout(rect=(0.03, legend_margin_in / A4_PORTRAIT[1], 1, 0.93))
+        right_margin = 1.0 - (legend_width_in / A4_PORTRAIT[0])
+        fig.tight_layout(rect=(0.03, 0, right_margin, 0.93))
     else:
         fig.tight_layout(rect=(0.03, 0, 1, 0.93))
     fig.suptitle(
@@ -1221,6 +1256,7 @@ def _plot_page_grouped_2d_grid(
     sample_title_fontsize=8,
     sample_title_pad=2,
     page_size=A4_PORTRAIT,
+    time_bin_size=None,
 ):
     """
     One A4 page: grouped state composition arranged in a 2D grid.
@@ -1317,7 +1353,8 @@ def _plot_page_grouped_2d_grid(
 
                 y_arrays = [mat[state].to_numpy(dtype=float) for state in reversed(list(state_order))]
                 colors = [state_colors[state] for state in reversed(list(state_order))]
-                ax.stackplot(x, *y_arrays, labels=[str(s) for s in reversed(list(state_order))], colors=colors, alpha=0.85)
+                labels = [str(s) for s in reversed(list(state_order))]
+                _plot_composition_stack(ax, x, y_arrays, colors, labels, time_bin_size=time_bin_size)
 
                 if mode == "relative":
                     ax.set_ylim(0.0, 1.0)
@@ -1387,7 +1424,8 @@ def _plot_page_grouped_2d_grid(
 
             y_arrays = [mat[state].to_numpy(dtype=float) for state in reversed(list(state_order))]
             colors = [state_colors[state] for state in reversed(list(state_order))]
-            ax.stackplot(x, *y_arrays, labels=[str(s) for s in reversed(list(state_order))], colors=colors, alpha=0.85)
+            labels = [str(s) for s in reversed(list(state_order))]
+            _plot_composition_stack(ax, x, y_arrays, colors, labels, time_bin_size=time_bin_size)
 
             if mode == "relative":
                 ax.set_ylim(0.0, 1.0)
@@ -1421,16 +1459,17 @@ def _plot_page_grouped_2d_grid(
             title_str += f"\n(groups {row_slice[0]+1}–{row_slice[1]} of {total_rows})"
 
     if len(first_labels) > 0:
-        legend_ncol, _, legend_margin_in = legend_layout(len(first_labels), base_margin_in=0.82)
+        legend_width_in = _right_legend_width_in(first_labels)
         fig.legend(
             first_handles,
             first_labels,
-            loc="lower center",
-            ncol=legend_ncol,
+            loc="center right",
+            ncol=1,
             frameon=False,
             fontsize=7,
         )
-        fig.tight_layout(rect=(0.03, legend_margin_in / page_size[1], 1, 0.92))
+        right_margin = 1.0 - (legend_width_in / page_size[0])
+        fig.tight_layout(rect=(0.03, 0, right_margin, 0.92))
     else:
         fig.tight_layout(rect=(0.03, 0, 1, 0.92))
     fig.suptitle(title_str, y=0.97, fontsize=11, fontweight="bold")
@@ -1658,6 +1697,7 @@ def save_state_composition_report(
                         axis_cols=axis_cols,
                         sample_title_fontsize=sample_title_fontsize,
                         sample_title_pad=sample_title_pad,
+                        time_bin_size=time_bin_size,
                     )
                     pdf.savefig(fig_g, dpi=dpi)
                     plt.close(fig_g)
@@ -1677,6 +1717,7 @@ def save_state_composition_report(
                         axis_cols=axis_cols,
                         sample_title_fontsize=sample_title_fontsize,
                         sample_title_pad=sample_title_pad,
+                        time_bin_size=time_bin_size,
                     )
                     pdf.savefig(fig_g_cnt, dpi=dpi)
                     plt.close(fig_g_cnt)
@@ -1698,6 +1739,7 @@ def save_state_composition_report(
                         state_colors=state_colors,
                         sample_title_fontsize=sample_title_fontsize,
                         sample_title_pad=sample_title_pad,
+                        time_bin_size=time_bin_size,
                     )
                     pdf.savefig(fig_flat, dpi=dpi)
                     plt.close(fig_flat)
@@ -1717,6 +1759,7 @@ def save_state_composition_report(
                         global_ymax=global_group_ymax,
                         sample_title_fontsize=sample_title_fontsize,
                         sample_title_pad=sample_title_pad,
+                        time_bin_size=time_bin_size,
                     )
                     pdf.savefig(fig_flat_cnt, dpi=dpi)
                     plt.close(fig_flat_cnt)
@@ -1752,6 +1795,7 @@ def save_state_composition_report(
                 state_colors=state_colors,
                 sample_title_fontsize=sample_title_fontsize,
                 sample_title_pad=sample_title_pad,
+                time_bin_size=time_bin_size,
             )
             pdf.savefig(fig1, dpi=dpi)
             plt.close(fig1)
@@ -1771,6 +1815,7 @@ def save_state_composition_report(
                 state_colors=state_colors,
                 sample_title_fontsize=sample_title_fontsize,
                 sample_title_pad=sample_title_pad,
+                time_bin_size=time_bin_size,
             )
             pdf.savefig(fig_counts, dpi=dpi)
             plt.close(fig_counts)

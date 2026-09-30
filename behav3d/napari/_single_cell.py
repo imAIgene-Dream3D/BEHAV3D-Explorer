@@ -1218,7 +1218,9 @@ class StateClassificationSubTab(QWidget):
         g_sfheat.addWidget(_make_info_label(
             "Heatmap of behavioral states x features: the mean of each selected "
             "per-timepoint feature per state. The features the states were built on are "
-            "preselected; add any other feature. Cell labels show the unscaled state mean."
+            "preselected below; move others across from Available, then drag rows in "
+            "Selected to set the order they appear in the plot. Cell labels show the "
+            "unscaled state mean."
         ))
         sfheat_form = QFormLayout()
         sfheat_form.setSpacing(3)
@@ -1250,10 +1252,20 @@ class StateClassificationSubTab(QWidget):
             "red = higher, blue = lower. 'min-max': state means rescaled 0-1 per feature."
         ))
         g_sfheat.addLayout(sfheat_form)
-        g_sfheat.addWidget(QLabel("Features (Ctrl/Cmd click for multiple):"))
-        self.list_state_heatmap_features = QListWidget()
-        self.list_state_heatmap_features.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        g_sfheat.addWidget(self.list_state_heatmap_features)
+        g_sfheat.addWidget(QLabel("Available features (click to select, then Add):"))
+        self.list_state_heatmap_available = QListWidget()
+        self.list_state_heatmap_available.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        g_sfheat.addWidget(self.list_state_heatmap_available)
+        self.btn_state_heatmap_add = QPushButton("Add ▼")
+        g_sfheat.addWidget(self.btn_state_heatmap_add)
+        g_sfheat.addWidget(QLabel("Selected features - drag to set the plot order:"))
+        self.list_state_heatmap_picked = QListWidget()
+        self.list_state_heatmap_picked.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.list_state_heatmap_picked.setDragDropMode(QAbstractItemView.InternalMove)
+        self.list_state_heatmap_picked.setDefaultDropAction(Qt.MoveAction)
+        g_sfheat.addWidget(self.list_state_heatmap_picked)
+        self.btn_state_heatmap_remove = QPushButton("▲ Remove")
+        g_sfheat.addWidget(self.btn_state_heatmap_remove)
         sfheat_sel_row = QHBoxLayout()
         self.btn_state_heatmap_defaults = QPushButton("Select used features")
         self.btn_state_heatmap_all = QPushButton("Select all")
@@ -1268,6 +1280,7 @@ class StateClassificationSubTab(QWidget):
         self.btn_view_state_feature_heatmap = _make_view_btn()
         sfheat_row.addWidget(self.btn_view_state_feature_heatmap)
         g_sfheat.addLayout(sfheat_row)
+        self._state_heatmap_candidates = []
         self._state_heatmap_defaults = []
         self._state_heatmap_cache_key = None
 
@@ -1589,8 +1602,22 @@ class StateClassificationSubTab(QWidget):
         self.btn_state_feature_heatmap.clicked.connect(self._on_state_feature_heatmap)
         _wire_view_btn(self.btn_view_state_feature_heatmap, self._on_view, "state_feature_heatmap")
         self.btn_state_heatmap_defaults.clicked.connect(self._select_state_heatmap_defaults)
-        self.btn_state_heatmap_all.clicked.connect(self.list_state_heatmap_features.selectAll)
-        self.btn_state_heatmap_clear.clicked.connect(self.list_state_heatmap_features.clearSelection)
+        self.btn_state_heatmap_all.clicked.connect(
+            lambda: self._set_state_heatmap_picked(self._state_heatmap_candidates)
+        )
+        self.btn_state_heatmap_clear.clicked.connect(lambda: self._set_state_heatmap_picked([]))
+        self.btn_state_heatmap_add.clicked.connect(self._state_heatmap_add_selected)
+        self.btn_state_heatmap_remove.clicked.connect(self._state_heatmap_remove_selected)
+        self.list_state_heatmap_available.itemDoubleClicked.connect(
+            lambda item: self._set_state_heatmap_picked(
+                self._list_widget_items(self.list_state_heatmap_picked) + [item.text()]
+            )
+        )
+        self.list_state_heatmap_picked.itemDoubleClicked.connect(
+            lambda item: self._set_state_heatmap_picked(
+                [c for c in self._list_widget_items(self.list_state_heatmap_picked) if c != item.text()]
+            )
+        )
         self.btn_condition_comparison.clicked.connect(self._on_condition_comparison)
         _wire_view_btn(self.btn_view_condition_comparison, self._on_view, "state_condition_comparison")
         self.btn_state_contact_type_comparison.clicked.connect(self._on_state_contact_type_comparison)
@@ -2454,16 +2481,57 @@ class StateClassificationSubTab(QWidget):
         self._refresh_composition_group_cols()
         self._refresh_state_heatmap_features()
 
+    @staticmethod
+    def _list_widget_items(list_widget):
+        """A QListWidget's item texts in row order (drag-reordering changes this)."""
+        return [list_widget.item(i).text() for i in range(list_widget.count())]
+
+    def _set_state_heatmap_picked(self, picked):
+        """Set the "Selected features" list (in ``picked``'s order - the plot's row
+        order) and put every other candidate back into "Available features"."""
+        picked = [c for c in dict.fromkeys(picked) if c in self._state_heatmap_candidates]
+        picked_set = set(picked)
+        self.list_state_heatmap_picked.clear()
+        self.list_state_heatmap_picked.addItems(picked)
+        self.list_state_heatmap_available.clear()
+        self.list_state_heatmap_available.addItems(
+            [c for c in self._state_heatmap_candidates if c not in picked_set]
+        )
+        _fit_list_widget_height(self.list_state_heatmap_available, max_rows=10)
+        _fit_list_widget_height(self.list_state_heatmap_picked, max_rows=10)
+
+    def _state_heatmap_add_selected(self):
+        chosen = [
+            self.list_state_heatmap_available.item(i).text()
+            for i in range(self.list_state_heatmap_available.count())
+            if self.list_state_heatmap_available.item(i).isSelected()
+        ]
+        if chosen:
+            self._set_state_heatmap_picked(self._list_widget_items(self.list_state_heatmap_picked) + chosen)
+
+    def _state_heatmap_remove_selected(self):
+        remove = {
+            self.list_state_heatmap_picked.item(i).text()
+            for i in range(self.list_state_heatmap_picked.count())
+            if self.list_state_heatmap_picked.item(i).isSelected()
+        }
+        if remove:
+            self._set_state_heatmap_picked(
+                [c for c in self._list_widget_items(self.list_state_heatmap_picked) if c not in remove]
+            )
+
     def _refresh_state_heatmap_features(self):
-        """Fill the state-heatmap feature list (state features preselected); keeps the
-        user's selection when nothing changed on disk."""
+        """Fill the state-heatmap available/selected feature lists (state features
+        preselected); keeps the user's picked list and order when nothing changed on disk."""
         ct = self._cell_type()
         out = self._out_dir()
         full_path = self._full_adata_path(ct) if ct else None
         has_states = bool(full_path and full_path.exists())
         self.btn_state_feature_heatmap.setEnabled(has_states)
         if not ct or not out or not has_states:
-            self.list_state_heatmap_features.clear()
+            self.list_state_heatmap_available.clear()
+            self.list_state_heatmap_picked.clear()
+            self._state_heatmap_candidates = []
             self._state_heatmap_cache_key = None
             return
         from behav3d.analysis.behavior.state.utils import _resolve_positions_csv_path
@@ -2483,27 +2551,22 @@ class StateClassificationSubTab(QWidget):
         except Exception as exc:
             self._log(f"⚠ Could not list features for the state heatmap: {exc}")
             candidates, defaults = [], []
-        previous = {i.text() for i in self.list_state_heatmap_features.selectedItems()}
+        previous_picked = self._list_widget_items(self.list_state_heatmap_picked)
         keep_previous = (
             self._state_heatmap_cache_key is not None and key[:2] == self._state_heatmap_cache_key[:2]
         )
         self._state_heatmap_cache_key = key
+        self._state_heatmap_candidates = list(candidates)
         self._state_heatmap_defaults = list(defaults)
-        wanted = previous if keep_previous and previous else set(defaults)
-        self.list_state_heatmap_features.clear()
-        for col in candidates:
-            self.list_state_heatmap_features.addItem(col)
-            if col in wanted:
-                self.list_state_heatmap_features.item(
-                    self.list_state_heatmap_features.count() - 1
-                ).setSelected(True)
-        _fit_list_widget_height(self.list_state_heatmap_features, max_rows=10)
+        candidate_set = set(candidates)
+        picked = (
+            [c for c in previous_picked if c in candidate_set]
+            if keep_previous and previous_picked else list(defaults)
+        )
+        self._set_state_heatmap_picked(picked)
 
     def _select_state_heatmap_defaults(self):
-        wanted = set(self._state_heatmap_defaults)
-        for i in range(self.list_state_heatmap_features.count()):
-            item = self.list_state_heatmap_features.item(i)
-            item.setSelected(item.text() in wanted)
+        self._set_state_heatmap_picked(self._state_heatmap_defaults)
 
     def _on_state_feature_heatmap(self):
         ct = self._cell_type()
@@ -2516,9 +2579,9 @@ class StateClassificationSubTab(QWidget):
         if not full_path or not full_path.exists():
             QMessageBox.warning(self, "No data", "Run state classification first.")
             return
-        features = [i.text() for i in self.list_state_heatmap_features.selectedItems()]
+        features = self._list_widget_items(self.list_state_heatmap_picked)
         if not features:
-            QMessageBox.warning(self, "No features", "Select at least one feature for the heatmap.")
+            QMessageBox.warning(self, "No features", "Add at least one feature to the heatmap.")
             return
         out = self._out_dir()
         state_col_choice = self.combo_state_heatmap_state_col.currentData()

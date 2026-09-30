@@ -1078,6 +1078,7 @@ def save_track_class_proportions_by_sample_plot(
                         grid_ncols=ncols_eff,
                         figsize_per_panel=(4.0, 2.8),
                         state_colors=colors,
+                        time_bin_size=time_bin_size,
                     )
                     pdf.savefig(fig_t, dpi=dpi)
                     plt.close(fig_t)
@@ -1131,6 +1132,7 @@ def save_track_class_proportions_by_sample_plot(
                                 state_colors=colors,
                                 row_slice=(row_start, row_end),
                                 axis_cols=axis_cols,
+                                time_bin_size=time_bin_size,
                             )
                             pdf.savefig(fig_gt, dpi=dpi)
                             plt.close(fig_gt)
@@ -1148,6 +1150,7 @@ def save_track_class_proportions_by_sample_plot(
                                 grid_ncols=ncols_eff,
                                 figsize_per_panel=(4.0, 2.8),
                                 state_colors=colors,
+                                time_bin_size=time_bin_size,
                             )
                             pdf.savefig(fig_gt, dpi=dpi)
                             plt.close(fig_gt)
