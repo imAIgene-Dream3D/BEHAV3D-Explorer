@@ -206,10 +206,15 @@ def run_launcher():
     returncode = 1
     try:
         with open(log_path, "ab", buffering=0) as log_f:
+            # With stdout piped (not a console), Python on Windows falls back to the
+            # ANSI code page (cp1252), so printing e.g. "✅" raises
+            # UnicodeEncodeError inside napari. Force UTF-8 output instead.
+            child_env = dict(os.environ, PYTHONIOENCODING="utf-8")
             proc = subprocess.Popen(
                 cmd, shell=use_shell,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 bufsize=0,
+                env=child_env,
             )
             # Raw byte passthrough — no text mode. text=True's universal-newline
             # translation treats a bare '\r' as a line break, which shreds a
