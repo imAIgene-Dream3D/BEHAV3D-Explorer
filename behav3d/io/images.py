@@ -120,6 +120,114 @@ def _cast_uint32_for_zarr(arr: np.ndarray) -> np.ndarray:
     return arr.astype(np.int32)
 
 
+def normalize_label_zarr(zarr_path, keep_backup: bool = False) -> dict:
+    """
+    Convert an imported label zarr (e.g. external tracking) to the pipeline's
+    label dtype: uint16, or int32 when the IDs exceed uint16.
+
+    Externally produced labels may come in narrow or signed dtypes (int8 only
+    holds 127 IDs, so later edits overflow) and may contain negative values,
+    usually an int8 overflow of the producing tool.  A plain cast would turn
+    a negative into a large, valid-looking ID (-1 -> 65535) that could collide
+    with a real one, and regionprops silently drops negative labels from the
+    tracks CSV.  So each distinct negative value is first remapped to a new,
+    unused positive ID (max + 1, max + 2, ... in ascending order of the
+    negative value), the same in every frame, so a track keeps its identity
+    and never merges with another one.  Positive IDs are never changed.
+
+    The zarr is rewritten next to the original and only swapped in once fully
+    written; the original stays untouched if anything fails.  With
+    ``keep_backup=True`` (use it when the zarr is the user's own file, not a
+    copy) the original is kept as ``<name>.orig-<dtype>``.
+
+    Returns a dict with ``changed``, ``from_dtype``, ``to_dtype``,
+    ``remapped`` ({negative value: new ID}) and ``backup`` (path or None).
+    """
+    import zarr
+
+    zarr_path = Path(zarr_path)
+    src = zarr.open_array(str(zarr_path), mode="r")
+    from_dtype = np.dtype(src.dtype)
+    report = {"changed": False, "from_dtype": from_dtype, "to_dtype": from_dtype,
+              "remapped": {}, "backup": None}
+    if not np.issubdtype(from_dtype, np.integer):
+        return report
+
+    # Pass 1: max positive ID and the distinct negative values.
+    max_pos = 0
+    negatives = set()
+    for t in range(int(src.shape[0])):
+        frame = np.asarray(src[t])
+        if frame.size:
+            max_pos = max(max_pos, int(frame.max()))
+            if np.issubdtype(from_dtype, np.signedinteger):
+                negatives.update(int(v) for v in np.unique(frame[frame < 0]))
+    neg_vals = np.array(sorted(negatives), dtype=np.int64)
+    new_ids = np.arange(max_pos + 1, max_pos + 1 + len(neg_vals), dtype=np.int64)
+
+    final_max = int(new_ids[-1]) if len(new_ids) else max_pos
+    if final_max <= np.iinfo(np.uint16).max:
+        to_dtype = np.dtype(np.uint16)
+    elif final_max <= np.iinfo(np.int32).max:
+        to_dtype = np.dtype(np.int32)
+    else:
+        raise ValueError(f"Label IDs up to {final_max} do not fit in int32")
+    report["to_dtype"] = to_dtype
+    report["remapped"] = {int(v): int(n) for v, n in zip(neg_vals, new_ids)}
+    if to_dtype == from_dtype and not len(neg_vals):
+        return report
+
+    if len(neg_vals):
+        print(
+            f"  ⚠️ {len(neg_vals)} negative label value(s) found (likely an overflow in the tool "
+            f"that produced them); remapped to new IDs {int(new_ids[0])}–{int(new_ids[-1])}"
+        )
+    print(f"  Casting labels {from_dtype} → {to_dtype} (max label value {final_max})")
+
+    # Pass 2: write the converted labels into a temporary zarr.
+    tmp_path = zarr_path.with_name(zarr_path.name + ".converting")
+    if tmp_path.exists():
+        shutil.rmtree(tmp_path)
+    try:
+        dst = zarr.open_array(str(tmp_path), mode="w", shape=src.shape,
+                              chunks=src.chunks, dtype=to_dtype)
+        dst.attrs.update(dict(src.attrs))
+        for t in range(int(src.shape[0])):
+            frame = np.asarray(src[t]).astype(np.int64)
+            if len(neg_vals):
+                neg = frame < 0
+                frame[neg] = new_ids[np.searchsorted(neg_vals, frame[neg])]
+            dst[t] = frame.astype(to_dtype)
+        del src, dst
+    except Exception:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+        raise
+
+    # Swap: original -> backup/old, converted -> original path.  Undo the
+    # first rename if the second fails.
+    old_path = zarr_path.with_name(
+        f"{zarr_path.name}.orig-{from_dtype.name}" if keep_backup else f"{zarr_path.name}.old"
+    )
+    if old_path.exists():
+        if keep_backup:
+            shutil.rmtree(tmp_path, ignore_errors=True)
+            raise FileExistsError(f"Backup already exists: {old_path}. Move or delete it first.")
+        shutil.rmtree(old_path)
+    zarr_path.rename(old_path)
+    try:
+        tmp_path.rename(zarr_path)
+    except Exception:
+        old_path.rename(zarr_path)
+        raise
+    if keep_backup:
+        report["backup"] = old_path
+        print(f"  Original kept as {old_path.name}")
+    else:
+        shutil.rmtree(old_path, ignore_errors=True)
+    report["changed"] = True
+    return report
+
+
 def reorder_axes(img, source_order, target_order):
     """
     Reorder image axes from source_order to target_order via np.transpose.

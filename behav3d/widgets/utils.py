@@ -23,13 +23,13 @@ from behav3d.core.metadata import (
     multicolor_base_name,
     load_behav3d_metadata,
 )
-from behav3d.io.formats.zarr import save_as_zarr
 from behav3d.io.images import (
     convert_label_file_to_zarr,
     convert_raw_file_to_zarr,
     get_image_dimension_order,
     get_image_shape,
     load_image,
+    normalize_label_zarr,
 )
 from behav3d.preprocessing.tracking import convert_tracked_image_to_csv
 
@@ -1295,18 +1295,10 @@ class ExternalImageImporter(widgets.VBox):
 
                 # dtype check for label images (segmentation/tracking)
                 # Prefer uint16 (standard for pipeline), fall back to int32
-                # for very large label sets (>65535 objects).
+                # for very large label sets (>65535 objects); negative labels
+                # are remapped to new IDs instead of wrapping around.
                 if self._is_label_image:
-                    arr = load_image(zarr_path)
-                    max_val = int(np.max(np.asarray(arr)))
-                    if arr.dtype == np.uint16:
-                        pass  # Already correct
-                    elif max_val <= np.iinfo(np.uint16).max:
-                        print(f"  Casting from {arr.dtype} to uint16 (max value {max_val} fits)")
-                        save_as_zarr(np.asarray(arr).astype(np.uint16), zarr_path)
-                    elif arr.dtype != np.int32:
-                        print(f"  Casting from {arr.dtype} to int32 (max value {max_val} exceeds uint16)")
-                        save_as_zarr(np.asarray(arr).astype(np.int32), zarr_path)
+                    normalize_label_zarr(zarr_path)
 
                 self.last_zarr_path = str(zarr_path)
                 if self._on_converted:

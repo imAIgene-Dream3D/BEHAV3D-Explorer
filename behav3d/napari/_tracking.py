@@ -424,7 +424,7 @@ class _ImportTrackingPage(QWidget):
     # ── processing ──────────────────────────────────────────────────────
     def _process_single(self, sample_name: str, row_idx: int, _=None, save: bool = True):
         import shutil
-        from behav3d.io.images import load_image, save_as_zarr, convert_label_file_to_zarr
+        from behav3d.io.images import load_image, save_as_zarr, convert_label_file_to_zarr, normalize_label_zarr
         from behav3d.preprocessing.tracking import convert_tracked_image_to_csv
 
         info = self._rows.get(sample_name)
@@ -481,6 +481,11 @@ class _ImportTrackingPage(QWidget):
                     shutil.copytree(str(src), str(dest_z))
 
             zarr_path = dest_z
+
+            # Step 1b — bring the labels to the pipeline dtype (uint16) so
+            # later edits don't overflow; negative labels are remapped.  Keep a
+            # backup when the zarr is the user's own file rather than a copy.
+            normalize_label_zarr(zarr_path, keep_backup=src.resolve() == dest_z.resolve())
 
             # Step 2 — generate tracks CSV (unchanged: already-correct logic)
             md_row = self.metadata_loader.metadata.iloc[row_idx]
