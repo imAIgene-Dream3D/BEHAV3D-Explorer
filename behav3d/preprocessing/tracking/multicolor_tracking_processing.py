@@ -212,11 +212,33 @@ def _validate_tracked_shapes(sample_name, source_arrays):
     return next(iter(unique_shapes))
 
 
+def raise_on_label_overlap(masks: dict, context: str) -> None:
+    """Raise ``ValueError`` naming the first colliding pair if any pixel is
+    claimed by more than one mask in ``masks``.
+
+    ``context`` should read like a sentence fragment ending right before
+    " between '<a>' and '<b>'.", e.g. "...at timepoint 3".
+    """
+    occupancy = None
+    for mask in masks.values():
+        occupancy = mask.astype(np.uint8) if occupancy is None else occupancy + mask.astype(np.uint8)
+    if occupancy is None or not np.any(occupancy > 1):
+        return
+
+    items = list(masks.items())
+    for idx_a in range(len(items)):
+        name_a, mask_a = items[idx_a]
+        for idx_b in range(idx_a + 1, len(items)):
+            name_b, mask_b = items[idx_b]
+            if np.any(mask_a & mask_b):
+                raise ValueError(f"{context} between '{name_a}' and '{name_b}'.")
+    raise ValueError(f"{context}.")
+
+
 def _combine_tracked_timepoint(sample_name, t, source_arrays, offsets):
     first_arr = np.asarray(source_arrays[0]["arr"][t])
     combined = np.zeros(first_arr.shape, dtype=np.int64)
-    occupancy = np.zeros(first_arr.shape, dtype=np.uint8)
-    active_types = []
+    active_types = {}
 
     for item in source_arrays:
         cell_type = item["cell_type"]
@@ -224,25 +246,18 @@ def _combine_tracked_timepoint(sample_name, t, source_arrays, offsets):
         mask = vol > 0
         if not np.any(mask):
             continue
-        active_types.append((cell_type, mask))
-        occupancy += mask.astype(np.uint8)
+        active_types[cell_type] = mask
         shifted = vol.astype(np.int64, copy=True)
         shifted[mask] += int(offsets[cell_type])
         combined[mask] = shifted[mask]
 
-    if np.any(occupancy > 1):
-        for idx_a in range(len(active_types)):
-            name_a, mask_a = active_types[idx_a]
-            for idx_b in range(idx_a + 1, len(active_types)):
-                name_b, mask_b = active_types[idx_b]
-                if np.any(mask_a & mask_b):
-                    raise ValueError(
-                        f"Voxel overlap detected while combining tracked images for sample '{sample_name}' "
-                        f"at timepoint {t} between '{name_a}' and '{name_b}'."
-                    )
-        raise ValueError(
-            f"Voxel overlap detected while combining tracked images for sample '{sample_name}' at timepoint {t}."
-        )
+    raise_on_label_overlap(
+        active_types,
+        context=(
+            f"Voxel overlap detected while combining tracked images for sample "
+            f"'{sample_name}' at timepoint {t}"
+        ),
+    )
 
     return combined
 

@@ -31,6 +31,14 @@ from behav3d.analysis.behavior.state.utils import (
     _normalize_label_color_map,
 )
 
+# Row height/spacing used by `plot_tracks_bars_on_ax` to lay out one bar per
+# tracklet - exposed so callers that annotate rows from the outside (e.g. a
+# cluster-membership sidebar) can compute matching row y-extents without
+# duplicating these numbers.
+TRACK_BAR_HEIGHT = 0.8
+TRACK_BAR_Y_GAP = 0.25
+
+
 def _validate_required_columns(df_like, required_cols, name):
     missing = [str(c) for c in required_cols if str(c) not in df_like.columns]
     if len(missing) > 0:
@@ -230,8 +238,8 @@ def plot_tracks_bars_on_ax(
 
     tracks = chosen_df[key_cols].drop_duplicates().reset_index(drop=True)
 
-    bar_h = 0.8
-    y_gap = 0.25
+    bar_h = TRACK_BAR_HEIGHT
+    y_gap = TRACK_BAR_Y_GAP
 
     for i, row in tracks.iterrows():
         mask = (obs[sample_key] == row[sample_key]) & (obs[track_key] == row[track_key])

@@ -1373,9 +1373,15 @@ def run_categorical_dtaidistance_trajectory_clustering(
         "source_adata_full_path": str(adata_full_path),
     }
 
-    if bool(plot_results):
-        raw_qc_dir = paths.clustering_outfolder / "raw"
+    # Overview/medoid grid PDFs (exemplar block below) are clustering-diagnostic
+    # artifacts, like the diagnostics PDF - both belong in clustering/raw. Hoisted
+    # here, above both blocks, so it's available to the exemplar block regardless
+    # of plot_results's value.
+    raw_qc_dir = paths.clustering_outfolder / "raw"
+    if bool(plot_results) or (bool(plot_exemplars) and has_states):
         raw_qc_dir.mkdir(parents=True, exist_ok=True)
+
+    if bool(plot_results):
         plot_paths = _save_diagnostics(
             adata_tracks,
             distances,
@@ -1394,8 +1400,6 @@ def run_categorical_dtaidistance_trajectory_clustering(
     if bool(plot_exemplars) and has_states:
         exemplar_root = paths.example_tracks_outfolder
         exemplar_root.mkdir(parents=True, exist_ok=True)
-        clustering_outfolder = paths.clustering_outfolder
-        clustering_outfolder.mkdir(parents=True, exist_ok=True)
         try:
             _ensure_exemplar_coordinate_columns(
                 adata_filt,
@@ -1432,7 +1436,7 @@ def run_categorical_dtaidistance_trajectory_clustering(
                 tmax_key="position_t_max",
                 seed=int(random_state),
             )
-            overview_pdf = clustering_outfolder / "example_tracks_overview.pdf"
+            overview_pdf = raw_qc_dir / "example_tracks_overview.pdf"
             with PdfPages(overview_pdf) as pdf:
                 pdf.savefig(fig_exemplar, bbox_inches="tight", dpi=300)
             plt.close(fig_exemplar)
@@ -1446,7 +1450,7 @@ def run_categorical_dtaidistance_trajectory_clustering(
                     state_key=str(state_cols[0]),
                     time_col=str(time_col),
                 )
-                medoid_overview_pdf = clustering_outfolder / "medoid_tracks_overview.pdf"
+                medoid_overview_pdf = raw_qc_dir / "medoid_tracks_overview.pdf"
                 with PdfPages(medoid_overview_pdf) as pdf:
                     pdf.savefig(fig_medoid, bbox_inches="tight", dpi=300)
                 plt.close(fig_medoid)

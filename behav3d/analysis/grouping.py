@@ -114,6 +114,15 @@ def create_cell_type_group(output_dir, group_name: str, member_cell_types) -> Pa
     even if their original numbering overlapped for the same sample —
     downstream code groups strictly by ``(TrackID, sample_name)``.
 
+    If a member's filtered CSV already has an ``original_TrackID`` column
+    (stamped by Filtering — see ``filtering.py``'s track-splitting step —
+    to record the pre-split id that matches that member's *own* tracked
+    image pixels), it's resynced to the new ``TrackID`` here too. Otherwise
+    it would keep pointing at that member's pre-merge pixel labels, while
+    backprojection prefers ``original_TrackID`` over ``TrackID`` whenever
+    it's present — silently breaking the pixel lookup against the group's
+    combined tracked image (whose pixels use the new, merged ``TrackID``).
+
     Raises ``FileNotFoundError`` naming every member missing a filtered CSV
     (i.e. not yet run through Filtering), and ``ValueError`` if no member
     cell types are given.
@@ -154,6 +163,8 @@ def create_cell_type_group(output_dir, group_name: str, member_cell_types) -> Pa
         unique_ids = sorted(df["TrackID"].unique())
         remap = {old: new for new, old in enumerate(unique_ids, start=next_id)}
         df["TrackID"] = df["TrackID"].map(remap)
+        if "original_TrackID" in df.columns:
+            df["original_TrackID"] = df["TrackID"]
         next_id = max(remap.values(), default=next_id - 1) + 1
 
     merged = pd.concat(frames, ignore_index=True, sort=False)
@@ -166,7 +177,7 @@ def create_cell_type_group(output_dir, group_name: str, member_cell_types) -> Pa
 
 def _build_group_tracked_sample(
     output_dir, group_id: str, sample_name: str, sdf, metadata_row,
-    n_workers: int = 1, log=None, show_progress: bool = True,
+    n_workers: int = 1, log=None, show_progress: bool = True, skipped_out=None,
 ):
     """Build one sample's combined tracked zarr + tracks CSV for a group.
 
@@ -185,15 +196,23 @@ def _build_group_tracked_sample(
     concurrently with each other, so there's only ever one bar active.
 
     Returns ``{"image": Path, "csv": Path}``, or ``None`` if the sample was
-    skipped (logged via ``log``, if given).
+    skipped (logged via ``log``, if given). Skips are also appended as
+    structured ``{"sample_name", "cell_type", "reason"}`` records to
+    ``skipped_out`` (``cell_type`` is ``None`` for a whole-sample skip), if
+    given, so callers can surface them without parsing log text.
     """
     from behav3d.io.images import load_image
     from behav3d.io.formats.zarr import write_zarr_parallel
     from behav3d.preprocessing.tracking import convert_tracked_image_to_csv
+    from behav3d.preprocessing.tracking.multicolor_tracking_processing import raise_on_label_overlap
 
     def _log(msg):
         if log:
             log(msg)
+
+    def _skip(cell_type, reason):
+        if skipped_out is not None:
+            skipped_out.append({"sample_name": sample_name, "cell_type": cell_type, "reason": reason})
 
     output_dir = Path(output_dir)
     row = metadata_row
@@ -204,6 +223,7 @@ def _build_group_tracked_sample(
         img_path = _member_tracked_image_path(row, cell_type)
         if not img_path or not Path(img_path).exists():
             _log(f"  - {sample_name}/{cell_type}: tracked image not found, skipping member")
+            _skip(cell_type, "tracked image not found")
             continue
         arr = load_image(img_path)
         member_images[cell_type] = arr
@@ -211,6 +231,7 @@ def _build_group_tracked_sample(
 
     if not member_images:
         _log(f"  - Skipping {sample_name}: no member tracked images available")
+        _skip(None, "no member tracked images available")
         return None
 
     img_out = group_tracked_image_path(output_dir, sample_name, group_id)
@@ -239,12 +260,28 @@ def _build_group_tracked_sample(
 
     def _process_timepoint(t):
         combined = None
+        masks_by_ct = {}
         for cell_type, arr in member_images.items():
             t_img = np.asarray(arr[t])
             if combined is None:
                 combined = np.zeros_like(t_img)
-            for old_id, new_id in relabel_by_ct_t.get(cell_type, {}).get(t, ()):
+            pairs = relabel_by_ct_t.get(cell_type, {}).get(t, ())
+            if len(pairs) == 0:
+                continue
+            old_ids = pairs[:, 0]
+            mask = np.isin(t_img, old_ids)
+            if np.any(mask):
+                masks_by_ct[cell_type] = mask
+            for old_id, new_id in pairs:
                 combined[t_img == old_id] = new_id
+
+        raise_on_label_overlap(
+            masks_by_ct,
+            context=(
+                f"Voxel overlap detected while building tracked segments for group "
+                f"'{group_id}' sample '{sample_name}' at timepoint {t}"
+            ),
+        )
         write_zarr_parallel(outpath=img_out, index=t, data=combined)
 
     desc = f"{sample_name} [{group_id}]"
@@ -280,7 +317,8 @@ def _build_group_tracked_sample(
 
 
 def create_group_tracked_segments(
-    output_dir, group_id: str, metadata, log=None, progress_cb=None, n_workers: int = 1
+    output_dir, group_id: str, metadata, log=None, progress_cb=None, n_workers: int = 1,
+    skipped_out=None,
 ) -> dict:
     """Build per-sample tracked label images + tracks CSVs for a group.
 
@@ -312,12 +350,19 @@ def create_group_tracked_segments(
 
     Returns ``{sample_name: {"image": Path, "csv": Path}}`` for samples
     that produced output; samples missing every member's tracked image are
-    skipped (logged via ``log`` if given).
+    skipped (logged via ``log`` if given). Skips are also appended as
+    structured ``{"sample_name", "cell_type", "reason"}`` records to
+    ``skipped_out``, if given (``cell_type`` is ``None`` when the whole
+    sample is skipped).
     """
 
     def _log(msg):
         if log:
             log(msg)
+
+    def _skip(sample_name, cell_type, reason):
+        if skipped_out is not None:
+            skipped_out.append({"sample_name": sample_name, "cell_type": cell_type, "reason": reason})
 
     def _progress(current, total, label):
         if progress_cb:
@@ -352,11 +397,13 @@ def create_group_tracked_segments(
         sample_rows = metadata.loc[metadata["sample_name"].astype(str) == sample_name]
         if sample_rows.empty:
             _log(f"  - Skipping {sample_name}: not found in metadata")
+            _skip(sample_name, None, "sample not found in metadata")
             continue
         row = sample_rows.iloc[0]
 
         result = _build_group_tracked_sample(
-            output_dir, group_id, sample_name, sdf, row, n_workers=n_workers, log=_log
+            output_dir, group_id, sample_name, sdf, row, n_workers=n_workers, log=_log,
+            skipped_out=skipped_out,
         )
         if result is not None:
             written[sample_name] = result

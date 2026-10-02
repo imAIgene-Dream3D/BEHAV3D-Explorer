@@ -14,7 +14,7 @@ import pandas as pd
 import scanpy as sc
 
 import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
+from matplotlib.patches import Patch, Rectangle
 from sklearn.metrics import pairwise_distances
 
 from qtpy.QtWidgets import (
@@ -43,16 +43,25 @@ from behav3d.analysis.behavior.state.utils import _set_classification_state_orde
 from behav3d.analysis.behavior.state.visualization.backprojection import (
     _resolve_behavioral_states_h5ad_path,
 )
-from behav3d.analysis.behavior.track.utils import _filter_tracks_for_dtaidistance
+from behav3d.analysis.behavior.track.utils import (
+    _filter_tracks_for_dtaidistance,
+    _peek_track_outfolder,
+    get_dtaidistance_track_trajectories_filename,
+)
 from behav3d.analysis.behavior.track.dtw import (
     extract_categorical_track_sequences,
     compute_dtaidistance_onehot_distance_matrix,
     compute_transition_profile_distance_matrix,
+    resolve_state_feature_matrix,
+    extract_numeric_track_sequences,
+    compute_dtaidistance_numeric_distance_matrix,
     _validate_distance_matrix,
 )
 from behav3d.analysis.behavior.track.visualization.plots.exemplar_track_per_cluster import (
     plot_tracks_bars_on_ax,
     _build_state_color_map,
+    TRACK_BAR_HEIGHT,
+    TRACK_BAR_Y_GAP,
 )
 from behav3d.analysis.behavior.utils import _to_numpy_2d
 from behav3d.features.state_descriptive_features import (
@@ -80,14 +89,14 @@ from behav3d.features.state_descriptive_features import (
 # These seed the dialog's initial field values; edit them if you want a different
 # starting point each time, but you no longer need to edit this file to change a run.
 INTERACTIVE_BEHAV3D_FOLDER = None
-INTERACTIVE_OUTPUT_DIR = "/Volumes/T7_Sam/BHVD_BEHAV3D/BEHAV3D_python/runs/NatureBriefComm/SafetyProfiling"
-INTERACTIVE_CELL_TYPE = "TEG"
+INTERACTIVE_OUTPUT_DIR = "/Users/s.deblank-3/Documents/LowDensity_MultiColor"
+INTERACTIVE_CELL_TYPE = "tcells_merged"
 STATE_COL = FULL_STATE_COL
 
 # Tracklet length ("e.g. 50 timepoints, user choice"). Long tracks are cut into
 # independent, non-overlapping windows of this many frames; tracks shorter
 # than this are dropped.
-TRACKLET_LENGTH = 50
+TRACKLET_LENGTH = 500
 
 # Anchor tracklet placed at the bottom of the plot. Set REFERENCE_TRACK to pin
 # an exact tracklet as (sample_name, TrackID) or
@@ -103,6 +112,15 @@ REFERENCE_STATE_LABEL = "dead"
 #   fractions, bout stats, transitions, bigrams, trigrams) that the bouts-based track
 #   clustering pipeline (run_state_based_analysis) clusters on, with the same
 #   CLR/log1p/MFA-block-scaling preprocessing it applies.
+# "feature_dtw": multivariate DTW computed directly over the raw per-timepoint
+#   CONTINUOUS feature trajectory - the same continuous feature columns (plus the HMM's
+#   own saved cap/log1p/scaling preprocessing) that fed BEHAV3D's behavioral-state HMM
+#   classification itself (see resolve_state_feature_matrix in
+#   behav3d/analysis/behavior/track/dtw.py), rather than the categorical state sequence
+#   ("dtw") or the bouts-derived summary feature vector ("bouts"). Closest in spirit to
+#   BEHAV3D's legacy "original BEHAV3D" feature-DTW track clustering, but reusing the
+#   state-classification pipeline's own already-saved feature set/preprocessing instead
+#   of recomputing its own normalization from scratch.
 TRACK_SIMILARITY_METHOD = "bouts"
 
 # Only used when TRACK_SIMILARITY_METHOD == "dtw":
@@ -141,6 +159,12 @@ STATE_ORDER = ["dead", "static", "scanner", "engager", "killer"]
 #                        by the resolved state order, greedy-chain within each bucket.
 #   "penalized_greedy" - same greedy walk as "greedy", but run on
 #                        distances + LAMBDA * |score_i - score_j|.
+#   "cluster"          - bucket tracklets by an imported BEHAV3D track-cluster assignment
+#                        (see "Track cluster grouping" in the dialog - load cluster
+#                        assignments before picking this), order buckets by that
+#                        clustering's saved display order, greedy-chain within each
+#                        bucket. Same mechanism as "bucket", just keyed on the imported
+#                        cluster label instead of dominant state.
 ORDERING_METHOD = "greedy"
 
 # Only used when ORDERING_METHOD == "penalized_greedy": weight of the semantic-score
@@ -326,24 +350,29 @@ def dominant_state_per_tracklet(sequences) -> list[str]:
     return [Counter(str(v) for v in seq).most_common(1)[0][0] for seq in sequences]
 
 
-def order_by_dominant_state_buckets(
+def order_by_label_buckets(
     distances: np.ndarray,
-    sequences,
-    resolved_order: list[str],
+    bucket_labels,
+    bucket_order: list[str],
     start_idx: int,
+    *,
+    bucket_kind: str = "bucket",
 ) -> list[int]:
-    """Method "bucket": bucket tracklets by their single dominant state, iterate buckets
-    in canonical rank order (only ranks that actually occur - empty buckets are
-    structurally impossible), and within each bucket run the existing
+    """Shared mechanism behind methods "bucket" and "cluster": bucket tracklets by an
+    arbitrary per-tracklet label (dominant state for "bucket", imported track cluster for
+    "cluster"), iterate buckets in canonical rank order (only ranks that actually occur -
+    empty buckets are structurally impossible), and within each bucket run the existing
     `greedy_chain_order` on that bucket's own distance submatrix, entering each bucket
     from whichever tracklet is closest to the previous bucket's last tracklet. Global
     indices are mapped to/from each bucket's local index space explicitly so
     `greedy_chain_order` never sees an out-of-range or mismatched index.
+
+    `bucket_kind` only affects the wording of the one-time NOTE print below.
     """
-    dominant = dominant_state_per_tracklet(sequences)
-    rank_of = {state: i for i, state in enumerate(resolved_order)}
-    unranked_rank = len(resolved_order)
-    bucket_rank = np.array([rank_of.get(d, unranked_rank) for d in dominant])
+    labels = [str(v) for v in list(bucket_labels)]
+    rank_of = {label: i for i, label in enumerate(bucket_order)}
+    unranked_rank = len(bucket_order)
+    bucket_rank = np.array([rank_of.get(label, unranked_rank) for label in labels])
 
     global_order: list[int] = []
     anchor_global_idx = int(start_idx)
@@ -357,8 +386,8 @@ def order_by_dominant_state_buckets(
         else:
             if first:
                 print(
-                    "[tracklet-chain] NOTE: reference tracklet's dominant-state bucket is "
-                    "not first in 'bucket' ordering; the anchor will not land at chain "
+                    f"[tracklet-chain] NOTE: reference tracklet's {bucket_kind} is "
+                    "not first in this ordering; the anchor will not land at chain "
                     "position 0."
                 )
             local_start = int(np.argmin(distances[anchor_global_idx, bucket_global_idx]))
@@ -374,6 +403,34 @@ def order_by_dominant_state_buckets(
     return global_order
 
 
+def order_by_dominant_state_buckets(
+    distances: np.ndarray,
+    sequences,
+    resolved_order: list[str],
+    start_idx: int,
+) -> list[int]:
+    """Method "bucket": see `order_by_label_buckets` - buckets are each tracklet's single
+    dominant state, ordered by the resolved semantic state order."""
+    dominant = dominant_state_per_tracklet(sequences)
+    return order_by_label_buckets(
+        distances, dominant, resolved_order, start_idx, bucket_kind="dominant-state bucket"
+    )
+
+
+def order_by_track_cluster_buckets(
+    distances: np.ndarray,
+    cluster_labels,
+    cluster_order: list[str],
+    start_idx: int,
+) -> list[int]:
+    """Method "cluster": see `order_by_label_buckets` - buckets are each tracklet's
+    imported BEHAV3D track-cluster label, ordered by that clustering's saved display
+    order (see `load_track_cluster_assignments`)."""
+    return order_by_label_buckets(
+        distances, cluster_labels, cluster_order, start_idx, bucket_kind="track-cluster bucket"
+    )
+
+
 def penalize_distance_matrix_by_score(distances: np.ndarray, scores: np.ndarray, lam: float) -> np.ndarray:
     """Used by method "penalized_greedy": add `lam * |score_i - score_j|` to `distances`
     so the greedy walk is biased away from jumping back to an already-passed semantic
@@ -385,6 +442,85 @@ def penalize_distance_matrix_by_score(distances: np.ndarray, scores: np.ndarray,
     diff = np.nan_to_num(diff, nan=0.0)
     penalized = distances + float(lam) * diff
     return _validate_distance_matrix(penalized, distances.shape[0])
+
+
+def load_track_cluster_assignments(output_dir, cell_type, cluster_key: str = "ClusterID"):
+    """Load a previously computed (and optionally renamed) BEHAV3D track clustering
+    result for `cell_type` from `output_dir`, for grouping tracklets by cluster in the
+    "cluster" ordering method. Import-only: this never runs clustering itself, it only
+    reads whatever `run_state_based_analysis` (via the track-classification widget) has
+    already written to disk.
+
+    Returns `(assignments_df, cluster_order, cluster_color_map)`:
+      - `assignments_df` has columns `sample_name`, `TrackID`, and `trajectory_window_id`
+        if present in the source file, plus `cluster_key` - all cast to `str`.
+      - `cluster_order` / `cluster_color_map` are the clustering's saved display order and
+        hex color map for `cluster_key` (via `_build_state_color_map`), falling back to a
+        mixed-sort order with default colors if none was ever saved (e.g. clusters were
+        never renamed via the widget's "Rename clusters" step).
+    """
+    outfolder = _peek_track_outfolder(output_dir, cell_type)
+    path = outfolder / get_dtaidistance_track_trajectories_filename(cell_type)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"No track clustering output found for cell_type={cell_type!r} at '{path}'. "
+            "Run track clustering for this cell type first (BEHAV3D track-classification "
+            "widget: 'Run clustering' step)."
+        )
+
+    cluster_adata = sc.read_h5ad(path)
+    if cluster_key not in cluster_adata.obs.columns:
+        raise ValueError(f"'{cluster_key}' column not found in '{path}'.")
+
+    key_cols = [c for c in ("sample_name", "TrackID", "trajectory_window_id") if c in cluster_adata.obs.columns]
+    assignments_df = cluster_adata.obs[key_cols + [cluster_key]].copy()
+    for col in key_cols + [cluster_key]:
+        assignments_df[col] = assignments_df[col].astype(str)
+    assignments_df = assignments_df.drop_duplicates().reset_index(drop=True)
+
+    cluster_order, cluster_color_map = _build_state_color_map(cluster_adata, cluster_key)
+    return assignments_df, cluster_order, cluster_color_map
+
+
+def attach_track_clusters(meta_df, assignments_df, cluster_key: str = "ClusterID") -> np.ndarray:
+    """Left-join `assignments_df`'s cluster label onto `meta_df`'s tracklets, matched on
+    (sample_name, TrackID[, trajectory_window_id]) - trajectory_window_id is only used as
+    a join key when present in both frames, so a clustering run without
+    `split_long_tracks` (whole-track clusters) still broadcasts its one cluster to every
+    window of that track here.
+
+    Returns a numpy array of cluster labels positionally aligned with `meta_df` (same
+    convention as `compute_semantic_state_scores`). Raises `ValueError` naming the count
+    and a few example keys if any tracklet has no matching cluster assignment, rather than
+    silently dropping rows - this also surfaces a windowing mismatch (clustering run with a
+    different trajectory/window size than this script's TRACKLET_LENGTH) as a loud failure.
+
+    Known limitation, not guarded against here: if clustering used `split_long_tracks` with
+    a *different* window size than TRACKLET_LENGTH, trajectory_window_id values could
+    coincidentally overlap and silently join to the wrong window. Use the same
+    TRACKLET_LENGTH for both when relying on this ordering method.
+    """
+    merge_cols = [
+        c for c in ("sample_name", "TrackID", "trajectory_window_id")
+        if c in meta_df.columns and c in assignments_df.columns
+    ]
+    left = meta_df[merge_cols].astype(str).copy()
+    left["_row"] = np.arange(len(left))
+    merged = left.merge(assignments_df[merge_cols + [cluster_key]].astype(str), on=merge_cols, how="left")
+    merged = merged.sort_values("_row")
+
+    n_missing = int(merged[cluster_key].isna().sum())
+    if n_missing > 0:
+        missing_examples = (
+            merged.loc[merged[cluster_key].isna(), merge_cols].head(5).to_dict("records")
+        )
+        raise ValueError(
+            f"{n_missing}/{len(merged)} tracklet(s) have no matching cluster assignment "
+            f"(matched on {merge_cols}). Examples: {missing_examples}. Make sure track "
+            "clustering was run for this cell type, and (if split_long_tracks was used) "
+            "with a matching trajectory/window size."
+        )
+    return merged[cluster_key].to_numpy()
 
 
 def compute_bouts_feature_distance_matrix(
@@ -484,6 +620,55 @@ def compute_bouts_feature_distance_matrix(
     return _validate_distance_matrix(distances, X.shape[0])
 
 
+def compute_feature_dtw_distance_matrix(
+    adata_windowed,
+    meta_df,
+    *,
+    groupby_cols=("sample_name", "TrackID", "trajectory_window_id"),
+    time_col="position_t",
+) -> np.ndarray:
+    """Multivariate DTW distance matrix over the raw per-timepoint CONTINUOUS feature
+    trajectory - the same continuous feature columns, with the same HMM-saved
+    cap/log1p/scaling preprocessing, that fed BEHAV3D's own behavioral-state HMM
+    classification (`resolve_state_feature_matrix`, behav3d/analysis/behavior/track/dtw.py
+    - falls back to the saved `kept_features`/`var_names` and z-scoring if that
+    preprocessing metadata is missing). Unlike "bouts" (one summary vector per tracklet)
+    or "dtw" (categorical state sequence), this keeps each continuous feature's full
+    per-timepoint trajectory and compares tracklets with true multivariate DTW
+    (`dtw_ndim.distance_matrix_fast`, via `compute_dtaidistance_numeric_distance_matrix`).
+
+    Binary/contact columns are deliberately excluded (`binary_weight=0.0`) so this is
+    exactly "the features used in state clustering" - the HMM's continuous features only.
+    """
+    matrix, cont_cols, _bin_cols, source = resolve_state_feature_matrix(adata_windowed, binary_weight=0.0)
+    if len(cont_cols) == 0:
+        raise ValueError(
+            "No continuous feature columns resolved for feature-based DTW; the loaded "
+            "behavioral-states h5ad may be missing uns['preprocessing']['continuous_feature_cols']."
+        )
+    print(f"[tracklet-chain] feature_dtw: {len(cont_cols)} continuous feature(s), preprocessing={source!r}")
+
+    numeric_sequences, keys = extract_numeric_track_sequences(
+        adata_windowed, matrix, groupby_cols=groupby_cols, time_col=time_col
+    )
+
+    # Realign to meta_df's row order (same idiom as compute_bouts_feature_distance_matrix
+    # above) rather than assuming extract_numeric_track_sequences' own group-iteration
+    # order matches meta_df's.
+    key_strs = [tuple(str(v) for v in key) for key in keys]
+    row_by_key = {key: i for i, key in enumerate(key_strs)}
+    meta_keys = meta_df[list(groupby_cols)].astype(str)
+    try:
+        row_order = [row_by_key[key] for key in meta_keys.itertuples(index=False, name=None)]
+    except KeyError as exc:
+        raise ValueError(
+            f"Could not align feature-DTW rows to tracklet metadata; missing key {exc.args[0]!r}."
+        ) from exc
+
+    sequences_reordered = [numeric_sequences[i] for i in row_order]
+    return compute_dtaidistance_numeric_distance_matrix(sequences_reordered)
+
+
 class TrackletChainConfigDialog(QDialog):
     """Small Qt dialog for configuring and running the tracklet-similarity-chain plot.
 
@@ -501,6 +686,9 @@ class TrackletChainConfigDialog(QDialog):
         self.sequences = None
         self.meta_df = None
         self.categories_in_data: list[str] = []
+        self.track_cluster_assignments_df = None
+        self.track_cluster_order: list[str] = []
+        self.track_cluster_color_map: dict = {}
 
         self._build_ui()
         self._wire_signals()
@@ -540,7 +728,7 @@ class TrackletChainConfigDialog(QDialog):
         sim_group = QGroupBox("Similarity")
         sim_form = QFormLayout(sim_group)
         self.combo_similarity_method = QComboBox()
-        self.combo_similarity_method.addItems(["bouts", "dtw"])
+        self.combo_similarity_method.addItems(["bouts", "dtw", "feature_dtw"])
         self.combo_similarity_method.setCurrentText(str(self.defaults["similarity_method"]))
         sim_form.addRow("Method:", self.combo_similarity_method)
 
@@ -575,10 +763,26 @@ class TrackletChainConfigDialog(QDialog):
         layout.addWidget(order_group)
         self.order_group = order_group
 
+        cluster_group = QGroupBox("Track cluster grouping (optional)")
+        cluster_layout = QVBoxLayout(cluster_group)
+        self.check_use_track_clusters = QCheckBox(
+            "Group by existing BEHAV3D track clustering (import cluster names from the output folder)"
+        )
+        cluster_layout.addWidget(self.check_use_track_clusters)
+        cluster_btn_row = QHBoxLayout()
+        self.btn_load_track_clusters = QPushButton("Load cluster assignments")
+        self.cluster_status_label = QLineEdit("Not loaded.")
+        self.cluster_status_label.setReadOnly(True)
+        cluster_btn_row.addWidget(self.btn_load_track_clusters)
+        cluster_btn_row.addWidget(self.cluster_status_label)
+        cluster_layout.addLayout(cluster_btn_row)
+        layout.addWidget(cluster_group)
+        self.cluster_group = cluster_group
+
         ordering_group = QGroupBox("Chain ordering")
         ordering_form = QFormLayout(ordering_group)
         self.combo_ordering_method = QComboBox()
-        self.combo_ordering_method.addItems(["greedy", "score", "bucket", "penalized_greedy"])
+        self.combo_ordering_method.addItems(["greedy", "score", "bucket", "penalized_greedy", "cluster"])
         self.combo_ordering_method.setCurrentText(str(self.defaults["ordering_method"]))
         ordering_form.addRow("Method:", self.combo_ordering_method)
 
@@ -625,6 +829,7 @@ class TrackletChainConfigDialog(QDialog):
 
     def _wire_signals(self):
         self.btn_load.clicked.connect(self._on_load_clicked)
+        self.btn_load_track_clusters.clicked.connect(self._on_load_track_clusters_clicked)
         self.combo_similarity_method.currentTextChanged.connect(self._on_similarity_method_changed)
         self.combo_ordering_method.currentTextChanged.connect(self._on_ordering_method_changed)
         self.btn_run.clicked.connect(self._on_run_clicked)
@@ -643,11 +848,12 @@ class TrackletChainConfigDialog(QDialog):
         self.btn_run.setEnabled(enabled)
 
     def _on_similarity_method_changed(self, *_args):
-        is_bouts = self.combo_similarity_method.currentText() == "bouts"
+        method = self.combo_similarity_method.currentText()
+        is_bouts = method == "bouts"
         self.combo_bouts_metric.setEnabled(is_bouts)
         for cb in self.bouts_block_checks.values():
             cb.setEnabled(is_bouts)
-        self.combo_dtw_metric.setEnabled(not is_bouts)
+        self.combo_dtw_metric.setEnabled(method == "dtw")
 
     def _on_ordering_method_changed(self, *_args):
         self.spin_lambda.setEnabled(self.combo_ordering_method.currentText() == "penalized_greedy")
@@ -709,6 +915,31 @@ class TrackletChainConfigDialog(QDialog):
         self._set_loaded_controls_enabled(True)
         print(f"[tracklet-chain] loaded {len(sequences)} tracklets of length {tracklet_length}")
 
+    def _on_load_track_clusters_clicked(self):
+        """Import an already-computed BEHAV3D track clustering result for the current
+        cell type from the output folder (see `load_track_cluster_assignments`) - this
+        never runs clustering itself, only reads what the track-classification widget has
+        already written to disk."""
+        try:
+            output_dir = resolve_behav3d_output_dir(None, self.edit_output_dir.text())
+            cell_type = self.combo_cell_type.currentText().strip()
+            assignments_df, cluster_order, cluster_color_map = load_track_cluster_assignments(
+                output_dir, cell_type
+            )
+        except Exception as exc:
+            self.cluster_status_label.setText("Failed to load - see error dialog.")
+            QMessageBox.critical(self, "Failed to load cluster assignments", str(exc))
+            return
+
+        self.track_cluster_assignments_df = assignments_df
+        self.track_cluster_order = cluster_order
+        self.track_cluster_color_map = cluster_color_map
+
+        counts = assignments_df["ClusterID"].value_counts()
+        summary = ", ".join(f"{label} (n={int(counts.get(label, 0))})" for label in cluster_order)
+        self.cluster_status_label.setText(f"Loaded {len(cluster_order)} clusters: {summary}")
+        print(f"[tracklet-chain] loaded track clusters: {summary}")
+
     def _on_run_clicked(self):
         """Run one plot with the current config without closing the dialog, so the same
         loaded data can be re-run with tweaked settings as many times as wanted."""
@@ -716,6 +947,13 @@ class TrackletChainConfigDialog(QDialog):
             cb.isChecked() for cb in self.bouts_block_checks.values()
         ):
             QMessageBox.warning(self, "No feature blocks selected", "Select at least one bouts feature block.")
+            return
+        if self.combo_ordering_method.currentText() == "cluster" and self.track_cluster_assignments_df is None:
+            QMessageBox.warning(
+                self,
+                "No track cluster assignments loaded",
+                "Click 'Load cluster assignments' in the 'Track cluster grouping' group first.",
+            )
             return
 
         config = self.get_config()
@@ -749,7 +987,70 @@ class TrackletChainConfigDialog(QDialog):
             reference_track=reference_track,
             reference_state_label=(None if reference_track else self.combo_reference_state.currentText()),
             output_path=self.edit_output_path.text(),
+            track_cluster_assignments=self.track_cluster_assignments_df,
+            track_cluster_order=self.track_cluster_order,
+            track_cluster_color_map=self.track_cluster_color_map,
         )
+
+
+def draw_track_cluster_sidebar(
+    ax,
+    chosen_df,
+    cluster_col: str,
+    cluster_color_map: dict,
+    *,
+    bar_h: float = TRACK_BAR_HEIGHT,
+    y_gap: float = TRACK_BAR_Y_GAP,
+    gap_axes_frac: float = 0.02,
+    bar_width_axes_frac: float = 0.03,
+    label_fontsize: float = 8,
+):
+    """Draw one colored block + cluster-name text label to the right of `ax` for each
+    contiguous run of `chosen_df[cluster_col]`. Rows are already cluster-contiguous
+    whenever ordering_method == "cluster" (buckets are iterated and chained one at a
+    time, see `order_by_label_buckets`), so a simple contiguous-run scan suffices.
+
+    Uses `ax.get_yaxis_transform()` (x in axes-fraction, y in data coordinates) rather
+    than a second Axes, so the sidebar automatically lines up with whatever y-limits
+    `plot_tracks_bars_on_ax` set via the same `bar_h`/`y_gap` row-spacing it uses
+    internally (imported here as `TRACK_BAR_HEIGHT`/`TRACK_BAR_Y_GAP`).
+    """
+    labels = chosen_df[cluster_col].astype(str).to_numpy()
+    n = len(labels)
+    if n == 0:
+        return
+
+    trans = ax.get_yaxis_transform()
+    block_start = 0
+    for i in range(1, n + 1):
+        if i == n or labels[i] != labels[block_start]:
+            label = labels[block_start]
+            y0 = block_start * (bar_h + y_gap)
+            y1 = (i - 1) * (bar_h + y_gap) + bar_h
+            color = cluster_color_map.get(label, "grey")
+            ax.add_patch(
+                Rectangle(
+                    (1.0 + gap_axes_frac, y0),
+                    bar_width_axes_frac,
+                    y1 - y0,
+                    transform=trans,
+                    facecolor=color,
+                    edgecolor="k",
+                    linewidth=0.5,
+                    clip_on=False,
+                )
+            )
+            ax.text(
+                1.0 + gap_axes_frac + bar_width_axes_frac + 0.01,
+                (y0 + y1) / 2,
+                str(label),
+                transform=trans,
+                va="center",
+                ha="left",
+                fontsize=label_fontsize,
+                clip_on=False,
+            )
+            block_start = i
 
 
 def run_tracklet_chain_analysis(config: dict, adata_windowed, sequences, meta_df) -> str:
@@ -779,6 +1080,14 @@ def run_tracklet_chain_analysis(config: dict, adata_windowed, sequences, meta_df
             selected_feature_blocks=config["bouts_feature_blocks"],
         )
         similarity_label = f"bouts_{config['bouts_metric']}"
+    elif config["similarity_method"] == "feature_dtw":
+        distances = compute_feature_dtw_distance_matrix(
+            adata_windowed,
+            meta_df,
+            groupby_cols=("sample_name", "TrackID", "trajectory_window_id"),
+            time_col="position_t",
+        )
+        similarity_label = "feature_dtw"
     else:
         raise ValueError(f"Unknown similarity method: {config['similarity_method']!r}")
 
@@ -813,6 +1122,20 @@ def run_tracklet_chain_analysis(config: dict, adata_windowed, sequences, meta_df
         chain_order = greedy_chain_order(
             penalize_distance_matrix_by_score(distances, scores, config["lam"]), start_idx
         )
+    elif ordering_method == "cluster":
+        cluster_assignments = config.get("track_cluster_assignments")
+        if cluster_assignments is None:
+            raise ValueError(
+                "ordering_method='cluster' requires loaded track cluster assignments; "
+                "click 'Load cluster assignments' in the 'Track cluster grouping' group first."
+            )
+        cluster_key = "ClusterID"
+        cluster_labels = attach_track_clusters(meta_df, cluster_assignments, cluster_key)
+        meta_df = meta_df.copy()
+        meta_df["_track_cluster"] = cluster_labels
+        chain_order = order_by_track_cluster_buckets(
+            distances, cluster_labels, list(config["track_cluster_order"]), start_idx
+        )
     else:
         raise ValueError(f"Unknown ordering method: {ordering_method!r}")
 
@@ -836,8 +1159,15 @@ def run_tracklet_chain_analysis(config: dict, adata_windowed, sequences, meta_df
         x_mode="relative",
         window_key="trajectory_window_id",
         state_color_map=color_map,
-        title=f"{n_tracklets} tracklets, {ordering_method} ordering ({similarity_label})",
+        title=(
+            f"{n_tracklets} tracklets, {ordering_method} ordering ({similarity_label})"
+            + (f", {len(set(chosen_df['_track_cluster']))} clusters" if ordering_method == "cluster" else "")
+        ),
     )
+    if ordering_method == "cluster":
+        draw_track_cluster_sidebar(
+            ax, chosen_df, "_track_cluster", config["track_cluster_color_map"]
+        )
     legend_handles = [
         Patch(facecolor=color_map.get(str(v), "grey"), edgecolor="k", label=str(v))
         for v in state_values
@@ -849,7 +1179,7 @@ def run_tracklet_chain_analysis(config: dict, adata_windowed, sequences, meta_df
         bbox_to_anchor=(0.98, 0.5),
         frameon=False,
     )
-    fig.tight_layout(rect=(0, 0, 0.9, 1))
+    fig.tight_layout(rect=(0, 0, 0.72, 1) if ordering_method == "cluster" else (0, 0, 0.9, 1))
     output_path = config["output_path"]
     fig.savefig(output_path, format="pdf", bbox_inches="tight")
     plt.close(fig)

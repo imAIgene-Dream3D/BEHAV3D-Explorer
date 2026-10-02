@@ -2023,11 +2023,16 @@ def run_state_based_analysis(
     )
     _vdone(verbose, "trajectory-clustering", "UMAP embedding", umap_started)
 
+    # Hoisted above both blocks below so it's available to the exemplar-overview
+    # block too, not just diagnostics - both are clustering-diagnostic artifacts
+    # from this run and belong together in clustering/raw.
+    raw_clustering_outfolder = clustering_outfolder / "raw"
+    if bool(autosave_plots) and (bool(plot_results) or bool(plot_exemplars)):
+        raw_clustering_outfolder.mkdir(parents=True, exist_ok=True)
+
     if plot_results:
         if bool(autosave_plots):
             diagnostics_started = time.perf_counter()
-            raw_clustering_outfolder = clustering_outfolder / "raw"
-            raw_clustering_outfolder.mkdir(parents=True, exist_ok=True)
             report_paths = generate_track_clustering_report_pdfs(
                 adata_tracks=adata_state_features,
                 outfolder=raw_clustering_outfolder,
@@ -2119,12 +2124,13 @@ def run_state_based_analysis(
     # --------- Exemplar tracks by cluster ----------
     fig_exemplar = None
     if plot_exemplars:
+        exemplar_root.mkdir(parents=True, exist_ok=True)
         exemplar_started = time.perf_counter()
         if bool(autosave_plots):
             fig_exemplar, chosen_exemplars, _exemplar_overview_path = _save_bouts_exemplar_overview_pdf(
                 adata_filt,
                 adata_state_features,
-                out_dir=clustering_outfolder,
+                out_dir=raw_clustering_outfolder,
                 n_per_cluster=n_per_cluster,
                 state_col=state_col,
                 cluster_key=cluster_key,

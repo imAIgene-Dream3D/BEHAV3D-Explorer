@@ -407,6 +407,26 @@ def _fit_list_widget_height(list_widget, min_rows: int = 2, max_rows: int = 5) -
     list_widget.setFixedHeight(n * row_h + 2 * list_widget.frameWidth() + 4)
 
 
+def _inject_known_metadata_cols(adata, md_snapshot) -> None:
+    """Inject known metadata grouping columns (exp_nr, well, *_line_condition) from the loaded
+    metadata CSV into `adata.obs` when missing (for existing h5ad files that predate Fix 1 in
+    classification.py), so a "group per page" selection drawn from those columns is guaranteed
+    to be present on `adata.obs` by the time a report function reads it."""
+    if md_snapshot is None or "sample_name" not in md_snapshot.columns:
+        return
+    known_meta = ["exp_nr", "well"] + [c for c in md_snapshot.columns if c.endswith("_line_condition")]
+    cols_to_inject = [c for c in known_meta if c in md_snapshot.columns and c not in adata.obs.columns]
+    if not cols_to_inject:
+        return
+    meta_map = (
+        md_snapshot[["sample_name"] + cols_to_inject]
+        .drop_duplicates("sample_name")
+        .set_index("sample_name")
+    )
+    for col in cols_to_inject:
+        adata.obs[col] = adata.obs["sample_name"].map(meta_map[col]).astype(str).fillna("(unknown)")
+
+
 def _condition_levels_for_column(col, *, metadata_loader=None, adata=None, h5ad_path=None) -> list[str]:
     """Cheap, synchronous discovery of the distinct values of a metadata/obs column, for
     populating a "group conditions" level picker without triggering a full h5ad load.
@@ -1355,6 +1375,14 @@ class StateClassificationSubTab(QWidget):
             "behavioral-state classification plus the per-timepoint tracks CSV."
         ))
 
+        g_state_contact.addWidget(QLabel(
+            "Group per page (Ctrl/Cmd click for multiple) — splits both reports below into "
+            "one page set per group:"
+        ))
+        self.list_state_contact_group_cols = QListWidget()
+        self.list_state_contact_group_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        g_state_contact.addWidget(self.list_state_contact_group_cols)
+
         g_state_contact.addWidget(_make_info_label(
             "Contact type comparison — compares contacting-state proportions between "
             "selected contact columns (e.g. healthy vs. tumor organoid contact): "
@@ -1888,6 +1916,19 @@ class StateClassificationSubTab(QWidget):
                     contact_cols = list_available_contact_columns(pd.read_csv(csv_path, nrows=0))
                 except Exception:
                     contact_cols = []
+
+        candidate_group_cols = self._composition_candidate_columns()
+        prev_group_selection = {item.text() for item in self.list_state_contact_group_cols.selectedItems()}
+        self.list_state_contact_group_cols.blockSignals(True)
+        self.list_state_contact_group_cols.clear()
+        for col in candidate_group_cols:
+            self.list_state_contact_group_cols.addItem(col)
+        for i in range(self.list_state_contact_group_cols.count()):
+            item = self.list_state_contact_group_cols.item(i)
+            if item.text() in prev_group_selection:
+                item.setSelected(True)
+        self.list_state_contact_group_cols.blockSignals(False)
+        _fit_list_widget_height(self.list_state_contact_group_cols)
 
         prev_type_selection = {item.text() for item in self.list_state_contact_type_compare_cols.selectedItems()}
         self.list_state_contact_type_compare_cols.blockSignals(True)
@@ -3344,6 +3385,9 @@ class StateClassificationSubTab(QWidget):
             QMessageBox.warning(self, "No data", "Track-features CSV not found. Run feature extraction first.")
             return
         state_col_choice = self.combo_state_contact_type_state_col.currentText()
+        selected_extra_cols = [item.text() for item in self.list_state_contact_group_cols.selectedItems()]
+        _raw_md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
+        md_snapshot = _raw_md.copy() if _raw_md is not None else None
         out = self._out_dir()
         self._log(f"▶ Running state contact type comparison for '{ct}'…")
 
@@ -3358,12 +3402,14 @@ class StateClassificationSubTab(QWidget):
             state_col = _resolve_ui_state_col(adata, state_col_choice)
             df_timepoints = pd.read_csv(csv_path)
             state_dir = _resolve_state_paths(out, ct).state_outdir
+            _inject_known_metadata_cols(adata, md_snapshot)
             return save_state_contact_type_comparison(
                 adata,
                 df_timepoints,
                 state_dir,
                 contact_cols=contact_cols,
                 state_col=state_col,
+                extra_group_cols=selected_extra_cols or None,
                 verbose=True,
             )
 
@@ -3405,6 +3451,9 @@ class StateClassificationSubTab(QWidget):
         window_mode = self.combo_state_shift_window_mode.currentText().lower()
         fixed_window_length = int(self.spin_state_shift_window_length.value())
         state_col_choice = self.combo_state_shift_state_col.currentText()
+        selected_extra_cols = [item.text() for item in self.list_state_contact_group_cols.selectedItems()]
+        _raw_md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
+        md_snapshot = _raw_md.copy() if _raw_md is not None else None
         out = self._out_dir()
         self._log(f"▶ Running state contact-shift analysis for '{ct}'…")
 
@@ -3419,6 +3468,7 @@ class StateClassificationSubTab(QWidget):
             state_col = _resolve_ui_state_col(adata, state_col_choice)
             df_timepoints = pd.read_csv(csv_path)
             state_dir = _resolve_state_paths(out, ct).state_outdir
+            _inject_known_metadata_cols(adata, md_snapshot)
             return save_state_contact_shift_report(
                 df_timepoints,
                 adata,
@@ -3428,6 +3478,7 @@ class StateClassificationSubTab(QWidget):
                 state_col=state_col,
                 window_mode=window_mode,
                 fixed_window_length=fixed_window_length,
+                extra_group_cols=selected_extra_cols or None,
                 verbose=True,
             )
 
@@ -7670,15 +7721,15 @@ class TrackClassificationSubTab(QWidget):
             self._reload()
             self._notify_results()
 
-            # The auto exemplar-overview step below relies on save_dtaidistance_exemplar_overview /
-            # save_dtaidistance_medoid_overview, which need a DTW pairwise distance matrix — not
-            # applicable to a bouts-derived model. The bouts pipeline already writes its own
-            # diagnostics/exemplar PDFs inline (via plot_results/plot_exemplars above).
+            # Only a lightweight exemplar/medoid overview grid is auto-generated here
+            # (into clustering/raw, alongside the diagnostics PDF) - the full
+            # per-cluster/per-example exemplar PDFs (example_tracks/) are expensive
+            # and stay manual-only, via the "Create exemplar PDFs" button.
             # Exemplar/medoid overviews draw state bars: nothing to show without states.
             has_states = bool(
                 (r.uns.get("dtai_trajectory_clustering", {}) or {}).get("has_behavioral_states", True)
             ) if not is_bouts else True
-            if is_bouts or not has_states:
+            if not has_states:
                 if on_done_ext:
                     on_done_ext(r)
                 return
@@ -7689,15 +7740,31 @@ class TrackClassificationSubTab(QWidget):
             _log = self._log
 
             def _run_overview(**kw):
+                from behav3d.analysis.behavior.track.utils import _resolve_track_paths
+                _method = (_track_adata.uns.get("dtai_trajectory_clustering", {}) or {}).get("method")
+                _raw_dir = _resolve_track_paths(str(out), ct).clustering_outfolder / "raw"
+                _raw_dir.mkdir(parents=True, exist_ok=True)
+                if _method == "bouts_feature_clustering":
+                    # Bouts has no medoid-overview equivalent (its adata.X is a
+                    # per-track feature matrix, not a pairwise DTW distance
+                    # matrix); just the exemplar overview grid.
+                    from behav3d.analysis.behavior.track.bouts import (
+                        save_bouts_exemplar_overview,
+                    )
+                    return save_bouts_exemplar_overview(
+                        _track_adata,
+                        output_dir=str(out),
+                        cell_type=ct,
+                        n_per_cluster=_n_per,
+                        seed=_seed,
+                        outfolder=_raw_dir,
+                        verbose=True,
+                    )
                 from behav3d.analysis.behavior.track.state_dtw import (
                     FEATURE_ONLY_METHODS,
                     save_dtaidistance_exemplar_overview,
                     save_dtaidistance_medoid_overview,
                 )
-                from behav3d.analysis.behavior.track.utils import _resolve_track_paths
-                _method = (_track_adata.uns.get("dtai_trajectory_clustering", {}) or {}).get("method")
-                _raw_dir = _resolve_track_paths(str(out), ct).clustering_outfolder / "raw"
-                _raw_dir.mkdir(parents=True, exist_ok=True)
                 _result = save_dtaidistance_exemplar_overview(
                     _track_adata,
                     output_dir=str(out),
@@ -7708,7 +7775,7 @@ class TrackClassificationSubTab(QWidget):
                     verbose=True,
                 )
                 # Medoid selection needs a precomputed pairwise DTW distance matrix,
-                # structurally unavailable for feature-based clustering (bouts).
+                # structurally unavailable for feature-based clustering.
                 if _method not in FEATURE_ONLY_METHODS:
                     try:
                         save_dtaidistance_medoid_overview(
@@ -7901,12 +7968,15 @@ class TrackClassificationSubTab(QWidget):
                 self._regenerate_track_reports_after_rename(ct)
 
     def _regenerate_track_reports_after_rename(self, ct: str):
-        """Re-run diagnostics + proportion plots so plots reflect the just-renamed labels/colors."""
+        """Re-run diagnostics plus a lightweight exemplar/medoid overview grid so plots
+        reflect the just-renamed labels/colors. Deliberately does NOT regenerate the
+        behavior-proportions plot or the full per-cluster/per-example exemplar PDFs
+        (example_tracks/) - those are expensive and remain manual-only, via their
+        dedicated buttons."""
         if self._track_adata is None or self._bg.is_running():
             return
         out = self._out_dir()
         track_adata = self._track_adata
-        time_bin_size = int(self.spin_track_composition_time_bin.value())
         method = (track_adata.uns.get("dtai_trajectory_clustering", {}) or {}).get("method")
         if method == "original_behav3d_feature_dtw":
             # Known limitation: renaming feature-DTW clusters via this generic dialog updates
@@ -7925,7 +7995,6 @@ class TrackClassificationSubTab(QWidget):
             )
             from behav3d.analysis.behavior.track.visualization.plots.reports import (
                 generate_track_clustering_report_pdfs,
-                save_track_class_proportions_by_sample_plot,
             )
             from behav3d.analysis.behavior.track.utils import _resolve_track_paths
             from behav3d.napari._rename_dialog import _track_cluster_col
@@ -7952,23 +8021,18 @@ class TrackClassificationSubTab(QWidget):
                     cell_type=ct,
                     verbose=True,
                 )
-            prop = save_track_class_proportions_by_sample_plot(
-                track_adata,
-                paths.behavior_proportions_outfolder,
-                sample_col="sample_name",
-                class_col=cluster_col,
-                time_bin_size=time_bin_size,
-                verbose=True,
-            )
-            result = {"diagnostics": diag, "proportions": prop}
+            result = {"diagnostics": diag}
             # Note: the Sankey (window transitions) and transition-analysis (circular
-            # diagram + heatmap) reports are intentionally NOT regenerated here - they're
-            # expensive and a rename shouldn't trigger them automatically. Use the
-            # dedicated "Window Transitions" / "Track Transition Report" buttons instead.
-            # Refresh the example-track PDF too, so it reflects the just-renamed
-            # cluster labels/colors rather than staying stale - caught locally
-            # so a failure here doesn't take down the reports above, which
-            # already succeeded by this point.
+            # diagram + heatmap) reports, the behavior-proportions plot, and the full
+            # per-cluster/per-example exemplar PDFs are intentionally NOT regenerated
+            # here - they're expensive and a rename shouldn't trigger them
+            # automatically. Use the dedicated "Window Transitions" / "Track
+            # Transition Report" / "Track proportions" / "Exemplar PDFs" buttons
+            # instead.
+            # Refresh the lightweight exemplar/medoid overview grid too, so it
+            # reflects the just-renamed cluster labels/colors rather than staying
+            # stale - caught locally so a failure here doesn't take down the
+            # reports above, which already succeeded by this point.
             try:
                 if method == "bouts_feature_clustering":
                     # Reuse the same plotting/saving logic bouts.py runs right

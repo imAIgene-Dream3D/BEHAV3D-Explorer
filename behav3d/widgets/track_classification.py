@@ -288,6 +288,10 @@ class TrackClassificationPanel:
             description="Also generate exemplar PDFs", value=True, indent=False,
             layout=widgets.Layout(width="220px"),
         )
+        self.dtw_plot_exemplars = widgets.Checkbox(
+            description="Also generate exemplar PDFs", value=True, indent=False,
+            layout=widgets.Layout(width="220px"),
+        )
         self.missing_policy = widgets.Dropdown(
             description="Missing",
             options=[("Keep as category", "keep"), ("Drop missing timepoints", "drop")],
@@ -426,6 +430,7 @@ class TrackClassificationPanel:
                 self.parallel,
                 self.save_distance_matrix,
                 self.use_original_behav3d,
+                self.dtw_plot_exemplars,
             ],
             layout=widgets.Layout(flex_flow="row wrap", gap="8px"),
         )
@@ -1129,6 +1134,7 @@ class TrackClassificationPanel:
         self.bouts_block_scaling.value = bool(cfg.get("bouts_block_scaling", self.bouts_block_scaling.value))
         self.bouts_drop_redundant.value = bool(cfg.get("bouts_drop_redundant", self.bouts_drop_redundant.value))
         self.bouts_plot_exemplars.value = bool(cfg.get("bouts_plot_exemplars", self.bouts_plot_exemplars.value))
+        self.dtw_plot_exemplars.value = bool(cfg.get("dtw_plot_exemplars", self.dtw_plot_exemplars.value))
         self.missing_policy.value = str(cfg.get("missing_policy", self.missing_policy.value))
         self.parallel.value = bool(cfg.get("parallel", self.parallel.value))
         self.save_distance_matrix.value = bool(cfg.get("save_distance_matrix", self.save_distance_matrix.value))
@@ -1181,6 +1187,7 @@ class TrackClassificationPanel:
             "bouts_block_scaling": bool(self.bouts_block_scaling.value),
             "bouts_drop_redundant": bool(self.bouts_drop_redundant.value),
             "bouts_plot_exemplars": bool(self.bouts_plot_exemplars.value),
+            "dtw_plot_exemplars": bool(self.dtw_plot_exemplars.value),
             "missing_policy": str(self.missing_policy.value),
             "parallel": bool(self.parallel.value),
             "save_distance_matrix": bool(self.save_distance_matrix.value),
@@ -1394,6 +1401,7 @@ class TrackClassificationPanel:
             self.parallel,
             self.save_distance_matrix,
             self.use_original_behav3d,
+            self.dtw_plot_exemplars,
         ):
             widget.layout.display = "none" if is_bouts else None
         self._sync_trim_mode_visibility()
@@ -1420,7 +1428,9 @@ class TrackClassificationPanel:
             "clustering (use the Diagnostics/Exemplar PDF buttons below only for the DTW basis)."
             if is_bouts else
             "<b>dtaidistance backend:</b> one-hot vectors with <code>inner_dist='squared euclidean'</code>; "
-            "the DTW window is the main speed constraint."
+            "the DTW window is the main speed constraint. Exemplar PDFs for this basis are written "
+            "automatically when you run clustering (untick 'Also generate exemplar PDFs' to skip, or "
+            "use the Exemplar PDF button below to regenerate with different options)."
         )
         self.btn_run.description = (
             "Run bout/proportion clustering" if is_bouts else "Run one-hot dtaidistance clustering"
@@ -1513,6 +1523,7 @@ class TrackClassificationPanel:
                 self.parallel,
                 self.save_distance_matrix,
                 self.use_original_behav3d,
+                self.dtw_plot_exemplars,
             ]
             self.original_run_section.children = [
                 self.original_description_html,
@@ -2138,7 +2149,7 @@ class TrackClassificationPanel:
             missing_policy="keep",
             save_distance_matrix=bool(self.save_distance_matrix.value),
             plot_results=True,
-            plot_exemplars=False,
+            plot_exemplars=bool(self.dtw_plot_exemplars.value),
             n_per_cluster=int(self.n_per_cluster.value),
             random_state=int(self.random_state.value),
             verbose=True,
@@ -2153,7 +2164,10 @@ class TrackClassificationPanel:
                 f"<b style='color:#a60;'>⚠ UMAP was skipped in diagnostics:</b> {umap_error}"
             )
         else:
-            self.plot_status_html.value = "<b>Ready for plots:</b> clustering finished."
+            self.plot_status_html.value = (
+                "<b>Ready for plots:</b> clustering finished."
+                + (" Exemplar PDFs were written." if bool(self.dtw_plot_exemplars.value) else "")
+            )
 
     def _run_bouts_clustering(self, trajectory_size):
         # run_state_based_analysis truncates/filters tracks to an exact length, so it needs a

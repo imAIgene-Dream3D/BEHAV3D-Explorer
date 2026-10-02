@@ -247,26 +247,45 @@ class GroupBuilder(widgets.VBox):
         """Run create_group_tracked_segments with a live progress bar.
 
         Blocking (no background-thread infra in the notebook layer), but
-        the IntProgress widget still updates live during the call.
+        the IntProgress widget still updates live during the call. Returns
+        ``(written, skipped, error)`` — ``skipped`` is a list of
+        ``{"sample_name", "cell_type", "reason"}`` records for any member
+        that could not be included (empty list on success with no skips,
+        ``None`` alongside a non-``None`` error).
         """
         n_workers = int(self.n_workers.value) if hasattr(self, "n_workers") else 1
         params = self._params()
         if params.get("n_workers") != n_workers:
             params["n_workers"] = n_workers
             self._persist_params()
+        skipped: list = []
         try:
             written = create_group_tracked_segments(
                 output_dir, group_id, self.metadata_loader.metadata,
                 log=print,
                 progress_cb=self._tracked_progress_cb,
                 n_workers=n_workers,
+                skipped_out=skipped,
             )
-            return written, None
+            return written, skipped, None
         except Exception as e:
-            return None, e
+            return None, None, e
         finally:
             self.tracked_progress.layout.visibility = 'hidden'
             self.tracked_progress_label.value = ''
+
+    @staticmethod
+    def _skipped_html(skipped) -> str:
+        if not skipped:
+            return ''
+        lines = [f'<b style="color:orange;">⚠ {len(skipped)} member(s) skipped:</b><ul style="margin:2px 0;">']
+        for rec in skipped[:20]:
+            ct = rec.get("cell_type") or "all members"
+            lines.append(f'<li>{rec["sample_name"]} / {ct}: {rec["reason"]}</li>')
+        if len(skipped) > 20:
+            lines.append(f'<li>…and {len(skipped) - 20} more (see printed log).</li>')
+        lines.append('</ul>')
+        return ''.join(lines)
 
     def _get_selected_cell_types(self):
         """Get list of selected member cell types from checkboxes."""
@@ -323,13 +342,16 @@ class GroupBuilder(widgets.VBox):
                 success_html += '<i>Building tracked segments… this may take a while.</i><br/>'
                 self.status_output.value = success_html + '</div>'
                 print("  Building tracked segments...")
-                written, err = self._run_tracked_build(output_dir, group_id)
+                written, skipped, err = self._run_tracked_build(output_dir, group_id)
                 if err is None:
                     success_html += (
                         f'<b style="color:green;">✓ Tracked segments built for '
                         f'{len(written)} sample(s).</b><br/>'
                     )
+                    success_html += self._skipped_html(skipped)
                     print(f"  ✓ Tracked segments built for {len(written)} sample(s).")
+                    if skipped:
+                        print(f"  ⚠ {len(skipped)} member(s) skipped — see status output for details.")
                 else:
                     success_html += (
                         f'<b style="color:red;">⚠ Could not build tracked segments:</b> {err}<br/>'
@@ -393,7 +415,7 @@ class GroupBuilder(widgets.VBox):
                 'this may take a while.</i></div>'
             )
             print(f"Building tracked segments for '{group_id}'...")
-            written, err = self._run_tracked_build(output_dir, group_id)
+            written, skipped, err = self._run_tracked_build(output_dir, group_id)
             if err is None:
                 status = group_tracked_segments_status(
                     output_dir, group_id, self.metadata_loader.metadata
@@ -401,9 +423,12 @@ class GroupBuilder(widgets.VBox):
                 self.status_output.value = (
                     f'<div style="color:green;"><b>✓ Tracked segments built for '
                     f'{group_id}:</b> {len(written)} sample(s) written '
-                    f'({status["built"]}/{status["total"]} total now have tracked segments).</div>'
+                    f'({status["built"]}/{status["total"]} total now have tracked segments).'
+                    f'{self._skipped_html(skipped)}</div>'
                 )
                 print(f"✓ Tracked segments built for '{group_id}': {len(written)} sample(s) written.")
+                if skipped:
+                    print(f"⚠ {len(skipped)} member(s) skipped — see status output for details.")
             elif isinstance(err, (FileNotFoundError, ValueError)):
                 self.status_output.value = f'<div style="color:red;"><b>Error:</b> {err}</div>'
             else:

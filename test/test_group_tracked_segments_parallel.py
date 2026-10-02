@@ -14,6 +14,7 @@ import uuid
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from behav3d.io.formats.zarr import save_as_zarr
 from behav3d.io.images import load_image
@@ -168,3 +169,96 @@ def test_parallel_matches_serial():
             )
     finally:
         _cleanup(case_dir)
+
+
+def test_missing_member_image_logs_and_skips():
+    """If one member's tracked-image path doesn't resolve for a sample, that
+    member is skipped for that sample (not the whole build), and the skip is
+    reported both via ``log`` and via a structured ``skipped_out`` record —
+    the bug this guards against is these skips being silently swallowed."""
+    case_dir = _case_dir("missing_member")
+    try:
+        metadata, group_id = _build_inputs(case_dir)
+
+        # Break sample2's nkcell tracked-image path.
+        metadata.loc[metadata["sample_name"] == "sample2", "im_nkcell_tracks_image_path"] = (
+            str(case_dir / "does_not_exist.zarr")
+        )
+
+        out_dir = case_dir / "out"
+        merged_src = merged_track_features_csv(case_dir, group_id)
+        merged_dst = merged_track_features_csv(out_dir, group_id)
+        merged_dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(merged_src, merged_dst)
+
+        logged = []
+        skipped = []
+        written = create_group_tracked_segments(
+            out_dir, group_id, metadata, log=logged.append, skipped_out=skipped, n_workers=1
+        )
+
+        # sample1 (both members intact) and sample2 (nkcell missing, tcell
+        # intact) both still produce output — only the affected member's
+        # tracks are missing from sample2's combined image.
+        assert set(written.keys()) == set(SAMPLES)
+        img_sample2 = np.asarray(load_image(written["sample2"]["image"]))
+        tcell_ids = set(GROUP_TRACKID["tcell"].values())
+        nkcell_ids = set(GROUP_TRACKID["nkcell"].values())
+        assert tcell_ids <= set(np.unique(img_sample2))
+        assert not (nkcell_ids & set(np.unique(img_sample2)))
+
+        assert any(
+            rec["sample_name"] == "sample2" and rec["cell_type"] == "nkcell"
+            and "tracked image not found" in rec["reason"]
+            for rec in skipped
+        )
+        assert any("nkcell" in msg and "skipping member" in msg for msg in logged)
+    finally:
+        _cleanup(case_dir)
+
+
+def test_overlapping_member_masks_raise():
+    """If two members' segmentation masks physically overlap at the same
+    pixel for a surviving (filtered-in) track, the build must raise instead
+    of silently letting one member's label overwrite the other's."""
+    for n_workers in (1, 2):
+        case_dir = _case_dir(f"overlap_w{n_workers}")
+        try:
+            group_id = "immune_merged"
+            sample_name = "sample1"
+            shape = (1, 1, 2, 2)  # T, Z, Y, X
+
+            tcell_arr = np.zeros(shape, dtype=np.uint16)
+            tcell_arr[0, 0, 0, 0] = 1
+            nkcell_arr = np.zeros(shape, dtype=np.uint16)
+            nkcell_arr[0, 0, 0, 0] = 1  # same pixel as tcell's label 1
+
+            sample_dir = case_dir / "images" / sample_name
+            sample_dir.mkdir(parents=True)
+            tcell_path = sample_dir / f"{sample_name}_tcell_tracked.zarr"
+            nkcell_path = sample_dir / f"{sample_name}_nkcell_tracked.zarr"
+            save_as_zarr(tcell_arr, tcell_path)
+            save_as_zarr(nkcell_arr, nkcell_path)
+
+            metadata = pd.DataFrame([{
+                "sample_name": sample_name,
+                "pixel_distance_xy": 1,
+                "pixel_distance_z": 1,
+                "im_tcell_tracks_image_path": str(tcell_path),
+                "im_nkcell_tracks_image_path": str(nkcell_path),
+            }])
+
+            merged_df = pd.DataFrame([
+                {"TrackID": 1, "origin_cell_type": "tcell", "origin_TrackID": 1,
+                 "sample_name": sample_name, "position_t": 0},
+                {"TrackID": 2, "origin_cell_type": "nkcell", "origin_TrackID": 1,
+                 "sample_name": sample_name, "position_t": 0},
+            ])
+            out_csv = merged_track_features_csv(case_dir, group_id)
+            out_csv.parent.mkdir(parents=True, exist_ok=True)
+            merged_df.to_csv(out_csv, index=False)
+
+            with pytest.raises(ValueError, match="Voxel overlap detected"):
+                create_group_tracked_segments(case_dir, group_id, metadata, n_workers=n_workers)
+        finally:
+            _cleanup(case_dir)

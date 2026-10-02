@@ -188,3 +188,84 @@ def test_save_state_contact_type_comparison_diff_and_stacked_outputs(tmp_path):
     # This is a Welch's-t-test cluster-size-difference comparison, not the old purely
     # descriptive mean-fraction bar chart — no chi-square columns should leak in.
     assert not {"chi2", "cramers_v"} & set(diff_df.columns)
+
+
+def _build_df_timepoints_mixed_two_samples():
+    rows = [
+        {
+            "sample_name": sample_name,
+            "TrackID": track_id,
+            "position_t": t,
+            "healthy_organoid_contact": int(spec["healthy"](t)),
+            "tumor_organoid_contact": int(spec["tumor"](t)),
+        }
+        for sample_name in ("sample_1", "sample_2")
+        for track_id, spec in _MIXED_SPECS.items()
+        for t in range(_N_TIMEPOINTS)
+    ]
+    return pd.DataFrame(rows)
+
+
+def _build_adata_states_mixed_two_samples():
+    rows = [
+        {
+            "sample_name": sample_name,
+            "TrackID": track_id,
+            "position_t": t,
+            "full_behavioral_state": spec["state"](t),
+            "condition": condition,
+        }
+        for sample_name, condition in (("sample_1", "cond_a"), ("sample_2", "cond_b"))
+        for track_id, spec in _MIXED_SPECS.items()
+        for t in range(_N_TIMEPOINTS)
+    ]
+    obs = pd.DataFrame(rows)
+    obs.index = [str(i) for i in range(len(obs))]
+    return ad.AnnData(X=np.zeros((len(obs), 1)), obs=obs)
+
+
+def test_save_state_contact_type_comparison_extra_group_cols_splits_pages(tmp_path):
+    df_timepoints = _build_df_timepoints_mixed_two_samples()
+    adata_states = _build_adata_states_mixed_two_samples()
+
+    result = save_state_contact_type_comparison(
+        adata_states, df_timepoints, tmp_path,
+        contact_cols=["healthy_organoid_contact", "tumor_organoid_contact"],
+        state_col="full_behavioral_state",
+        extra_group_cols=["condition"],
+        verbose=False,
+    )
+
+    assert Path(result["pdf_path"]).exists()
+
+    # sample_1/cond_a and sample_2/cond_b are identical copies of the single-sample dataset
+    # used above, so each group's own stats must reproduce those exact values independently.
+    healthy_mean_a = (0.6 + 0.8 + 0.5) / 3
+    tumor_mean_a = (0.2 + 0.4 + 1.0) / 3
+
+    stacked = pd.read_csv(result["stacked_csv_path"])
+    assert set(stacked["condition"]) == {"cond_a", "cond_b"}
+    for condition in ("cond_a", "cond_b"):
+        sub = stacked[stacked["condition"] == condition].set_index(["contact_col", "state"])["proportion"]
+        assert sub.loc[("healthy_organoid_contact", "A")] == pytest.approx(healthy_mean_a)
+        assert sub.loc[("tumor_organoid_contact", "A")] == pytest.approx(tumor_mean_a)
+
+    diff_df = pd.read_csv(result["diff_csv_path"])
+    assert set(diff_df["condition"]) == {"cond_a", "cond_b"}
+    for condition in ("cond_a", "cond_b"):
+        row_a = diff_df[(diff_df["condition"] == condition) & (diff_df["class"] == "A")].iloc[0]
+        assert row_a["mean_a"] == pytest.approx(healthy_mean_a)
+        assert row_a["mean_b"] == pytest.approx(tumor_mean_a)
+        assert row_a["n_a"] == 3 and row_a["n_b"] == 3
+
+
+def test_save_state_contact_type_comparison_missing_group_col_raises(tmp_path):
+    df_timepoints = _build_df_timepoints_mixed()
+    adata_states = _build_adata_states_mixed()
+    with pytest.raises(KeyError, match="condition"):
+        save_state_contact_type_comparison(
+            adata_states, df_timepoints, tmp_path,
+            contact_cols=["healthy_organoid_contact", "tumor_organoid_contact"],
+            state_col="full_behavioral_state",
+            extra_group_cols=["condition"],
+        )
