@@ -47,6 +47,7 @@ from qtpy.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QStackedWidget,
+    QTableWidget,
     QTabWidget,
     QTextEdit,
     QToolButton,
@@ -594,6 +595,139 @@ def _resolve_ui_state_col(adata, choice: str) -> str:
     return choice
 
 
+def _render_compact_statebar_pixmap(
+    track_df, state_color_map, state_col, time_col="position_t",
+    figsize=(3.2, 0.34), dpi=100,
+):
+    """A bare colored strip (no axis/ticks) for one track's state history —
+    the compact per-row version of `render_track_statebar_image` (see
+    `behav3d.analysis.behavior.track.visualization.backprojection`), which
+    always draws a `position_t` axis and is left untouched since the Track
+    Classification click-dock depends on that look.
+
+    Returns ``(pixmap, (xmin, xmax))``. The caller gets the time range back
+    because the image is rendered flush to its edges (no margins), so a
+    pixel x-coordinate maps linearly onto ``(xmin, xmax)`` across the full
+    pixmap width — used by `_StateTimelineScrubber` to turn a click/drag
+    position into a timepoint."""
+    from behav3d.analysis.behavior.track.visualization.plots.exemplar_track_per_cluster import (
+        _compute_state_bar_segments,
+    )
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib import pyplot as plt
+    from qtpy.QtGui import QImage, QPixmap
+
+    segments, xlim = _compute_state_bar_segments(
+        track_df=track_df, state_key=str(state_col), time_key=str(time_col),
+        state_color_map=state_color_map,
+    )
+    fig, ax = plt.subplots(figsize=figsize, dpi=int(dpi))
+    for start, width, color in segments:
+        ax.broken_barh([(start, width)], (0.0, 1.0), facecolors=color)
+    ax.set_xlim(*xlim)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    canvas = FigureCanvasAgg(fig)
+    canvas.draw()
+    rgb = np.ascontiguousarray(np.asarray(canvas.buffer_rgba())[..., :3], dtype=np.uint8)
+    plt.close(fig)
+
+    height, width = rgb.shape[0], rgb.shape[1]
+    fmt_rgb = getattr(QImage, "Format_RGB888", None) or QImage.Format.Format_RGB888
+    qimg = QImage(rgb.data, int(width), int(height), int(3 * width), fmt_rgb).copy()
+    return QPixmap.fromImage(qimg), xlim
+
+
+class _BehaviorMatchRowWidget(QWidget):
+    """One 'Find a Behavior' match: a compact detail line plus its state bar
+    underneath, both inside one table row. `table.selectRow(...)` updates the
+    real selection model even though this cell holds a widget instead of a
+    QTableWidgetItem, so clicking either line still selects the match."""
+
+    def __init__(self, table, row_index, details_text, bar_pixmap, parent=None):
+        super().__init__(parent)
+        self._table = table
+        self._row_index = row_index
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 4, 6, 4)
+        lay.setSpacing(2)
+        detail_label = QLabel(details_text)
+        detail_label.setStyleSheet("font-size: 10px; color: #ccc;")
+        lay.addWidget(detail_label)
+        bar_label = QLabel()
+        if bar_pixmap is not None:
+            bar_label.setPixmap(bar_pixmap)
+        else:
+            bar_label.setText("(state bar unavailable)")
+            bar_label.setStyleSheet("font-size: 9px; color: #777;")
+        lay.addWidget(bar_label)
+
+    def mousePressEvent(self, event):
+        self._table.selectRow(self._row_index)
+        super().mousePressEvent(event)
+
+
+class _StateTimelineScrubber(QWidget):
+    """A visualized track's full state history as a bar, with a live time
+    cursor. Clicking or dragging anywhere on it seeks the viewer to that
+    timepoint.
+
+    The colored strip is rendered once (via `_render_compact_statebar_pixmap`)
+    and stretched to the widget's current size on every paint; the cursor is
+    drawn as a plain line on top rather than being baked into a re-rendered
+    matplotlib image each time, so dragging stays smooth — re-running
+    matplotlib per mouse-move would be visibly janky. Pixel<->time mapping
+    only ever uses `self.width()`, not the base pixmap's native resolution,
+    so no resize handling is needed.
+    """
+
+    def __init__(self, base_pixmap, xlim, on_seek, parent=None):
+        super().__init__(parent)
+        self._base_pixmap = base_pixmap
+        self._tmin, self._tmax = float(xlim[0]), float(xlim[1])
+        self._on_seek = on_seek
+        self._current_time = self._tmin
+        self.setMinimumHeight(48)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def set_current_time(self, t):
+        self._current_time = float(t)
+        self.update()
+
+    def paintEvent(self, event):
+        from qtpy.QtGui import QPainter, QPen, QColor
+
+        painter = QPainter(self)
+        if self._base_pixmap is not None:
+            painter.drawPixmap(self.rect(), self._base_pixmap)
+        span = self._tmax - self._tmin
+        frac = 0.0 if span <= 0 else (self._current_time - self._tmin) / span
+        frac = min(1.0, max(0.0, frac))
+        x = int(round(frac * self.width()))
+        painter.setPen(QPen(QColor("white"), 2))
+        painter.drawLine(x, 0, x, self.height())
+        painter.end()
+
+    def _time_from_x(self, x):
+        frac = min(1.0, max(0.0, x / max(1, self.width())))
+        return int(round(self._tmin + frac * (self._tmax - self._tmin)))
+
+    def _seek_to_x(self, x):
+        t = self._time_from_x(x)
+        self.set_current_time(t)
+        if self._on_seek is not None:
+            self._on_seek(t)
+
+    def mousePressEvent(self, event):
+        self._seek_to_x(event.pos().x())
+
+    def mouseMoveEvent(self, event):
+        # Qt only delivers move events while a button is held (no
+        # setMouseTracking call), so this is drag-to-scrub, not hover.
+        self._seek_to_x(event.pos().x())
+
+
 def _save_behav3d_params(metadata_loader, out_dir_fn):
     params = getattr(metadata_loader, "behav3d_parameters", None)
     if not isinstance(params, dict):
@@ -640,6 +774,18 @@ class StateClassificationSubTab(QWidget):
         # of writing a full per-sample zarr up front.
         self._state_bp_preview: Optional[dict] = None
         self._state_bp_dims_callback = None
+        # "Find a Behavior" cache: the state adata/column loaded for the
+        # currently-selected combo_state_color_by, and the last search's
+        # results — avoids re-reading the h5ad on every search/visualize.
+        self._bp_sequence_adata = None
+        self._bp_sequence_state_col: Optional[str] = None
+        self._bp_sequence_color_by: Optional[str] = None
+        self._bp_sequence_results = None
+        # Scrubbable state-history bar shown under the viewer while a single
+        # track is visualized (see _on_visualize_matched_track); torn down
+        # alongside the rest of the preview in _teardown_state_bp_preview.
+        self._track_scrubber = None
+        self._track_scrubber_dock = None
         # Populated by _populate_dynamic_features; reused by the log-scaling
         # "Preview feature distributions" histogram button.
         self._logscale_candidate_cols: list = []
@@ -1595,6 +1741,94 @@ class StateClassificationSubTab(QWidget):
         g_view.addLayout(export_run_row)
         g_bp.addWidget(grp_view)
 
+        # Find a Behavior: search tracks for a user-ordered state sequence,
+        # then visualize a single matched track in isolation.
+        grp_find_behavior = QGroupBox("🔎 Find a Behavior")
+        g_find = QVBoxLayout(grp_find_behavior)
+        g_find.setSpacing(4)
+
+        info_find = QLabel(
+            "Build an ordered sequence of states, search the whole dataset "
+            "for tracks whose state history matches it, then visualize one "
+            "matched track in isolation (segmentation, state mask, and a "
+            "trajectory colored per timepoint by state)."
+        )
+        info_find.setStyleSheet("color: #999; font-size: 10px;")
+        info_find.setWordWrap(True)
+        g_find.addWidget(info_find)
+
+        seq_build_row = QHBoxLayout()
+        self.combo_bp_sequence_state = QComboBox()
+        self.combo_bp_sequence_state.setMinimumWidth(140)
+        self.combo_bp_sequence_state.setEnabled(False)
+        self.btn_bp_sequence_load_states = QPushButton("🔄 Load States")
+        _style_secondary(self.btn_bp_sequence_load_states)
+        self.btn_bp_sequence_add = QPushButton("➕ Add")
+        seq_build_row.addWidget(self.combo_bp_sequence_state, stretch=1)
+        seq_build_row.addWidget(self.btn_bp_sequence_load_states)
+        seq_build_row.addWidget(self.btn_bp_sequence_add)
+        g_find.addLayout(seq_build_row)
+
+        self.list_bp_sequence = QListWidget()
+        self.list_bp_sequence.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.list_bp_sequence.setMaximumHeight(90)
+        g_find.addWidget(self.list_bp_sequence)
+
+        seq_reorder_row = QHBoxLayout()
+        self.btn_bp_sequence_up = QPushButton("⬆")
+        self.btn_bp_sequence_down = QPushButton("⬇")
+        self.btn_bp_sequence_remove = QPushButton("✕ Remove")
+        self.btn_bp_sequence_clear = QPushButton("🗑 Clear")
+        for b in (
+            self.btn_bp_sequence_up,
+            self.btn_bp_sequence_down,
+            self.btn_bp_sequence_remove,
+            self.btn_bp_sequence_clear,
+        ):
+            seq_reorder_row.addWidget(b)
+        g_find.addLayout(seq_reorder_row)
+
+        self.chk_bp_sequence_strict = QCheckBox("Require no other state in between (strict)")
+        g_find.addLayout(_make_chk_help_row(
+            self.chk_bp_sequence_strict, "Strict match",
+            "Unchecked (default): other states may occur between sequence "
+            "steps, as long as the order holds (subsequence match). Checked: "
+            "sequence steps must be immediately adjacent bouts with nothing "
+            "else in between (contiguous match)."
+        ))
+
+        self.chk_bp_sequence_start = QCheckBox("Sequence must start the track")
+        self.chk_bp_sequence_end = QCheckBox("Sequence must end the track")
+        g_find.addWidget(self.chk_bp_sequence_start)
+        g_find.addWidget(self.chk_bp_sequence_end)
+
+        find_row = QHBoxLayout()
+        self.btn_bp_sequence_find = QPushButton("🔎 Find Matching Tracks")
+        _style_primary(self.btn_bp_sequence_find)
+        find_row.addWidget(self.btn_bp_sequence_find, stretch=1)
+        g_find.addLayout(find_row)
+
+        # Single spanning column: each row's cell holds a _BehaviorMatchRowWidget
+        # (details line + colored state bar underneath), not plain text items.
+        self.tbl_bp_sequence_matches = QTableWidget(0, 1)
+        self.tbl_bp_sequence_matches.horizontalHeader().setVisible(False)
+        self.tbl_bp_sequence_matches.verticalHeader().setVisible(False)
+        self.tbl_bp_sequence_matches.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tbl_bp_sequence_matches.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tbl_bp_sequence_matches.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.tbl_bp_sequence_matches.horizontalHeader().setStretchLastSection(True)
+        self.tbl_bp_sequence_matches.setMaximumHeight(220)
+        g_find.addWidget(self.tbl_bp_sequence_matches)
+
+        visualize_row = QHBoxLayout()
+        self.btn_bp_sequence_visualize = QPushButton("▶ Visualize This Track")
+        _style_primary(self.btn_bp_sequence_visualize)
+        self.btn_bp_sequence_visualize.setEnabled(False)
+        visualize_row.addWidget(self.btn_bp_sequence_visualize, stretch=1)
+        g_find.addLayout(visualize_row)
+
+        g_bp.addWidget(grp_find_behavior)
+
         lay.addWidget(self.grp_bp)
 
         # ── Progress + Log ───────────────────────────────────────────────
@@ -1658,6 +1892,17 @@ class StateClassificationSubTab(QWidget):
         self.btn_apply_hmm.clicked.connect(self._on_apply_hmm)
         self.btn_show_state_bp.clicked.connect(self._on_show_state_bp)
         self.btn_export_state_bp.clicked.connect(self._on_export_state_bp)
+        self.btn_bp_sequence_load_states.clicked.connect(self._on_bp_sequence_load_states)
+        self.btn_bp_sequence_add.clicked.connect(self._on_bp_sequence_add_state)
+        self.btn_bp_sequence_up.clicked.connect(self._on_bp_sequence_move_up)
+        self.btn_bp_sequence_down.clicked.connect(self._on_bp_sequence_move_down)
+        self.btn_bp_sequence_remove.clicked.connect(self._on_bp_sequence_remove_selected)
+        self.btn_bp_sequence_clear.clicked.connect(self.list_bp_sequence.clear)
+        self.btn_bp_sequence_find.clicked.connect(self._on_find_behavior_sequence)
+        self.tbl_bp_sequence_matches.itemSelectionChanged.connect(
+            self._on_bp_sequence_selection_changed
+        )
+        self.btn_bp_sequence_visualize.clicked.connect(self._on_visualize_matched_track)
 
         self.spin_window_size.valueChanged.connect(self._update_config_summary)
         self.chk_net_disp.toggled.connect(self._update_config_summary)
@@ -3705,6 +3950,13 @@ class StateClassificationSubTab(QWidget):
         unregister_preview_dims_listener(self.viewer, self)
         self._state_bp_dims_callback = None
         self._state_bp_preview = None
+        if self._track_scrubber_dock is not None:
+            try:
+                self._track_scrubber_dock.close()
+            except Exception:
+                pass
+        self._track_scrubber_dock = None
+        self._track_scrubber = None
 
     def _connect_state_bp_dims_listener(self):
         if self._state_bp_dims_callback is not None and self.viewer is not None:
@@ -3719,6 +3971,8 @@ class StateClassificationSubTab(QWidget):
 
         def _on_step(*_):
             self._refresh_state_bp_layer()
+            if self._track_scrubber is not None:
+                self._track_scrubber.set_current_time(self._current_viewer_frame())
 
         try:
             self.viewer.dims.events.current_step.connect(_on_step)
@@ -3921,6 +4175,8 @@ class StateClassificationSubTab(QWidget):
                         label_map=label_map,
                         output_col=state_col,
                         tail_length=int(tracked_img.shape[0]),
+                        blending="opaque",
+                        single_layer=True,
                     )
                 except Exception as exc:
                     self._log(f"⚠️ Could not add state trajectory layers: {exc}")
@@ -3940,6 +4196,433 @@ class StateClassificationSubTab(QWidget):
         except Exception as e:
             traceback.print_exc()
             self._log(f"❌ Backprojection failed: {e}")
+
+    # ── Find a Behavior ──────────────────────────────────────────────────
+
+    def _on_bp_sequence_load_states(self):
+        """Load the state adata for the current `combo_state_color_by`
+        choice and populate `combo_bp_sequence_state`. Also warms the cache
+        `_on_find_behavior_sequence` reuses, so searching never re-reads the
+        h5ad unless the color-by choice has changed since."""
+        ct = self._cell_type()
+        if not ct:
+            QMessageBox.warning(self, "No cell type", "Select a cell type first.")
+            return
+        color_by = self.combo_state_color_by.currentText()
+        if color_by == "raw_hmm_state":
+            state_path = self._model_adata_path(ct)
+            err_hint = "Model adata not found. Run State Clustering first."
+        else:
+            state_path = self._full_adata_path(ct)
+            err_hint = f"State adata not found:\n{state_path}\n\nRun State Clustering first."
+        if not state_path or not state_path.exists():
+            QMessageBox.warning(self, "No state adata", err_hint)
+            return
+        try:
+            import scanpy as sc
+            from behav3d.analysis.behavior.state.visualization.backprojection import (
+                _build_code_map,
+            )
+            from behav3d.analysis.behavior.state.utils import (
+                _get_classification_state_order,
+            )
+            adata = sc.read_h5ad(str(state_path))
+            state_col = _resolve_ui_state_col(adata, color_by)
+            state_order = _get_classification_state_order(adata, state_col)
+            code_map = _build_code_map(adata.obs, state_col=state_col, state_order=state_order)
+            self._bp_sequence_adata = adata
+            self._bp_sequence_state_col = state_col
+            self._bp_sequence_color_by = color_by
+            self.combo_bp_sequence_state.clear()
+            self.combo_bp_sequence_state.addItems(list(code_map.keys()))
+            self.combo_bp_sequence_state.setEnabled(len(code_map) > 0)
+            self._log(f"✅ Loaded {len(code_map)} state label(s) for '{state_col}'.")
+        except Exception as e:
+            traceback.print_exc()
+            self._log(f"❌ Could not load states: {e}")
+
+    def _on_bp_sequence_add_state(self):
+        label = self.combo_bp_sequence_state.currentText()
+        if not label:
+            return
+        if self.chk_bp_sequence_strict.isChecked() and self.list_bp_sequence.count() > 0:
+            last = self.list_bp_sequence.item(self.list_bp_sequence.count() - 1).text()
+            if last == label:
+                QMessageBox.warning(
+                    self,
+                    "Unmatchable sequence",
+                    "Strict mode requires sequence steps to be directly adjacent "
+                    "bouts; the same state can never immediately repeat in a "
+                    "track's bout-collapsed history, so this sequence could never "
+                    "match anything. Uncheck strict mode, or add a different state.",
+                )
+                return
+        self.list_bp_sequence.addItem(label)
+
+    def _on_bp_sequence_move_up(self):
+        row = self.list_bp_sequence.currentRow()
+        if row > 0:
+            item = self.list_bp_sequence.takeItem(row)
+            self.list_bp_sequence.insertItem(row - 1, item)
+            self.list_bp_sequence.setCurrentRow(row - 1)
+
+    def _on_bp_sequence_move_down(self):
+        row = self.list_bp_sequence.currentRow()
+        if 0 <= row < self.list_bp_sequence.count() - 1:
+            item = self.list_bp_sequence.takeItem(row)
+            self.list_bp_sequence.insertItem(row + 1, item)
+            self.list_bp_sequence.setCurrentRow(row + 1)
+
+    def _on_bp_sequence_remove_selected(self):
+        row = self.list_bp_sequence.currentRow()
+        if row >= 0:
+            self.list_bp_sequence.takeItem(row)
+
+    def _on_bp_sequence_selection_changed(self):
+        # selectedItems() only ever returns QTableWidgetItems, and this table
+        # has none (cell widgets replace them) — selectionModel() works at
+        # the index level regardless, so table.selectRow(...) (called from
+        # _BehaviorMatchRowWidget.mousePressEvent) is reflected correctly.
+        self.btn_bp_sequence_visualize.setEnabled(
+            self.tbl_bp_sequence_matches.selectionModel().hasSelection()
+        )
+
+    def _on_find_behavior_sequence(self):
+        ct = self._cell_type()
+        if not ct:
+            QMessageBox.warning(self, "No cell type", "Select a cell type first.")
+            return
+        target_states = self._list_widget_items(self.list_bp_sequence)
+        if len(target_states) == 0:
+            QMessageBox.warning(self, "No sequence", "Add at least one state to the sequence.")
+            return
+        color_by = self.combo_state_color_by.currentText()
+        try:
+            if self._bp_sequence_adata is None or self._bp_sequence_color_by != color_by:
+                self._on_bp_sequence_load_states()
+                if self._bp_sequence_adata is None:
+                    return
+            adata = self._bp_sequence_adata
+            state_col = self._bp_sequence_state_col
+            match_mode = "contiguous" if self.chk_bp_sequence_strict.isChecked() else "subsequence"
+            from behav3d.analysis.behavior.state.sequence_search import (
+                find_tracks_matching_state_sequence,
+            )
+            self._log(f"🔎 Searching for sequence {target_states!r} ({match_mode})…")
+            results = find_tracks_matching_state_sequence(
+                adata,
+                target_states=target_states,
+                state_col=state_col,
+                match_mode=match_mode,
+                require_track_start=self.chk_bp_sequence_start.isChecked(),
+                require_track_end=self.chk_bp_sequence_end.isChecked(),
+            )
+            self._bp_sequence_results = results
+            self._populate_bp_sequence_results_table(results)
+            self._log(f"✅ Found {len(results)} matching track(s).")
+        except Exception as e:
+            traceback.print_exc()
+            self._log(f"❌ Behavior sequence search failed: {e}")
+
+    def _populate_bp_sequence_results_table(self, results):
+        table = self.tbl_bp_sequence_matches
+        table.setRowCount(0)
+        table.setRowCount(len(results))
+        adata = self._bp_sequence_adata
+        state_col = self._bp_sequence_state_col
+        state_color_map, track_lookup = {}, {}
+        if adata is not None and state_col is not None and len(results) > 0:
+            from behav3d.analysis.behavior.track.visualization.plots.exemplar_track_per_cluster import (
+                _build_state_color_map,
+            )
+            from behav3d.analysis.behavior.track.visualization.backprojection import (
+                build_track_state_sequence_lookup,
+            )
+            try:
+                _, state_color_map = _build_state_color_map(adata, state_col)
+                track_lookup = build_track_state_sequence_lookup(adata, state_col=state_col)
+            except Exception as exc:
+                self._log(f"⚠️ Could not prepare state bars: {exc}")
+        for row_idx, (_, row) in enumerate(results.iterrows()):
+            sample_name = str(row["sample_name"])
+            track_id = int(row["TrackID"])
+            start_t, end_t = int(row["start_time"]), int(row["end_time"])
+            # start_t/end_t are the matched sequence's own span, not the whole
+            # track's — show the track's full length alongside it so it's
+            # clear how much of the track the match covers.
+            details_text = f"Sample {sample_name} · TrackID {track_id} · match t {start_t}–{end_t}"
+            track_df = track_lookup.get((sample_name, str(track_id)))
+            if track_df is not None and len(track_df) > 0:
+                import pandas as pd
+                track_times = pd.to_numeric(track_df["position_t"], errors="coerce").dropna()
+                if len(track_times) > 0:
+                    track_length = int(track_times.max()) - int(track_times.min()) + 1
+                    details_text += f" · track length {track_length}"
+            pixmap = None
+            if track_df is not None and len(state_color_map) > 0:
+                try:
+                    pixmap, _xlim = _render_compact_statebar_pixmap(track_df, state_color_map, state_col=state_col)
+                except Exception:
+                    pixmap = None
+            table.setCellWidget(
+                row_idx, 0,
+                _BehaviorMatchRowWidget(table, row_idx, details_text, pixmap),
+            )
+            table.resizeRowToContents(row_idx)
+        self.btn_bp_sequence_visualize.setEnabled(False)
+
+    def _on_visualize_matched_track(self):
+        row_idx = self.tbl_bp_sequence_matches.currentRow()
+        if row_idx < 0 or self._bp_sequence_results is None:
+            return
+        match = self._bp_sequence_results.iloc[row_idx]
+        sample_name = str(match["sample_name"])
+        track_id = int(match["TrackID"])
+        start_time = int(match["start_time"])
+        end_time = int(match["end_time"])
+        ct = self._cell_type()
+        out_dir = self._out_dir()
+        if not ct or not out_dir:
+            QMessageBox.warning(self, "Missing setup", "Cell type / output directory not set.")
+            return
+        opacity = self.spin_state_opacity.value() / 100.0
+        color_by = self.combo_state_color_by.currentText()
+        adata = self._bp_sequence_adata
+        state_col = self._bp_sequence_state_col
+        self._log(f"▶ Visualizing TrackID {track_id} in sample '{sample_name}'…")
+        try:
+            import pandas as pd
+            from behav3d.analysis.behavior.state.visualization.backprojection import (
+                _resolve_raw_image_path,
+                _resolve_tracked_image_path,
+                _build_code_map,
+                _build_state_code_color_map,
+                _add_mapping_dock_widget,
+                _build_state_mapping_text,
+                _align_labels_to_raw_shape_for_view,
+                _validate_required_obs_columns,
+                prepare_state_code_lookup,
+                prepare_state_trajectory_data,
+            )
+            from behav3d.analysis.behavior.state.utils import (
+                _get_classification_state_colors,
+                _get_classification_state_order,
+                _normalize_label_color_map,
+            )
+            from behav3d.analysis.backprojection import filter_track_image_to_ids
+            from behav3d.analysis.behavior.track.visualization.backprojection import (
+                add_track_cluster_trajectory_layers,
+            )
+            from behav3d.io.images import load_image
+
+            try:
+                from behav3d.analysis.behavior.track.visualization.plots.exemplar_coordinate_utils import (
+                    ensure_exemplar_coordinate_columns,
+                )
+                ensure_exemplar_coordinate_columns(
+                    adata, output_dir=out_dir, cell_type=ct, require_pixel_for_video=True,
+                )
+            except Exception as exc:
+                self._log(f"⚠️ Could not prepare trajectory positions: {exc}")
+
+            obs_samples = adata.obs["sample_name"].astype(str)
+            sample_adata = adata[obs_samples == sample_name]
+            if sample_adata.n_obs == 0:
+                raise ValueError(f"No rows found for sample '{sample_name}' in state adata.")
+            _validate_required_obs_columns(
+                sample_adata.obs, required_cols=["TrackID", "position_t", state_col]
+            )
+
+            # Legend/colors are built from the whole sample's obs (not the
+            # single-track subset below) so they stay consistent with the
+            # rest of the UI rather than being whatever states this one
+            # track happens to visit.
+            state_order = _get_classification_state_order(sample_adata, state_col)
+            code_map = _build_code_map(sample_adata.obs, state_col=state_col, state_order=state_order)
+            if len(code_map) == 0:
+                raise ValueError(f"'{state_col}' has no non-empty labels for sample '{sample_name}'.")
+            state_colors = _normalize_label_color_map(
+                code_map.keys(), colors=_get_classification_state_colors(sample_adata, state_col)
+            )
+            code_colors = _build_state_code_color_map(code_map, state_colors=state_colors)
+            label_map = {str(code): str(label) for label, code in code_map.items()}
+
+            track_numeric = pd.to_numeric(sample_adata.obs["TrackID"], errors="coerce")
+            track_obs = sample_adata.obs[track_numeric == track_id].copy()
+            if len(track_obs) == 0:
+                raise ValueError(f"TrackID {track_id} not found in sample '{sample_name}'.")
+            state_code_lookup = prepare_state_code_lookup(
+                track_obs, state_col=state_col, code_map=code_map,
+            )
+
+            gui_metadata_csv_path = resolve_metadata_csv_path(self.metadata_loader)
+            raw_path = _resolve_raw_image_path(
+                out_dir, sample_name, verbose=False, metadata_csv_path=gui_metadata_csv_path
+            )
+            if raw_path is None or not Path(raw_path).exists():
+                raise FileNotFoundError(f"Raw image not found for sample '{sample_name}'.")
+            tracked_path = _resolve_tracked_image_path(
+                out_dir, sample_name, ct, verbose=False, metadata_csv_path=gui_metadata_csv_path
+            )
+            if tracked_path is None or not Path(tracked_path).exists():
+                raise FileNotFoundError(
+                    f"Tracked image not found for sample '{sample_name}', cell_type '{ct}'."
+                )
+            raw_img = load_image(raw_path)
+            tracked_img = load_image(tracked_path)
+            tracked_view = _align_labels_to_raw_shape_for_view(tracked_img, raw_img, "TrackID", verbose=False)
+            tracked_view = filter_track_image_to_ids(tracked_view, [track_id])
+
+            # Full viewer reset — identical pattern to _on_show_state_bp, so
+            # this preview never coexists with a previous whole-sample or
+            # feature backprojection preview.
+            self._teardown_state_bp_preview()
+            stop_dim_playback(self.viewer)
+            disconnect_all_preview_dims_listeners(self.viewer)
+            clear_viewer_layers(self.viewer)
+            saved_channels = (
+                getattr(self.metadata_loader, "behav3d_parameters", {})
+                .get("viewer_display", {})
+                .get("channels", {})
+            )
+            try:
+                md = self.metadata_loader.metadata
+                row = md[md["sample_name"] == sample_name].iloc[0]
+                dim_order = str(row.get("dimension_order", "TCZYX")).strip() or "TCZYX"
+            except Exception:
+                dim_order = "TCZYX"
+            ch_names = _bp_add_raw_channels(self.viewer, raw_img, sample_name, saved_channels, dim_order)
+            for lname in ch_names:
+                try:
+                    layer = self.viewer.layers[lname]
+                    layer.events.contrast_limits.connect(self._on_bp_layer_display_changed)
+                    layer.events.colormap.connect(self._on_bp_layer_display_changed)
+                except (KeyError, IndexError):
+                    pass
+            self.viewer.add_labels(tracked_view, name="filtered TrackID", visible=False, opacity=opacity)
+
+            self._state_bp_preview = {
+                "tracked_path": Path(tracked_path),
+                "code_lookup": state_code_lookup,
+                "layer_name": color_by,
+                "opacity": opacity,
+                "code_colors": code_colors,
+            }
+            self._refresh_state_bp_layer()
+            self._connect_state_bp_dims_listener()
+
+            trajectory_data = prepare_state_trajectory_data(track_obs, state_col=state_col)
+            add_track_cluster_trajectory_layers(
+                self.viewer,
+                trajectory_data=trajectory_data,
+                code_colors=code_colors,
+                label_map=label_map,
+                output_col=state_col,
+                tail_length=int(tracked_img.shape[0]),
+                blending="opaque",
+                single_layer=True,
+            )
+
+            # Close any stale legend/statebar dock up front — including a
+            # previous visualize-matched-track scrubber — before adding the
+            # new scrubber and legend below, since both are now tagged for
+            # this same cleanup and calling it again in between would just
+            # remove the scrubber this method itself just created.
+            close_backprojection_legend_docks(self.viewer)
+
+            try:
+                scrub_pixmap, scrub_xlim = _render_compact_statebar_pixmap(
+                    track_obs, state_colors, state_col=state_col,
+                    figsize=(8.0, 0.5), dpi=120,
+                )
+                self._track_scrubber = _StateTimelineScrubber(
+                    scrub_pixmap, scrub_xlim, on_seek=self._on_track_scrubber_seek,
+                )
+                scrubber_container = QWidget()
+                scrubber_layout = QVBoxLayout(scrubber_container)
+                scrubber_layout.setContentsMargins(4, 2, 4, 2)
+                scrubber_layout.setSpacing(2)
+                scrubber_hint = QLabel("Click anywhere on the bar to jump to that timepoint.")
+                scrubber_hint.setStyleSheet("color: #888; font-size: 11px;")
+                scrubber_layout.addWidget(scrubber_hint)
+                scrubber_layout.addWidget(self._track_scrubber)
+                self._track_scrubber_dock = self.viewer.window.add_dock_widget(
+                    scrubber_container, area="bottom", name="State timeline",
+                )
+                # Tag it the same way the state/track mapping legends are
+                # tagged (see close_backprojection_legend_docks) so it closes
+                # itself on tab navigation instead of lingering below the
+                # viewer while the user works on an unrelated tab. Its native
+                # title-bar close (x) button already lets the user dismiss it
+                # directly, via the same viewer.window.remove_dock_widget
+                # path — so both close routes end up destroying the same
+                # QDockWidget, and the `destroyed` connection below is the
+                # one place that needs to notice either of them and drop our
+                # otherwise-stale references to it.
+                self._track_scrubber_dock.widget()._behav3d_backprojection_legend_dock = True
+                dock_ref = self._track_scrubber_dock
+                dock_ref.destroyed.connect(
+                    lambda *_a, _dock=dock_ref: self._on_track_scrubber_dock_destroyed(_dock)
+                )
+                self._track_scrubber.set_current_time(start_time)
+            except Exception as exc:
+                self._log(f"⚠️ Could not add state timeline scrubber: {exc}")
+
+            mapping_text = _build_state_mapping_text(label_map, code_colors)
+            state_mapping_dock = _add_mapping_dock_widget(
+                self.viewer,
+                mapping_text=mapping_text,
+                label_map=label_map,
+                code_colors=code_colors,
+                title="State Class Mapping",
+            )
+            if state_mapping_dock is not None:
+                state_mapping_dock.widget()._behav3d_backprojection_legend_dock = True
+
+            current_step = list(self.viewer.dims.current_step)
+            current_step[0] = int(start_time)
+            self.viewer.dims.current_step = tuple(current_step)
+
+            self._log(
+                f"✅ Visualizing TrackID {track_id} in '{sample_name}' "
+                f"(t={start_time}..{end_time})."
+            )
+        except Exception as e:
+            traceback.print_exc()
+            self._log(f"❌ Could not visualize matched track: {e}")
+
+    def _on_track_scrubber_seek(self, t):
+        """Called by `_StateTimelineScrubber` on click/drag. Jumps the viewer
+        the same way `_on_visualize_matched_track` jumps to a match's start
+        time; this fires napari's own `current_step` event, which loops back
+        through `_connect_state_bp_dims_listener`'s callback to keep the
+        state mask layer and the scrubber's own cursor in sync regardless of
+        whether the user dragged this bar or napari's native slider."""
+        if self.viewer is None:
+            return
+        current_step = list(self.viewer.dims.current_step)
+        current_step[0] = int(t)
+        self.viewer.dims.current_step = tuple(current_step)
+
+    def _on_track_scrubber_dock_destroyed(self, dock):
+        """The state-timeline dock was torn down — either the user closed it
+        with its own title-bar (x), or `close_backprojection_legend_docks`
+        closed it on tab navigation (it's tagged like the legend docks; see
+        `_on_visualize_matched_track`). Either way that QDockWidget and its
+        `_StateTimelineScrubber` are gone, so drop our references rather than
+        leaving `_teardown_state_bp_preview` a stale dock/widget to `.close()`
+        next time around, and leaving `_connect_state_bp_dims_listener`'s
+        per-frame callback updating a cursor nobody can see.
+
+        Guarded by identity (`dock` is the dock this callback was bound to
+        at creation time): `_teardown_state_bp_preview` only hides the old
+        dock rather than fully removing it, so a visualize-another-track
+        call can leave a stale dock object whose eventual `destroyed` must
+        not clear out the new one that replaced it.
+        """
+        if self._track_scrubber_dock is dock:
+            self._track_scrubber_dock = None
+            self._track_scrubber = None
 
     def _on_export_state_bp(self):
         ct = self._cell_type()

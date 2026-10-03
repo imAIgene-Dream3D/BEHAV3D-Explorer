@@ -79,15 +79,32 @@ def test_build_code_map_honors_saved_state_order():
     assert code_map == {"mu": 1, "zeta": 2, "alpha": 3}
 
 
+class _FakeTracksLayer:
+    """Minimal stand-in for a real napari `Tracks` layer: just enough mutable
+    state for `add_track_cluster_trajectory_layers`'s `single_layer=True`
+    path to install a colormap into and recolor against."""
+
+    def __init__(self, data, name, **kwargs):
+        self.data = data
+        self.name = name
+        self.kwargs = dict(kwargs)
+        self.colormaps_dict = {}
+        self.color_by = kwargs.get("color_by")
+        self.blending = kwargs.get("blending")
+
+
 class _FakeViewer:
-    """Minimal stand-in for `napari.Viewer` that just records `add_tracks` call order."""
+    """Minimal stand-in for `napari.Viewer` that just records `add_tracks` calls."""
 
     def __init__(self):
         self.added_names = []
+        self.added_layers = []
 
     def add_tracks(self, data, name, **kwargs):
         self.added_names.append(name)
-        return name
+        layer = _FakeTracksLayer(data, name, **kwargs)
+        self.added_layers.append(layer)
+        return layer
 
 
 def test_add_track_cluster_trajectory_layers_honors_label_map_order():
@@ -119,6 +136,68 @@ def test_add_track_cluster_trajectory_layers_honors_label_map_order():
     )
 
     assert viewer.added_names == [f"{_STATE_COL} trajectory: {label}" for label in _CUSTOM_ORDER]
+
+
+def test_add_track_cluster_trajectory_layers_single_layer_consolidates_states():
+    """`single_layer=True` must combine every label's rows into ONE added
+    layer instead of one per label, with a per-row `state_code` feature that
+    correctly maps each row back to the state it came from, and with the
+    requested `blending` applied."""
+    trajectory_data = {
+        "alpha": np.array([[0, 0, 0.0, 0.0]]),
+        "mu": np.array([[1, 1, 1.0, 1.0], [1, 2, 1.0, 1.0]]),
+        "zeta": np.array([[2, 0, 2.0, 2.0]]),
+    }
+    code_map = _build_code_map(
+        pd.DataFrame({_STATE_COL: _CUSTOM_ORDER}), state_col=_STATE_COL, state_order=_CUSTOM_ORDER,
+    )
+    label_map = {str(code): str(label) for label, code in code_map.items()}
+    code_colors = {str(code): f"#{code:02x}{code:02x}{code:02x}" for code in code_map.values()}
+
+    viewer = _FakeViewer()
+    result = add_track_cluster_trajectory_layers(
+        viewer,
+        trajectory_data=trajectory_data,
+        code_colors=code_colors,
+        label_map=label_map,
+        output_col=_STATE_COL,
+        tail_length=5,
+        blending="opaque",
+        single_layer=True,
+    )
+
+    assert viewer.added_names == [f"{_STATE_COL} trajectory"]
+    assert len(result) == 1
+    layer = result[0]
+    assert layer.blending == "opaque"
+    assert layer.color_by == "state_code"
+    assert "state_code" in layer.colormaps_dict
+
+    total_rows = sum(arr.shape[0] for arr in trajectory_data.values())
+    assert layer.data.shape[0] == total_rows
+
+    label_to_code = {label: int(code) for code, label in label_map.items()}
+    codes = list(layer.kwargs["features"]["state_code"])
+    expected_codes = []
+    for label in _CUSTOM_ORDER:  # ordered_labels follows label_map's order
+        expected_codes += [label_to_code[label]] * trajectory_data[label].shape[0]
+    assert codes == expected_codes
+
+
+def test_add_track_cluster_trajectory_layers_single_layer_empty_data_adds_nothing():
+    code_map = _build_code_map(
+        pd.DataFrame({_STATE_COL: _CUSTOM_ORDER}), state_col=_STATE_COL, state_order=_CUSTOM_ORDER,
+    )
+    label_map = {str(code): str(label) for label, code in code_map.items()}
+
+    viewer = _FakeViewer()
+    result = add_track_cluster_trajectory_layers(
+        viewer, trajectory_data={}, code_colors={}, label_map=label_map,
+        output_col=_STATE_COL, single_layer=True,
+    )
+
+    assert result == []
+    assert viewer.added_names == []
 
 
 def test_export_behavioral_state_backprojection_zarrs_resolves_saved_order(tmp_path):
