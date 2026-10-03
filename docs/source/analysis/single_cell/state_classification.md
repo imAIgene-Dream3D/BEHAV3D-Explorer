@@ -17,7 +17,7 @@ The analysis runs on the **cell type chosen in the dropdown at the top of the Si
 3. [Renaming clusters](#renaming-clusters) — give the intrinsic and full behavioral states meaningful biological names.
 4. [Reports](#reports) — generate composition, transition, feature-heatmap and condition-comparison reports.
 5. [Contact Analysis](#contact-analysis) — compare contact types and behavioral-state shifts around contact.
-6. [Backprojection](#backprojection) — paint the states back onto the raw images to validate them.
+6. [Backprojection](#backprojection) — paint the states back onto the raw images to validate them, or search for a specific sequence of states to jump straight to a matching track ([Find a Behavior](#find-a-behavior)).
 
 ## Two ways to run
 
@@ -355,6 +355,42 @@ The **Live Napari Layer Backprojection** panel overlays coloured state labels on
 | **Show trajectories** | on | Overlay each track's full path as a line whose color changes over time to match its state at each timepoint — adds one napari Tracks layer per state. |
 
 Click **▶ Show State Backprojection in Napari** to load the overlay — this produces a napari layer only and writes nothing to disk.
+
+### Find a Behavior
+
+Rather than scrubbing through every sample looking for an example of a specific behaviour, build an ordered sequence of states and search the whole dataset for tracks whose state history matches it — then jump straight to one matching track, isolated in the viewer.
+
+**Build the sequence**
+
+| Control | Meaning |
+|---|---|
+| **🔄 Load States** | Loads the state labels available for the current cell type and the **Color by** choice above (`full_behavioral_state`, `hmm_intrinsic_behavioral_state`, or `raw_hmm_state`) into the dropdown. |
+| **➕ Add** | Appends the selected state as the next step of the sequence. |
+| **⬆ / ⬇** | Moves the selected step earlier / later in the sequence. |
+| **✕ Remove** / **🗑 Clear** | Removes the selected step / clears the whole sequence. |
+
+**Match options**
+
+- **Strict match** (off by default) — unchecked: a track matches if its states occur **in this order**, with any other states allowed in between (a subsequence match). Checked: each step must be the very next bout after the previous one, with nothing else in between (a contiguous match) — so the same state can never immediately repeat as two consecutive strict-mode steps.
+- **Sequence must start the track** — only match sequences that begin at the very start of a track's history.
+- **Sequence must end the track** — only match sequences that end at the very end of a track's history.
+
+Click **🔎 Find Matching Tracks** to search every track of the current cell type. Each match lists its sample, TrackID, the matched time range, the track's total length, and a small coloured bar showing that track's full state history — so you can see at a glance where the match sits within the track before opening it.
+
+**Visualize a match**
+
+Select a row in the results, then click **▶ Visualize This Track**. This isolates just that one track in the napari viewer, resetting whatever was shown before:
+
+- the raw channels plus that track's segmented mask, coloured by state,
+- a trajectory line coloured per timepoint by state,
+- a **State Class Mapping** legend (state name ↔ colour), and
+- a **State timeline** bar docked below the viewer: the track's full state history with a live time cursor. Click or drag anywhere on it to jump the viewer to that timepoint.
+
+The viewer also jumps straight to the start of the match.
+
+```{tip}
+The **State Class Mapping** legend and the **State timeline** bar close themselves as soon as you leave Behavioral State classification for another tab, so they don't linger over an unrelated view. You can also close either one yourself at any time with its own title-bar close (✕).
+```
 
 ### Export backprojection
 
