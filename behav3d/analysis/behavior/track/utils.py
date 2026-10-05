@@ -11,6 +11,14 @@ def _winfo(prefix, message):
     print(f"[{prefix}] INFO {message}")
 
 
+def get_track_classifier_filename(cell_type):
+    # Lives here (pandas-only imports) rather than in ``bouts`` so the GUI can
+    # resolve the classifier path on every metadata load without importing the
+    # scanpy / sklearn / seaborn stack that ``bouts`` pulls in.
+    cell_token = _sanitize_filename_token(cell_type, fallback="cell")
+    return f"track_classification_random_forest_{cell_token}.pkl"
+
+
 def _ordered_unique(values):
     out = []
     seen = set()

@@ -13,6 +13,20 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.figure import Figure
 from sklearn.preprocessing import StandardScaler
 
+# Re-exported for backwards compatibility; defined in a leaf module so the napari
+# plugin can import them without pulling in this module's heavy dependencies.
+from behav3d.core.h5_access import write_adata
+from behav3d.core.state_columns import (  # noqa: F401
+    FULL_STATE_COL,
+    HMM_INTRINSIC_RAW_STATE_COL,
+    INTRINSIC_STATE_COL,
+    _LEGACY_FULL_STATE_ALIASES,
+    _LEGACY_INTRINSIC_STATE_ALIASES,
+    _coerce_hmm_raw_state_series,
+    _format_hmm_raw_state_series_for_key,
+    resolve_full_state_col,
+    resolve_intrinsic_state_col,
+)
 from behav3d.core.anndata import df_to_adata
 from behav3d.core.utils import rmtree_ignore_missing
 from behav3d.features.rolling_window_features import create_descriptive_track_dataset
@@ -34,7 +48,6 @@ from behav3d.analysis.behavior.state.utils import (
     _rebuild_full_behavioral_state_from_intrinsic,
     _require_columns,
     _resolve_log_scale_feature_cols,
-    _resolve_obs_column_with_legacy_fallback,
     _resolve_positions_csv_path,
     _resolve_state_paths,
     _save_adata_obs_csv,
@@ -61,35 +74,9 @@ HMM_OPTIONAL_WINDOW_FEATURES = (
     "straightness",
     "mean_square_displacement",
 )
-INTRINSIC_STATE_COL = "hmm_intrinsic_behavioral_state"
-HMM_INTRINSIC_RAW_STATE_COL = "hmm_intrinsic_behavioral_state_raw"
-FULL_STATE_COL = "full_behavioral_state"
 BINARY_GROUP_COL = "binary_group"
 INTRINSIC_STATE_CONFIDENCE_COL = f"{INTRINSIC_STATE_COL}_confidence"
 FULL_STATE_CONFIDENCE_COL = f"{FULL_STATE_COL}_confidence"
-
-# Legacy obs-column names retired by this refactor; still checked as a
-# fallback when loading files written before columns were consolidated.
-_LEGACY_INTRINSIC_STATE_ALIASES = ("intrinsic_behavioral_cluster",)
-_LEGACY_FULL_STATE_ALIASES = ("full_behavioral_cluster", "behavioral_state")
-
-
-def resolve_intrinsic_state_col(adata):
-    """Return the obs column holding intrinsic state labels, falling back to
-    the pre-consolidation legacy column name for old files."""
-    return _resolve_obs_column_with_legacy_fallback(
-        adata, INTRINSIC_STATE_COL, _LEGACY_INTRINSIC_STATE_ALIASES
-    )
-
-
-def resolve_full_state_col(adata):
-    """Return the obs column holding full (intrinsic x binary-group) state
-    labels, falling back to pre-consolidation legacy column names (including
-    the old value of FULL_STATE_COL itself, "behavioral_state") for old files."""
-    return _resolve_obs_column_with_legacy_fallback(
-        adata, FULL_STATE_COL, _LEGACY_FULL_STATE_ALIASES
-    )
-
 
 def _obs_label_values(adata, col):
     if adata is None or not hasattr(adata, "obs") or col not in adata.obs.columns:
@@ -139,37 +126,6 @@ def _dedupe_preserve_order(values):
         out.append(value)
         seen.add(value)
     return out
-
-
-def _coerce_hmm_raw_state_series(raw_series, *, label):
-    series = pd.Series(raw_series)
-    stringified = series.astype("string").str.strip()
-    empty_mask = stringified.isna() | (stringified == "")
-    numeric = pd.to_numeric(series, errors="coerce")
-    invalid_mask = (~empty_mask) & numeric.isna()
-    if bool(invalid_mask.any()):
-        bad_vals = sorted(set(stringified[invalid_mask].tolist()))
-        raise ValueError(
-            f"{label} contains non-numeric HMM raw state values: {bad_vals[:10]}"
-        )
-    numeric_valid = numeric[~numeric.isna()]
-    if not numeric_valid.empty:
-        fractional = np.mod(numeric_valid.astype(float), 1.0)
-        non_integer_mask = ~np.isclose(fractional, 0.0)
-        if bool(np.any(non_integer_mask)):
-            bad_vals = sorted(set(numeric_valid[non_integer_mask].tolist()))
-            raise ValueError(
-                f"{label} contains non-integer HMM raw state values: {bad_vals[:10]}"
-            )
-    coerced = numeric.round(0).astype("Int64")
-    coerced[empty_mask] = pd.NA
-    coerced.index = series.index
-    return coerced
-
-
-def _format_hmm_raw_state_series_for_key(raw_series, *, label):
-    raw_int = _coerce_hmm_raw_state_series(raw_series, label=label)
-    return raw_int.astype("string").str.strip()
 
 
 def _format_hmm_raw_state_value_for_key(raw_state, *, label):
@@ -1867,7 +1823,7 @@ def run_hmm_state_clustering(
 
     state_paths.model_adata_path.parent.mkdir(parents=True, exist_ok=True)
     early_write_started = _vstart(verbose, "state-hmm", "write preliminary model adata")
-    model_adata.write(state_paths.model_adata_path, compression="gzip")
+    write_adata(model_adata, state_paths.model_adata_path, compression="gzip")
     _vdone(verbose, "state-hmm", "write preliminary model adata", early_write_started)
     _vsave(verbose, "state-hmm", "preliminary model adata", state_paths.model_adata_path)
 
@@ -2094,7 +2050,7 @@ def run_hmm_state_clustering(
 
     write_started = _vstart(verbose, "state-hmm", "write model adata")
     state_paths.model_adata_path.parent.mkdir(parents=True, exist_ok=True)
-    model_adata.write(state_paths.model_adata_path, compression="gzip")
+    write_adata(model_adata, state_paths.model_adata_path, compression="gzip")
     _vdone(verbose, "state-hmm", "write model adata", write_started)
     _vsave(verbose, "state-hmm", "model adata", state_paths.model_adata_path)
     _vinfo(
@@ -2305,7 +2261,7 @@ def _finalize_hmm_apply_outputs(
     )
 
     write_started = _vstart(verbose, "state-hmm-apply", "write full output adata")
-    adata_full.write(state_paths.full_output_adata_path, compression="gzip")
+    write_adata(adata_full, state_paths.full_output_adata_path, compression="gzip")
     full_output_csv_path = _save_adata_obs_csv(adata_full, state_paths.full_output_adata_path)
     _vdone(verbose, "state-hmm-apply", "write full output adata", write_started)
     _vsave(verbose, "state-hmm-apply", "full output adata", state_paths.full_output_adata_path)

@@ -12,7 +12,6 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.gridspec import GridSpec
 from matplotlib.colors import to_hex
 import seaborn as sns
-import umap
 import scanpy as sc
 
 from sklearn.cluster import KMeans, HDBSCAN, AgglomerativeClustering
@@ -38,7 +37,7 @@ try:
 except Exception:
     dtw_ndim = None
 from sklearn.metrics import silhouette_score
-from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+from behav3d.core.state_columns import FULL_STATE_COL
 from behav3d.analysis.behavior.track.feature_dtw import run_tcell_analysis
 from behav3d.analysis.behavior.track.visualization.plots.feature_dtw import (
     plot_cluster_percentage_bars,

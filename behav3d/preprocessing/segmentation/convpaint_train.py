@@ -51,6 +51,7 @@ from qtpy.QtWidgets import (
 )
 from qtpy.QtCore import Qt, Signal
 
+from behav3d.core.qt_events import pump_events
 from behav3d.napari._background_runner import BackgroundOperation, ThreadSafeLogger
 from qtpy.QtGui import QColor
 
@@ -1846,7 +1847,7 @@ class ConvPaintTrainingWidget(QWidget):
             self._external_log(str(msg))
         else:
             self.log_box.appendPlainText(str(msg))
-        QApplication.processEvents()
+        pump_events()
 
     # ── Model building ──────────────────────────────────────────────
 

@@ -163,7 +163,7 @@ class ResultsPanel(QWidget):
         # output directory, so it runs off the Qt main thread. The last
         # scan's raw file list is cached so the "Show non-viewable"
         # checkbox can re-filter/re-render without a fresh disk walk.
-        self._scan_bg = BackgroundOperation(self)
+        self._scan_bg = BackgroundOperation(self, silent=True)
         self._last_scan_out_dir: Optional[Path] = None
         self._last_scan_files: Optional[list[ResultFile]] = None
         self._init_ui()

@@ -1154,6 +1154,10 @@ class PopulationDynamicsTab(QWidget):
 
     # ── Log ─────────────────────────────────────────────────────────────
     def _log(self, msg: str):
+        from behav3d.napari._background_runner import redispatch_to_gui_thread
+
+        if redispatch_to_gui_thread(self._log, msg):
+            return
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         self.log_box.append(f"[{ts}] {msg}")
         self.log_box.verticalScrollBar().setValue(
@@ -1871,6 +1875,10 @@ class PopulationDynamicsTab(QWidget):
                 self, "Busy",
                 "Another analysis is already running. Please wait for it to finish.",
             )
+            return False
+        from behav3d.napari._background_runner import warn_if_busy
+
+        if warn_if_busy(self, "starting an analysis"):
             return False
         self._analysis_busy = True
         for btn in (
@@ -2599,6 +2607,13 @@ class AnalysisTab(QWidget):
 
         self.inner_tabs = QTabWidget()
         self.splitter.addWidget(self.inner_tabs)
+        # Entering another analysis page triggers reloads / scans; refuse the switch
+        # while background work is running.
+        from behav3d.napari._background_runner import install_busy_guard
+
+        self._inner_tabs_busy_guard = install_busy_guard(
+            self.inner_tabs, owner=self, what="switching analysis pages"
+        )
 
         self.feature_backprojection_tab = FeatureBackprojectionTab(
             viewer=viewer, metadata_loader=metadata_loader, parent=self

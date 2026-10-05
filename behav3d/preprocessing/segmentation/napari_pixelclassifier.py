@@ -23,6 +23,7 @@ from sklearn.ensemble import RandomForestClassifier
 from scipy import ndimage
 from scipy.ndimage import binary_fill_holes, find_objects
 
+from behav3d.core.qt_events import pump_events
 from behav3d.preprocessing.segmentation import segment_size_filter, get_border_segments, remove_boundary_segments, segment_2d_filter
 from behav3d.preprocessing import open_mask, dilate_mask, calculate_edt, zeropad_image_to_match_shape
 from behav3d.io.images import load_image, get_image_shape, load_zarr, save_as_zarr, append_to_zarr, _ensure_zarr
@@ -876,13 +877,13 @@ def train_pixel_classifier(
         log(f"Fill Holes: {fill_holes_dict}\n")
         log(f"only_segment = {only_segment}\n")
         log(f"all_cell_types = {all_cell_types}\n")
-        QApplication.processEvents()
+        pump_events()
         
         # Access the label layer and feature image
         image_data = all_images  # Use the original all_images data
         log(f"image_data shape: {image_data.shape if hasattr(image_data, 'shape') else 'N/A'}\n")
         log(f"all_features shape: {all_features.shape if hasattr(all_features, 'shape') else 'N/A'}\n")
-        QApplication.processEvents()
+        pump_events()
         
         # Save user labels for all cell types
         cell_type_labels = {}  # Store {cell_type: label_data}
@@ -890,7 +891,7 @@ def train_pixel_classifier(
         # Save death labels (only if present)
         if has_death:
             log("Saving death labels...\n")
-            QApplication.processEvents()
+            pump_events()
             dead_label_layer = viewer.layers['User Provided Labels (Dead)']
             dead_label_data = dead_label_layer.data
             dead_labels_outpath = Path(pixel_class_outdir, 'PixelClassifier_UserDeadLabels.zarr')
@@ -899,7 +900,7 @@ def train_pixel_classifier(
                 shutil.rmtree(dead_labels_outpath)
             save_as_zarr(dead_label_data, dead_labels_outpath)
             log("Saved death labels\n")
-            QApplication.processEvents()
+            pump_events()
         
         # Save dynamic cell type labels and apply postprocessing for training
         for cell_type in all_cell_types:
@@ -914,7 +915,7 @@ def train_pixel_classifier(
             save_as_zarr(label_data, labels_outpath)
             cell_type_labels[cell_type] = label_data
             log(f"Saved {cell_type} labels (postprocessed for training)\n")
-            QApplication.processEvents()
+            pump_events()
 
 
         def train_classifier(user_labels, features):
@@ -960,7 +961,7 @@ def train_pixel_classifier(
         
         _log_mem("before classifier training", log)
         log(f"\n--- Starting classifier training (only_segment={only_segment}) ---\n")
-        QApplication.processEvents()
+        pump_events()
         
         if not only_segment:
             # Train death classifier (only if death channel is present)
@@ -970,10 +971,10 @@ def train_pixel_classifier(
                 death_random_forest_outpath = Path(pixel_class_outdir, 'PixelClassifier_Death.joblib')
                 log(f"Saving to {death_random_forest_outpath}")
                 joblib.dump(clf_death, death_random_forest_outpath)
-                QApplication.processEvents()
+                pump_events()
             else:
                 log("\n### Skipping death classifier (no dead channel)")
-                QApplication.processEvents()
+                pump_events()
         
             # Train classifiers for all detected cell types
             for cell_type in all_cell_types:
@@ -983,7 +984,7 @@ def train_pixel_classifier(
                 log(f"Saving to {clf_outpath}")
                 joblib.dump(clf, clf_outpath)
                 classifiers[cell_type] = clf
-                QApplication.processEvents()
+                pump_events()
         
         
         # Apply classifiers to predict pixels
@@ -1008,26 +1009,26 @@ def train_pixel_classifier(
             if has_death:
                 log("\n### Predicting Death Pixels")
                 _log_mem("before death prediction", log)
-                QApplication.processEvents()
+                pump_events()
                 log("   Starting apply_classifier for death...")
-                QApplication.processEvents()
+                pump_events()
                 pred_death_mask = apply_classifier(clf_death, features_outpath, pred_death_labels_outpath, n_workers=n_workers)
                 _log_mem("after death prediction", log)
                 log("    Death prediction finished!")
-                QApplication.processEvents()
+                pump_events()
                 viewer.layers["Pixel Classification (Dead)"].data = pred_death_mask
                 _set_dead_mask_layer_color(viewer.layers["Pixel Classification (Dead)"])
                 log("    Death layer updated!")
-                QApplication.processEvents()
+                pump_events()
             else:
                 log("\n### Skipping death prediction (no dead channel)")
-                QApplication.processEvents()
+                pump_events()
 
             # Predict pixels for all cell types
             for cell_type in all_cell_types:
                 log(f"\n### Predicting {cell_type.capitalize()} Pixels")
                 _log_mem(f"before {cell_type} prediction", log)
-                QApplication.processEvents()
+                pump_events()
                 pred_mask = apply_classifier(classifiers[cell_type], features_outpath, pred_labels_paths[cell_type], n_workers=n_workers)
                 _log_mem(f"after {cell_type} prediction", log)
 
@@ -1038,20 +1039,20 @@ def train_pixel_classifier(
             # Load existing predictions
             if has_death:
                 log("\n### Loading Death Prediction Mask")
-                QApplication.processEvents()
+                pump_events()
                 pred_death_mask = viewer.layers["Pixel Classification (Dead)"].data
             
             # Load predictions for all cell types
             for cell_type in all_cell_types:
                 log(f"\n### Loading {cell_type.capitalize()} Prediction Mask")
-                QApplication.processEvents()
+                pump_events()
                 pred_mask = viewer.layers[f"Pixel Classification ({cell_type.capitalize()})"].data
                 pred_masks[cell_type] = pred_mask
             
         # Segment instances for all cell types
         _log_mem("before segmentation", log)
         log("\n### Segment Cell Instances")
-        QApplication.processEvents()
+        pump_events()
         
         # Segment each cell type using EDT watershed
         segmented_cells = {}  # Store {cell_type: segmented_mask}
@@ -1066,34 +1067,34 @@ def train_pixel_classifier(
             fill_holes = fill_holes_dict.get(cell_type, True)
             
             log(f"\n### Segmenting {cell_type.capitalize()} (EDT threshold={edt_threshold}, min_size={segment_size_min})")
-            QApplication.processEvents()
+            pump_events()
 
             pred_mask = pred_masks[cell_type]
             n_timepoints = pred_mask.shape[0]
             log(f"   Processing {n_timepoints} timepoints...")
             log(f"   Mask shape: {pred_mask.shape}")
-            QApplication.processEvents()
+            pump_events()
 
             segmented_timepoints = []
             for t_idx in range(n_timepoints):
                 log(f"   [T{t_idx+1}] Loading mask...")
-                QApplication.processEvents()
+                pump_events()
 
                 mask_t = pred_mask[t_idx]
                 # Remove background (label 1), keep only foreground (label 2)
                 mask_t = (mask_t == 2)  # bool mask is fine
                 fg_pixels = int(mask_t.sum())
                 log(f"   [T{t_idx+1}] Foreground pixels: {fg_pixels}")
-                QApplication.processEvents()
+                pump_events()
 
                 if fg_pixels == 0:
                     segmented = np.zeros_like(mask_t, dtype=np.uint16)
                     log(f"   [T{t_idx+1}] Empty mask, skipped")
-                    QApplication.processEvents()
+                    pump_events()
                 else:
                     # Use your unified pipeline (EDT + refine passes)
                     log(f"   [T{t_idx+1}] Segmenting via segment_mask()...")
-                    QApplication.processEvents()
+                    pump_events()
 
                     # log(f"\n### Preprocessing {cell_type.capitalize()} classifier mask (opening_nr_pixels={opening_nr_pixels}, fill_holes={fill_holes})")
                     # Convert label mask to binary for postprocessing
@@ -1113,7 +1114,7 @@ def train_pixel_classifier(
 
                     segmented = segmented.astype(np.uint16, copy=False)
                     log(f"   [T{t_idx+1}] Done! labels={int(segmented.max())}")
-                    QApplication.processEvents()
+                    pump_events()
 
                 segmented_timepoints.append(segmented)
 
@@ -1121,7 +1122,7 @@ def train_pixel_classifier(
             segmented_cells[cell_type] = full_seg
             _log_mem(f"after {cell_type} segmentation (all timepoints)", log)
             log(f"   {cell_type.capitalize()} segmentation complete!")
-            QApplication.processEvents()
+            pump_events()
 
             viewer.layers[f"{cell_type.capitalize()} Segments"].data = full_seg
 

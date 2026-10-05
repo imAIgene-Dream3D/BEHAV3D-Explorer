@@ -60,6 +60,8 @@ from behav3d.napari._background_runner import (
     BackgroundOperation,
     ProgressBarRow,
     ThreadSafeLogger,
+    install_busy_guard,
+    warn_if_busy,
 )
 from behav3d.napari._pdf_view import open_pdf_in_napari
 from behav3d.napari._rename_dialog import RenameClusterDialog
@@ -367,6 +369,85 @@ def _scan_state_feature_columns(csv_path, usable_cols, cancel_check=None) -> dic
     return {"bin_cols": bin_cols, "feat_cols": feat_cols}
 
 
+def _read_h5ad_shared(path, **kwargs):
+    """``anndata.read_h5ad`` under the shared HDF5 lock (see ``core/h5_access``).
+
+    Worker threads wait for any writer to finish. The GUI thread never blocks:
+    if a background task is rewriting a file it gets a clear error (which the
+    calling handler surfaces) rather than a frozen window or a corrupt read.
+    """
+    import threading
+
+    import anndata as ad
+    from behav3d.core.h5_access import H5Busy, h5_access
+
+    on_gui = threading.current_thread() is threading.main_thread()
+    try:
+        with h5_access(blocking=not on_gui):
+            return ad.read_h5ad(str(path), **kwargs)
+    except H5Busy:
+        raise RuntimeError(
+            "An .h5ad result file is currently being written by a background task. "
+            "Please wait for it to finish and try again."
+        ) from None
+
+
+class _LatestOnlyLoader:
+    """Background-load one file at a time; deliver only the *latest* request.
+
+    The state/track sub-tabs preload the whole ``.h5ad`` on every ``_reload``
+    (cell-type change, tab entry). The old code simply skipped a new request while
+    a load was in flight, so after A -> B in quick succession A's data finished
+    and was delivered as B's model -- wrong results shown with no error. Here a
+    result is handed to ``on_done`` only if its path is still the one most
+    recently requested; a different pending request restarts once the in-flight
+    load ends, and :meth:`invalidate` discards an in-flight result outright.
+    All methods run on the GUI thread; only ``loader`` runs on the worker.
+    """
+
+    def __init__(self, bg: BackgroundOperation) -> None:
+        self._bg = bg
+        self._want = None
+        self._inflight = None
+        self._pending = None
+
+    def invalidate(self) -> None:
+        self._want = None
+        self._pending = None
+
+    def request(self, path, loader, on_done, on_failed) -> None:
+        self._want = path
+        if self._bg.is_running():
+            if self._inflight == path:
+                return  # same file already loading: its result is what we want
+            self._pending = (path, loader, on_done, on_failed)
+            return
+        self._start(path, loader, on_done, on_failed)
+
+    def _start(self, path, loader, on_done, on_failed) -> None:
+        self._inflight = path
+        self._pending = None
+
+        def _done(result):
+            self._inflight = None
+            if path == self._want:
+                on_done(result)
+            self._drain()
+
+        def _failed(err):
+            self._inflight = None
+            if path == self._want:
+                on_failed(err)
+            self._drain()
+
+        self._bg.run(fn=loader, inject_progress=False, on_done=_done, on_failed=_failed)
+
+    def _drain(self) -> None:
+        pending, self._pending = self._pending, None
+        if pending is not None and pending[0] == self._want:
+            self._start(*pending)
+
+
 def _check_data_consistency(csv_path, h5ad_sources, groupby_cols) -> list:
     """Compare track IDs between the filtered track-features CSV and the
     track/behavioral-states h5ad output(s). Reads the full CSV (restricted
@@ -385,15 +466,20 @@ def _check_data_consistency(csv_path, h5ad_sources, groupby_cols) -> list:
             d[col] = _normalize_id_column(d[col])
         return set(map(tuple, d.drop_duplicates().to_numpy()))
 
+    from behav3d.core.h5_access import h5_access
+
     csv_keys = _key_set(pd.read_csv(csv_path, usecols=groupby_cols))
     mismatches = []
     for label, path in h5ad_sources:
-        adata = ad.read_h5ad(str(path), backed="r")
-        try:
-            h5ad_keys = _key_set(adata.obs[groupby_cols])
-        finally:
-            if getattr(adata, "isbacked", False):
-                adata.file.close()
+        # Hold the HDF5 lock for the whole open -> read -> close: a clustering run
+        # rewriting this file concurrently would corrupt a backed-mode read.
+        with h5_access():
+            adata = ad.read_h5ad(str(path), backed="r")
+            try:
+                h5ad_keys = _key_set(adata.obs[groupby_cols])
+            finally:
+                if getattr(adata, "isbacked", False):
+                    adata.file.close()
         missing = h5ad_keys - csv_keys
         if missing:
             mismatches.append((label, len(missing)))
@@ -448,7 +534,8 @@ def _condition_levels_for_column(col, *, metadata_loader=None, adata=None, h5ad_
     if h5ad_path is not None:
         try:
             import h5py
-            with h5py.File(str(h5ad_path), "r") as f:
+            from behav3d.core.h5_access import h5_read
+            with h5_read(), h5py.File(str(h5ad_path), "r") as f:
                 if "obs" in f and col in f["obs"]:
                     values = TrackClassificationSubTab._read_h5ad_obs_column(f, col)
                     return sorted({str(v) for v in values if v is not None})
@@ -579,7 +666,7 @@ def _resolve_ui_state_col(adata, choice: str) -> str:
     on disk — fall back to it via resolve_full_state_col/resolve_intrinsic_state_col
     so reports and backprojection still work against old files.
     """
-    from behav3d.analysis.behavior.state.classification import (
+    from behav3d.core.state_columns import (
         FULL_STATE_COL,
         INTRINSIC_STATE_COL,
         HMM_INTRINSIC_RAW_STATE_COL,
@@ -762,12 +849,13 @@ class StateClassificationSubTab(QWidget):
         self._hmm_model = None
         self._hmm_model_cell_type = None
         self._bg = BackgroundOperation(self)
-        self._preload_bg = BackgroundOperation(self)
+        self._preload_bg = BackgroundOperation(self, silent=True)
+        self._preload_loader = _LatestOnlyLoader(self._preload_bg)
         # Dedicated instance for the feature-column scan dispatched from
         # `_populate_dynamic_features` — kept separate from `_preload_bg`
         # (used for the h5ad preload later in `_reload()`) so the two don't
         # collide on `BackgroundOperation`'s one-job-at-a-time guard.
-        self._colscan_bg = BackgroundOperation(self)
+        self._colscan_bg = BackgroundOperation(self, silent=True)
         self._last_features_key: tuple = ()
         # Current-timepoint-only state backprojection preview (see
         # `_refresh_state_bp_layer`): recomputed on every dims scrub instead
@@ -807,7 +895,7 @@ class StateClassificationSubTab(QWidget):
 
     def _init_ui(self):
         from behav3d.napari._guided import make_back_header
-        from behav3d.analysis.behavior.state.classification import (
+        from behav3d.core.state_columns import (
             FULL_STATE_COL,
             INTRINSIC_STATE_COL,
         )
@@ -2217,19 +2305,17 @@ class StateClassificationSubTab(QWidget):
 
             path = self._model_adata_path(ct)
             if not path or not path.exists():
+                self._preload_loader.invalidate()
                 self._model_adata = None
                 self._refresh_buttons()
-                return
-
-            if self._preload_bg.is_running():
                 return
 
             self._model_adata = None
             self._refresh_buttons()
 
             def _load():
-                import anndata as ad
-                return ad.read_h5ad(str(path))
+                from behav3d.core.h5_access import read_h5ad_locked
+                return read_h5ad_locked(path)
 
             def _on_done(result):
                 self._model_adata = result
@@ -2240,12 +2326,7 @@ class StateClassificationSubTab(QWidget):
                 self._model_adata = None
                 self._refresh_buttons()
 
-            self._preload_bg.run(
-                fn=_load,
-                inject_progress=False,
-                on_done=_on_done,
-                on_failed=_on_failed,
-            )
+            self._preload_loader.request(path, _load, _on_done, _on_failed)
         except Exception:
             traceback.print_exc()
 
@@ -2728,7 +2809,7 @@ class StateClassificationSubTab(QWidget):
     def _load_model_adata(self, path: Path):
         try:
             import anndata as ad
-            self._model_adata = ad.read_h5ad(str(path))
+            self._model_adata = _read_h5ad_shared(str(path))
         except Exception:
             traceback.print_exc()
             self._model_adata = None
@@ -2736,7 +2817,7 @@ class StateClassificationSubTab(QWidget):
     # ── Button state management ──────────────────────────────────────────
 
     def _refresh_buttons(self):
-        from behav3d.analysis.behavior.state.classification import (
+        from behav3d.core.state_columns import (
             resolve_full_state_col,
             resolve_intrinsic_state_col,
         )
@@ -2882,7 +2963,7 @@ class StateClassificationSubTab(QWidget):
             from behav3d.analysis.behavior.track.visualization.plots.feature_heatmap import (
                 save_state_feature_heatmap,
             )
-            adata = ad.read_h5ad(str(full_path))
+            adata = _read_h5ad_shared(str(full_path))
             state_col = _resolve_ui_state_col(adata, state_col_choice)
             return save_state_feature_heatmap(
                 adata, str(out), ct, features,
@@ -2929,7 +3010,8 @@ class StateClassificationSubTab(QWidget):
                 return cols
             try:
                 import h5py
-                with h5py.File(str(full_path), "r") as f:
+                from behav3d.core.h5_access import h5_read
+                with h5_read(), h5py.File(str(full_path), "r") as f:
                     obs_cols = list(f.get("obs", {}).keys())
             except Exception:
                 return cols
@@ -3123,6 +3205,10 @@ class StateClassificationSubTab(QWidget):
         return "" if txt.startswith("—") else txt
 
     def _log(self, msg: str):
+        from behav3d.napari._background_runner import redispatch_to_gui_thread
+
+        if redispatch_to_gui_thread(self._log, msg):
+            return
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         formatted = f"[{ts}] {msg}"
         self.log_edit.append(formatted)
@@ -3166,12 +3252,22 @@ class StateClassificationSubTab(QWidget):
         self._log(f"▶ Running state classification for '{ct}'…")
         params = self._collect_state_params(ct)
 
+        # The fitted model is handed back through this dict and published on the GUI
+        # thread in the callback: assigning ``self._hmm_model`` and
+        # ``self._hmm_model_cell_type`` from the worker let the GUI observe the new
+        # model paired with the *old* cell type (two non-atomic writes).
+        _hmm_out = {}
+
         def _run(**kw):
             from behav3d.analysis.behavior.state.classification import run_hmm_state_clustering
             res = run_hmm_state_clustering(**params, verbose=True, return_details=True)
-            self._hmm_model = res["hmm_model"]
-            self._hmm_model_cell_type = ct
+            _hmm_out["model"] = res["hmm_model"]
             return res["model_adata"]
+
+        def _state_done(result):
+            self._hmm_model = _hmm_out.get("model")
+            self._hmm_model_cell_type = ct
+            self._on_state_done(result)
 
         self._bg.run(
             fn=_run,
@@ -3180,7 +3276,7 @@ class StateClassificationSubTab(QWidget):
             buttons=[self.btn_run_state],
             viewer=self.viewer,
             inject_progress=False,
-            on_done=self._on_state_done,
+            on_done=_state_done,
             on_failed=lambda e: self._log(f"❌ State classification failed: {e}"),
         )
 
@@ -3298,14 +3394,17 @@ class StateClassificationSubTab(QWidget):
         on_done_cb = extra_callbacks.get("on_done") if extra_callbacks else None
         on_fail_cb = extra_callbacks.get("on_failed") if extra_callbacks else None
 
+        _hmm_out = {}  # published on the GUI thread in _done (see _on_run_state)
+
         def _run(**kw):
             from behav3d.analysis.behavior.state.classification import run_hmm_state_clustering
             res = run_hmm_state_clustering(**params, verbose=True, return_details=True)
-            self._hmm_model = res["hmm_model"]
-            self._hmm_model_cell_type = ct
+            _hmm_out["model"] = res["hmm_model"]
             return res["model_adata"]
 
         def _done(result):
+            self._hmm_model = _hmm_out.get("model")
+            self._hmm_model_cell_type = ct
             self._on_state_done(result, interactive=interactive)
             if on_done_cb:
                 on_done_cb(result)
@@ -3350,7 +3449,7 @@ class StateClassificationSubTab(QWidget):
         if self._model_adata is None:
             QMessageBox.warning(self, "No model", "Run state classification first.")
             return
-        from behav3d.analysis.behavior.state.classification import resolve_full_state_col
+        from behav3d.core.state_columns import resolve_full_state_col
 
         if resolve_full_state_col(self._model_adata) is None:
             QMessageBox.warning(
@@ -3535,7 +3634,7 @@ class StateClassificationSubTab(QWidget):
 
         def _run(**kw):
             import anndata as ad
-            from behav3d.analysis.behavior.state.classification import (
+            from behav3d.core.state_columns import (
                 FULL_STATE_COL,
                 resolve_full_state_col,
             )
@@ -3543,7 +3642,7 @@ class StateClassificationSubTab(QWidget):
             from behav3d.analysis.behavior.state.visualization.plots.state_composition import (
                 save_state_composition_report,
             )
-            adata = ad.read_h5ad(str(full_path))
+            adata = _read_h5ad_shared(str(full_path))
             state_col = resolve_full_state_col(adata) or FULL_STATE_COL
 
             # Inject known metadata grouping columns from metadata CSV into obs (for
@@ -3643,7 +3742,7 @@ class StateClassificationSubTab(QWidget):
             from behav3d.analysis.behavior.state.visualization.plots.contact_type_report import (
                 save_state_contact_type_comparison,
             )
-            adata = ad.read_h5ad(str(full_path))
+            adata = _read_h5ad_shared(str(full_path))
             state_col = _resolve_ui_state_col(adata, state_col_choice)
             df_timepoints = pd.read_csv(csv_path)
             state_dir = _resolve_state_paths(out, ct).state_outdir
@@ -3709,7 +3808,7 @@ class StateClassificationSubTab(QWidget):
             from behav3d.analysis.behavior.state.visualization.plots.contact_state_shift_report import (
                 save_state_contact_shift_report,
             )
-            adata = ad.read_h5ad(str(full_path))
+            adata = _read_h5ad_shared(str(full_path))
             state_col = _resolve_ui_state_col(adata, state_col_choice)
             df_timepoints = pd.read_csv(csv_path)
             state_dir = _resolve_state_paths(out, ct).state_outdir
@@ -3770,7 +3869,7 @@ class StateClassificationSubTab(QWidget):
 
         def _run(**kw):
             import anndata as ad
-            from behav3d.analysis.behavior.state.classification import (
+            from behav3d.core.state_columns import (
                 FULL_STATE_COL,
                 resolve_full_state_col,
             )
@@ -3782,7 +3881,7 @@ class StateClassificationSubTab(QWidget):
                 _get_classification_state_colors,
                 _get_classification_state_order,
             )
-            adata = ad.read_h5ad(str(full_path))
+            adata = _read_h5ad_shared(str(full_path))
             state_col = resolve_full_state_col(adata) or FULL_STATE_COL
             transition_dir = _resolve_state_paths(out, ct).state_transitions_outdir
             transition_dir.mkdir(parents=True, exist_ok=True)
@@ -3870,7 +3969,7 @@ class StateClassificationSubTab(QWidget):
 
         def _run(**kw):
             import anndata as ad
-            from behav3d.analysis.behavior.state.classification import (
+            from behav3d.core.state_columns import (
                 FULL_STATE_COL,
                 resolve_full_state_col,
             )
@@ -3885,7 +3984,7 @@ class StateClassificationSubTab(QWidget):
             from behav3d.analysis.behavior.utils import _sanitize_filename_token
             from behav3d.core.utils import minutes_per_frame_from_metadata
             minutes_per_frame, minutes_valid = minutes_per_frame_from_metadata(md)
-            adata = ad.read_h5ad(str(full_path))
+            adata = _read_h5ad_shared(str(full_path))
             state_col = resolve_full_state_col(adata) or FULL_STATE_COL
             state_paths = _resolve_state_paths(out, ct)
             comp_dir = state_paths.state_composition_outdir / "behavior_proportions"
@@ -4063,7 +4162,7 @@ class StateClassificationSubTab(QWidget):
             out_dir = self._out_dir()
             if not out_dir:
                 raise ValueError("No output directory set.")
-            adata = sc.read_h5ad(str(state_path))
+            adata = _read_h5ad_shared(str(state_path))
             if self.chk_show_state_trajectories.isChecked():
                 try:
                     from behav3d.analysis.behavior.track.visualization.plots.exemplar_coordinate_utils import (
@@ -4226,7 +4325,7 @@ class StateClassificationSubTab(QWidget):
             from behav3d.analysis.behavior.state.utils import (
                 _get_classification_state_order,
             )
-            adata = sc.read_h5ad(str(state_path))
+            adata = _read_h5ad_shared(str(state_path))
             state_col = _resolve_ui_state_col(adata, color_by)
             state_order = _get_classification_state_order(adata, state_col)
             code_map = _build_code_map(adata.obs, state_col=state_col, state_order=state_order)
@@ -4644,11 +4743,11 @@ class StateClassificationSubTab(QWidget):
 
         def _run(**kw):
             import scanpy as sc
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+            from behav3d.core.state_columns import FULL_STATE_COL
             from behav3d.analysis.behavior.state.visualization.backprojection import (
                 export_behavioral_state_backprojection_zarrs,
             )
-            adata = sc.read_h5ad(str(state_path))
+            adata = _read_h5ad_shared(str(state_path))
             state_col = _resolve_ui_state_col(adata, color_by) if color_by else FULL_STATE_COL
             sample_name = sample if sample else None
             export_adata = (
@@ -5111,7 +5210,8 @@ class TrackClassificationSubTab(QWidget):
         self._track_adata = None
         self._track_adata_load_error: Optional[str] = None
         self._bg = BackgroundOperation(self)
-        self._preload_bg = BackgroundOperation(self)
+        self._preload_bg = BackgroundOperation(self, silent=True)
+        self._preload_loader = _LatestOnlyLoader(self._preload_bg)
         # Current-timepoint-only track-cluster backprojection preview (see
         # `_refresh_track_bp_layer`): recomputed on every dims scrub instead
         # of writing a full per-sample zarr up front.
@@ -5134,7 +5234,7 @@ class TrackClassificationSubTab(QWidget):
 
     def _init_ui(self):
         from behav3d.napari._guided import make_back_header
-        from behav3d.analysis.behavior.state.classification import (
+        from behav3d.core.state_columns import (
             FULL_STATE_COL,
             INTRINSIC_STATE_COL,
         )
@@ -6809,7 +6909,8 @@ class TrackClassificationSubTab(QWidget):
         try:
             import h5py
             import pandas as pd
-            with h5py.File(str(states_path), "r") as f:
+            from behav3d.core.h5_access import h5_read
+            with h5_read(), h5py.File(str(states_path), "r") as f:
                 obs = f.get("obs", {})
                 if "sample_name" not in obs or "TrackID" not in obs:
                     return None
@@ -6972,9 +7073,24 @@ class TrackClassificationSubTab(QWidget):
         state_path = self._state_adata_path(ct)
         try:
             import anndata as ad
-            adata = ad.read_h5ad(state_path, backed="r")
-            pre = adata.uns.get("preprocessing", {}) or {}
-            var_names = {str(v) for v in adata.var_names}
+            from behav3d.core.h5_access import H5Busy, h5_access
+
+            # Read what we need and close the backed handle inside the lock: left
+            # open it blocks rewriting the file on Windows and is a live reader
+            # while a clustering run overwrites it.
+            try:
+                with h5_access(blocking=False):
+                    adata = ad.read_h5ad(str(state_path), backed="r")
+                    try:
+                        pre = adata.uns.get("preprocessing", {}) or {}
+                        all_var_names = [str(v) for v in adata.var_names]
+                        obs_columns = set(adata.obs.columns)
+                    finally:
+                        if getattr(adata, "isbacked", False):
+                            adata.file.close()
+            except H5Busy:
+                return [], []  # file is being written; hint is retried on next refresh
+            var_names = set(all_var_names)
 
             def _as_list(value):
                 # Lists round-trip through h5ad as numpy arrays, whose
@@ -6988,12 +7104,12 @@ class TrackClassificationSubTab(QWidget):
             cont_source = (
                 _as_list(pre.get("continuous_feature_cols"))
                 or _as_list(pre.get("kept_features"))
-                or [str(v) for v in adata.var_names]
+                or all_var_names
             )
             cont_cols = [str(c) for c in cont_source if str(c) in var_names]
             binary_cols = [
                 str(c) for c in _as_list(pre.get("binary_cols_to_merge"))
-                if str(c) in adata.obs.columns
+                if str(c) in obs_columns
             ]
             return cont_cols, binary_cols
         except Exception as exc:
@@ -7510,19 +7626,19 @@ class TrackClassificationSubTab(QWidget):
         self._refresh_buttons()
 
         if not path or not path.exists():
+            self._preload_loader.invalidate()
             return
 
         # ── Slow async phase (background thread) ──────────────────────────
-        # Skip if a previous preload is still in flight (e.g. rapid tab switches).
-        if self._preload_bg.is_running():
-            return
-
+        # A newer request supersedes an in-flight one (see _LatestOnlyLoader), so
+        # rapid cell-type / tab switches can never deliver the wrong file.
         def _load():
             import h5py
-            import anndata as ad
-            if not h5py.is_hdf5(str(path)):
-                raise ValueError(f"Not a valid HDF5 file: {path.name}")
-            return ad.read_h5ad(str(path))
+            from behav3d.core.h5_access import h5_access, read_h5ad_locked
+            with h5_access():
+                if not h5py.is_hdf5(str(path)):
+                    raise ValueError(f"Not a valid HDF5 file: {path.name}")
+                return read_h5ad_locked(path)
 
         def _on_done(result):
             self._track_adata = result
@@ -7534,12 +7650,7 @@ class TrackClassificationSubTab(QWidget):
             self._track_adata_load_error = err
             self._refresh_buttons()
 
-        self._preload_bg.run(
-            fn=_load,
-            inject_progress=False,
-            on_done=_on_done,
-            on_failed=_on_failed,
-        )
+        self._preload_loader.request(path, _load, _on_done, _on_failed)
 
     def _autofill_paths(self, ct: str):
         """Lightweight path auto-fill called on tab switch.
@@ -7619,8 +7730,10 @@ class TrackClassificationSubTab(QWidget):
         self.combo_track_color_by.blockSignals(False)
 
     def _track_classifier_path(self, ct: str) -> Optional[Path]:
-        from behav3d.analysis.behavior.track.bouts import get_track_classifier_filename
-        from behav3d.analysis.behavior.track.utils import _peek_track_outfolder
+        from behav3d.analysis.behavior.track.utils import (
+            _peek_track_outfolder,
+            get_track_classifier_filename,
+        )
         out = self._out_dir()
         if not out:
             return None
@@ -7646,6 +7759,10 @@ class TrackClassificationSubTab(QWidget):
         return "" if txt.startswith("—") else txt
 
     def _log(self, msg: str):
+        from behav3d.napari._background_runner import redispatch_to_gui_thread
+
+        if redispatch_to_gui_thread(self._log, msg):
+            return
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         formatted = f"[{ts}] {msg}"
         self.log_edit.append(formatted)
@@ -8356,7 +8473,7 @@ class TrackClassificationSubTab(QWidget):
             # trajectory_clustering will independently resolve to below.
             _traj_dir = _peek_track_outfolder(out, ct)
             if is_bouts:
-                from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+                from behav3d.core.state_columns import FULL_STATE_COL
                 from behav3d.analysis.behavior.track.bouts import run_state_based_analysis
                 from behav3d.analysis.behavior.track.utils import (
                     get_dtaidistance_track_trajectories_filename,
@@ -8472,24 +8589,43 @@ class TrackClassificationSubTab(QWidget):
                         _log(f"⚠ Could not generate medoid overview: {_exc}")
                 return _result
 
+            # The Processing Queue is told "done" only once the overview has also
+            # finished (or failed -- the clustering itself succeeded, so a failed
+            # overview must not stop the queue). Signalling immediately let the
+            # queue start its next step while this overview was still running on
+            # the same BackgroundOperation.
+            def _notify_queue():
+                if on_done_ext:
+                    on_done_ext(r)
+
             def _overview_done(_):
                 _log("✅ Exemplar overview done.")
                 QTimer.singleShot(0, self._update_view_buttons)
+                _notify_queue()
+
+            def _overview_failed(e):
+                self._log(f"⚠ Exemplar overview failed: {e}")
+                _notify_queue()
 
             def _start_overview():
-                self._bg.run(
-                    fn=_run_overview,
-                    desc=f"Exemplar overview ({ct})…",
-                    progress_row=self.progress_row,
-                    buttons=[],
-                    viewer=self.viewer,
-                    inject_progress=False,
-                    on_done=_overview_done,
-                    on_failed=lambda e: self._log(f"⚠ Exemplar overview failed: {e}"),
-                )
+                try:
+                    self._bg.run(
+                        fn=_run_overview,
+                        desc=f"Exemplar overview ({ct})…",
+                        progress_row=self.progress_row,
+                        buttons=[],
+                        viewer=self.viewer,
+                        inject_progress=False,
+                        on_done=_overview_done,
+                        on_failed=_overview_failed,
+                        # Deliberate continuation of the clustering run that just
+                        # finished, not a fresh user action.
+                        chained=True,
+                    )
+                except Exception as exc:
+                    traceback.print_exc()
+                    _overview_failed(exc)
             QTimer.singleShot(0, _start_overview)
-            if on_done_ext:
-                on_done_ext(r)
 
         def _fail(e):
             self._log(f"❌ Track clustering failed: {e}")
@@ -9094,7 +9230,7 @@ class TrackClassificationSubTab(QWidget):
             from matplotlib.backends.backend_pdf import PdfPages
             import matplotlib.pyplot as plt
             import anndata as _ad
-            from behav3d.analysis.behavior.state.classification import (
+            from behav3d.core.state_columns import (
                 FULL_STATE_COL,
                 resolve_full_state_col,
             )
@@ -9107,7 +9243,7 @@ class TrackClassificationSubTab(QWidget):
                     f"Behavioral states h5ad not found at {state_adata_path}. "
                     "Run State Clustering first."
                 )
-            full_adata = _ad.read_h5ad(str(state_adata_path))
+            full_adata = _read_h5ad_shared(str(state_adata_path))
             state_key = resolve_full_state_col(full_adata) or FULL_STATE_COL
 
             out_path = _Path(out) if out else _Path(".")
@@ -9754,13 +9890,13 @@ class TrackClassificationSubTab(QWidget):
             if use_target_class:
                 touching_col = touching_column_name(target_ct)
                 if target_source == "track":
-                    adata_target = ad.read_h5ad(str(self._track_adata_path(target_ct)))
+                    adata_target = _read_h5ad_shared(str(self._track_adata_path(target_ct)))
                     target_class_lookup = build_target_class_lookup_from_track_adata(
                         adata_target, class_col="ClusterID",
                     )
                     time_varying = False
                 else:
-                    adata_target = ad.read_h5ad(str(self._state_adata_path(target_ct)))
+                    adata_target = _read_h5ad_shared(str(self._state_adata_path(target_ct)))
                     state_col = _resolve_ui_state_col(adata_target, target_state_choice)
                     target_class_lookup = build_target_class_lookup_from_state_adata(
                         adata_target, state_col=state_col,
@@ -9905,13 +10041,13 @@ class TrackClassificationSubTab(QWidget):
             if use_target_class:
                 touching_col = touching_column_name(target_ct)
                 if target_source == "track":
-                    adata_target = ad.read_h5ad(str(self._track_adata_path(target_ct)))
+                    adata_target = _read_h5ad_shared(str(self._track_adata_path(target_ct)))
                     target_class_lookup = build_target_class_lookup_from_track_adata(
                         adata_target, class_col="ClusterID",
                     )
                     time_varying = False
                 else:
-                    adata_target = ad.read_h5ad(str(self._state_adata_path(target_ct)))
+                    adata_target = _read_h5ad_shared(str(self._state_adata_path(target_ct)))
                     state_col = _resolve_ui_state_col(adata_target, target_state_choice)
                     target_class_lookup = build_target_class_lookup_from_state_adata(
                         adata_target, state_col=state_col,
@@ -10083,13 +10219,13 @@ class TrackClassificationSubTab(QWidget):
             if use_target_class:
                 touching_col = touching_column_name(target_ct)
                 if target_source == "track":
-                    adata_target = ad.read_h5ad(str(self._track_adata_path(target_ct)))
+                    adata_target = _read_h5ad_shared(str(self._track_adata_path(target_ct)))
                     target_class_lookup = build_target_class_lookup_from_track_adata(
                         adata_target, class_col="ClusterID",
                     )
                     time_varying = False
                 else:
-                    adata_target = ad.read_h5ad(str(self._state_adata_path(target_ct)))
+                    adata_target = _read_h5ad_shared(str(self._state_adata_path(target_ct)))
                     state_col = _resolve_ui_state_col(adata_target, target_state_choice)
                     target_class_lookup = build_target_class_lookup_from_state_adata(
                         adata_target, state_col=state_col,
@@ -10293,13 +10429,13 @@ class TrackClassificationSubTab(QWidget):
 
             touching_col = touching_column_name(target_ct)
             if target_source == "track":
-                adata_target = ad.read_h5ad(str(self._track_adata_path(target_ct)))
+                adata_target = _read_h5ad_shared(str(self._track_adata_path(target_ct)))
                 target_class_lookup = build_target_class_lookup_from_track_adata(
                     adata_target, class_col="ClusterID",
                 )
                 time_varying = False
             else:
-                adata_target = ad.read_h5ad(str(self._state_adata_path(target_ct)))
+                adata_target = _read_h5ad_shared(str(self._state_adata_path(target_ct)))
                 state_col = _resolve_ui_state_col(adata_target, target_state_choice)
                 target_class_lookup = build_target_class_lookup_from_state_adata(
                     adata_target, state_col=state_col,
@@ -10462,7 +10598,7 @@ class TrackClassificationSubTab(QWidget):
             from behav3d.analysis.behavior.track.visualization.plots.track_contact_overview_report import (
                 save_track_contact_overview_report,
             )
-            full_adata = _ad.read_h5ad(str(state_adata_path))
+            full_adata = _read_h5ad_shared(str(state_adata_path))
             state_col = _resolve_ui_state_col(full_adata, state_col_choice)
             df_timepoints = pd.read_csv(csv_path)
             contact_dir = _resolve_track_paths(str(out) if out else "", ct).outfolder
@@ -10659,11 +10795,11 @@ class TrackClassificationSubTab(QWidget):
             out_dir = self._out_dir()
             if not out_dir:
                 raise ValueError("No output directory set.")
-            adata_tracks = sc.read_h5ad(str(track_path))
+            adata_tracks = _read_h5ad_shared(str(track_path))
             self._sync_track_cluster_combo(adata_tracks)
             color_by = self.combo_track_color_by.currentText()
             state_adata_path = self._per_timepoint_adata_path(ct, adata_tracks) or state_adata_path
-            adata_full = sc.read_h5ad(str(state_adata_path))
+            adata_full = _read_h5ad_shared(str(state_adata_path))
             cluster_col = color_by if color_by else "ClusterID"
             output_col = "track_behavioral_cluster"
             obs_samples = adata_tracks.obs["sample_name"].astype(str)
@@ -10788,7 +10924,7 @@ class TrackClassificationSubTab(QWidget):
             )
             if track_mapping_dock is not None:
                 track_mapping_dock.widget()._behav3d_backprojection_legend_dock = True
-            from behav3d.analysis.behavior.state.classification import resolve_full_state_col
+            from behav3d.core.state_columns import resolve_full_state_col
             resolved_full_state_col = resolve_full_state_col(adata_full)
             if resolved_full_state_col is not None:
                 statebar_widget = _add_track_statebar_click_dock(
@@ -10822,7 +10958,7 @@ class TrackClassificationSubTab(QWidget):
             QMessageBox.warning(self, "Busy", "Another operation is running.")
             return
         import scanpy as sc
-        adata_tracks = sc.read_h5ad(str(track_path))
+        adata_tracks = _read_h5ad_shared(str(track_path))
         self._sync_track_cluster_combo(adata_tracks)
         color_by = self.combo_track_color_by.currentText()
         out = self._out_dir()
@@ -10839,7 +10975,7 @@ class TrackClassificationSubTab(QWidget):
                     f"Per-timepoint data not found at '{state_adata_path}'. "
                     "Run State Classification or Track Clustering first."
                 )
-            adata_full = sc.read_h5ad(str(state_adata_path))
+            adata_full = _read_h5ad_shared(str(state_adata_path))
             cluster_col = color_by if color_by else "ClusterID"
             sample_name = sample if sample else None
             logger("▶ Writing track backprojection zarrs…")
@@ -11017,7 +11153,7 @@ class SingleCellTab(QWidget):
         # `_refresh_data_consistency_warning` — kept separate from the
         # sub-tabs' own `_preload_bg`/`_colscan_bg` so it doesn't collide
         # with them on `BackgroundOperation`'s one-job-at-a-time guard.
-        self._consistency_bg = BackgroundOperation(self)
+        self._consistency_bg = BackgroundOperation(self, silent=True)
         self._last_consistency_key = None
 
         self._init_ui()
@@ -11048,6 +11184,11 @@ class SingleCellTab(QWidget):
         self.cell_type_combo.setToolTip("Immune and other cell types only (non-multicolor).")
         self.cell_type_combo.currentTextChanged.connect(self._on_cell_type_changed)
         hdr_lay.addWidget(self.cell_type_combo)
+        # Changing the cell type reloads every sub-tab (h5ad / CSV reads); refuse it
+        # while background work is running.
+        self._cell_type_busy_guard = install_busy_guard(
+            self.cell_type_combo, owner=self, what="changing the cell type"
+        )
         hdr_lay.addStretch()
 
         self.status_lbl = QLabel("Load metadata to begin.")
@@ -11133,6 +11274,8 @@ class SingleCellTab(QWidget):
     # ── Guided overview / focused settings ──────────────────────────────────
     def _on_guided_start(self, analysis_id: str):
         """Start from a Guided card: show only that analysis's settings."""
+        if warn_if_busy(self, "opening this analysis"):
+            return
         from behav3d.napari.analysis_guided_copy import (
             BEHAVIORAL_STATE, STATE_TRAJECTORY,
         )

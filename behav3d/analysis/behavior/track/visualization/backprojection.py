@@ -10,7 +10,6 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.colors import to_hex
 import seaborn as sns
-import umap
 import scanpy as sc
 
 from sklearn.cluster import KMeans, HDBSCAN, AgglomerativeClustering
@@ -36,7 +35,7 @@ try:
 except Exception:
     dtw_ndim = None
 from sklearn.metrics import silhouette_score
-from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+from behav3d.core.state_columns import FULL_STATE_COL
 from behav3d.analysis.behavior.track.feature_dtw import run_tcell_analysis
 from behav3d.analysis.behavior.track.visualization.plots.feature_dtw import (
     plot_cluster_percentage_bars,
@@ -577,6 +576,17 @@ def add_track_cluster_trajectory_layers(
         combined_data = np.concatenate(data_parts, axis=0)
         combined_codes = np.concatenate(code_parts, axis=0)
 
+        # napari's Tracks layer indexes per-vertex arrays by row and does numpy
+        # arithmetic on the coordinates on every opacity / tail / head change
+        # (thumbnail + recolour). A NaN/inf coordinate row poisons those, so drop
+        # such rows -- and the matching codes -- up front.
+        finite_rows = np.isfinite(combined_data).all(axis=1)
+        if not bool(finite_rows.all()):
+            combined_data = combined_data[finite_rows]
+            combined_codes = combined_codes[finite_rows]
+        if combined_data.shape[0] == 0:
+            return []
+
         layer_tail_length = tail_length
         if layer_tail_length is None:
             time_col_values = combined_data[:, 1]
@@ -593,19 +603,23 @@ def add_track_cluster_trajectory_layers(
                 color_dict[code_int] = str(color)
         direct_colormap = DirectLabelColormap(color_dict=color_dict)
 
+        # ``color_by`` is deliberately NOT passed to the constructor: Tracks
+        # assigns it before ``self.data`` (which resets ``features`` to {}), so
+        # napari warns "Previous color_by key ... not present in features" -- a
+        # notification bubble on every creation. Set it afterwards, once the
+        # feature exists and its colormap is installed.
         layer = viewer.add_tracks(
             combined_data,
             name=f"{output_col} trajectory",
             tail_length=layer_tail_length,
             features={"state_code": combined_codes},
-            color_by="state_code",
             blending=blending,
             visible=bool(visible),
         )
         _install_tracks_layer_colormaps_dict(
             layer, {**getattr(layer, "colormaps_dict", {}), "state_code": direct_colormap}
         )
-        layer.color_by = "state_code"  # re-trigger _recolor_tracks() with the new colormap
+        layer.color_by = "state_code"  # triggers _recolor_tracks() with the new colormap
         return [layer]
 
     added_layers = []

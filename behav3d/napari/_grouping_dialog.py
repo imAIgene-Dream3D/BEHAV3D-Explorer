@@ -313,6 +313,10 @@ class GroupBuilderDialog(QDialog):
 
     # ── Helpers ──────────────────────────────────────────────────────
     def _log(self, msg: str):
+        from behav3d.napari._background_runner import redispatch_to_gui_thread
+
+        if redispatch_to_gui_thread(self._log, msg):
+            return
         import datetime
 
         ts = datetime.datetime.now().strftime("%H:%M:%S")

@@ -2,14 +2,19 @@
 BEHAV3D napari plugin – main dock widget.
 Provides a QTabWidget with tabs for the full BEHAV3D pipeline.
 """
-from qtpy.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QPushButton
-from qtpy.QtCore import Qt, QSize, QEvent, QThread
+from qtpy.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QPushButton, QLabel
+from qtpy.QtCore import Qt, QSize, QEvent, QThread, QTimer
 from qtpy.QtGui import QIcon
 import logging
 import os
 import napari
 
-from behav3d.napari._background_runner import BackgroundOperation
+from behav3d.napari._background_runner import (
+    BackgroundOperation,
+    background_work_descriptions,
+    busy_notifier,
+    install_busy_guard,
+)
 from behav3d.napari._queue import ProcessingQueuePanel, StepType
 from behav3d.napari._global_workers import GlobalWorkersController
 from behav3d.napari._preview_dims import close_backprojection_legend_docks
@@ -227,8 +232,28 @@ class BEHAV3DWidget(QWidget):
             layout.addWidget(self.btn_toggle_assistant)
 
 
+        # Always-visible hint that something is running in the background. Work
+        # started elsewhere (a queue, another tab) used to go unnoticed, and
+        # clicking around while it ran was a main source of crashes.
+        self.busy_label = QLabel()
+        self.busy_label.setWordWrap(True)
+        self.busy_label.setStyleSheet(
+            "QLabel { background: #7a5a00; color: #fff; padding: 4px 8px; font-weight: bold; }"
+        )
+        self.busy_label.setVisible(False)
+        layout.addWidget(self.busy_label)
+        # While busy, re-check once a second: a cancelled job that is still
+        # winding down ends without any signal. Stopped again as soon as idle.
+        self._busy_timer = QTimer(self)
+        self._busy_timer.setInterval(1000)
+        self._busy_timer.timeout.connect(self._refresh_busy_label)
+        busy_notifier().changed.connect(self._refresh_busy_label)
+
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, stretch=1)
+        # Refuse user-initiated tab switches (click / wheel / arrow keys) while
+        # background work runs; programmatic switches are unaffected.
+        self._tab_switch_guard = install_busy_guard(self.tabs, owner=self, what="switching tabs")
 
         # --- Tab 1: Data Preparation (metadata + dim order + zarr) --------
         from behav3d.napari._data_preparation import DataPreparationTab
@@ -424,7 +449,6 @@ class BEHAV3DWidget(QWidget):
             # stacks them vertically by default. Defer to the next event-loop tick
             # (by which point this widget's own dock exists, for either launch
             # path) and re-split them *horizontally* → pipeline | assistant.
-            from qtpy.QtCore import QTimer
             QTimer.singleShot(0, self._place_assistant_beside)
             # Keep the toggle button in sync if the dock is shown/hidden by other
             # means (e.g. its native close button → hide, not destroy).
@@ -462,6 +486,24 @@ class BEHAV3DWidget(QWidget):
             app.aboutToQuit.connect(self._shutdown_background_operations)
 
     # ------------------------------------------------------------------
+    def _refresh_busy_label(self) -> None:
+        """Show/hide the "running" banner from the global busy state."""
+        try:
+            descriptions = list(dict.fromkeys(background_work_descriptions()))
+        except Exception:
+            descriptions = []
+        if descriptions:
+            shown = "; ".join(descriptions[:3])
+            extra = f" (+{len(descriptions) - 3} more)" if len(descriptions) > 3 else ""
+            self.busy_label.setText(f"⏳ Running in the background: {shown}{extra} — please wait")
+            self.busy_label.setVisible(True)
+            if not self._busy_timer.isActive():
+                self._busy_timer.start()
+        else:
+            self.busy_label.setVisible(False)
+            self._busy_timer.stop()
+
+    # ------------------------------------------------------------------
     def _shutdown_background_operations(self) -> None:
         """Best-effort stop of every live background thread before the app
         (or just this dock) is torn down.
@@ -496,6 +538,21 @@ class BEHAV3DWidget(QWidget):
                 thread,
             )
             self._direct_thread_zombies.append(thread)
+
+        # Threads owned by components that keep them parentless, which the
+        # findChildren sweeps above therefore cannot see: the assistant's network
+        # threads and the manual-correction editor's edit/index threads.
+        try:
+            if getattr(self, "assistant", None) is not None:
+                self.assistant.shutdown_threads(timeout_ms=500)
+        except Exception:
+            logger.warning("Teardown: assistant thread shutdown failed", exc_info=True)
+        try:
+            editor = getattr(getattr(self, "visualization_tab", None), "_editor", None)
+            if editor is not None:
+                editor._cleanup()
+        except Exception:
+            logger.warning("Teardown: segment editor cleanup failed", exc_info=True)
 
         # Second, longer pass: give stragglers (including BackgroundOperation's
         # own zombies from the sweep above) a further chance before we either

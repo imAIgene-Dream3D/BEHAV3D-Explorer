@@ -58,6 +58,7 @@ from behav3d.napari._background_runner import (
     ProgressBarRow,
     ThreadSafeLogger,
     fire_extra_callback,
+    install_busy_guard,
 )
 
 
@@ -203,6 +204,11 @@ class SegmentationTab(QWidget):
         ]
         self.method_combo.addItems(methods)
         self.method_combo.currentIndexChanged.connect(self._on_method_changed)
+        # Showing another method's page imports torch / probes devices on the GUI
+        # thread; refuse the switch while background work is running.
+        self._method_busy_guard = install_busy_guard(
+            self.method_combo, owner=self, what="changing the segmentation method"
+        )
         method_layout.addWidget(QLabel("Method:"))
         method_layout.addWidget(self.method_combo)
         method_group.setLayout(method_layout)
@@ -332,6 +338,10 @@ class SegmentationTab(QWidget):
                 self._log(f"⚠️ {name} failed to refresh after metadata update: {e}")
 
     def _log(self, msg):
+        from behav3d.napari._background_runner import redispatch_to_gui_thread
+
+        if redispatch_to_gui_thread(self._log, msg):
+            return
         import datetime
         timestamp = datetime.datetime.now().strftime("%H:%M:%S")
         self.log.append(f"[{timestamp}] {msg}")
@@ -1910,9 +1920,12 @@ class PixelClassifierWidget(QWidget):
     def run_train(self, interactive=True, extra_callbacks=None):
         """Run classifier training. Called by queue (interactive=False) or button (interactive=True).
 
-        Training stays synchronous on the Qt thread (deeply interleaved
-        with napari viewer state).  ``extra_callbacks`` is the queue's
-        chaining hook fired once the synchronous training finishes.
+        Training itself runs on a background thread (see
+        :meth:`_on_train_clicked`).  ``extra_callbacks`` is the queue's
+        chaining hook and fires only once training has *actually finished*
+        (results applied to the viewer) or failed -- not when this method
+        returns, which used to let the queue start the segmentation step while
+        the classifier was still being written to disk.
         """
         if not self.is_session_active:
             self.log("Session not active. Loading training data...")
@@ -1920,8 +1933,10 @@ class PixelClassifierWidget(QWidget):
 
         if self.is_session_active:
             try:
-                self._on_train_clicked()
-                fire_extra_callback(extra_callbacks, "on_done", None)
+                self._on_train_clicked(
+                    on_done=lambda _r: fire_extra_callback(extra_callbacks, "on_done", None),
+                    on_failed=lambda err: fire_extra_callback(extra_callbacks, "on_failed", str(err)),
+                )
             except Exception as e:
                 fire_extra_callback(extra_callbacks, "on_failed", str(e))
                 raise
@@ -1931,8 +1946,14 @@ class PixelClassifierWidget(QWidget):
             if not interactive:
                 raise RuntimeError("Training data not loaded. Please load training data manually first.")
 
-    def _on_train_clicked(self):
+    def _on_train_clicked(self, *_clicked_args, on_done=None, on_failed=None):
         """Train classifiers, predict pixels, and segment — runs on a background thread.
+
+        ``on_done(results)`` / ``on_failed(message)`` (keyword-only; the button's
+        ``clicked(bool)`` argument is swallowed by ``*_clicked_args``) fire when
+        the run has really completed or failed -- including the early exits that
+        never start a worker -- so a caller such as the Processing Queue can wait
+        for it.
 
         The work is split into three phases:
           1. Qt thread  — read viewer layers & widget values into plain NumPy arrays
@@ -1946,12 +1967,17 @@ class PixelClassifierWidget(QWidget):
         """
         if self._bg.is_running():
             self.log("⚠️ Training is already in progress.")
+            if on_failed is not None:
+                on_failed("Training is already in progress.")
             return
 
         # ── Phase 1 (Qt thread): gather all data we need ────────────────
         ctx = self._gather_train_inputs()
         if ctx is None:
-            return  # validation failed; error already logged
+            # validation failed; error already logged
+            if on_failed is not None:
+                on_failed("Training inputs could not be prepared (see the log).")
+            return
 
         all_features       = ctx["all_features"]
         targets            = ctx["targets"]
@@ -2114,10 +2140,21 @@ class PixelClassifierWidget(QWidget):
 
         # ── Phase 3 (Qt thread): apply results to viewer ─────────────────
         def _on_done(results):
-            self._apply_train_results(results)
+            try:
+                self._apply_train_results(results)
+            except Exception as exc:
+                traceback.print_exc()
+                self.log(f"❌ Error applying training results: {exc}")
+                if on_failed is not None:
+                    on_failed(str(exc))
+                return
+            if on_done is not None:
+                on_done(results)
 
         def _on_failed(err):
             self.log(f"❌ Error during training/segmentation: {err}")
+            if on_failed is not None:
+                on_failed(err)
 
         self._bg.run(
             fn=_do_train,
@@ -5726,6 +5763,11 @@ class APOCWidget(QWidget):
         self.spin_workers.valueChanged.connect(lambda _: self._save_apoc_params_to_yaml())
         self.combo_gpu_device.currentTextChanged.connect(self._on_gpu_device_changed)
         self.btn_force_cpu.toggled.connect(self._on_force_cpu_toggled)
+        # Switching the OpenCL device is process-global: not while a job is running.
+        self._gpu_busy_guards = [
+            install_busy_guard(self.combo_gpu_device, owner=self, what="changing the GPU device"),
+            install_busy_guard(self.btn_force_cpu, owner=self, what="changing the GPU device"),
+        ]
         self.check_process_all.stateChanged.connect(lambda _: self._save_apoc_params_to_yaml())
         self.spin_t_start.valueChanged.connect(lambda _: self._save_apoc_params_to_yaml())
         self.spin_t_end.valueChanged.connect(lambda _: self._save_apoc_params_to_yaml())

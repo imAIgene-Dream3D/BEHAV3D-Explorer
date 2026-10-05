@@ -9,6 +9,7 @@ from dtaidistance import dtw_ndim
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
+from behav3d.core.h5_access import write_adata
 from behav3d.analysis.behavior.general.umap import fit_umap
 from behav3d.analysis.behavior.track.utils import _resolve_track_paths
 from behav3d.analysis.behavior.track.visualization.plots.feature_dtw import (
@@ -1035,7 +1036,7 @@ def _create_original_behav3d_adata(output_dir, cell_type):
     }
 
     out_path = outdir.parent / get_dtaidistance_track_trajectories_filename(cell_type)
-    adata.write(out_path, compression="gzip")
+    write_adata(adata, out_path, compression="gzip")
     _save_adata_obs_csv(adata, out_path)
     print(f"- Saved original BEHAV3D AnnData ({len(adata)} tracks) to {out_path}")
     return adata

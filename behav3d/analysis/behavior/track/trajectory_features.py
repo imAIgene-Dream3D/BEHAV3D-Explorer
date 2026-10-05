@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
+from behav3d.core.h5_access import write_adata
 from behav3d.core.anndata import df_to_adata
 from behav3d.analysis.behavior.state.classification import (
     HMM_OPTIONAL_WINDOW_FEATURES,
@@ -192,7 +193,7 @@ def build_trajectory_feature_adata(
     if save:
         path = trajectory_feature_adata_path(output_dir, cell_type)
         path.parent.mkdir(parents=True, exist_ok=True)
-        adata.write(path, compression="gzip")
+        write_adata(adata, path, compression="gzip")
         if verbose:
             _winfo(
                 "trajectory-features",

@@ -7,7 +7,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.patches import Patch
 
 from behav3d.features.state_descriptive_features import rle_encode
-from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+from behav3d.core.state_columns import FULL_STATE_COL
 from behav3d.analysis.behavior.track.contact_grouping import (
     compute_track_contact_features,
     _contact_group_col_name,

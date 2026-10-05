@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from matplotlib import colors as mcolors
 from matplotlib import pyplot as plt
+from behav3d.core.state_columns import _resolve_obs_column_with_legacy_fallback  # noqa: F401  (re-export)
 from behav3d.analysis.behavior.utils import (
     _mixed_label_sort_key,
     _natural_sort_key,
@@ -687,20 +688,6 @@ def _rebuild_full_behavioral_state_from_intrinsic(
     adata.obs[full_state_col] = full_behavioral_state.astype("category")
     adata.obs["behavioral_clusterid"] = adata.obs["behavioral_clusterid"].astype("category")
     return adata
-
-
-def _resolve_obs_column_with_legacy_fallback(adata, canonical_col, legacy_aliases=()):
-    """Return the first of [canonical_col, *legacy_aliases] present in adata.obs.columns, or None.
-
-    Lets read sites recognise files written before an obs column was renamed
-    or consolidated, without forcing a rewrite of the file on read.
-    """
-    if adata is None or not hasattr(adata, "obs"):
-        return None
-    for col in (canonical_col, *legacy_aliases):
-        if col in adata.obs.columns:
-            return col
-    return None
 
 
 def build_identity_cluster_mapping(

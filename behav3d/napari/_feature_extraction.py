@@ -3872,6 +3872,10 @@ class FeatureExtractionTab(QWidget):
 
     # ── Helpers ──────────────────────────────────────────────────────────────
     def _log(self, msg):
+        from behav3d.napari._background_runner import redispatch_to_gui_thread
+
+        if redispatch_to_gui_thread(self._log, msg):
+            return
         import datetime
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         self.log_box.append(f"[{ts}] {msg}")

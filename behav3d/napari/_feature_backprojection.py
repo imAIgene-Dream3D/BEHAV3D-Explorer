@@ -74,7 +74,7 @@ class FeatureBackprojectionTab(QWidget):
         self._df_features_cell_type: Optional[str] = None
         self._df_features_mtime: Optional[float] = None
 
-        self._features_bg = BackgroundOperation(self)
+        self._features_bg = BackgroundOperation(self, silent=True)
         self._pending_show_after_load = False
 
         self._tracked_path: Optional[Path] = None

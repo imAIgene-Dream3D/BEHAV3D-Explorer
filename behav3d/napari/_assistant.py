@@ -1229,6 +1229,37 @@ class AssistantDock(QWidget):
         if had_text:
             self._append_log()
 
+    def shutdown_threads(self, timeout_ms: int = 500) -> int:
+        """Detach and stop this dock's network threads before teardown.
+
+        Called from ``BEHAV3DWidget._shutdown_background_operations``. These
+        ``QThread``s are parentless, so the widget's ``findChildren`` sweep never
+        saw them and quitting mid-request ended in "QThread: Destroyed while
+        thread is still running". A request blocked inside ``requests`` cannot be
+        interrupted (it ends by its own timeout), so stragglers are kept referenced
+        in ``self._zombie_threads`` rather than dropped. Their completion handlers
+        are disconnected first so a late finish cannot call into a destroyed dock.
+        Returns the number of threads still running.
+        """
+        if not hasattr(self, "_zombie_threads"):
+            self._zombie_threads = []
+        still_running = 0
+        for thread, worker in list(self._threads):
+            try:
+                thread.finished.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+            try:
+                thread.quit()
+                if thread.wait(timeout_ms):
+                    continue
+            except RuntimeError:
+                continue  # C++ thread object already gone
+            still_running += 1
+            self._zombie_threads.append((thread, worker))
+        self._threads = [(t, w) for (t, w) in self._threads if t.isRunning()]
+        return still_running
+
     def _cleanup_thread(self, thread, worker):
         self._threads = [(t, w) for (t, w) in self._threads if t is not thread]
         worker.deleteLater()

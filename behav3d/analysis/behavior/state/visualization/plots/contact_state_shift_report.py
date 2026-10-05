@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.gridspec import GridSpec
 
-from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+from behav3d.core.state_columns import FULL_STATE_COL
 from behav3d.analysis.behavior.utils import _contact_analysis_dir
 from behav3d.analysis.behavior.track.visualization.plots.exemplar_track_per_cluster import (
     _build_state_color_map,

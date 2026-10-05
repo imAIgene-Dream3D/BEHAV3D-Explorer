@@ -11,7 +11,7 @@ import yaml
 from matplotlib.backends.backend_pdf import PdfPages
 import matplotlib.pyplot as plt
 
-from behav3d.analysis.behavior.state.classification import FULL_STATE_COL, INTRINSIC_STATE_COL
+from behav3d.core.state_columns import FULL_STATE_COL, INTRINSIC_STATE_COL
 from behav3d.analysis.behavior.state.utils import (
     _apply_state_order,
     _get_classification_state_colors,

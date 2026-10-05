@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import threading
 import traceback
 from copy import deepcopy
 from pathlib import Path
@@ -57,6 +58,7 @@ from behav3d.core.metadata import (
     detect_other_cell_types_from_metadata,
 )
 from behav3d.core.qt_help import HelpButton
+from behav3d.napari._background_runner import begin_busy, end_busy, warn_if_busy
 
 # These are imported lazily by the conversion worker to keep startup fast.
 # from behav3d.preprocessing import convert_input_files_to_zarr
@@ -374,11 +376,32 @@ class DataPreparationTab(QWidget):
     # Signal emitted when metadata is successfully loaded
     metadata_loaded = Signal(object)  # pd.DataFrame
 
+    # The shared metadata table ---------------------------------------------
+    # Background workers used to receive this very DataFrame and the backends
+    # mutate it in place (``metadata.at[idx, "<cell>_tracks_image_path"] = ...``)
+    # while the GUI thread iterates it to refresh widgets; concurrent workers
+    # could interleave writes the same way. On a non-GUI thread the getter
+    # therefore returns a private snapshot: in-place edits stay private to that
+    # worker and are published only by *assignment* of the returned table, which
+    # every caller already does (``self.metadata_loader.metadata = updated``) and
+    # which is an atomic reference swap. The GUI thread keeps the live object.
+    @property
+    def metadata(self):
+        md = self._metadata
+        if md is not None and threading.current_thread() is not threading.main_thread():
+            return md.copy()
+        return md
+
+    @metadata.setter
+    def metadata(self, value):
+        self._metadata = value
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
         # State -----------------------------------------------------------
-        self.metadata: pd.DataFrame | None = None
+        self._metadata: pd.DataFrame | None = None
+        self.metadata = None
         self.output_dir: str = ""
         self.behav3d_parameters: dict = deepcopy(_DEFAULT_CONFIG)
         self._zarr_worker: _ZarrWorker | None = None
@@ -427,6 +450,10 @@ class DataPreparationTab(QWidget):
     # Logging helper
     # ------------------------------------------------------------------
     def _log(self, msg: str):
+        from behav3d.napari._background_runner import redispatch_to_gui_thread
+
+        if redispatch_to_gui_thread(self._log, msg):
+            return
         self.log.append(msg)
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
 
@@ -1495,6 +1522,9 @@ class DataPreparationTab(QWidget):
         if getattr(self, "_metadata_load_worker", None) is not None and self._metadata_load_worker.isRunning():
             return False
 
+        if warn_if_busy(self, "loading metadata"):
+            return False
+
         self.btn_load_metadata.setEnabled(False)
         self.btn_load_metadata.setText("Loading…")
         self.metadata_info_label.setText("⏳ Loading metadata…")
@@ -1503,9 +1533,13 @@ class DataPreparationTab(QWidget):
         self._metadata_load_worker.progress.connect(self._log, Qt.QueuedConnection)
         self._metadata_load_worker.finished.connect(self._on_metadata_load_finished)
         self._metadata_load_worker.start()
+        self._metadata_busy = begin_busy(
+            "Loading metadata", alive=self._metadata_load_worker.isRunning
+        )
         return True
 
     def _on_metadata_load_finished(self, result: dict):
+        end_busy(getattr(self, "_metadata_busy", None))
         self.btn_load_metadata.setEnabled(True)
         self.btn_load_metadata.setText("Load Metadata")
 
@@ -1948,6 +1982,8 @@ class DataPreparationTab(QWidget):
         if self._zarr_worker is not None:
             self._log("⚠️ Zarr conversion already running. Please wait.")
             return
+        if warn_if_busy(self, "converting to zarr"):
+            return
         out_dir = self.output_dir_edit.text().strip()
         if self.metadata is None:
             QMessageBox.warning(self, "Error", "Please load metadata first.")
@@ -2015,12 +2051,16 @@ class DataPreparationTab(QWidget):
                     self._zarr_clip_worker.progress.connect(self._log, Qt.QueuedConnection)
                     self._zarr_clip_worker.finished.connect(self._on_zarr_clip_done, Qt.QueuedConnection)
                     self._zarr_clip_worker.start()
+                    self._zarr_busy = begin_busy(
+                        "Clipping zarr files", alive=self._zarr_clip_worker.isRunning
+                    )
                     return
                 # else: "Leave As-Is" clicked — fall through to normal conversion
 
         self._start_zarr_conversion(out_dir, t_start, t_end, originals)
 
     def _on_zarr_clip_done(self, success: bool, message: str, sample_records=None):
+        end_busy(getattr(self, "_zarr_busy", None))
         out_dir, t_start, t_end, originals = self._zarr_clip_ctx
         self._log(message)
         if not success:
@@ -2048,9 +2088,13 @@ class DataPreparationTab(QWidget):
         self._zarr_worker.progress.connect(self._log, Qt.QueuedConnection)
         self._zarr_worker.finished.connect(self._on_zarr_done)
         self._zarr_worker.start()
+        self._zarr_busy = begin_busy(
+            "Converting images to zarr", alive=self._zarr_worker.isRunning
+        )
 
     def _on_zarr_done(self, success: bool, message: str,
                        updated_metadata, originals_map, sample_records=None):
+        end_busy(getattr(self, "_zarr_busy", None))
         self.zarr_btn.setEnabled(True)
         self.zarr_status.setText(message.split("\n")[0])
         self._log(message)

@@ -20,7 +20,12 @@ from qtpy.QtWidgets import (
 from qtpy.QtCore import Qt, Signal, Slot, QObject, QTimer
 from qtpy.QtGui import QFont
 
-from behav3d.napari._background_runner import ProgressBarRow
+from behav3d.napari._background_runner import (
+    ProgressBarRow,
+    queue_dispatch,
+    set_queue_active,
+    warn_if_busy,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1128,6 +1133,10 @@ class ProcessingQueuePanel(QWidget):
         if not self._steps or self._is_running:
             return
 
+        # Don't start a queue on top of a manual run that is still going.
+        if warn_if_busy(self, "starting the queue"):
+            return
+
         if self.metadata_loader.metadata is None:
             QMessageBox.warning(self, "No Metadata", "Please load metadata first.")
             return
@@ -1168,6 +1177,7 @@ class ProcessingQueuePanel(QWidget):
 
         # ── UI lock ──
         self._is_running = True
+        set_queue_active(True)
         self._skip_existing = skip_existing
         self._queue_total_start = time.time()
         self._active_step_idx = -1
@@ -1227,7 +1237,8 @@ class ProcessingQueuePanel(QWidget):
         print(f"\n▶ [{idx + 1}/{total}] {step.display_label}...", file=sys.stderr)
 
         try:
-            widget = self._dispatch_step(step, self._skip_existing)
+            with queue_dispatch():
+                widget = self._dispatch_step(step, self._skip_existing)
         except Exception as e:  # dispatch itself failed (sync exception)
             traceback.print_exc()
             QTimer.singleShot(0, lambda err=str(e): self._step_failed(idx, err))
@@ -1369,6 +1380,8 @@ class ProcessingQueuePanel(QWidget):
         print(f"  🛒 Queue finished in {total_elapsed:.1f}s", file=sys.stderr)
         print(f"{'=' * 60}\n", file=sys.stderr)
 
+        if self._is_running:
+            set_queue_active(False)
         self._is_running = False
         self._active_step_idx = -1
         self._disconnect_active_progress()
@@ -1448,7 +1461,7 @@ class ProcessingQueuePanel(QWidget):
     # ── Step runners (non-interactive) ─────────────────────────────────
 
     def _run_train(self, extra_callbacks):
-        """Run classifier training (synchronous; queue advances on return)."""
+        """Run classifier training (asynchronous; the queue advances when it finishes)."""
         parent = self.parent()
         while parent and not hasattr(parent, 'tabs'):
             parent = parent.parent()
@@ -1456,10 +1469,11 @@ class ProcessingQueuePanel(QWidget):
             parent.tabs.setCurrentIndex(2)  # Segmentation tab
 
         pc_widget = self.segmentation_tab.pixel_classifier_page
-        # ``run_train`` is intentionally synchronous; ``extra_callbacks``
-        # fires before the call returns so we don't double-emit.
+        # Training runs on the widget's BackgroundOperation; ``extra_callbacks``
+        # fires only once it has really finished or failed, so the next step
+        # (segmentation) cannot start while the classifier is still being written.
         pc_widget.run_train(interactive=False, extra_callbacks=extra_callbacks)
-        return None  # synchronous — body bar stays busy
+        return pc_widget  # lets the queue subscribe to the training progress
 
     def _run_segment(self, skip_existing, extra_callbacks):
         """Run batch segmentation asynchronously.

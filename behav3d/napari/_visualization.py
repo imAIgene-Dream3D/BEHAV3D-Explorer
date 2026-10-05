@@ -405,6 +405,10 @@ class VisualizationTab(QWidget):
     # Helpers
     # ------------------------------------------------------------------
     def _log(self, msg: str):
+        from behav3d.napari._background_runner import redispatch_to_gui_thread
+
+        if redispatch_to_gui_thread(self._log, msg):
+            return
         self.log.append(msg)
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
 
@@ -424,6 +428,10 @@ class VisualizationTab(QWidget):
     # Load dataset into napari
     # ------------------------------------------------------------------
     def _on_load_dataset(self):
+        from behav3d.napari._background_runner import warn_if_busy
+
+        if warn_if_busy(self, "loading the dataset"):
+            return
         # Always read the loader's current frame rather than the copy handed
         # over by the last ``metadata_loaded`` emission: a Segmentation or
         # Tracking run updates ``data_prep.metadata`` in place and may jump

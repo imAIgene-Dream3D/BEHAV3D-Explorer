@@ -17,6 +17,7 @@ from pathlib import Path
 
 # Configure PyOpenCL (cache off, build chatter silenced) before
 # pyclesperanto_prototype/apoc are imported below.
+from behav3d.core.qt_events import pump_events
 from behav3d.core.opencl_env import configure_pyopencl
 configure_pyopencl()
 
@@ -3029,7 +3030,7 @@ class APOCTrainingWidget(QWidget):
 
         try:
             self.status_label.setText(f"Running instance preview for {ct}...")
-            QApplication.processEvents()
+            pump_events()
 
             prob_layer_name = f"Probability Map ({ct.capitalize()})"
             prob_path = _probability_map_path(self.pixel_class_outdir, ct)
@@ -3512,7 +3513,7 @@ class APOCTrainingWidget(QWidget):
                 expanded_feature_spec = " ".join(expanded_feature_names)
 
                 self.status_label.setText(f"Processing {ct}...")
-                QApplication.processEvents()
+                pump_events()
 
                 images = self._get_images_for_tab(ct)
                 if not images:

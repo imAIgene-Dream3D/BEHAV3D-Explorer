@@ -11,7 +11,8 @@ from matplotlib.backends.backend_pdf import PdfPages
 from sklearn.metrics import silhouette_score
 from scipy.stats import chi2_contingency, ttest_rel, wilcoxon
 
-from behav3d.analysis.behavior.state.classification import FULL_STATE_COL, resolve_full_state_col
+from behav3d.core.h5_access import write_adata
+from behav3d.core.state_columns import FULL_STATE_COL, resolve_full_state_col
 from behav3d.analysis.behavior.state.utils import (
     _apply_state_order,
     _get_classification_state_colors,
@@ -607,7 +608,7 @@ def _write_model_if_requested(adata_tracks, output_dir, cell_type, *, save_outpu
         / get_dtaidistance_track_trajectories_filename(cell_type)
     )
     if bool(save_outputs):
-        adata_tracks.write(output_path, compression="gzip")
+        write_adata(adata_tracks, output_path, compression="gzip")
         _save_adata_obs_csv(adata_tracks, output_path)
     return output_path
 
@@ -1513,7 +1514,7 @@ def run_categorical_dtaidistance_trajectory_clustering(
 
     output_path = paths.outfolder / get_dtaidistance_track_trajectories_filename(cell_type)
     if bool(save_outputs):
-        adata_tracks.write(output_path, compression="gzip")
+        write_adata(adata_tracks, output_path, compression="gzip")
         _save_adata_obs_csv(adata_tracks, output_path)
         if bool(verbose):
             _winfo("trajectory-dtai", f"saved trajectory model: {output_path}")

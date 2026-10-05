@@ -32,21 +32,42 @@ happened. ``install_crash_diagnostics`` now also attaches a handler to the
 ``"behav3d"`` logger, so lifecycle breadcrumbs logged by e.g.
 ``behav3d.napari._background_runner`` land in the same file, in the same
 timeline, as the Qt/faulthandler output above.
+
+A fourth gap: Python exceptions raised inside Qt slots. Under ``napari.run()``
+napari replaces ``sys.excepthook`` with its own handler that turns the
+exception into an on-screen notification bubble and does *not* call the
+previous hook, so such a traceback never reached this file (the bubble is
+dismissed and the evidence is gone). Outside ``napari.run()`` PyQt5 >= 5.5
+instead calls ``qFatal()`` (-> abort) on an unhandled slot exception unless a
+Python ``sys.excepthook`` is installed. This module therefore (a) installs
+logging ``sys.excepthook``/``threading.excepthook`` that chain to the previous
+hooks, and (b) subscribes to napari's ``notification_manager`` so every
+exception *and warning* napari surfaces is also written here, with traceback.
 """
 from __future__ import annotations
 
 import faulthandler
 import logging
+import os
+import platform
 import sys
+import threading
+import traceback
 from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+# Separate child logger so slot exceptions / napari notifications are easy to
+# grep for ("behav3d.crash") in the shared log file.
+_crash_logger = logging.getLogger("behav3d.crash")
 
 # behav3d/napari/_crash_diagnostics.py -> repo root is three parents up.
 # Editable-installed (pip install -e .), so __file__ resolves to the actual
 # checkout, not a copy under site-packages.
 _LOG_DIR = Path(__file__).resolve().parents[2] / "logs"
+
+_hooks_installed = False
+_notifications_hooked = False
 
 # Kept at module scope: faulthandler and the Qt message handler both need
 # this file object to stay open and referenced for the lifetime of the
@@ -94,6 +115,130 @@ def _make_qt_message_handler(log_file, previous_handler):
     return _handler
 
 
+def _install_python_excepthooks() -> None:
+    """Log uncaught Python exceptions (main thread and worker threads) to the
+    crash log, chaining to whatever hook was active before.
+
+    Besides the logging, having *a* Python ``sys.excepthook`` installed keeps
+    PyQt5 from calling ``qFatal()`` on an unhandled exception in a slot when the
+    app is not running under ``napari.run()`` (which installs its own hook).
+    """
+    global _hooks_installed
+    if _hooks_installed:
+        return
+    _hooks_installed = True
+
+    previous_sys_hook = sys.excepthook
+
+    def _sys_hook(exc_type, exc_value, exc_tb):
+        try:
+            _crash_logger.error(
+                "Uncaught exception on main thread:\n%s",
+                "".join(traceback.format_exception(exc_type, exc_value, exc_tb)),
+            )
+        except Exception:
+            pass
+        try:
+            previous_sys_hook(exc_type, exc_value, exc_tb)
+        except Exception:
+            pass
+
+    sys.excepthook = _sys_hook
+
+    previous_thread_hook = getattr(threading, "excepthook", None)
+    if previous_thread_hook is not None:
+
+        def _thread_hook(args):
+            try:
+                name = getattr(args.thread, "name", "?")
+                _crash_logger.error(
+                    "Uncaught exception in thread %r:\n%s",
+                    name,
+                    "".join(
+                        traceback.format_exception(
+                            args.exc_type, args.exc_value, args.exc_traceback
+                        )
+                    ),
+                )
+            except Exception:
+                pass
+            try:
+                previous_thread_hook(args)
+            except Exception:
+                pass
+
+        threading.excepthook = _thread_hook
+
+
+def _log_napari_notification(notification) -> None:
+    """Write one napari notification (exception or warning) to the crash log."""
+    try:
+        severity = str(getattr(notification, "severity", "")).upper() or "INFO"
+        exc = getattr(notification, "exception", None)
+        if exc is not None:
+            body = "".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__)
+            )
+            _crash_logger.error("napari notification [%s]:\n%s", severity, body)
+        else:
+            _crash_logger.warning("napari notification [%s]: %s", severity, notification)
+    except Exception:
+        pass
+
+
+def install_notification_logging() -> bool:
+    """Subscribe to napari's notification manager so every exception/warning it
+    turns into a bubble is also persisted. Idempotent; returns True once hooked.
+
+    napari is imported lazily and a failure is swallowed: this must never stop
+    the plugin from loading.
+    """
+    global _notifications_hooked
+    if _notifications_hooked:
+        return True
+    try:
+        from napari.utils.notifications import notification_manager
+
+        notification_manager.notification_ready.connect(_log_napari_notification)
+        _notifications_hooked = True
+    except Exception:
+        logger.debug("Could not hook napari notifications", exc_info=True)
+    return _notifications_hooked
+
+
+def _log_environment_summary() -> None:
+    """One-time header so a crash log is interpretable on its own."""
+    try:
+        from importlib import metadata
+
+        def _ver(dist):
+            try:
+                return metadata.version(dist)
+            except Exception:
+                return "n/a"
+
+        pkgs = (
+            "napari", "vispy", "PyQt5", "PyQt6", "qtpy", "superqt", "magicgui",
+            "numpy", "pandas", "numba", "zarr", "anndata", "scanpy", "torch",
+        )
+        _crash_logger.info(
+            "Environment: python=%s platform=%s | %s",
+            platform.python_version(),
+            platform.platform(),
+            " ".join(f"{d}={_ver(d)}" for d in pkgs),
+        )
+        _crash_logger.info(
+            "Env vars: NUMBA_THREADING_LAYER=%s NUMBA_NUM_THREADS=%s "
+            "NAPARI_CATCH_ERRORS=%s KMP_DUPLICATE_LIB_OK=%s",
+            os.environ.get("NUMBA_THREADING_LAYER"),
+            os.environ.get("NUMBA_NUM_THREADS"),
+            os.environ.get("NAPARI_CATCH_ERRORS"),
+            os.environ.get("KMP_DUPLICATE_LIB_OK"),
+        )
+    except Exception:
+        pass
+
+
 def install_crash_diagnostics() -> None:
     """Enable faulthandler + a Qt message logger, both writing to a
     timestamped file under the repo's ``logs/`` directory.
@@ -130,6 +275,13 @@ def install_crash_diagnostics() -> None:
             ))
             behav3d_logger.addHandler(file_handler)
             behav3d_logger.setLevel(logging.INFO)
+
+            _log_environment_summary()
+            _install_python_excepthooks()
+
+        # Idempotent, and safe to retry on every call: napari may not have been
+        # importable yet the first time round on some launch paths.
+        install_notification_logging()
 
         from qtpy.QtCore import qInstallMessageHandler
 

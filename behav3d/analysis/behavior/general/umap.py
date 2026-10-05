@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-import umap
 
 from behav3d.analysis.behavior.utils import _handle_nan_in_distance_matrix
 
@@ -12,6 +11,10 @@ def fit_umap(
     umap_minimal_distance=None,
     random_state=None,
 ):
+    # Lazy: importing umap pulls in pynndescent, whose numba JIT costs ~9 s, and
+    # this module is imported by every track-clustering report.
+    import umap
+
     print("- Fitting the dynamic time warping to a UMAP")
     assert config is not None or all(
         [umap_n_neighbors, umap_minimal_distance]
