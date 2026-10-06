@@ -2645,7 +2645,7 @@ class AnalysisTab(QWidget):
         # Re-scan when the user switches sub-tab so new outputs show up
         # without an explicit refresh click.
         self.inner_tabs.currentChanged.connect(
-            lambda _i: self.results_panel.refresh()
+            lambda _i: self.results_panel.refresh_if_stale()
         )
         # Leaving Single Cell's backprojection sub-tabs for another inner tab
         # (Feature Backprojection, Population Dynamics) shouldn't leave a
@@ -2679,6 +2679,75 @@ class AnalysisTab(QWidget):
             self.metadata_loader is not None
             and getattr(self.metadata_loader, "metadata", None) is not None
         )
+        # Every inner tab and the Results panel connected to ``metadata_loaded``
+        # before this slot, so they have all just refreshed: remember what
+        # the outputs looked like so the first switch to this tab doesn't
+        # redo that work.
+        self._refreshed_fingerprint = self._refresh_fingerprint()
+
+    def _refresh_fingerprint(self) -> tuple:
+        """Stat-only snapshot of every output the inner tabs inspect.
+
+        The inner tabs show which outputs exist (filtered CSVs, track-feature
+        CSVs, behavioral-state / track h5ads) and a refresh re-reads them, so
+        the snapshot holds the path, mtime and size of each of those files plus
+        the mtime of the folders that gain new files. A handful of ``stat``
+        calls per cell type; never reads file contents.
+        """
+        loader = self.metadata_loader
+        out = getattr(loader, "output_dir", None) if loader is not None else None
+        if not out or getattr(loader, "metadata", None) is None:
+            return (None,)
+        out = Path(str(out)).expanduser()
+
+        def _st(p):
+            try:
+                st = Path(p).stat()
+                return (str(p), st.st_mtime_ns, st.st_size)
+            except OSError:
+                return (str(p), None, None)
+
+        try:
+            org, imm, oth = _detect_cell_types(loader)
+        except Exception:
+            org, imm, oth = [], [], []
+        track_tab = getattr(getattr(self, "single_cell_tab", None), "track_tab", None)
+        parts = [("out", str(out), id(getattr(loader, "metadata", None)))]
+        for ct in list(org) + list(imm) + list(oth):
+            base = out / "analysis" / ct
+            parts.append(_st(base))
+            parts.append(_st(base / "track_features"))
+            parts.append(_st(_filtered_csv(out, ct)))
+            parts.append(_st(
+                base / "track_features" / f"BEHAV3D_{ct}_combined_track_features.csv"
+            ))
+            states = base / "behavioral_states"
+            parts.append(_st(states))
+            parts.append(_st(states / f"BEHAV3D_{ct}_behavioral_states.h5ad"))
+            parts.append(_st(states / "processing"))
+            parts.append(_st(
+                states / "processing" / f"BEHAV3D_{ct}_behavioral_states_modeldata.h5ad"
+            ))
+            if track_tab is not None:
+                try:
+                    tpath = track_tab._track_adata_path(ct)
+                except Exception:
+                    tpath = None
+                if tpath:
+                    parts.append(_st(tpath))
+                    parts.append(_st(Path(tpath).parent))
+        return tuple(parts)
+
+    def refresh_if_stale(self) -> bool:
+        """Refresh the inner tabs only if something they show has changed
+        since they were last refreshed. Called on every switch to this tab;
+        before, every switch re-ran the whole refresh cascade (CSV header reads,
+        h5ad reads, panel rebuilds) even when nothing had changed. Returns
+        ``True`` when a refresh ran."""
+        if self._refresh_fingerprint() == getattr(self, "_refreshed_fingerprint", None):
+            return False
+        self._on_metadata_updated()
+        return True
 
     def _on_metadata_updated(self, *_):
         """Cascade metadata updates to inner tabs and results panel."""
@@ -2689,7 +2758,10 @@ class AnalysisTab(QWidget):
         if hasattr(self, "single_cell_tab"):
             self.single_cell_tab._on_metadata_updated()
         if hasattr(self, "results_panel"):
-            self.results_panel.refresh()
+            self.results_panel.refresh_if_stale()
+        # Taken after the cascade: it may create folders (mkdir) that would
+        # otherwise make the very next check look stale.
+        self._refreshed_fingerprint = self._refresh_fingerprint()
 
     # ── Cell type grouping ────────────────────────────────────────────────
     def _on_open_grouping_dialog(self):

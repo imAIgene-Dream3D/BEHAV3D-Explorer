@@ -118,6 +118,10 @@ def fire_extra_callback(extra_callbacks, key: str, *args) -> None:
 #
 # * ``silent=True`` instances (automatic background scans/preloads) are never
 #   counted as "work the user must wait for" and are never blocked themselves.
+#   ``notify=True`` on top of that makes such a scan *visible*: it is listed in
+#   the main widget's banner (see :func:`informational_work_descriptions`) as
+#   "loading in the background, you can keep working", but still never blocks
+#   anything -- read-only loads whose results arrive via GUI-thread callbacks.
 # * the Processing Queue marks itself active (so tab switches / selectors / run
 #   buttons that call :func:`warn_if_busy` are refused while it runs) and wraps
 #   each step dispatch in :func:`queue_dispatch`, so a queue step can start
@@ -218,6 +222,20 @@ def background_work_descriptions(exclude: Optional["BackgroundOperation"] = None
     out.extend(_live_scope_descriptions())
     if include_queue and _queue_active_count > 0:
         out.append("Processing queue")
+    return out
+
+
+def informational_work_descriptions() -> List[str]:
+    """Descriptions of running ``silent`` operations that asked to be shown
+    (``notify=True``): automatic loads the user may like to know about but never
+    has to wait for. Not counted by :func:`any_background_work`."""
+    out: List[str] = []
+    for op in list(_INSTANCES):
+        try:
+            if op.silent and op.notify:
+                out.extend(op._busy_descriptions())
+        except RuntimeError:
+            continue
     return out
 
 
@@ -957,14 +975,24 @@ class BackgroundOperation(QObject):
 
     progress = Signal(int, int, str)
 
-    def __init__(self, parent: Optional[QObject] = None, *, silent: bool = False) -> None:
+    def __init__(self, parent: Optional[QObject] = None, *, silent: bool = False,
+                 notify: bool = False) -> None:
         """``silent=True`` marks an automatic background task (results scan,
         column scan, data preload) that the user never asked for: it is never
         counted as work to wait for, and is never blocked by the busy guard.
+
+        ``notify=True`` (only meaningful with ``silent``) lists the running task
+        in the main widget's banner as an informational "loading in the
+        background" entry, without ever blocking tab switches or other actions.
         """
         super().__init__(parent)
         self._state: Optional[_RunState] = None
+        # True while run() is between its guards and ``self._state`` being set.
+        # That window contains napari calls that pump the event loop, so a second
+        # click / showEvent can re-enter run() before ``_state`` exists.
+        self._starting = False
         self.silent = bool(silent)
+        self.notify = bool(notify)
         # Threads that didn't stop within a cancel() timeout. Kept
         # referenced (never dereferenced) so Qt can't destroy a QThread
         # while its OS thread is still alive -- see cancel()'s docstring.
@@ -993,6 +1021,8 @@ class BackgroundOperation(QObject):
 
     # ------------------------------------------------------------------
     def is_running(self) -> bool:
+        if self._starting:
+            return True
         st = self._state
         # ``st.thread.isRunning()`` reflects Qt's own view of whether the OS
         # thread is still alive, not just whether we haven't cleared
@@ -1085,6 +1115,55 @@ class BackgroundOperation(QObject):
                             exclude=self, include_queue=False):
                 return
 
+        # Claim the instance *before* anything that can pump the event loop
+        # (make_activity_progress -> napari's QApplication.processEvents(),
+        # button/progress-row repaints). A second click or showEvent delivered
+        # there would otherwise re-enter run(), see no state, start its own
+        # thread, and then this call would overwrite ``self._state`` and drop the
+        # last reference to that running QThread ("Destroyed while thread is
+        # still running" -> process abort).
+        self._starting = True
+        try:
+            self._launch(
+                fn, args, kwargs, desc=desc, progress_row=progress_row,
+                buttons=buttons, viewer=viewer, on_done=on_done,
+                on_failed=on_failed, inject_progress=inject_progress,
+                inject_cancel_check=inject_cancel_check,
+                indeterminate=indeterminate, finish_delay_ms=finish_delay_ms,
+            )
+        finally:
+            self._starting = False
+
+    # ------------------------------------------------------------------
+    def _park(self, old_state: _RunState, *, cleanup_ui: bool = True) -> None:
+        """Detach ``old_state`` from this instance and keep its thread alive.
+
+        Never lets the last Python reference to a possibly-still-running
+        ``QThread`` go; parks it in ``_zombie_threads`` instead.
+        """
+        if old_state.cancel_event is not None:
+            old_state.cancel_event.set()
+        if old_state.thread is not None:
+            for signal, slot in (
+                (old_state.thread.finished, self._on_thread_finished),
+                (old_state.worker.done, self._on_done),
+                (old_state.worker.failed, self._on_failed),
+                (old_state.worker.progress, self._on_progress),
+            ):
+                try:
+                    signal.disconnect(slot)
+                except (TypeError, RuntimeError):
+                    pass
+        if cleanup_ui:
+            self._cleanup_ui()
+        if old_state.thread is not None:
+            self._zombie_threads.append((old_state.thread, old_state.worker))
+        self._state = None
+
+    # ------------------------------------------------------------------
+    def _launch(self, fn, args, kwargs, *, desc, progress_row, buttons, viewer,
+                on_done, on_failed, inject_progress, inject_cancel_check,
+                indeterminate, finish_delay_ms) -> None:
         # self._state may still reference a previous run. Note that
         # is_running() above reads the same live QThread.isRunning() flag
         # we'd have to re-read here to decide whether it's still alive --
@@ -1119,23 +1198,7 @@ class BackgroundOperation(QObject):
                     "misreported it as finished.",
                     old_state.fn_name, getattr(fn, "__name__", repr(fn)),
                 )
-            if old_state.cancel_event is not None:
-                old_state.cancel_event.set()
-            if old_state.thread is not None:
-                for signal, slot in (
-                    (old_state.thread.finished, self._on_thread_finished),
-                    (old_state.worker.done, self._on_done),
-                    (old_state.worker.failed, self._on_failed),
-                    (old_state.worker.progress, self._on_progress),
-                ):
-                    try:
-                        signal.disconnect(slot)
-                    except (TypeError, RuntimeError):
-                        pass
-            self._cleanup_ui()
-            if old_state.thread is not None:
-                self._zombie_threads.append((old_state.thread, old_state.worker))
-            self._state = None
+            self._park(old_state)
 
         kwargs = dict(kwargs or {})
         btn_list = [b for b in (buttons or []) if b is not None]
@@ -1172,6 +1235,18 @@ class BackgroundOperation(QObject):
             "BackgroundOperation run start: owner=%r fn=%s desc=%r",
             self.parent(), fn_name, desc,
         )
+
+        # Safety net: the calls above can pump events. If anything still managed to
+        # install a state meanwhile, park it rather than drop a live QThread.
+        # (Its buttons/progress row are shared with this run, so don't clean them.)
+        stray = self._state
+        if stray is not None:
+            logger.warning(
+                "BackgroundOperation.run: state for fn=%s appeared while "
+                "starting fn=%s -- parking it as zombie.",
+                stray.fn_name, getattr(fn, "__name__", repr(fn)),
+            )
+            self._park(stray, cleanup_ui=False)
 
         state = _RunState(
             thread=thread,

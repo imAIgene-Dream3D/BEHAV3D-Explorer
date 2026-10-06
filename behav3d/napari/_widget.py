@@ -13,6 +13,7 @@ from behav3d.napari._background_runner import (
     BackgroundOperation,
     background_work_descriptions,
     busy_notifier,
+    informational_work_descriptions,
     install_busy_guard,
 )
 from behav3d.napari._queue import ProcessingQueuePanel, StepType
@@ -464,10 +465,8 @@ class BEHAV3DWidget(QWidget):
                 )
             except Exception:
                 pass
-            # Keep the assistant's context bar in sync with workflow state.
-            self.tabs.currentChanged.connect(
-                lambda *_: self.assistant.refresh_context_bar()
-            )
+            # Keep the assistant's context bar in sync with workflow state. Tab
+            # switches are already handled by AssistantDock._on_tab_changed.
             if hasattr(self.data_prep_tab, "metadata_loaded"):
                 self.data_prep_tab.metadata_loaded.connect(
                     lambda *_: self.assistant.refresh_context_bar()
@@ -493,21 +492,36 @@ class BEHAV3DWidget(QWidget):
 
     # ------------------------------------------------------------------
     def _refresh_busy_label(self) -> None:
-        """Show/hide the "running" banner from the global busy state."""
+        """Show/hide the "running" banner from the global busy state.
+
+        Work the user has to wait for takes precedence. Otherwise the banner
+        lists automatic background loads (column scans, data reads) as
+        informational: they never block anything."""
         try:
             descriptions = list(dict.fromkeys(background_work_descriptions()))
         except Exception:
             descriptions = []
+        try:
+            info = list(dict.fromkeys(informational_work_descriptions()))
+        except Exception:
+            info = []
         if descriptions:
             shown = "; ".join(descriptions[:3])
             extra = f" (+{len(descriptions) - 3} more)" if len(descriptions) > 3 else ""
             self.busy_label.setText(f"⏳ Running in the background: {shown}{extra} — please wait")
-            self.busy_label.setVisible(True)
-            if not self._busy_timer.isActive():
-                self._busy_timer.start()
+        elif info:
+            shown = "; ".join(info[:3])
+            extra = f" (+{len(info) - 3} more)" if len(info) > 3 else ""
+            self.busy_label.setText(
+                f"⏳ Loading in the background: {shown}{extra} — you can keep working"
+            )
         else:
             self.busy_label.setVisible(False)
             self._busy_timer.stop()
+            return
+        self.busy_label.setVisible(True)
+        if not self._busy_timer.isActive():
+            self._busy_timer.start()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -991,15 +1005,15 @@ class BEHAV3DWidget(QWidget):
 
         self._last_tab_index = index
 
-        # Auto-refresh Analysis tab when switched to. This already cascades
-        # into single_cell_tab._on_metadata_updated() (see
-        # AnalysisTab._on_metadata_updated), so no separate call is needed.
-        # Skip the refresh (rather than firing it unconditionally on every
-        # switch to this tab) when a background CSV column scan is already
-        # in flight in the Single Cell sub-tabs -- re-cascading would just
-        # queue a second, wasteful multi-second full-CSV rescan behind the
-        # first. The in-flight scan's own on_done/on_failed callback already
-        # refreshes the UI once it completes, so nothing is lost by skipping.
+        # Refresh the Analysis tab when switched to, but only if something it
+        # shows changed since its last refresh (a stat-only check; see
+        # AnalysisTab.refresh_if_stale). It used to re-run the whole cascade on
+        # every switch, which on big datasets meant re-reading CSV headers and
+        # h5ad files on the GUI thread each time.
+        # Skip it while a background column scan is in flight in the Single
+        # Cell sub-tabs: re-cascading would only queue a second full-CSV rescan
+        # behind the first. That scan's own on_done callback refreshes the UI,
+        # and the next switch picks up anything still stale.
         if index == 6 and hasattr(self, 'analysis_tab'):
             sc_tab = getattr(self.analysis_tab, 'single_cell_tab', None)
             bg_ops = [
@@ -1008,8 +1022,8 @@ class BEHAV3DWidget(QWidget):
                 for bg_name in ('_colscan_bg', '_preload_bg')
             ]
             scan_in_flight = any(bg is not None and bg.is_running() for bg in bg_ops)
-            if not scan_in_flight and hasattr(self.analysis_tab, '_on_metadata_updated'):
-                self.analysis_tab._on_metadata_updated()
+            if not scan_in_flight and hasattr(self.analysis_tab, 'refresh_if_stale'):
+                self.analysis_tab.refresh_if_stale()
 
     def sizeHint(self):
         return QSize(440, 650)

@@ -93,11 +93,16 @@ class _ImportTrackingPage(QWidget):
         self._switch_to_data_prep_edit = switch_to_data_prep_edit_callback
         # sample_name -> {"path_edit", "browse_btn", "status_layout", "last_value", "row_idx"}
         self._rows = {}
+        # The per-sample rows (each one stats its source and destination paths) are
+        # only built while this page is on screen: every metadata (re)load used to
+        # rebuild the page of *every* cell type's panel, shown or not -- including
+        # panels of earlier generations that Qt's QTabWidget.clear() keeps alive.
+        self._stale = False
         self._init_ui()
         if hasattr(metadata_loader, "metadata_loaded"):
             metadata_loader.metadata_loaded.connect(self._on_metadata_updated)
         if getattr(metadata_loader, "metadata", None) is not None:
-            self._rebuild()
+            self._on_metadata_updated()
 
     # ── column helpers ──────────────────────────────────────────────────
     def _tracks_img_col(self):
@@ -179,7 +184,17 @@ class _ImportTrackingPage(QWidget):
         layout.addWidget(self._scroll)
 
     def _on_metadata_updated(self, _=None):
-        self._rebuild()
+        if self.isVisible():
+            self._stale = False
+            self._rebuild()
+        else:
+            self._stale = True
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._stale:
+            self._stale = False
+            self._rebuild()
 
     def _rebuild(self):
         # Detach the old content widget without destroying it — this prevents

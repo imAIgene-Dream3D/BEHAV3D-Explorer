@@ -238,6 +238,82 @@ def test_run_parks_live_thread_when_qthread_isRunning_itself_misreports_false():
     del first_state.thread.isRunning  # restore the real bound method
 
 
+def test_reentrant_run_during_event_pump_is_refused_not_overwritten(monkeypatch):
+    """napari's progress bar creation calls QApplication.processEvents(), which
+    delivers a second click / showEvent *inside* run(), before ``_state`` is set.
+    The re-entrant call used to start its own thread and then be overwritten by
+    the outer call -> "QThread: Destroyed while thread is still running"."""
+    import behav3d.napari._background_runner as br
+
+    _qt_app()
+    parent = QWidget()
+    op = BackgroundOperation(parent, silent=True)
+    block_event = threading.Event()
+    started = []
+    real_thread_cls = br.QThread
+
+    class _CountingThread(real_thread_cls):
+        def start(self, *a, **k):
+            started.append(self)
+            return super().start(*a, **k)
+
+    monkeypatch.setattr(br, "QThread", _CountingThread)
+
+    calls = {"n": 0}
+    real_make = br.make_activity_progress
+
+    def _pumping_make(viewer, desc="Running…"):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Simulate the nested event: a second run() on the same instance.
+            op.run(fn=_blocking_fn, args=(block_event,), inject_progress=False)
+        return real_make(viewer, desc=desc)
+
+    monkeypatch.setattr(br, "make_activity_progress", _pumping_make)
+
+    done = []
+    op.run(fn=_blocking_fn, args=(block_event,), inject_progress=False,
+           on_done=done.append)
+
+    assert len(started) == 1, "re-entrant run() must be refused, not start a 2nd thread"
+    assert op._zombie_threads == []
+    assert op.is_running()
+    assert op._starting is False
+
+    block_event.set()
+    assert _pump_until(lambda: not op.is_running() and done == ["released"])
+
+
+def test_run_parks_state_that_appears_while_starting(monkeypatch):
+    """Safety net: if a state is somehow installed during the pump window, the
+    outer run() parks its live thread instead of dropping the last reference."""
+    import behav3d.napari._background_runner as br
+
+    _qt_app()
+    parent = QWidget()
+    op = BackgroundOperation(parent, silent=True)
+    block_event = threading.Event()
+
+    op.run(fn=_blocking_fn, args=(block_event,), inject_progress=False)
+    first_state = op._state
+    assert first_state is not None and first_state.thread.isRunning()
+    op._state = None  # forget it, as a bypassed guard would
+
+    real_make = br.make_activity_progress
+
+    def _installing_make(viewer, desc="Running…"):
+        op._state = first_state  # state "appears" while the outer run is starting
+        return real_make(viewer, desc=desc)
+
+    monkeypatch.setattr(br, "make_activity_progress", _installing_make)
+    op.run(fn=_quick_fn, inject_progress=False)
+
+    assert first_state.thread in [t for t, _w in op._zombie_threads]
+
+    block_event.set()
+    assert _pump_until(lambda: op.drain_zombies(timeout_ms=50) == 0)
+
+
 # --------------------------------------------------------------------------
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

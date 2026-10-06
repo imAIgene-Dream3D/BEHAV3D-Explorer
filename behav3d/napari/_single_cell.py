@@ -346,27 +346,19 @@ def _scan_state_feature_columns(csv_path, usable_cols, cancel_check=None) -> dic
     ``BackgroundOperation`` from `StateClassificationSubTab._populate_dynamic_features`
     so the full-CSV scan doesn't block the Qt main thread.
 
-    ``cancel_check``, when given, is polled by both underlying scans (see
-    ``column_detection.py``) and also checked between them, so a teardown
-    mid-scan (e.g. app quit) doesn't kick off the second full-CSV pass."""
-    from behav3d.core.column_detection import (
-        detect_binary_columns_from_csv,
-        detect_non_numeric_columns_from_csv,
-    )
-    bin_cols = detect_binary_columns_from_csv(Path(csv_path), usable_cols, cancel_check=cancel_check)
+    Columns that are not binary and cannot be parsed as continuous numbers
+    (e.g. "touching_27ts" holding comma-separated contact-ID lists, or
+    unit/label columns) must not be offered as selectable HMM features --
+    picking one silently breaks the .h5ad write later on.
+
+    Delegates to ``classify_feature_columns``: one pass over the CSV, memoized
+    per file version, and shared with ``TrajectoryFeatureSelector``. ``cancel_check``
+    is polled once per chunk, so a teardown mid-scan (e.g. app quit) stops it."""
+    from behav3d.core.column_detection import classify_feature_columns
+    result = classify_feature_columns(Path(csv_path), usable_cols, cancel_check=cancel_check)
     if cancel_check is not None and cancel_check():
         return {"bin_cols": [], "feat_cols": []}
-    bin_set = set(bin_cols)
-    # Columns that aren't binary and can't be parsed as continuous numbers
-    # (e.g. "touching_27ts" holding comma-separated contact-ID lists, or
-    # unit/label columns) must not be offered as selectable HMM features --
-    # picking one silently breaks the .h5ad write later on.
-    non_feature_candidates = [c for c in usable_cols if c not in bin_set]
-    non_numeric_cols = set(
-        detect_non_numeric_columns_from_csv(Path(csv_path), non_feature_candidates, cancel_check=cancel_check)
-    )
-    feat_cols = [c for c in non_feature_candidates if c not in non_numeric_cols]
-    return {"bin_cols": bin_cols, "feat_cols": feat_cols}
+    return {"bin_cols": result["bin_cols"], "feat_cols": result["feat_cols"]}
 
 
 def _read_h5ad_shared(path, **kwargs):
@@ -392,6 +384,128 @@ def _read_h5ad_shared(path, **kwargs):
         ) from None
 
 
+_MISSING = object()
+# (kind, (path, mtime_ns, size)) -> longest track length (None = unknown).
+_MAX_TRACK_LEN_CACHE: dict = {}
+
+
+def _h5ad_obs_codes(f, col):
+    """Integer codes (``-1`` = missing) for one obs column of an open h5ad file,
+    read as numpy arrays without building per-row Python objects. Handles both
+    AnnData's categorical (categories/codes) group and plain array encodings."""
+    import h5py
+    import numpy as np
+    import pandas as pd
+
+    node = f["obs"][col]
+    if isinstance(node, h5py.Group):
+        return np.asarray(node["codes"][:], dtype=np.int64)
+    codes, _ = pd.factorize(node[:])
+    return np.asarray(codes, dtype=np.int64)
+
+
+def _longest_group_size(codes_a, codes_b):
+    """Largest number of rows sharing one ``(a, b)`` pair, ignoring rows where
+    either code is ``-1`` (missing). Same result as a pandas
+    ``groupby([a, b]).size().max()`` that drops NaN keys."""
+    import numpy as np
+    import pandas as pd
+
+    valid = (codes_a >= 0) & (codes_b >= 0)
+    if not valid.any():
+        return 0
+    a = codes_a[valid]
+    b = codes_b[valid]
+    combined = a * (int(b.max()) + 1) + b
+    inverse, _ = pd.factorize(combined)
+    return int(np.bincount(inverse).max())
+
+
+def _compute_max_track_length(kind, path, cancel_check=None):
+    """Longest ``(sample_name, TrackID)`` track in the given file, or ``None``.
+    Pure numpy/pandas/h5py, no Qt: runs on a ``BackgroundOperation`` worker.
+
+    ``kind`` is ``"csv"`` (a track-features/positions CSV) or ``"h5ad"`` (the
+    behavioral-states file, whose obs columns are read straight from HDF5)."""
+    try:
+        import pandas as pd
+
+        if kind == "csv":
+            ids = pd.read_csv(path, usecols=["sample_name", "TrackID"])
+            codes_a, _ = pd.factorize(ids["sample_name"])
+            codes_b, _ = pd.factorize(ids["TrackID"])
+            longest = _longest_group_size(codes_a.astype("int64"), codes_b.astype("int64"))
+        else:
+            import h5py
+            from behav3d.core.h5_access import h5_read
+
+            with h5_read(), h5py.File(str(path), "r") as f:
+                obs = f.get("obs", {})
+                if "sample_name" not in obs or "TrackID" not in obs:
+                    return None
+                codes_a = _h5ad_obs_codes(f, "sample_name")
+                codes_b = _h5ad_obs_codes(f, "TrackID")
+            if len(codes_a) == 0 or len(codes_a) != len(codes_b):
+                return None
+            longest = _longest_group_size(codes_a, codes_b)
+        return longest if longest > 0 else None
+    except Exception:
+        return None
+
+
+# (path, mtime_ns, size) -> (preprocessing dict, var names, obs column names)
+_H5AD_LIGHT_META_CACHE: dict = {}
+
+
+def _read_h5ad_light_meta(path):
+    """``(preprocessing, var_names, obs_columns)`` of an h5ad file, read straight
+    from HDF5 *without* loading the obs table (which ``read_h5ad(backed="r")``
+    does, and which is O(rows) for a multi-GB states file). Memoized per file
+    version. Returns ``None`` when the file can't be read this way, so callers
+    can fall back to a backed ``read_h5ad``."""
+    key = _file_key(path)
+    if key is None:
+        return None
+    hit = _H5AD_LIGHT_META_CACHE.get(key)
+    if hit is not None:
+        return hit
+    try:
+        import h5py
+        try:
+            from anndata.io import read_elem
+        except ImportError:  # older anndata
+            from anndata.experimental import read_elem
+
+        with h5py.File(str(path), "r") as f:
+            var_names = [str(v) for v in read_elem(f["var"]).index]
+            obs_columns = {
+                (c.decode() if isinstance(c, bytes) else str(c))
+                for c in f["obs"].attrs["column-order"]
+            }
+            pre = {}
+            if "uns" in f and "preprocessing" in f["uns"]:
+                pre = read_elem(f["uns"]["preprocessing"])
+    except Exception:
+        return None
+    result = (pre if isinstance(pre, dict) else {}, var_names, obs_columns)
+    if len(_H5AD_LIGHT_META_CACHE) >= 8:
+        _H5AD_LIGHT_META_CACHE.pop(next(iter(_H5AD_LIGHT_META_CACHE)))
+    _H5AD_LIGHT_META_CACHE[key] = result
+    return result
+
+
+def _file_key(path):
+    """``(path, mtime_ns, size)`` of ``path`` or ``None``: identifies one *version*
+    of a file, so loaded data can be reused until the file is rewritten."""
+    if not path:
+        return None
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return None
+    return (str(path), st.st_mtime_ns, st.st_size)
+
+
 class _LatestOnlyLoader:
     """Background-load one file at a time; deliver only the *latest* request.
 
@@ -415,16 +529,16 @@ class _LatestOnlyLoader:
         self._want = None
         self._pending = None
 
-    def request(self, path, loader, on_done, on_failed) -> None:
+    def request(self, path, loader, on_done, on_failed, desc="Loading data…") -> None:
         self._want = path
         if self._bg.is_running():
             if self._inflight == path:
                 return  # same file already loading: its result is what we want
-            self._pending = (path, loader, on_done, on_failed)
+            self._pending = (path, loader, on_done, on_failed, desc)
             return
-        self._start(path, loader, on_done, on_failed)
+        self._start(path, loader, on_done, on_failed, desc)
 
-    def _start(self, path, loader, on_done, on_failed) -> None:
+    def _start(self, path, loader, on_done, on_failed, desc="Loading data…") -> None:
         self._inflight = path
         self._pending = None
 
@@ -440,7 +554,7 @@ class _LatestOnlyLoader:
                 on_failed(err)
             self._drain()
 
-        self._bg.run(fn=loader, inject_progress=False, on_done=_done, on_failed=_failed)
+        self._bg.run(fn=loader, inject_progress=False, desc=desc, on_done=_done, on_failed=_failed)
 
     def _drain(self) -> None:
         pending, self._pending = self._pending, None
@@ -846,16 +960,19 @@ class StateClassificationSubTab(QWidget):
         self.metadata_loader = metadata_loader
         self._get_cell_type = cell_type_getter
         self._model_adata = None
+        # (path, mtime, size) of the file ``_model_adata`` was read from; lets
+        # ``_reload`` keep the loaded copy while the file is unchanged.
+        self._model_adata_key = None
         self._hmm_model = None
         self._hmm_model_cell_type = None
         self._bg = BackgroundOperation(self)
-        self._preload_bg = BackgroundOperation(self, silent=True)
+        self._preload_bg = BackgroundOperation(self, silent=True, notify=True)
         self._preload_loader = _LatestOnlyLoader(self._preload_bg)
         # Dedicated instance for the feature-column scan dispatched from
         # `_populate_dynamic_features` — kept separate from `_preload_bg`
         # (used for the h5ad preload later in `_reload()`) so the two don't
         # collide on `BackgroundOperation`'s one-job-at-a-time guard.
-        self._colscan_bg = BackgroundOperation(self, silent=True)
+        self._colscan_bg = BackgroundOperation(self, silent=True, notify=True)
         self._last_features_key: tuple = ()
         # Current-timepoint-only state backprojection preview (see
         # `_refresh_state_bp_layer`): recomputed on every dims scrub instead
@@ -2307,10 +2424,21 @@ class StateClassificationSubTab(QWidget):
             if not path or not path.exists():
                 self._preload_loader.invalidate()
                 self._model_adata = None
+                self._model_adata_key = None
+                self._refresh_buttons()
+                return
+
+            # The model h5ad can be multi-GB; re-reading it on every refresh (cell
+            # type change, tab entry) is what made revisits slow. Keep the loaded
+            # copy while the file on disk is the same version (a run that rewrites
+            # it changes mtime/size, so it still reloads).
+            key = _file_key(path)
+            if self._model_adata is not None and key is not None and key == self._model_adata_key:
                 self._refresh_buttons()
                 return
 
             self._model_adata = None
+            self._model_adata_key = None
             self._refresh_buttons()
 
             def _load():
@@ -2319,14 +2447,18 @@ class StateClassificationSubTab(QWidget):
 
             def _on_done(result):
                 self._model_adata = result
+                self._model_adata_key = key
                 self._refresh_buttons()
 
             def _on_failed(err):
                 print(f"[BEHAV3D] State model adata failed to load: {err}")
                 self._model_adata = None
+                self._model_adata_key = None
                 self._refresh_buttons()
 
-            self._preload_loader.request(path, _load, _on_done, _on_failed)
+            self._preload_loader.request(
+                path, _load, _on_done, _on_failed, desc=f"Loading behavioral-state model ({ct})…"
+            )
         except Exception:
             traceback.print_exc()
 
@@ -2664,6 +2796,7 @@ class StateClassificationSubTab(QWidget):
         self._colscan_bg.run(
             fn=_scan_state_feature_columns,
             args=(csv_path, usable_cols),
+            desc=f"Scanning feature columns ({ct})…",
             inject_progress=False,
             inject_cancel_check=True,
             on_done=_on_scan_done,
@@ -2833,11 +2966,8 @@ class StateClassificationSubTab(QWidget):
         self.btn_state_diagnostics.setEnabled(has_intrinsic)
 
         if has_intrinsic:
-            n_intr = self._model_adata.obs[intrinsic_col].astype(str).nunique()
-            n_full = (
-                self._model_adata.obs[full_col].astype(str).nunique()
-                if has_full else 0
-            )
+            n_intr = self._cluster_count(self._model_adata, intrinsic_col)
+            n_full = self._cluster_count(self._model_adata, full_col) if has_full else 0
             self.rename_status_lbl.setText(
                 f"✅ Model loaded: {n_intr} intrinsic clusters"
                 + (f", {n_full} full clusters." if has_full else ".")
@@ -2847,6 +2977,22 @@ class StateClassificationSubTab(QWidget):
 
         self._refresh_composition_group_cols()
         self._refresh_state_heatmap_features()
+
+    def _cluster_count(self, adata, col) -> int:
+        """Number of distinct values of ``adata.obs[col]`` (as strings). Counting
+        converts every row to a string, which is slow on a large model and was
+        redone on every ``_refresh_buttons``; remember it per loaded adata."""
+        import weakref
+
+        cache = getattr(self, "_cluster_count_cache", None)
+        if cache is None or cache[0]() is not adata:
+            # Weak reference: must not keep a replaced multi-GB adata alive.
+            cache = (weakref.ref(adata), {})
+            self._cluster_count_cache = cache
+        counts = cache[1]
+        if col not in counts:
+            counts[col] = int(adata.obs[col].astype(str).nunique())
+        return counts[col]
 
     @staticmethod
     def _list_widget_items(list_widget):
@@ -4901,6 +5047,10 @@ class TrajectoryFeatureSelector(QWidget):
         self._logscale_checkboxes: dict = {}
         self._pending_cfg: dict = {}
         self._loaded_key = None
+        self._scanning = False
+        self._scan_queued = None
+        # Column classification of the whole CSV runs here, off the GUI thread.
+        self._scan_bg = BackgroundOperation(self, silent=True, notify=True)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -5017,15 +5167,14 @@ class TrajectoryFeatureSelector(QWidget):
 
     # ── population ──────────────────────────────────────────────────────
     def populate(self, csv_path, metadata=None, cfg=None):
-        """(Re)build the checkboxes from the track-features CSV header."""
-        from copy import deepcopy
+        """(Re)build the checkboxes from the track-features CSV.
+
+        The header is read here, but the value-based binary / non-numeric column
+        classification needs a pass over the whole (multi-GB) CSV, so it runs on
+        a background worker (memoized per file version, and shared with the State
+        tab's own scan); the checkboxes appear when it finishes."""
         import pandas as pd
-        from behav3d.widgets.utils import behav3d_calculated_features, excluded_non_behavior_columns
-        from behav3d.core.utils import expand_column_patterns
-        from behav3d.core.column_detection import (
-            detect_binary_columns_from_csv,
-            detect_non_numeric_columns_from_csv,
-        )
+        from behav3d.widgets.utils import excluded_non_behavior_columns
 
         cfg = dict(cfg or {})
         try:
@@ -5038,6 +5187,7 @@ class TrajectoryFeatureSelector(QWidget):
                 self.set_params(cfg)
             return
         self._loaded_key = key
+        self._pending_cfg = cfg
 
         for sub in (self.timepoint_lay, self.binary_lay):
             _clear_layout(sub)
@@ -5054,15 +5204,76 @@ class TrajectoryFeatureSelector(QWidget):
         cols = list(pd.read_csv(csv_path, nrows=0).columns)
         excluded = excluded_non_behavior_columns(cols, metadata=metadata)
         usable = [c for c in cols if c not in excluded]
-        bin_cols = detect_binary_columns_from_csv(Path(csv_path), usable)
-        bin_set = set(bin_cols)
-        candidates = [c for c in usable if c not in bin_set]
-        non_numeric = set(detect_non_numeric_columns_from_csv(Path(csv_path), candidates))
+
+        self.timepoint_lay.addWidget(_make_info_label("<i>Scanning feature columns…</i>"))
+        self.binary_lay.addWidget(_make_info_label("<i>Scanning feature columns…</i>"))
+        self._scanning = True
+
+        def _on_scan_done(result):
+            if self._loaded_key != key:
+                return  # a newer populate() superseded this one and runs its own scan
+            self._scanning = False
+            for sub in (self.timepoint_lay, self.binary_lay):
+                _clear_layout(sub)
+            self._build_checkboxes(result["bin_cols"], result["feat_cols"], dict(self._pending_cfg or {}))
+
+        def _on_scan_failed(err):
+            if self._loaded_key != key:
+                return
+            self._scanning = False
+            traceback.print_exc()
+            for sub in (self.timepoint_lay, self.binary_lay):
+                _clear_layout(sub)
+            self.timepoint_lay.addWidget(_make_info_label(f"<i>Could not scan feature columns: {err}</i>"))
+            self._rebuild_logscale()
+
+        if self._scan_bg.is_running():
+            # One scan at a time: re-run for whatever is current once it ends.
+            self._scan_queued = (csv_path, metadata, cfg)
+            return
+        self._start_scan(key, csv_path, usable, _on_scan_done, _on_scan_failed)
+
+    def _start_scan(self, key, csv_path, usable, on_done, on_failed):
+        def _finished(result):
+            on_done(result)
+            self._run_queued_scan()
+
+        def _failed(err):
+            on_failed(err)
+            self._run_queued_scan()
+
+        self._scan_bg.run(
+            fn=_scan_state_feature_columns,
+            args=(csv_path, usable),
+            desc="Scanning trajectory feature columns…",
+            inject_progress=False,
+            inject_cancel_check=True,
+            on_done=_finished,
+            on_failed=_failed,
+        )
+
+    def _run_queued_scan(self):
+        queued, self._scan_queued = self._scan_queued, None
+        if queued is not None:
+            csv_path, metadata, cfg = queued
+            self._loaded_key = None  # force populate() to rebuild for the latest request
+            self.populate(csv_path, metadata=metadata, cfg=cfg)
+
+    def is_populating(self) -> bool:
+        """True while the column scan behind the checkboxes is still running."""
+        return bool(self._scanning)
+
+    def _build_checkboxes(self, bin_cols, feat_cols, cfg):
+        """Create the checkbox groups once the column scan is available."""
+        from copy import deepcopy
+        from behav3d.widgets.utils import behav3d_calculated_features
+        from behav3d.core.utils import expand_column_patterns
+
         # Image/physical coordinates locate a cell; they don't describe its behavior.
         coord_cols = {"position_x", "position_y", "position_z"}
         feat_cols = [
-            c for c in candidates
-            if c not in non_numeric and c not in coord_cols and not str(c).startswith("pixel_position_")
+            c for c in feat_cols
+            if c not in coord_cols and not str(c).startswith("pixel_position_")
         ]
 
         saved = cfg.get("features")
@@ -5150,15 +5361,27 @@ class TrajectoryFeatureSelector(QWidget):
     def params(self) -> dict:
         lo = float(self.spin_quant_lo.value())
         hi = float(self.spin_quant_hi.value())
+        if self._scanning:
+            # The checkboxes don't exist yet; report the saved selection rather
+            # than an empty one, so persisting the settings while the column scan
+            # is still running can never wipe what was saved.
+            pending = self._pending_cfg or {}
+            features = list(pending.get("features") or [])
+            binary = list(pending.get("binary_features") or [])
+            log_scale = list(pending.get("log_scale_features") or [])
+        else:
+            features = [f for f, cb in self._timepoint_checkboxes.items() if cb.isChecked()]
+            binary = [b for b, cb in self._binary_checkboxes.items() if cb.isChecked()]
+            log_scale = [f for f, cb in self._logscale_checkboxes.items() if cb.isChecked()]
         return {
-            "features": [f for f, cb in self._timepoint_checkboxes.items() if cb.isChecked()],
-            "binary_features": [b for b, cb in self._binary_checkboxes.items() if cb.isChecked()],
+            "features": features,
+            "binary_features": binary,
             "additional_window_features": [f for f, cb in self._window_checkboxes.items() if cb.isChecked()],
             "window_features_window": int(self.spin_window_size.value()),
             "feature_smoothing_window": int(self.spin_smoothing.value()),
             "lower_quantile_cap": lo if lo > 0 else None,
             "upper_quantile_cap": hi if hi < 1 else None,
-            "log_scale_features": [f for f, cb in self._logscale_checkboxes.items() if cb.isChecked()],
+            "log_scale_features": log_scale,
             "start_offset": int(self.spin_start_offset.value()),
         }
 
@@ -5208,9 +5431,17 @@ class TrackClassificationSubTab(QWidget):
         self.metadata_loader = metadata_loader
         self._get_cell_type = cell_type_getter
         self._track_adata = None
+        # (path, mtime, size) of the file ``_track_adata`` was read from; lets
+        # ``_reload`` keep the loaded copy while the file is unchanged.
+        self._track_adata_key = None
         self._track_adata_load_error: Optional[str] = None
+        # Longest-track lookup for the Trajectory size cap (see
+        # ``_apply_max_trajectory_size``); kept off ``_preload_bg`` so the two
+        # don't collide on BackgroundOperation's one-job-at-a-time guard.
+        self._maxlen_bg = BackgroundOperation(self, silent=True, notify=True)
+        self._max_len_wanted = None
         self._bg = BackgroundOperation(self)
-        self._preload_bg = BackgroundOperation(self, silent=True)
+        self._preload_bg = BackgroundOperation(self, silent=True, notify=True)
         self._preload_loader = _LatestOnlyLoader(self._preload_bg)
         # Current-timepoint-only track-cluster backprojection preview (see
         # `_refresh_track_bp_layer`): recomputed on every dims scrub instead
@@ -6887,50 +7118,70 @@ class TrackClassificationSubTab(QWidget):
         data = node[:]
         return [v.decode() if isinstance(v, bytes) else v for v in data]
 
-    def _max_available_track_length(self, ct: str):
-        """Longest (sample_name, TrackID) track in this cell type's behavioral-states
-        h5ad — the same file/keys the dtaidistance clustering step reads — so the
-        Trajectory size spinbox can never be pushed past what any track can supply.
-        In 'Directly from features' mode the track-features CSV is used instead."""
-        if ct and self._track_input_is_features():
+    def _max_track_length_source(self, ct: str):
+        """``(kind, path)`` of the file the longest-track length is read from, or
+        ``None``: the positions CSV in 'Directly from features' mode, otherwise
+        the behavioral-states h5ad (the same file/keys the dtaidistance
+        clustering step reads)."""
+        if not ct:
+            return None
+        if self._track_input_is_features():
             try:
-                import pandas as pd
                 from behav3d.analysis.behavior.state.utils import _resolve_positions_csv_path
-                csv_path = _resolve_positions_csv_path(output_dir=str(self._out_dir()), cell_type=ct)
-                ids = pd.read_csv(csv_path, usecols=["sample_name", "TrackID"])
-                counts = ids.groupby(["sample_name", "TrackID"]).size()
-                max_len = int(counts.max()) if len(counts) else 0
-                return max_len if max_len > 0 else None
+                return ("csv", _resolve_positions_csv_path(output_dir=str(self._out_dir()), cell_type=ct))
             except Exception:
                 return None
-        states_path = self._state_adata_path(ct) if ct else None
+        states_path = self._state_adata_path(ct)
         if not states_path or not states_path.exists():
             return None
-        try:
-            import h5py
-            import pandas as pd
-            from behav3d.core.h5_access import h5_read
-            with h5_read(), h5py.File(str(states_path), "r") as f:
-                obs = f.get("obs", {})
-                if "sample_name" not in obs or "TrackID" not in obs:
-                    return None
-                sample_names = self._read_h5ad_obs_column(f, "sample_name")
-                track_ids = self._read_h5ad_obs_column(f, "TrackID")
-            if not sample_names or len(sample_names) != len(track_ids):
-                return None
-            counts = pd.DataFrame({"sample_name": sample_names, "TrackID": track_ids}).groupby(
-                ["sample_name", "TrackID"]
-            ).size()
-            max_len = int(counts.max()) if len(counts) else 0
-            return max_len if max_len > 0 else None
-        except Exception:
-            return None
+        return ("h5ad", states_path)
 
     def _apply_max_trajectory_size(self, ct: str):
         """Cap the Trajectory size spinbox at the longest available track,
-        so a value guaranteed to filter out every track can't be selected."""
-        max_len = self._max_available_track_length(ct)
-        self.spin_traj_size.setMaximum(max_len if max_len else 9999)
+        so a value guaranteed to filter out every track can't be selected.
+
+        Finding the longest track means reading every row's sample/track id of a
+        multi-GB file, so it never runs on the GUI thread: a cached value (per
+        file version) is applied immediately, otherwise it is computed in the
+        background and applied when ready. Until then the previous cap stays.
+        """
+        source = self._max_track_length_source(ct)
+        file_key = _file_key(source[1]) if source else None
+        if source is None or file_key is None:
+            self.spin_traj_size.setMaximum(9999)
+            self._max_len_wanted = None
+            return
+        key = (source[0], file_key)
+        self._max_len_wanted = (key, source)
+        cached = _MAX_TRACK_LEN_CACHE.get(key, _MISSING)
+        if cached is not _MISSING:
+            self.spin_traj_size.setMaximum(cached if cached else 9999)
+            return
+        self._start_max_len_scan()
+
+    def _start_max_len_scan(self):
+        wanted = getattr(self, "_max_len_wanted", None)
+        if wanted is None or self._maxlen_bg.is_running():
+            return  # the scan in flight re-checks what is wanted when it ends
+        key, source = wanted
+        kind, path = source
+
+        def _finish(result):
+            _MAX_TRACK_LEN_CACHE[key] = result
+            current = getattr(self, "_max_len_wanted", None)
+            if current is not None and current[0] == key:
+                self.spin_traj_size.setMaximum(result if result else 9999)
+            elif current is not None:
+                self._apply_max_trajectory_size(self._cell_type())
+
+        self._maxlen_bg.run(
+            fn=_compute_max_track_length,
+            args=(kind, str(path)),
+            desc="Finding the longest track…",
+            inject_progress=False,
+            on_done=_finish,
+            on_failed=lambda err: _finish(None),
+        )
 
     # ── Guided pipeline dispatch (Step 3 create plots) ───────────────────
     _TRACK_PIPELINE_RUN_BUTTONS = {
@@ -7080,14 +7331,19 @@ class TrackClassificationSubTab(QWidget):
             # while a clustering run overwrites it.
             try:
                 with h5_access(blocking=False):
-                    adata = ad.read_h5ad(str(state_path), backed="r")
-                    try:
-                        pre = adata.uns.get("preprocessing", {}) or {}
-                        all_var_names = [str(v) for v in adata.var_names]
-                        obs_columns = set(adata.obs.columns)
-                    finally:
-                        if getattr(adata, "isbacked", False):
-                            adata.file.close()
+                    light = _read_h5ad_light_meta(state_path)
+                    if light is not None:
+                        pre, all_var_names, obs_columns = light
+                        pre = pre or {}
+                    else:
+                        adata = ad.read_h5ad(str(state_path), backed="r")
+                        try:
+                            pre = adata.uns.get("preprocessing", {}) or {}
+                            all_var_names = [str(v) for v in adata.var_names]
+                            obs_columns = set(adata.obs.columns)
+                        finally:
+                            if getattr(adata, "isbacked", False):
+                                adata.file.close()
             except H5Busy:
                 return [], []  # file is being written; hint is retried on next refresh
             var_names = set(all_var_names)
@@ -7620,13 +7876,26 @@ class TrackClassificationSubTab(QWidget):
         self._update_view_buttons()
         self._update_bp_buttons()
 
-        # Reset adata so buttons reflect "not yet loaded" state immediately.
-        self._track_adata = None
-        self._track_adata_load_error = None
+        # The track h5ad can be multi-GB; re-reading it on every refresh (cell
+        # type change, tab entry) is what made revisits slow. Keep the loaded copy
+        # while the file on disk is the same version (a run that rewrites it
+        # changes mtime/size, so it still reloads); otherwise reset it so buttons
+        # reflect the "not yet loaded" state immediately.
+        have_file = bool(path and path.exists())
+        key = _file_key(path) if have_file else None
+        reuse = (
+            self._track_adata is not None and key is not None and key == self._track_adata_key
+        )
+        if not reuse:
+            self._track_adata = None
+            self._track_adata_key = None
+            self._track_adata_load_error = None
         self._refresh_buttons()
 
-        if not path or not path.exists():
+        if not have_file:
             self._preload_loader.invalidate()
+            return
+        if reuse:
             return
 
         # ── Slow async phase (background thread) ──────────────────────────
@@ -7642,6 +7911,7 @@ class TrackClassificationSubTab(QWidget):
 
         def _on_done(result):
             self._track_adata = result
+            self._track_adata_key = key
             self._refresh_buttons()
             self._sync_track_cluster_combo(result)
 
@@ -7650,7 +7920,9 @@ class TrackClassificationSubTab(QWidget):
             self._track_adata_load_error = err
             self._refresh_buttons()
 
-        self._preload_loader.request(path, _load, _on_done, _on_failed)
+        self._preload_loader.request(
+            path, _load, _on_done, _on_failed, desc=f"Loading track classification ({ct})…"
+        )
 
     def _autofill_paths(self, ct: str):
         """Lightweight path auto-fill called on tab switch.
@@ -8387,6 +8659,16 @@ class TrackClassificationSubTab(QWidget):
             and self._behavioral_states_available()
         )
         feature_build_params = None
+        if features_only and not use_state_preset and self.traj_feature_selector.is_populating():
+            msg = (
+                "The trajectory feature list is still being scanned in the background. "
+                "Please try again in a moment."
+            )
+            if extra_callbacks and extra_callbacks.get("on_failed"):
+                extra_callbacks["on_failed"](msg)
+            else:
+                QMessageBox.information(self, "Still loading", msg)
+            return
         if features_only and not use_state_preset:
             feature_build_params = self.traj_feature_selector.params()
             if not (feature_build_params["features"] or feature_build_params["additional_window_features"]
@@ -8669,6 +8951,13 @@ class TrackClassificationSubTab(QWidget):
 
         exact_settings = self.chk_use_exact_original_settings.isChecked()
         feature_params = None
+        if not exact_settings and self.traj_feature_selector.is_populating():
+            QMessageBox.information(
+                self, "Still loading",
+                "The trajectory feature list is still being scanned in the background. "
+                "Please try again in a moment.",
+            )
+            return
         if not exact_settings:
             feature_params = self.traj_feature_selector.params()
             if not (feature_params["features"] or feature_params["additional_window_features"]
@@ -11153,7 +11442,7 @@ class SingleCellTab(QWidget):
         # `_refresh_data_consistency_warning` — kept separate from the
         # sub-tabs' own `_preload_bg`/`_colscan_bg` so it doesn't collide
         # with them on `BackgroundOperation`'s one-job-at-a-time guard.
-        self._consistency_bg = BackgroundOperation(self, silent=True)
+        self._consistency_bg = BackgroundOperation(self, silent=True, notify=True)
         self._last_consistency_key = None
 
         self._init_ui()
@@ -11457,10 +11746,17 @@ class SingleCellTab(QWidget):
 
         def _on_check_failed(err):
             print(f"[BEHAV3D] Data-consistency check failed: {err}")
+            # Remember the failure for this exact set of files too: otherwise a
+            # check that cannot succeed (e.g. an obs column is missing) re-reads
+            # the whole CSV and h5ad on every tab show / metadata update.
+            current = self._consistency_check_inputs()
+            if current is not None and current[4] == key:
+                self._last_consistency_key = key
 
         self._consistency_bg.run(
             fn=_check_data_consistency,
             args=(csv_path, h5ad_sources, groupby_cols),
+            desc=f"Checking track data consistency ({ct})…",
             inject_progress=False,
             on_done=_on_check_done,
             on_failed=_on_check_failed,

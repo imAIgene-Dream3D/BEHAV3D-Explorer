@@ -4824,7 +4824,20 @@ class ImportWidget(QWidget):
         self.immune_types = [ct for ct in detect_immune_cell_types_from_metadata(md) if not is_combined_multicolor_celltype(ct)]
         self.other_types = [ct for ct in detect_other_cell_types_from_metadata(md) if not is_combined_multicolor_celltype(ct)]
         self.all_cell_types = self.organoid_types + self.immune_types + self.other_types
-        self._rebuild_table()
+        # The table checks every sample x cell type's files (exists / opening zarr
+        # stores), which is slow on big projects or network drives. Do it only
+        # when the page is on screen; otherwise remember to do it on first show.
+        if self.isVisible():
+            self._table_stale = False
+            self._rebuild_table()
+        else:
+            self._table_stale = True
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if getattr(self, "_table_stale", False):
+            self._table_stale = False
+            self._rebuild_table()
 
     # ── table builder ───────────────────────────────────────────────────
     def _rebuild_table(self):
@@ -5496,6 +5509,8 @@ class APOCWidget(QWidget):
         # by the parent SegmentationTab).
         self.tab_progress_row = tab_progress_row
         self._bg = BackgroundOperation(self)
+        # Reads a saved training import on a worker (see _restore_import_on_session_load).
+        self._restore_bg = BackgroundOperation(self, silent=True, notify=True)
         self._init_ui()
 
     def _init_ui(self):
@@ -7037,13 +7052,47 @@ class APOCWidget(QWidget):
         pc.pop("apoc_imported_training_path", None)
         self._flush_params_to_yaml()
 
-    def _restore_import_on_session_load(self):
-        """Re-apply a persisted import if the YAML holds an import path."""
+    @staticmethod
+    def _read_import_payload(saved_path):
+        """Read a persisted training import from disk (``.zip`` bundle or
+        training-data folder). Pure file I/O, no Qt: runs on a worker thread
+        because the arrays can be large. Returns ``(meta, data_by_celltype,
+        imported_cts)`` or ``None``."""
         from behav3d.preprocessing.segmentation.apoc_train import (
             _load_training_metadata,
             _load_training_data_for_celltype,
             _load_training_bundle,
         )
+        if saved_path.endswith(".zip"):
+            meta, data_by_celltype = _load_training_bundle(saved_path)
+            if meta is None or not data_by_celltype:
+                return None
+            imported_cts = list(meta.get("cell_types", []))
+            if meta.get("has_death"):
+                imported_cts.append("dead")
+        else:
+            meta = _load_training_metadata(saved_path)
+            if meta is None:
+                return None
+            source_td = Path(saved_path).parent
+            imported_cts = list(meta.get("cell_types", []))
+            if meta.get("has_death"):
+                imported_cts.append("dead")
+            data_by_celltype = {}
+            for ct in imported_cts:
+                X, y = _load_training_data_for_celltype(source_td, ct)
+                if X is not None:
+                    data_by_celltype[ct] = (X, y)
+        if not data_by_celltype:
+            return None
+        return meta, data_by_celltype, imported_cts
+
+    def _restore_import_on_session_load(self):
+        """Re-apply a persisted import if the YAML holds an import path.
+
+        The training arrays are read on a background worker (they can be large
+        and this runs on every metadata load); only applying them to the widget
+        happens on the GUI thread."""
         if self._training_widget is None:
             return
         pc = self.metadata_loader.behav3d_parameters.get("pixel_classifier", {}) or {}
@@ -7051,49 +7100,53 @@ class APOCWidget(QWidget):
         if not saved_path or not Path(saved_path).exists():
             return
 
-        try:
-            if saved_path.endswith(".zip"):
-                meta, data_by_celltype = _load_training_bundle(saved_path)
-                if meta is None or not data_by_celltype:
-                    return
-                imported_cts = list(meta.get("cell_types", []))
-                if meta.get("has_death"):
-                    imported_cts.append("dead")
-            else:
-                meta = _load_training_metadata(saved_path)
-                if meta is None:
-                    return
-                source_td = Path(saved_path).parent
-                imported_cts = list(meta.get("cell_types", []))
-                if meta.get("has_death"):
-                    imported_cts.append("dead")
-                data_by_celltype = {}
-                for ct in imported_cts:
-                    X, y = _load_training_data_for_celltype(source_td, ct)
-                    if X is not None:
-                        data_by_celltype[ct] = (X, y)
-            if not data_by_celltype:
+        widget = self._training_widget
+
+        def _apply(payload):
+            # The training widget is rebuilt on every metadata load; a payload
+            # read for an earlier one must not be applied to its replacement
+            # (or to nothing).
+            if self._training_widget is not widget:
+                if self._training_widget is not None:
+                    self._restore_import_on_session_load()
                 return
+            if payload is None:
+                return
+            meta, data_by_celltype, imported_cts = payload
+            try:
+                local_cts = list(self.all_cell_types)
+                if widget.has_death:
+                    local_cts.append("dead")
+                cell_type_mapping = {ct: ct for ct in imported_cts if ct in local_cts}
 
-            local_cts = list(self.all_cell_types)
-            if self._training_widget.has_death:
-                local_cts.append("dead")
-            cell_type_mapping = {ct: ct for ct in imported_cts if ct in local_cts}
+                # Run pixel size check silently on restore (just warn, no cancel)
+                self._check_pixel_size_compatibility(meta)
 
-            # Run pixel size check silently on restore (just warn, no cancel)
-            self._check_pixel_size_compatibility(meta)
+                widget.apply_import(
+                    meta, data_by_celltype, cell_type_mapping, source_path=saved_path
+                )
+                # Restoring a saved import also makes the classifier trainable,
+                # same as a fresh manual import — unlock the UI accordingly.
+                self._is_session_active = True
+                self._update_training_controls_state()
+                self._update_import_panel()
+                self.log(f"↩ Restored import from {saved_path}")
+            except Exception as exc:
+                self.log(f"⚠️ Could not restore import from {saved_path}: {exc}")
 
-            self._training_widget.apply_import(
-                meta, data_by_celltype, cell_type_mapping, source_path=saved_path
-            )
-            # Restoring a saved import also makes the classifier trainable,
-            # same as a fresh manual import — unlock the UI accordingly.
-            self._is_session_active = True
-            self._update_training_controls_state()
-            self._update_import_panel()
-            self.log(f"↩ Restored import from {saved_path}")
-        except Exception as exc:
-            self.log(f"⚠️ Could not restore import from {saved_path}: {exc}")
+        def _failed(err):
+            self.log(f"⚠️ Could not restore import from {saved_path}: {err}")
+
+        if self._restore_bg.is_running():
+            return  # a restore is already reading; the widget check above guards staleness
+        self._restore_bg.run(
+            fn=self._read_import_payload,
+            args=(saved_path,),
+            desc="Restoring saved pixel-classifier training import…",
+            inject_progress=False,
+            on_done=_apply,
+            on_failed=_failed,
+        )
 
     def _on_training_finished_update_export_btn(self, *_):
         """Enable the export button once training data has been saved."""

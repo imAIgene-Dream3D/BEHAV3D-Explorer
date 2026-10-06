@@ -18,6 +18,7 @@ Public surface
 """
 from __future__ import annotations
 
+import os
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -57,6 +58,40 @@ from behav3d.napari._results_catalog import (
     group_by_tree,
     scan_outputs,
 )
+
+
+# ---------------------------------------------------------------------------
+# Cheap "did anything change on disk?" stamp
+# ---------------------------------------------------------------------------
+_STAMP_MAX_DEPTH = 6
+
+
+def outputs_stamp(out_dir: Path) -> tuple:
+    """Modification times of ``out_dir/analysis`` and its sub-directories.
+
+    Creating, renaming or deleting a result file bumps its parent directory's
+    mtime, so comparing two stamps tells :meth:`ResultsPanel.refresh_if_stale`
+    whether a full (file-by-file) rescan is worth doing. Only directories are
+    stat-ed (``.zarr`` stores are not entered), so this costs a few ``scandir``
+    calls instead of the per-file classification of ``scan_outputs``.
+    """
+    root = Path(out_dir) / "analysis"
+    stamp = []
+    stack = [(str(root), 0)]
+    while stack:
+        path, depth = stack.pop()
+        try:
+            stamp.append((path, os.stat(path).st_mtime_ns))
+            if depth >= _STAMP_MAX_DEPTH:
+                continue
+            with os.scandir(path) as it:
+                for entry in it:
+                    if entry.is_dir(follow_symlinks=False) and not entry.name.endswith(".zarr"):
+                        stack.append((entry.path, depth + 1))
+        except OSError:
+            continue
+    stamp.sort()
+    return tuple(stamp)
 
 
 # ---------------------------------------------------------------------------
@@ -166,12 +201,15 @@ class ResultsPanel(QWidget):
         self._scan_bg = BackgroundOperation(self, silent=True)
         self._last_scan_out_dir: Optional[Path] = None
         self._last_scan_files: Optional[list[ResultFile]] = None
+        # outputs_stamp() taken when the last scan started (see refresh_if_stale)
+        self._scan_stamp: Optional[tuple] = None
+        self._pending_stamp: Optional[tuple] = None
         self._init_ui()
 
         if metadata_loader is not None and hasattr(
             metadata_loader, "metadata_loaded"
         ):
-            metadata_loader.metadata_loaded.connect(self.refresh)
+            metadata_loader.metadata_loaded.connect(self.refresh_if_stale)
 
         self.refresh()
 
@@ -368,6 +406,24 @@ class ResultsPanel(QWidget):
         return None
 
     # ── Public API ─────────────────────────────────────────────────────
+    def refresh_if_stale(self):
+        """Like :meth:`refresh`, but does nothing when nothing under
+        ``analysis/`` changed since the last completed scan -- used by tab and
+        sub-tab switches so merely looking at the panel does not clear and
+        rebuild a (possibly huge) tree every time."""
+        out_dir = self._output_dir()
+        if (
+            out_dir is not None
+            and self._last_scan_files is not None
+            and self._last_scan_out_dir == out_dir
+            and self._scan_stamp is not None
+            and outputs_stamp(out_dir) == self._scan_stamp
+        ):
+            return
+        if self._scan_bg.is_running():
+            return  # the scan already in flight will deliver fresh results
+        self.refresh()
+
     def refresh(self):
         """Re-scan the output directory (in the background) and rebuild the
         tree once the scan completes."""
@@ -376,6 +432,7 @@ class ResultsPanel(QWidget):
         if out_dir is None:
             self._last_scan_out_dir = None
             self._last_scan_files = None
+            self._scan_stamp = None
             placeholder = QTreeWidgetItem(
                 self.tree,
                 ["⚠ No output directory configured"],
@@ -395,6 +452,9 @@ class ResultsPanel(QWidget):
             # results, so starting a second walk here would be redundant.
             return
 
+        # Stamp *before* scanning: anything written while the scan runs makes
+        # the next refresh_if_stale() see a difference and rescan.
+        self._pending_stamp = outputs_stamp(out_dir)
         self._scan_bg.run(
             fn=scan_outputs,
             args=(out_dir,),
@@ -406,6 +466,7 @@ class ResultsPanel(QWidget):
     def _on_scan_done(self, out_dir: Path, files: list):
         self._last_scan_out_dir = out_dir
         self._last_scan_files = files
+        self._scan_stamp = self._pending_stamp
         self._build_tree(out_dir, files)
 
     def _on_scan_failed(self, err: str):
@@ -487,7 +548,7 @@ class ResultsPanel(QWidget):
         self.metadata_loader = loader
         if loader is not None and hasattr(loader, "metadata_loaded"):
             try:
-                loader.metadata_loaded.connect(self.refresh)
+                loader.metadata_loaded.connect(self.refresh_if_stale)
             except Exception:
                 pass
         self.refresh()

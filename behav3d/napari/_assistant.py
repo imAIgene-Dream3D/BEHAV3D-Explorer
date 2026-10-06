@@ -26,7 +26,11 @@ from qtpy.QtWidgets import (
     QPlainTextEdit, QProgressBar, QTextBrowser, QFrame, QSizePolicy, QScrollArea,
 )
 
-from behav3d.napari._assistant_context import build_context, context_summary_line
+from behav3d.napari._assistant_context import (
+    build_context,
+    build_summary_context,
+    context_summary_line,
+)
 from behav3d.napari._assistant_actions import (
     build_actions, apply_action, TOOL_SCHEMA, ProposedAction, humanize_parameter_key,
 )
@@ -562,9 +566,25 @@ class AssistantDock(QWidget):
     # Context bar
     # ------------------------------------------------------------------
     def refresh_context_bar(self):
+        """Update the one-line context bar.
+
+        Only the few fields the bar shows are gathered (see
+        ``build_summary_context``), and bursts of calls (a tab switch and a
+        metadata load each fire several) are coalesced into one update on the
+        next event-loop turn, instead of rebuilding the full LLM context each
+        time on the GUI thread."""
+        if getattr(self, "_context_bar_pending", False):
+            return
+        self._context_bar_pending = True
+        QTimer.singleShot(0, self._do_refresh_context_bar)
+
+    def _do_refresh_context_bar(self):
+        self._context_bar_pending = False
         try:
-            ctx = build_context(self.main_widget)
+            ctx = build_summary_context(self.main_widget)
             self.context_bar.setText(context_summary_line(ctx))
+        except RuntimeError:
+            return  # widget already deleted (shutdown)
         except Exception:
             self.context_bar.setText("BEHAV3D Assistant")
 
