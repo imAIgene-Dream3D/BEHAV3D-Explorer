@@ -2,7 +2,7 @@
 BEHAV3D napari plugin – main dock widget.
 Provides a QTabWidget with tabs for the full BEHAV3D pipeline.
 """
-from qtpy.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QPushButton, QLabel
+from qtpy.QtWidgets import QApplication, QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QPushButton, QLabel
 from qtpy.QtCore import Qt, QSize, QEvent, QThread, QTimer
 from qtpy.QtGui import QIcon
 import logging
@@ -17,11 +17,17 @@ from behav3d.napari._background_runner import (
 )
 from behav3d.napari._queue import ProcessingQueuePanel, StepType
 from behav3d.napari._global_workers import GlobalWorkersController
+from behav3d.napari._dock_fit import fit_dock_title_bar
 from behav3d.napari._preview_dims import close_backprojection_legend_docks
 from behav3d.core.qt_help import disable_spinbox_wheel_scroll, reset_scroll_on_page_change
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _event_global_pos(event):
+    """Global cursor position of a mouse event as a ``QPoint``."""
+    return event.globalPosition().toPoint()
 
 
 class FloatingAssistantButton(QPushButton):
@@ -78,7 +84,7 @@ class FloatingAssistantButton(QPushButton):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self._drag_start_global_pos = event.globalPos()
+            self._drag_start_global_pos = _event_global_pos(event)
             self._drag_start_window_pos = self.pos()
             self._drag_active = False
         super().mousePressEvent(event)
@@ -86,7 +92,7 @@ class FloatingAssistantButton(QPushButton):
     def mouseMoveEvent(self, event):
         if event.buttons() & Qt.LeftButton and self._drag_start_global_pos is not None:
             # Add a small distance threshold to differentiate a click from a drag
-            diff = event.globalPos() - self._drag_start_global_pos
+            diff = _event_global_pos(event) - self._drag_start_global_pos
             if not self._drag_active and diff.manhattanLength() < 5:
                 super().mouseMoveEvent(event)
                 return
@@ -502,6 +508,14 @@ class BEHAV3DWidget(QWidget):
         else:
             self.busy_label.setVisible(False)
             self._busy_timer.stop()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # napari's dock title bar otherwise paints over the top of this panel.
+        dock = self.parent()
+        while dock is not None and not isinstance(dock, QDockWidget):
+            dock = dock.parent()
+        fit_dock_title_bar(dock)
 
     # ------------------------------------------------------------------
     def _shutdown_background_operations(self) -> None:

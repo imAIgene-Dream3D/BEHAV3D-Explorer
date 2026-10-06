@@ -701,6 +701,63 @@ def fix_freetype_windows(conda_path: str) -> None:
         print_warning(f"FreeType fix: could not copy DLL ({exc})")
 
 
+def fix_icu_for_pyqt6_windows(conda_path: str) -> None:
+    """Make PyQt6 importable on Windows conda environments (ICU DLL clash).
+
+    conda-forge's ``icu`` package ships *unversioned* copies (``icuuc.dll``,
+    ``icuin.dll``, ...) of its versioned libraries (``icuuc78.dll``, ...) in
+    ``Library/bin``, and conda's Python puts that folder on the DLL search path
+    ahead of System32. Qt6 binaries from PyPI (PyQt6 / PySide6) import the *bare*
+    name ``icuuc.dll`` expecting Windows' built-in ICU; they get conda's full ICU,
+    whose exports differ, and ``import PyQt6.QtCore`` fails with
+    "DLL load failed ... The specified procedure could not be found" (WinError 127)
+    - i.e. napari cannot start at all.
+
+    Everything conda-built links against the *versioned* names, so the unversioned
+    copies are moved into ``Library/bin/_icu_unversioned_disabled`` (not deleted).
+    Only done when PyQt6 is installed and the versioned DLLs are present.
+    No-op on macOS/Linux.
+    """
+    if platform.system() != "Windows":
+        return
+
+    try:
+        run_prefix = get_conda_run_prefix(conda_path, ENV_NAME)
+        result = run_command(
+            f'{run_prefix} python -c "import sys; print(sys.prefix)"', capture=True,
+        )
+        if not result:
+            return
+        env_prefix = Path(result.strip().splitlines()[-1])
+    except Exception as exc:
+        print_warning(f"ICU fix: could not find env prefix ({exc})")
+        return
+
+    if not (env_prefix / "Lib" / "site-packages" / "PyQt6").exists():
+        return  # PyQt5/PySide builds are not affected
+
+    print_step("Applying Windows ICU DLL fix for PyQt6...")
+    bin_dir = env_prefix / "Library" / "bin"
+    disabled = bin_dir / "_icu_unversioned_disabled"
+    moved = []
+    for stem in ("icuuc", "icuin", "icuio", "icutu", "icudt", "icutest"):
+        bare = bin_dir / f"{stem}.dll"
+        # Only move an unversioned copy when a versioned sibling exists, so nothing
+        # that actually needs the library can be left without it.
+        has_versioned = any(bin_dir.glob(f"{stem}[0-9]*.dll"))
+        if bare.exists() and has_versioned:
+            try:
+                disabled.mkdir(exist_ok=True)
+                shutil.move(str(bare), str(disabled / bare.name))
+                moved.append(bare.name)
+            except Exception as exc:
+                print_warning(f"ICU fix: could not move {bare.name} ({exc})")
+    if moved:
+        print_success(f"ICU fix applied: moved {', '.join(moved)} to {disabled.name}")
+    else:
+        print_info("ICU fix: nothing to do.")
+
+
 # =============================================================================
 # VERIFICATION
 # =============================================================================
@@ -718,6 +775,7 @@ def verify_installation(conda_path):
         ("CUDA Available", 'python -c "import torch; print(f\'CUDA: {torch.cuda.is_available()}\')"'),
         ("Cellpose", 'python -c "from importlib.metadata import version; print(f\'Cellpose {version(\\\"cellpose\\\")}\')"'),
         ("ConvPaint", 'python -c "from importlib.metadata import version; print(f\'ConvPaint {version(\\\"napari-convpaint\\\")}\')"'),
+        ("Qt binding", 'python -c "import qtpy; print(qtpy.API_NAME, qtpy.QT_VERSION)"'),
         ("Napari", 'python -c "import napari; print(f\'Napari {napari.__version__}\')"'),
         ("BEHAV3D Plugin", 'python -c "from behav3d.napari._widget import BEHAV3DWidget; print(\'Plugin OK\')"'),
     ]
@@ -1137,6 +1195,7 @@ Examples:
     # Fix FreeType DLL name mismatch on Windows
     print_header("PLATFORM FIXES")
     fix_freetype_windows(conda_path)
+    fix_icu_for_pyqt6_windows(conda_path)
 
     # Verify installation
     print_header("VERIFICATION")
