@@ -61,6 +61,7 @@ from behav3d.editing import (
     split_label,
     swap_labels,
 )
+from behav3d.napari._background_runner import detach_from_tqdm_terminal
 from behav3d.napari._widgets import HelpButton
 from behav3d.napari._loaders import tracked_segments_paths_for
 from behav3d.napari._tutorial_dialog import TutorialButton, TutorialStep
@@ -1009,6 +1010,7 @@ class TrackedSegmentEditor(QWidget):
             return None
         try:
             pbr = _NapariProgress(total=0, desc=desc)
+            detach_from_tqdm_terminal(pbr)
             # Try to expand the activity panel.  The attribute name for the
             # activity dock differs across napari versions; try each in turn.
             self._show_napari_activity_panel()

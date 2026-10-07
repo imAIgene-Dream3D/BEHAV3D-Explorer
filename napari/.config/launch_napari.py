@@ -139,6 +139,26 @@ def _find_env_python(pkg_manager, env_name):
     return None
 
 
+def _enable_windows_ansi():
+    """Let a legacy Windows console interpret ANSI escapes (cursor moves etc.).
+
+    The child's output is relayed byte-for-byte, so without this a nested
+    tqdm bar's cursor-up escape (ESC[A) is printed literally. No-op elsewhere
+    or when stdout isn't a console.
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # VT processing
+    except Exception:
+        pass
+
+
 def run_launcher():
     """Read config and spawn subprocess in the correct environment."""
     import json
@@ -204,6 +224,7 @@ def run_launcher():
     # saved to a file — subprocess.run only gives us the inherited terminal,
     # which is gone by the time a crash needs investigating.
     returncode = 1
+    _enable_windows_ansi()
     try:
         with open(log_path, "ab", buffering=0) as log_f:
             # With stdout piped (not a console), Python on Windows falls back to the

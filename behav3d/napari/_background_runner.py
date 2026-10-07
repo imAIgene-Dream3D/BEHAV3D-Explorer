@@ -66,6 +66,7 @@ __all__ = [
     "BackgroundOperation",
     "ThreadSafeLogger",
     "make_activity_progress",
+    "detach_from_tqdm_terminal",
     "update_activity_progress",
     "close_activity_progress",
     "show_napari_activity_panel",
@@ -693,11 +694,32 @@ def make_activity_progress(viewer, desc: str = "Running…"):
         return None
     try:
         pbr = _NapariProgress(total=0, desc=desc)
+        detach_from_tqdm_terminal(pbr)
         if viewer is not None:
             show_napari_activity_panel(viewer)
         return pbr
     except Exception:
         return None
+
+
+def detach_from_tqdm_terminal(pbr) -> None:
+    """Stop a napari activity-dock bar from claiming a tqdm terminal row.
+
+    ``napari.utils.progress`` subclasses tqdm, so it registers in
+    ``tqdm._instances`` and holds terminal position 0 for the whole run even
+    though it only draws in the GUI. Every real tqdm bar the pipeline then
+    opens is pushed to position 1, which makes tqdm redraw it with a
+    cursor-up escape (``ESC[A``) -- shown literally, one new line per update,
+    on consoles that don't interpret ANSI. The GUI is driven by napari's own
+    ``progress._all_instances``, and ``tqdm.close()`` tolerates an instance
+    that is no longer registered, so dropping it here is safe.
+    """
+    if pbr is None:
+        return
+    try:
+        type(pbr)._instances.discard(pbr)
+    except Exception:
+        pass
 
 
 def show_napari_activity_panel(viewer) -> None:
