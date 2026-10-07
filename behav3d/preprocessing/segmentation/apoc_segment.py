@@ -35,6 +35,7 @@ from behav3d.core.metadata import (
     detect_other_cell_types_from_metadata,
     has_dead_channel,
 )
+from behav3d.core.run_plan import Action, resolve_action
 from behav3d.preprocessing.segmentation.segment_journal import (
     file_fingerprint,
     journal_path,
@@ -376,6 +377,7 @@ def run_apoc_segmentation(
     other_types=None,
     only_segment=False,
     overwrite_existing=False,
+    plan=None,
     n_workers=1,
     gpu_device=None,
     apoc_strategy="APOC (Direct Instance Segmentation)",
@@ -472,7 +474,7 @@ def run_apoc_segmentation(
     # ------------------------------------------------------------------
     # Every mismatch is knowable before any frame is written, so find them all now
     # and fail once rather than aborting the batch half-way through.
-    if not overwrite_existing:
+    if plan is not None or not overwrite_existing:
         conflicts = []
         for sample_name in sample_names:
             row = metadata[metadata['sample_name'] == sample_name].iloc[0]
@@ -491,6 +493,10 @@ def run_apoc_segmentation(
             img_dir = output_dir / "images" / sample_name
             entries = []
             for ct in active_cell_types:
+                # Items the plan skips or overwrites are never resumed into, so their
+                # journals cannot conflict with the current settings.
+                if resolve_action(plan, overwrite_existing, sample_name, ct) is not Action.RUN:
+                    continue
                 channels = clf_channels[ct] or [0]
                 strategy = (per_ct_strategies or {}).get(ct, apoc_strategy)
                 entries.append((
@@ -504,7 +510,9 @@ def run_apoc_segmentation(
                         _mask_fingerprint(apoc_config or {}, ct, classifiers[ct], channels),
                         f"{ct} mask for {sample_name}",
                     ))
-            if has_death and clf_death and not only_segment:
+            if has_death and clf_death and not only_segment and (
+                resolve_action(plan, overwrite_existing, sample_name, "dead") is Action.RUN
+            ):
                 entries.append((
                     img_dir / f"{sample_name}_mask_dead.zarr", shape, "uint16",
                     _death_fingerprint(clf_death, death_channels),
@@ -512,7 +520,7 @@ def run_apoc_segmentation(
                 ))
             conflicts.extend(preflight_conflicts(
                 entries,
-                overwrite_existing=overwrite_existing,
+                overwrite_existing=False if plan is not None else overwrite_existing,
                 timepoint_range=timepoint_range,
                 requested_timepoints=requested_tps,
             ))
@@ -565,6 +573,11 @@ def run_apoc_segmentation(
         seg_plans, mask_plans = {}, {}
         remaining_cts = []
         for ct in active_cts_for_sample:
+            action = resolve_action(plan, overwrite_existing, sample_name, ct)
+            if action is Action.SKIP:
+                print(f"  ⏭️ {sample_name}/{ct}: skipped by the run plan")
+                continue
+            ow = action is Action.OVERWRITE
             channels = clf_channels[ct] or [0]
             strategy = (per_ct_strategies or {}).get(ct, apoc_strategy)
             mask_fps[ct] = _mask_fingerprint(apoc_config or {}, ct, classifiers[ct], channels)
@@ -574,7 +587,7 @@ def run_apoc_segmentation(
             seg_plans[ct] = plan_output(
                 seg_path_of(ct), out_shape, "uint16", seg_fps[ct],
                 f"{ct} segments for {sample_name}",
-                overwrite_existing=overwrite_existing,
+                overwrite_existing=ow,
                 timepoint_range=timepoint_range,
                 requested_timepoints=t_range,
             )
@@ -583,7 +596,7 @@ def run_apoc_segmentation(
             mask_plans[ct] = None if only_segment else plan_output(
                 mask_path_of(ct), out_shape, "uint16", mask_fps[ct],
                 f"{ct} mask for {sample_name}",
-                overwrite_existing=overwrite_existing,
+                overwrite_existing=ow,
                 timepoint_range=timepoint_range,
                 requested_timepoints=t_range,
             )
@@ -595,12 +608,13 @@ def run_apoc_segmentation(
         active_cts_for_sample = remaining_cts
 
         death_plan = None
-        if has_death_for_sample and clf_death and not only_segment:
+        death_action = resolve_action(plan, overwrite_existing, sample_name, "dead")
+        if has_death_for_sample and clf_death and not only_segment and death_action is not Action.SKIP:
             death_fp = _death_fingerprint(clf_death, death_channels)
             death_plan = plan_output(
                 death_path, out_shape, "uint16", death_fp,
                 f"dead mask for {sample_name}",
-                overwrite_existing=overwrite_existing,
+                overwrite_existing=death_action is Action.OVERWRITE,
                 timepoint_range=timepoint_range,
                 requested_timepoints=t_range,
             )

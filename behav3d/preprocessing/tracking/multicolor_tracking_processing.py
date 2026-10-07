@@ -8,6 +8,7 @@ from tqdm import tqdm
 
 from behav3d.io.images import load_zarr, write_zarr_parallel
 from behav3d.core.metadata import expand_multicolor_celltype_names
+from behav3d.core.run_plan import Action, resolve_action
 
 
 def _remove_output(path):
@@ -130,7 +131,7 @@ def _plan_multicolor_tracking_sample(sample, output_dir, source_cell_types, comb
     }
 
 
-def _plan_multicolor_tracking(metadata, output_dir, source_cell_types, combined_cell_type, overwrite):
+def _plan_multicolor_tracking(metadata, output_dir, source_cell_types, combined_cell_type, overwrite, plan=None):
     sample_name_col = metadata["sample_name"].astype("string").str.strip()
     sample_names = (
         sample_name_col
@@ -149,10 +150,14 @@ def _plan_multicolor_tracking(metadata, output_dir, source_cell_types, combined_
     for sample_name in sample_names:
         sample = metadata[sample_name_col == sample_name].iloc[0]
         sample_plan = _plan_multicolor_tracking_sample(sample, output_dir, source_cell_types, combined_cell_type)
+        sample_plan["action"] = resolve_action(plan, overwrite, sample_name, combined_cell_type)
         sample_plans.append(sample_plan)
-        missing_items.extend(sample_plan["missing"])
+        if sample_plan["action"] is not Action.SKIP:
+            missing_items.extend(sample_plan["missing"])
 
-        if not overwrite:
+        # With a plan the caller already decided per sample, so existing merged
+        # outputs are never a conflict; without one keep the strict behaviour.
+        if plan is None and not overwrite:
             for path in (sample_plan["outputs"]["img"], sample_plan["outputs"]["csv"]):
                 if path.exists():
                     output_conflicts.append(
@@ -270,6 +275,28 @@ def _count_tracks(df):
     return 0
 
 
+def _register_combined_outputs(metadata, sample_name, combined_cell_type, outputs, output_prefix):
+    img_col = f"{combined_cell_type}_tracks_image_path"
+    csv_col = f"{combined_cell_type}_tracks_csv_path"
+    prefixed_img_col = None
+    prefixed_csv_col = None
+    if output_prefix in {"or", "im", "ot"}:
+        prefixed_img_col = f"{output_prefix}_{combined_cell_type}_tracks_image_path"
+        prefixed_csv_col = f"{output_prefix}_{combined_cell_type}_tracks_csv_path"
+
+    cols_to_ensure = [img_col, csv_col]
+    if prefixed_img_col is not None and prefixed_csv_col is not None:
+        cols_to_ensure.extend([prefixed_img_col, prefixed_csv_col])
+    _ensure_metadata_output_columns(metadata, *cols_to_ensure)
+
+    row_idx = metadata.index[metadata["sample_name"].astype("string").str.strip() == sample_name][0]
+    metadata.at[row_idx, img_col] = str(outputs["img"])
+    metadata.at[row_idx, csv_col] = str(outputs["csv"])
+    if prefixed_img_col is not None and prefixed_csv_col is not None:
+        metadata.at[row_idx, prefixed_img_col] = str(outputs["img"])
+        metadata.at[row_idx, prefixed_csv_col] = str(outputs["csv"])
+
+
 def combine_multicolor_tracked_outputs(
     metadata,
     output_dir,
@@ -277,7 +304,15 @@ def combine_multicolor_tracked_outputs(
     combined_cell_type,
     overwrite=False,
     n_workers=1,
+    plan=None,
 ):
+    """Merge per-channel tracked outputs into ``combined_cell_type``.
+
+    ``plan`` (a ``RunPlan`` keyed by ``(sample_name, combined_cell_type)``) decides
+    per sample: ``SKIP`` keeps the existing merged output, anything else rebuilds
+    it.  Without a plan, ``overwrite=False`` raises ``FileExistsError`` when a
+    merged output already exists.
+    """
     metadata = metadata.copy()
     output_dir = Path(output_dir).expanduser()
     source_cell_types = [str(cell_type).strip() for cell_type in source_cell_types if str(cell_type).strip()]
@@ -299,10 +334,18 @@ def combine_multicolor_tracked_outputs(
         source_cell_types=source_cell_types,
         combined_cell_type=combined_cell_type,
         overwrite=overwrite,
+        plan=plan,
     )
 
     for sample_plan in sample_plans:
         sample_name = sample_plan["sample_name"]
+        if sample_plan["action"] is Action.SKIP:
+            print(f"Multicolor merge already complete for sample: {sample_name} — keeping existing data.")
+            _register_combined_outputs(
+                metadata, sample_name, combined_cell_type,
+                sample_plan["outputs"], sample_plan.get("output_prefix"),
+            )
+            continue
         print(f"Combining multicolor tracking for sample: {sample_name}")
 
         source_arrays = []
@@ -331,7 +374,7 @@ def combine_multicolor_tracked_outputs(
 
         outputs["image_dir"].mkdir(parents=True, exist_ok=True)
         outputs["csv_dir"].mkdir(parents=True, exist_ok=True)
-        if overwrite:
+        if overwrite or plan is not None:
             _remove_output(outputs["img"])
             _remove_output(outputs["csv"])
 
@@ -391,26 +434,9 @@ def combine_multicolor_tracked_outputs(
         print(f"  Combined into a total of {total_tracks} tracks")
         combined_df.to_csv(outputs["csv"], index=False)
 
-        img_col = f"{combined_cell_type}_tracks_image_path"
-        csv_col = f"{combined_cell_type}_tracks_csv_path"
-        prefixed_img_col = None
-        prefixed_csv_col = None
-        output_prefix = sample_plan.get("output_prefix")
-        if output_prefix in {"or", "im", "ot"}:
-            prefixed_img_col = f"{output_prefix}_{combined_cell_type}_tracks_image_path"
-            prefixed_csv_col = f"{output_prefix}_{combined_cell_type}_tracks_csv_path"
-
-        cols_to_ensure = [img_col, csv_col]
-        if prefixed_img_col is not None and prefixed_csv_col is not None:
-            cols_to_ensure.extend([prefixed_img_col, prefixed_csv_col])
-        _ensure_metadata_output_columns(metadata, *cols_to_ensure)
-
-        row_idx = metadata.index[metadata["sample_name"].astype("string").str.strip() == sample_name][0]
-        metadata.at[row_idx, img_col] = str(outputs["img"])
-        metadata.at[row_idx, csv_col] = str(outputs["csv"])
-        if prefixed_img_col is not None and prefixed_csv_col is not None:
-            metadata.at[row_idx, prefixed_img_col] = str(outputs["img"])
-            metadata.at[row_idx, prefixed_csv_col] = str(outputs["csv"])
+        _register_combined_outputs(
+            metadata, sample_name, combined_cell_type, outputs, sample_plan.get("output_prefix"),
+        )
 
     return metadata
 

@@ -1,5 +1,10 @@
 
 import napari
+from behav3d.core.run_plan import (
+    RunPlan,
+    scan_pixelclassifier_items,
+    scan_segmentation_items,
+)
 from behav3d.napari._widgets import (
     HelpButton,
     make_help_row,
@@ -67,67 +72,29 @@ from behav3d.napari._background_runner import (
 # so training and batch inference use the same physical-unit sigma values.
 
 
-def _segmentation_output_path(output_dir, sample_name, cell_type):
-    """Where APOC/ConvPaint write the output for ``cell_type`` of a sample.
+def _prompt_segmentation_plan(widget, md, output_dir, cell_types, *, title, name):
+    """Ask what to do about existing APOC/ConvPaint outputs.
 
-    The ``dead`` cell type is written as ``<sn>_mask_dead.zarr`` by both
-    backends; every other cell type gets ``<sn>_<ct>_segments.zarr``.  Using
-    the wrong name here makes existence checks silently miss dead masks, so
-    the overwrite prompt never fires.
+    Returns ``(plan, cancelled)``.  ``plan`` is ``None`` when nothing exists yet
+    (the engine then simply runs everything) and ``cancelled`` is True when the
+    user dismissed the dialog.
     """
-    fname = (
-        f"{sample_name}_mask_dead.zarr" if cell_type == "dead"
-        else f"{sample_name}_{cell_type}_segments.zarr"
+    from behav3d.core.metadata import has_dead_channel
+    from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
+
+    items = scan_segmentation_items(
+        md, output_dir, cell_types, include_mask=True,
+        include_dead=("dead" not in cell_types and has_dead_channel(md)),
     )
-    return Path(output_dir) / "images" / sample_name / fname
-
-
-def _segmentation_output_label(cell_type, sample_name):
-    """Human-readable entry for the overwrite prompt listing."""
-    if cell_type == "dead":
-        return f"dead mask for {sample_name}"
-    return f"{cell_type} segments for {sample_name}"
-
-
-def _segmentation_output_entries(output_dir, sample_names, cell_types):
-    """List the existing APOC/ConvPaint outputs, each with how complete it is.
-
-    "Already exists" is not the same as "already finished": a run killed by a power
-    cut, or a sub-range run, leaves an array that is real but partial. The progress
-    journal beside each array knows the difference, so the prompt can say which is
-    which instead of making the user guess.
-
-    Returns ``(items, any_incomplete)``. *items* are prompt lines like
-    ``"tcell segments for S2 - INCOMPLETE (47/120)"``; *any_incomplete* drives the
-    Skip button's label.
-    """
-    from behav3d.preprocessing.segmentation.segment_journal import (
-        describe_state, journal_state,
-    )
-
-    items = []
-    any_incomplete = False
-    for sn in sample_names:
-        for ct in cell_types:
-            path = _segmentation_output_path(output_dir, sn, ct)
-            state, n_done, t_total = journal_state(path)
-            if state == "missing":
-                continue
-            if state == "partial":
-                any_incomplete = True
-            items.append(
-                f"{_segmentation_output_label(ct, sn)} — "
-                f"{describe_state(state, n_done, t_total)}"
-            )
-    return items, any_incomplete
-
-
-#: Extra line shown under the listing when something in it is resumable, so the
-#: Skip button's new name is self-explanatory.
-_RESUME_HINT = (
-    "Skip & Resume keeps completed timepoints and finishes the incomplete ones.\n"
-    "What do you want to do?"
-)
+    if not plan_needs_prompt(items):
+        return None, False
+    choice, plan = prompt_run_plan(widget, title, items)
+    if choice == "cancel":
+        widget.log(f"{name} segmentation cancelled.")
+        return None, True
+    if not plan.any_work():
+        widget.log(f"{name}: everything is already complete — nothing to do.")
+    return plan, False
 
 
 def _notify_metadata_refresh(metadata_loader, log_fn=None, context="segmentation"):
@@ -1321,7 +1288,7 @@ class PixelClassifierWidget(QWidget):
         self.run_batch_segmentation(interactive=True, block=False)
 
     def run_batch_segmentation(self, interactive=True, skip_existing=False,
-                               block=True, extra_callbacks=None):
+                               block=True, extra_callbacks=None, plan=None):
         """Run batch segmentation.
 
         ``block=True`` (default, queue path) runs synchronously.
@@ -1347,22 +1314,32 @@ class PixelClassifierWidget(QWidget):
 
         self.log("Starting batch segmentation...")
         self._persist_params()
-        if interactive:
-            from behav3d.napari._overwrite_prompt import prompt_overwrite_batch
-            choice = prompt_overwrite_batch(
-                self,
-                "Existing Segmentation Results",
-                ["existing segmentation results may already be present"],
-                body_prefix=(
-                    "Segmentation results may already exist for some timepoints."
-                ),
+        # This engine segments every cell type of a sample together, so the plan
+        # has one item per sample.
+        if plan is None:
+            items = scan_pixelclassifier_items(
+                self.metadata_loader.metadata, Path(self.metadata_loader.output_dir),
+                list(self.all_cell_types),
             )
-            if choice == "cancel":
-                self.log("Segmentation cancelled.")
+            plan = (
+                RunPlan.skip_existing(items) if skip_existing
+                else RunPlan.overwrite_all(items)
+            )
+            if interactive:
+                from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
+                if plan_needs_prompt(items):
+                    choice, plan = prompt_run_plan(
+                        self, "Existing Segmentation Results", items,
+                        body_prefix="Segmentation results already exist for:",
+                    )
+                    if choice == "cancel":
+                        self.log("Segmentation cancelled.")
+                        fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
+                        return
+            if items and not plan.any_work():
+                self.log("Segmentation: everything is already complete — nothing to do.")
+                fire_extra_callback(extra_callbacks, "on_done", None)
                 return
-            overwrite = (choice == "overwrite")
-        else:
-            overwrite = not skip_existing
 
         # Timepoint range (Qt widget reads — must stay on Qt thread).
         if self.check_process_all.isChecked():
@@ -1453,7 +1430,8 @@ class PixelClassifierWidget(QWidget):
                 only_segment=False,
                 n_workers=n_workers_val,
                 log_callback=log_bridge,
-                overwrite_existing=overwrite,
+                overwrite_existing=False,
+                plan=plan,
                 timepoint_range=timepoint_range,
                 clf_organoid_paths=clf_organoid_paths,
                 clf_immune_paths=clf_immune_paths,
@@ -3030,7 +3008,7 @@ class CellposeWidget(QWidget):
     # ── run cellpose ────────────────────────────────────────────────────
     def run_batch_cellpose(self, interactive=True, skip_existing=False,
                            cell_type_override=None, model_path_override=None,
-                           block=True, extra_callbacks=None):
+                           block=True, extra_callbacks=None, plan=None):
         """Run Cellpose segmentation for the selected cell type.
 
         ``block=True`` (default, queue) runs synchronously; ``block=False``
@@ -3065,30 +3043,29 @@ class CellposeWidget(QWidget):
 
         self.channel_panel._persist_channel_config()
 
-        if interactive:
-            from behav3d.napari._overwrite_prompt import prompt_overwrite_batch
-            md = self.metadata_loader.metadata
-            existing = []
-            if md is not None:
-                out_dir = Path(self.metadata_loader.output_dir)
-                for sn in md["sample_name"].unique():
-                    seg_path = out_dir / "images" / sn / f"{sn}_{cell_type}_segments.zarr"
-                    if seg_path.exists():
-                        existing.append(f"{cell_type} segments for {sn}")
-            if not existing:
-                existing = [f"existing {cell_type} Cellpose results"]
-            choice = prompt_overwrite_batch(
-                self,
-                "Existing Cellpose Results",
-                existing,
+        if plan is None:
+            items = scan_segmentation_items(
+                self.metadata_loader.metadata, Path(self.metadata_loader.output_dir),
+                [cell_type],
             )
-            if choice == "cancel":
-                self.log("Cellpose segmentation cancelled.")
-                fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
+            plan = (
+                RunPlan.skip_existing(items) if skip_existing
+                else RunPlan.overwrite_all(items)
+            )
+            if interactive:
+                from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
+                if plan_needs_prompt(items):
+                    choice, plan = prompt_run_plan(
+                        self, "Existing Cellpose Results", items,
+                    )
+                    if choice == "cancel":
+                        self.log("Cellpose segmentation cancelled.")
+                        fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
+                        return
+            if items and not plan.any_work():
+                self.log(f"Cellpose '{cell_type}': everything is already complete — nothing to do.")
+                fire_extra_callback(extra_callbacks, "on_done", None)
                 return
-            overwrite = (choice == "overwrite")
-        else:
-            overwrite = not skip_existing
 
         # Timepoint range (Qt widget reads on caller thread).
         if self.check_process_all.isChecked():
@@ -3113,6 +3090,7 @@ class CellposeWidget(QWidget):
                 label_name=cell_type,
                 timepoint_range=timepoint_range,
                 progress_cb=progress_cb,
+                plan=plan,
             )
 
         def _report_summary(summary):
@@ -3160,7 +3138,7 @@ class CellposeWidget(QWidget):
 
     # ── run Otsu dead mask ──────────────────────────────────────────────
     def run_otsu_threshold(self, interactive=True, block=True,
-                           extra_callbacks=None):
+                           extra_callbacks=None, skip_existing=False, plan=None):
         """Run Otsu thresholding on the dead channel.
 
         ``block=True`` (default, queue) runs synchronously; ``block=False``
@@ -3183,27 +3161,29 @@ class CellposeWidget(QWidget):
         self.channel_panel._persist_channel_config()
 
         # ---- Overwrite check ------------------------------------------------
-        out_dir = Path(self.metadata_loader.output_dir)
-        md = self.metadata_loader.metadata
-        existing = []
-        for sn in md["sample_name"].unique():
-            mask_path = out_dir / "images" / sn / f"{sn}_mask_dead.zarr"
-            if mask_path.exists():
-                existing.append(f"{sn} dead mask ({mask_path.name})")
-
-        overwrite_existing = True
-        if existing and interactive:
-            from behav3d.napari._overwrite_prompt import prompt_overwrite_batch
-            choice = prompt_overwrite_batch(
-                self,
-                "Overwrite Existing Dead Masks?",
-                existing,
+        if plan is None:
+            items = scan_segmentation_items(
+                self.metadata_loader.metadata, Path(self.metadata_loader.output_dir),
+                [], include_dead=True,
             )
-            if choice == "cancel":
-                self.log("Otsu dead mask cancelled.")
-                fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
+            plan = (
+                RunPlan.skip_existing(items) if skip_existing
+                else RunPlan.overwrite_all(items)
+            )
+            if interactive:
+                from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
+                if plan_needs_prompt(items):
+                    choice, plan = prompt_run_plan(
+                        self, "Existing Dead Masks", items,
+                    )
+                    if choice == "cancel":
+                        self.log("Otsu dead mask cancelled.")
+                        fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
+                        return
+            if items and not plan.any_work():
+                self.log("Otsu dead mask: everything is already complete — nothing to do.")
+                fire_extra_callback(extra_callbacks, "on_done", None)
                 return
-            overwrite_existing = (choice == "overwrite")
 
         self.log("Starting Otsu dead mask segmentation...")
 
@@ -3213,16 +3193,14 @@ class CellposeWidget(QWidget):
         else:
             timepoint_range = (self.spin_t_start.value(), self.spin_t_end.value())
 
-        if not overwrite_existing:
-            self.log("Samples with an existing dead mask will be skipped.")
-
         def _do_otsu(progress_cb=None):
             return run_otsu_threshold_segmentation_from_zarr(
                 output_dir=self.metadata_loader.output_dir,
                 metadata=self.metadata_loader.metadata,
                 timepoint_range=timepoint_range,
                 progress_cb=progress_cb,
-                overwrite=overwrite_existing,
+                overwrite=False,
+                plan=plan,
             )
 
         def _apply_otsu(result):
@@ -4486,7 +4464,7 @@ class CellposeSAMWidget(QWidget):
     # \u2500\u2500 run \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     def run_batch_cellpose_sam(self, interactive=True, skip_existing=False,
                                cell_type_override=None, block=True,
-                               extra_callbacks=None):
+                               extra_callbacks=None, plan=None):
         """Run Cellpose-SAM for the selected cell type (or all of them).
 
         ``block=True`` (queue) runs synchronously; ``block=False`` (GUI) runs in
@@ -4521,28 +4499,29 @@ class CellposeSAMWidget(QWidget):
 
         self._persist_params()
 
-        if interactive:
-            from behav3d.napari._overwrite_prompt import prompt_overwrite_batch
-            md = self.metadata_loader.metadata
-            out_dir = Path(self.metadata_loader.output_dir)
-            existing = []
-            for ct in cell_types:
-                for sn in md["sample_name"].unique():
-                    if (out_dir / "images" / sn / f"{sn}_{ct}_segments.zarr").exists():
-                        existing.append(f"{ct} segments for {sn}")
-            if existing:
-                choice = prompt_overwrite_batch(self, "Existing Segmentation Results", existing)
-                if choice == "cancel":
-                    self.log("Cellpose-SAM segmentation cancelled.")
-                    fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
-                    return
-                overwrite = (choice == "overwrite")
-                skip_existing = (choice == "skip")
-            else:
-                overwrite = True
-                skip_existing = False
-        else:
-            overwrite = not skip_existing
+        if plan is None:
+            items = scan_segmentation_items(
+                self.metadata_loader.metadata, Path(self.metadata_loader.output_dir),
+                cell_types,
+            )
+            plan = (
+                RunPlan.skip_existing(items) if skip_existing
+                else RunPlan.overwrite_all(items)
+            )
+            if interactive:
+                from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
+                if plan_needs_prompt(items):
+                    choice, plan = prompt_run_plan(
+                        self, "Existing Segmentation Results", items,
+                    )
+                    if choice == "cancel":
+                        self.log("Cellpose-SAM segmentation cancelled.")
+                        fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
+                        return
+            if items and not plan.any_work():
+                self.log("Cellpose-SAM: everything is already complete — nothing to do.")
+                fire_extra_callback(extra_callbacks, "on_done", None)
+                return
 
         if self.check_process_all.isChecked():
             timepoint_range = None
@@ -4590,6 +4569,9 @@ class CellposeSAMWidget(QWidget):
 
             results = []
             for i, ct in enumerate(cell_types):
+                if not plan.for_cell_type(ct).any_work():
+                    log_bridge(f"Cellpose-SAM {ct}: already complete — skipping.")
+                    continue
                 results.append(run_cellpose_sam_and_sync_metadata(
                     output_dir=self.metadata_loader.output_dir,
                     metadata_loader=self.metadata_loader,
@@ -4603,8 +4585,7 @@ class CellposeSAMWidget(QWidget):
                     resume=True,
                     n_threads=n_threads,
                     cooldown_s=cooldown_s,
-                    overwrite_existing=overwrite,
-                    skip_existing=skip_existing,
+                    plan=plan,
                     progress_cb=_make_scaled_cb(i),
                     log_callback=log_bridge,
                 ))
@@ -4617,6 +4598,8 @@ class CellposeSAMWidget(QWidget):
             for _md, summary in results:
                 merged["processed"].extend(summary["processed"])
                 merged["skipped"].extend(summary["skipped"])
+            if not results:  # every cell type was already complete
+                return self.metadata_loader.metadata, merged
             return results[-1][0], merged
 
         def _report_summary(summary):
@@ -7531,37 +7514,26 @@ class APOCWidget(QWidget):
 
         output_dir = Path(self.metadata_loader.output_dir)
 
-        # Check for pre-existing segments and prompt.  The dead cell type is
-        # stored as ``<sn>_mask_dead.zarr``, not ``<sn>_dead_segments.zarr``.
-        sample_names = md['sample_name'].unique()
-        existing, any_incomplete = _segmentation_output_entries(
-            output_dir, sample_names, [ct],
-        )
-
-        overwrite = False
-        if existing:
-            from behav3d.napari._overwrite_prompt import prompt_overwrite_single
-            choice = prompt_overwrite_single(
-                self,
-                f"Run {ct.capitalize()} Segmentation",
-                existing,
-                skip_label="Skip & Resume" if any_incomplete else "Skip",
-                body_suffix=_RESUME_HINT if any_incomplete else "What do you want to do?",
+        # Per-sample status of this cell type's outputs (the dead cell type lives in
+        # ``<sn>_mask_dead.zarr``; the scan knows the naming).
+        items = scan_segmentation_items(md, output_dir, [ct], include_mask=True)
+        plan = None
+        from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
+        if plan_needs_prompt(items):
+            choice, plan = prompt_run_plan(
+                self, f"Run {ct.capitalize()} Segmentation", items,
             )
             if choice == "cancel":
                 return
-            overwrite = (choice == "overwrite")
+            if not plan.any_work():
+                self.log(f"{ct}: everything is already complete — nothing to do.")
+                return
 
         # Run segmentation for this cell type only.  Use the background
         # path (``block=False``) so napari remains interactive.
-        orig_overwrite = self._overwrite_existing
-        self._overwrite_existing = overwrite
-        try:
-            self._on_run_segmentation(
-                interactive=True, only_cell_types=[ct], block=False,
-            )
-        finally:
-            self._overwrite_existing = orig_overwrite
+        self._on_run_segmentation(
+            interactive=True, only_cell_types=[ct], block=False, plan=plan,
+        )
 
     def _update_global_run_btn_label(self, tab_index):
         """Update the global Run button label to reflect the active cell-type tab."""
@@ -7662,7 +7634,7 @@ class APOCWidget(QWidget):
 
     # ── Run batch segmentation ──────────────────────────────────
     def _on_run_segmentation(self, interactive=True, only_cell_types=None,
-                             block=True, extra_callbacks=None):
+                             block=True, extra_callbacks=None, plan=None):
         """Run APOC batch segmentation.
 
         ``block=True`` (default) keeps the call synchronous so the
@@ -7691,25 +7663,17 @@ class APOCWidget(QWidget):
 
             # ---- Overwrite check (batch only — per-cell-type uses its own
             # prompt in ``_on_global_run_instance``) ----------------------
-            if interactive and only_cell_types is None:
-                check_cts = list(self.all_cell_types or [])
-                existing, any_incomplete = _segmentation_output_entries(
-                    output_dir, md["sample_name"].unique(), check_cts,
+            if plan is None and interactive and only_cell_types is None:
+                plan, cancelled = _prompt_segmentation_plan(
+                    self, md, output_dir, list(self.all_cell_types or []),
+                    title="Existing APOC Segmentations", name="APOC",
                 )
-                if existing:
-                    from behav3d.napari._overwrite_prompt import prompt_overwrite_batch
-                    choice = prompt_overwrite_batch(
-                        self,
-                        "Overwrite Existing APOC Segmentations?",
-                        existing,
-                        skip_label="Skip & Resume" if any_incomplete else "Skip Existing",
-                        body_suffix=_RESUME_HINT if any_incomplete else "What do you want to do?",
-                    )
-                    if choice == "cancel":
-                        self.log("APOC segmentation cancelled.")
-                        fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
-                        return
-                    self._overwrite_existing = (choice == "overwrite")
+                if cancelled:
+                    fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
+                    return
+                if plan is not None and not plan.any_work():
+                    fire_extra_callback(extra_callbacks, "on_done", None)
+                    return
 
             # Timepoint range
             if only_cell_types is not None and hasattr(self, 'check_limit_timerange_ct'):
@@ -7783,6 +7747,7 @@ class APOCWidget(QWidget):
                     timepoint_range=timepoint_range,
                     apoc_config=apoc_config,
                     overwrite_existing=overwrite_val,
+                    plan=plan,
                     n_workers=n_workers_val,
                     gpu_device=gpu_device_val,
                     apoc_strategy=strategy,
@@ -8763,7 +8728,7 @@ class ConvPaintWidget(QWidget):
 
     # ── Run batch segmentation ───────────────────────────────────
     def _on_run_segmentation(self, interactive=True, only_cell_types=None,
-                             block=True, extra_callbacks=None):
+                             block=True, extra_callbacks=None, plan=None):
         """Run ConvPaint batch segmentation.
 
         ``block=True`` (default) is synchronous so the processing queue
@@ -8794,25 +8759,17 @@ class ConvPaintWidget(QWidget):
             pixel_class_outdir = output_dir / "images" / "PixelClassification"
 
             # ---- Overwrite check (batch only) ---------------------------
-            if interactive and only_cell_types is None:
-                check_cts = list(self.all_cell_types or [])
-                existing, any_incomplete = _segmentation_output_entries(
-                    output_dir, md["sample_name"].unique(), check_cts,
+            if plan is None and interactive and only_cell_types is None:
+                plan, cancelled = _prompt_segmentation_plan(
+                    self, md, output_dir, list(self.all_cell_types or []),
+                    title="Existing ConvPaint Segmentations", name="ConvPaint",
                 )
-                if existing:
-                    from behav3d.napari._overwrite_prompt import prompt_overwrite_batch
-                    choice = prompt_overwrite_batch(
-                        self,
-                        "Overwrite Existing ConvPaint Segmentations?",
-                        existing,
-                        skip_label="Skip & Resume" if any_incomplete else "Skip Existing",
-                        body_suffix=_RESUME_HINT if any_incomplete else "What do you want to do?",
-                    )
-                    if choice == "cancel":
-                        self.log("ConvPaint segmentation cancelled.")
-                        fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
-                        return
-                    self._overwrite_existing = (choice == "overwrite")
+                if cancelled:
+                    fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
+                    return
+                if plan is not None and not plan.any_work():
+                    fire_extra_callback(extra_callbacks, "on_done", None)
+                    return
 
             # Quick preflight: a unified ConvPaint model must exist.
             from behav3d.preprocessing.segmentation.convpaint_label_map import (
@@ -8891,6 +8848,7 @@ class ConvPaintWidget(QWidget):
                     timepoint_range=timepoint_range,
                     convpaint_config=convpaint_config,
                     overwrite_existing=overwrite_val,
+                    plan=plan,
                     n_workers=n_workers_val,
                     convpaint_strategy=strategy,
                     per_ct_convpaint_strategies=per_ct_convpaint_strategies,

@@ -31,6 +31,7 @@ from qtpy.QtWidgets import (
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QCursor
 
+from behav3d.core.run_plan import RunPlan, Status, scan_feature_items
 from behav3d.core.qt_help import HelpButton, make_help_row, reset_scroll_on_page_change
 from behav3d.napari._analysis import CollapsibleSection
 from behav3d.napari._units import UnitGroupManager
@@ -1807,13 +1808,15 @@ class CellTypeFeaturePanel(QWidget):
             _notify_post_extraction(self)
 
     def _run_feature_extraction_for(self, cell_type: str, overwrite: bool = False,
-                                    params: dict = None, progress_cb=None):
+                                    params: dict = None, progress_cb=None, plan=None):
         """Run feature extraction for a single cell type.
 
         ``params`` is an optional Qt-thread-safe snapshot from
         :meth:`_collect_params`; when supplied the widget values are not
         re-read (required when called from a background worker).
-        ``progress_cb`` is forwarded to ``run_feature_extraction``.
+        ``progress_cb`` is forwarded to ``run_feature_extraction``; ``plan``
+        (a :class:`~behav3d.core.run_plan.RunPlan`) sets per-sample skip / run /
+        overwrite and supersedes ``overwrite``.
         """
         from behav3d.features.timepoint_features import run_feature_extraction
 
@@ -1832,6 +1835,7 @@ class CellTypeFeaturePanel(QWidget):
             n_workers=int(params["n_workers"]),
             overwrite=overwrite,
             progress_cb=progress_cb,
+            plan=plan,
         )
 
     def _run_death_only_for(self, cell_type: str, params: dict = None):
@@ -1862,16 +1866,6 @@ class CellTypeFeaturePanel(QWidget):
             propagate=propagate,
         )
 
-    def _check_existing_features(self, cell_types: list) -> list:
-        warnings = []
-        out_dir = Path(self.metadata_loader.output_dir)
-        for ct in cell_types:
-            feat_dir = out_dir / "analysis" / ct / "track_features"
-            combined = feat_dir / f"BEHAV3D_{ct}_combined_track_features.csv"
-            if combined.exists():
-                warnings.append(f"{ct} feature data ({combined.name})")
-        return warnings
-
     # ── Click handler ────────────────────────────────────────────────────────
     def _on_run_clicked(self, interactive=True):
         """Background-execute feature extraction for this cell type.
@@ -1880,7 +1874,7 @@ class CellTypeFeaturePanel(QWidget):
         The death-only re-run path uses indeterminate progress because
         ``rerun_death_classification`` has no top-level sample loop.
         """
-        from behav3d.napari._overwrite_prompt import prompt_overwrite_single
+        from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
         from qtpy.QtWidgets import QMessageBox as _QMB
 
         if self._bg.is_running():
@@ -1889,12 +1883,17 @@ class CellTypeFeaturePanel(QWidget):
 
         self.log(f"Running feature extraction for: {self.cell_type}")
 
-        overwrite = False
         death_only = False
-        existing = self._check_existing_features([self.cell_type])
+        md = self.metadata_loader.metadata
+        out_dir = self.metadata_loader.output_dir
+        items = (
+            scan_feature_items(md, Path(out_dir), [self.cell_type])
+            if md is not None and out_dir else []
+        )
+        plan = RunPlan.skip_existing(items)
         threshold_changed = self._threshold_changed()
 
-        if existing:
+        if plan_needs_prompt(items):
             if interactive:
                 extra = None
                 if threshold_changed:
@@ -1905,21 +1904,26 @@ class CellTypeFeaturePanel(QWidget):
                             _QMB.ActionRole,
                         ),
                     ]
-                choice = prompt_overwrite_single(
+                choice, plan = prompt_run_plan(
                     self,
-                    "Overwrite Existing Features?",
-                    existing,
+                    "Existing Feature Data",
+                    items,
                     extra_buttons=extra,
                 )
-                if choice == "cancel" or choice == "skip":
+                if choice == "cancel":
                     self.log(f"Feature extraction for {self.cell_type} cancelled.")
                     return
                 if choice == "death_only":
                     death_only = True
-                else:
-                    overwrite = True
             else:
-                overwrite = True
+                plan = RunPlan.overwrite_all(items)
+
+        if not death_only and items and not plan.any_work():
+            self.log(
+                f"Feature extraction for {self.cell_type}: everything is already "
+                "complete — nothing to do."
+            )
+            return
 
         # Persist + snapshot widget state on the Qt thread.
         self._persist()
@@ -1954,7 +1958,7 @@ class CellTypeFeaturePanel(QWidget):
 
         def _do_extraction(progress_cb=None):
             return self._run_feature_extraction_for(
-                cell_type, overwrite=overwrite,
+                cell_type, overwrite=False, plan=plan,
                 params=params_snapshot, progress_cb=progress_cb,
             )
 
@@ -4319,7 +4323,7 @@ class FeatureExtractionTab(QWidget):
         self.run_batch_feature_extraction(interactive=True, block=False)
 
     def run_batch_feature_extraction(self, interactive=True, skip_existing=False,
-                                     block=True, extra_callbacks=None):
+                                     block=True, extra_callbacks=None, plan=None):
         """Run feature extraction for all cell types sequentially.
 
         ``block=True`` (default, queue) runs synchronously.  ``block=False``
@@ -4330,7 +4334,7 @@ class FeatureExtractionTab(QWidget):
         ``extra_callbacks`` is the queue's chaining hook
         (``{"on_done": cb, "on_failed": cb}``).
         """
-        from behav3d.napari._overwrite_prompt import prompt_overwrite_batch
+        from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
         from qtpy.QtWidgets import QMessageBox as _QMB
 
         if not self.panels:
@@ -4355,26 +4359,23 @@ class FeatureExtractionTab(QWidget):
         self._log(f"Starting batch feature extraction for {total} cell type(s)…")
 
         all_cts = list(self.panels.keys())
-        existing = []
-        existing_cts = set()
         out_dir = Path(self.metadata_loader.output_dir)
-        for ct in all_cts:
-            feat_dir = out_dir / "analysis" / ct / "track_features"
-            combined = feat_dir / f"BEHAV3D_{ct}_combined_track_features.csv"
-            if combined.exists():
-                existing.append(f"{ct} feature data ({combined.name})")
-                existing_cts.add(ct)
+        md = self.metadata_loader.metadata
+        items = scan_feature_items(md, out_dir, all_cts) if md is not None else []
+        existing_cts = {it.cell_type for it in items if it.status is not Status.MISSING}
 
         changed_cts = [
             ct for ct in all_cts
             if ct in existing_cts and self.panels[ct]._threshold_changed()
         ]
 
-        skip_existing_flag = skip_existing
-        overwrite = not skip_existing
         death_only_cts: set[str] = set()
-        if existing:
-            if interactive:
+        if plan is None:
+            plan = (
+                RunPlan.skip_existing(items) if skip_existing
+                else RunPlan.overwrite_all(items)
+            )
+            if interactive and plan_needs_prompt(items):
                 extra = None
                 if changed_cts:
                     extra = [
@@ -4384,10 +4385,10 @@ class FeatureExtractionTab(QWidget):
                             _QMB.ActionRole,
                         ),
                     ]
-                choice = prompt_overwrite_batch(
+                choice, chosen = prompt_run_plan(
                     self,
-                    "Overwrite Existing Features?",
-                    existing,
+                    "Existing Feature Data",
+                    items,
                     extra_buttons=extra,
                 )
                 if choice == "cancel":
@@ -4396,13 +4397,8 @@ class FeatureExtractionTab(QWidget):
                     return
                 if choice == "death_only":
                     death_only_cts = set(changed_cts)
-                    skip_existing_flag = False
-                    overwrite = False
                 else:
-                    skip_existing_flag = choice == "skip"
-                    overwrite = not skip_existing_flag
-            else:
-                overwrite = True
+                    plan = chosen
 
         # Persist + snapshot every panel's Qt widget state on the Qt
         # thread — the worker must not read widgets.
@@ -4451,8 +4447,8 @@ class FeatureExtractionTab(QWidget):
                         except Exception:
                             pass
                     continue
-                if skip_existing_flag and ct in existing_cts:
-                    self._log(f"--- [{i + 1}/{total}] Skipping {ct} (existing data) ---")
+                if not plan.for_cell_type(ct).any_work():
+                    self._log(f"--- [{i + 1}/{total}] Skipping {ct} (already complete) ---")
                     if progress_cb is not None:
                         try:
                             progress_cb((i + 1) * SCALE, total * SCALE, step_label_prefix)
@@ -4462,7 +4458,8 @@ class FeatureExtractionTab(QWidget):
                 self._log(f"--- [{i + 1}/{total}] Feature extraction: {ct} ---")
                 panel._run_feature_extraction_for(
                     ct,
-                    overwrite=overwrite,
+                    overwrite=False,
+                    plan=plan,
                     params=panel_params[ct],
                     progress_cb=_make_step_cb(i, step_label_prefix),
                 )

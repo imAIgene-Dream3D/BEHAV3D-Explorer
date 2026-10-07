@@ -7,6 +7,13 @@ from skimage.segmentation import relabel_sequential, watershed
 from tqdm import tqdm
 
 from behav3d.core.metadata import detect_organoid_types_from_metadata
+from behav3d.core.run_plan import (
+    ALL_ORGANOIDS,
+    Action,
+    Status,
+    all_organoids_status,
+    resolve_action,
+)
 from behav3d.io.images import append_to_zarr, load_image
 from behav3d.preprocessing.tracking import convert_tracked_image_to_csv
 from behav3d.preprocessing.tracking.propagation_tracking import (
@@ -152,6 +159,17 @@ def _all_outputs_exist(paths):
     return all(path.exists() for path in required)
 
 
+def _rebuild_split_csvs(paths):
+    """Write the missing per-type csvs from the combined csv (no re-tracking)."""
+    combined_df = pd.read_csv(paths["combined_csv"])
+    for organoid_type, organoid_paths in paths["split"].items():
+        if organoid_paths["csv"].exists():
+            continue
+        split_df = combined_df[combined_df["organoid_type"] == organoid_type].copy()
+        organoid_paths["csv"].parent.mkdir(parents=True, exist_ok=True)
+        split_df.to_csv(organoid_paths["csv"], index=False)
+
+
 def run_propagation_tracking_all_organoids(
     metadata,
     output_dir,
@@ -160,8 +178,15 @@ def run_propagation_tracking_all_organoids(
     segment_size_min=100,
     organoid_types=None,
     progress_cb=None,
+    plan=None,
     **kwargs,
 ):
+    """Track every organoid type of each sample together.
+
+    ``plan`` (a ``RunPlan``) is keyed by ``(sample_name, ALL_ORGANOIDS)``: the
+    combined output and every per-type output are one group, because TrackIDs are
+    shared across types.  Without a plan, ``overwrite`` applies to every sample.
+    """
     organoid_types = list(organoid_types or detect_organoid_types_from_metadata(metadata))
     if not organoid_types:
         print("Warning: No organoid types detected in metadata. Skipping all-organoids propagation tracking.")
@@ -189,8 +214,16 @@ def run_propagation_tracking_all_organoids(
         for organoid_type in available_types:
             paths["split"][organoid_type]["csv"].parent.mkdir(parents=True, exist_ok=True)
 
-        if _all_outputs_exist(paths) and not overwrite:
-            print("All-organoids tracking already exists... Provide overwrite=True to overwrite... Loading existing tracking data")
+        action = resolve_action(plan, overwrite, sample_name, ALL_ORGANOIDS)
+        probe = (
+            None if action is Action.OVERWRITE
+            else all_organoids_status(output_dir, sample_name, available_types, segments_paths)
+        )
+        if probe is not None and probe.status is Status.COMPLETE:
+            print(f"All-organoids tracking already complete for {sample_name} — keeping existing data.")
+        elif probe is not None and probe.csv_only:
+            print(f"All-organoids zarrs exist for {sample_name}; rebuilding missing per-type csvs.")
+            _rebuild_split_csvs(paths)
         else:
             segment_arrays = {organoid_type: load_image(path) for organoid_type, path in segments_paths.items()}
             _validate_segment_shapes(sample_name, segment_arrays)

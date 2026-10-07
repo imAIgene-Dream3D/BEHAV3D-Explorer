@@ -45,6 +45,7 @@ from behav3d.preprocessing.segmentation.cpsam_env import (
     cpsam_env_status,
     find_cpsam_python,
 )
+from behav3d.core.run_plan import Action
 from behav3d.preprocessing.segmentation.segment_journal import (
     JOURNAL_VERSION,
     journal_path,
@@ -381,6 +382,7 @@ def run_cellpose_sam_segmentation(
     log_callback: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
     config: Optional[dict] = None,
+    plan=None,
     **_kwargs,
 ):
     """Run Cellpose-SAM for one or many cell types across every sample.
@@ -399,6 +401,11 @@ def run_cellpose_sam_segmentation(
         ``"auto"``, ``"cpu"``, or ``"cuda:<n>"``. *force_cpu* overrides it.
     sam_params / size_filter:
         Overrides for :data:`DEFAULT_SAM_PARAMS` / :data:`DEFAULT_SIZE_FILTER`.
+    plan:
+        Optional ``RunPlan`` keyed by ``(sample_name, cell_type)``. When given it
+        replaces ``overwrite_existing`` / ``skip_existing`` / ``resume`` per unit:
+        ``SKIP`` leaves an existing array alone, ``RUN`` resumes it from the
+        journal, ``OVERWRITE`` re-segments it from scratch.
     resume:
         Continue an interrupted run instead of starting over: keep the timepoints
         already recorded in the sidecar journal and segment only the rest. Raises
@@ -427,6 +434,18 @@ def run_cellpose_sam_segmentation(
     other_types = detect_other_cell_types_from_metadata(metadata)
 
     summary = {"processed": [], "skipped": []}
+
+    def _unit_flags(sample_name, cell_type):
+        """``(skip, overwrite, resume)`` for one (sample, cell type) unit."""
+        if plan is None:
+            return skip_existing, overwrite_existing, resume
+        action = plan.action(sample_name, cell_type)
+        if action is Action.SKIP:
+            return True, False, True
+        if action is Action.OVERWRITE:
+            return False, True, False
+        return False, False, True
+
     units = [(ct, idx, sample) for ct in cell_types for idx, sample in metadata.iterrows()]
 
     # Precompute how many timepoints will actually run, across every unit, so
@@ -438,14 +457,15 @@ def run_cellpose_sam_segmentation(
         sample_dir = output_dir / "images" / str(sample_name)
         raw_zarr = sample_dir / f"{sample_name}.zarr"
         out_zarr = sample_dir / f"{sample_name}_{cell_type}_segments.zarr"
-        if not raw_zarr.exists() or (skip_existing and out_zarr.exists()):
+        u_skip, _u_over, u_resume = _unit_flags(sample_name, cell_type)
+        if not raw_zarr.exists() or (u_skip and out_zarr.exists()):
             continue
         try:
             t_total = load_image(raw_zarr).shape[0]
         except Exception:
             continue
         wanted = _timepoints_for(t_total, timepoint_range)
-        if resume:
+        if u_resume:
             # Best-effort only: this drives the progress bar's denominator. The
             # authoritative (fingerprint-checked) filtering happens per unit below,
             # so a journal that turns out to be unusable just makes the bar jump.
@@ -484,7 +504,8 @@ def run_cellpose_sam_segmentation(
                 continue
 
             out_zarr = sample_dir / f"{sample_name}_{cell_type}_segments.zarr"
-            if skip_existing and out_zarr.exists():
+            u_skip, u_over, u_resume = _unit_flags(sample_name, cell_type)
+            if u_skip and out_zarr.exists():
                 log(f"  [SKIP] {tag}: segments already exist.")
                 summary["skipped"].append(f"{tag} (exists)")
                 metadata.at[idx, path_col] = str(out_zarr)
@@ -507,7 +528,7 @@ def run_cellpose_sam_segmentation(
             # overwrite was requested. Never recreate for a sub-range run: doing so
             # would zero every timepoint outside the range. Never recreate when
             # resuming either - that is the whole point.
-            recreate = overwrite_existing and timepoint_range is None and not resume
+            recreate = u_over and timepoint_range is None and not u_resume
             if not out_zarr.exists():
                 recreate = True
             else:
@@ -525,7 +546,7 @@ def run_cellpose_sam_segmentation(
             # A journal only vouches for frames produced under the settings it
             # records; once those differ it says nothing about what is on disk.
             if journal is not None and journal.get("fingerprint") != fingerprint:
-                if resume:
+                if u_resume:
                     raise RuntimeError(
                         f"Cannot resume {tag}: the segmentation settings have changed since "
                         f"the interrupted run (channels, model, anisotropy, cellpose params "
@@ -537,7 +558,7 @@ def run_cellpose_sam_segmentation(
                 journal = None
 
             already_done = set(journal.get("done") or ()) if journal else set()
-            if resume and already_done:
+            if u_resume and already_done:
                 remaining = [t for t in timepoints if t not in already_done]
                 n_skip = len(timepoints) - len(remaining)
                 if not remaining:

@@ -187,6 +187,7 @@ import traceback
 from behav3d.analysis import smooth_value_over_time
 from behav3d.core.utils import get_current_time, format_time, convert_time, convert_distance
 from behav3d.core.metadata import is_multicolor_celltype, resolve_immune_track_paths_for_sample
+from behav3d.core.run_plan import Action, resolve_action
 from behav3d.io.images import load_image, load_image_timepoint, convert_raw_file_to_zarr
 from tqdm import tqdm
 from datetime import datetime
@@ -465,7 +466,15 @@ def run_feature_extraction(
     overwrite=False,
     n_workers=1,
     progress_cb=None,
+    plan=None,
     ):
+    """Extract per-track features for one cell type, sample by sample.
+
+    ``plan`` (a ``RunPlan`` keyed by ``(sample_name, cell_type)``) supersedes
+    ``overwrite``: ``SKIP`` reuses the sample's existing feature csv in the
+    combined output, ``RUN`` recomputes it reusing cached intermediates, and
+    ``OVERWRITE`` also discards those caches.
+    """
     assert config is not None or output_dir is not None, "Either 'config' or 'output_dir' must be supplied"
     
     if output_dir is None:
@@ -494,6 +503,20 @@ def run_feature_extraction(
         start_time = time.time()
 
         sample_name = sample_metadata['sample_name']
+        action = resolve_action(plan, overwrite, sample_name, cell_type)
+        sample_overwrite = action is Action.OVERWRITE
+        existing_features_path = Path(
+            output_dir, "trackdata", sample_name, cell_type,
+            f"{sample_name}_{cell_type}_track_features.csv",
+        )
+        if action is Action.SKIP and existing_features_path.exists():
+            print(f"Features already complete for {sample_name} / {cell_type} — keeping existing data.")
+            df_kept = pd.read_csv(existing_features_path, sep=",")
+            sort_cols = [c for c in ("sample_name", "TrackID", "relative_time") if c in df_kept.columns]
+            if sort_cols:
+                df_kept = df_kept.sort_values(by=sort_cols)
+            df_all_tracks = pd.concat([df_all_tracks, df_kept])
+            continue
 
         try:
             distance_unit=sample_metadata['distance_unit']
@@ -638,7 +661,7 @@ def run_feature_extraction(
                 path=raw_path,
                 outpath=raw_zarr,
                 axis_order=axis_order,
-                overwrite=overwrite,
+                overwrite=sample_overwrite,
             )
             raw_image_path = raw_zarr
 
@@ -732,7 +755,7 @@ def run_feature_extraction(
                         organoid_segments_paths=organoid_segments_paths,
                         immune_segments_paths=immune_segments_paths,
                         other_segments_paths=other_segments_paths,
-                        overwrite=overwrite,
+                        overwrite=sample_overwrite,
                         n_workers=n_workers
                     )
             else:

@@ -6,7 +6,7 @@ import shutil
 from skimage.measure import regionprops, regionprops_table
 from scipy.ndimage import distance_transform_edt
 from behav3d.io.images import load_image, save_as_zarr
-from behav3d.preprocessing.tracking import convert_segments_to_tracks
+from behav3d.preprocessing.tracking import convert_segments_to_tracks, prepare_tracking_sample
 from typing import Optional, Tuple, Sequence
 
 try:
@@ -180,6 +180,7 @@ def run_trackpy_tracking_generic(
     return_trackimg=True,
     log_callback=None,
     progress_cb=None,
+    plan=None,
     **kwargs
 ):
     """Run trackpy tracking on any cell type.
@@ -208,6 +209,9 @@ def run_trackpy_tracking_generic(
         Called as ``progress_cb(current, total, label)`` from inside the
         per-sample loop so a GUI can drive a progress bar.  ``None`` is a
         no-op (default).  Notebook callers omit this kwarg.
+    plan : behav3d.core.run_plan.RunPlan, optional
+        Per-(sample, cell type) skip / run / overwrite choices; supersedes
+        ``overwrite`` when given.
     **kwargs : dict
     """
     output_dir = Path(output_dir)
@@ -250,12 +254,19 @@ def run_trackpy_tracking_generic(
         element_size_y = sample["pixel_distance_xy"]
         element_size_z = sample["pixel_distance_z"]
         
-        if (
-            (
-                not tracked_csv_outpath.exists() or 
-                not tracked_img_outpath.exists()
-            ) or overwrite
-            ):
+        if prepare_tracking_sample(
+            sample_name=sample_name,
+            cell_type=cell_type,
+            tracked_img_outpath=tracked_img_outpath,
+            tracked_csv_outpath=tracked_csv_outpath,
+            segments_path=segments_path,
+            element_size_x=element_size_x,
+            element_size_y=element_size_y,
+            element_size_z=element_size_z,
+            overwrite=overwrite,
+            plan=plan,
+            log=print,
+        ):
             
             print(f"Loading segments from {segments_path}")
             segments = load_image(segments_path)
@@ -363,8 +374,6 @@ def run_trackpy_tracking_generic(
                     outpath=tracked_img_outpath,
                     n_workers=n_workers,
                 )
-        else:
-            print("Tracking already exists... Provide overwrite=True to overwrite... Loading existing tracking data")
         
         # Update metadata with prefixed column names
         if segments_col is not None and segments_col.startswith(('or_', 'im_', 'ot_')):
@@ -403,6 +412,7 @@ def run_trackpy_tracking_with_method(
     adaptive_stop=10.0,
     adaptive_step=0.95,
     tracking_method='trackpy_post',
+    plan=None,
     **kwargs
 ):
     """Run tracking on any cell type with specified tracking method.
@@ -461,15 +471,21 @@ def run_trackpy_tracking_with_method(
         element_size_x = sample["pixel_distance_xy"]
         element_size_y = sample["pixel_distance_xy"]
         element_size_z = sample["pixel_distance_z"]
-        segments = np.asarray(load_image(segments_path))
 
-        if (
-            (
-                not tracked_csv_outpath.exists() or 
-                not tracked_img_outpath.exists()
-            ) or overwrite
-            ):
-            
+        if prepare_tracking_sample(
+            sample_name=sample_name,
+            cell_type=cell_type,
+            tracked_img_outpath=tracked_img_outpath,
+            tracked_csv_outpath=tracked_csv_outpath,
+            segments_path=segments_path,
+            element_size_x=element_size_x,
+            element_size_y=element_size_y,
+            element_size_z=element_size_z,
+            overwrite=overwrite,
+            plan=plan,
+            log=print,
+        ):
+            segments = np.asarray(load_image(segments_path))
             print(f"Running {tracking_method} tracking...")
             if tracking_method == 'trackpy_post':
                 df_tracks, tracked_img = run_trackpy_tracking(
@@ -537,8 +553,6 @@ def run_trackpy_tracking_with_method(
                 print(f"Saving tracks CSV to {tracked_csv_outpath}")
                 
                 df_tracks.to_csv(tracked_csv_outpath, index=False)
-        else:
-            print("Tracking already exists... Provide overwrite=True to overwrite... Loading existing tracking data")
 
         # Update metadata with prefixed column names
         if segments_col is not None and segments_col.startswith(('or_', 'im_', 'ot_')):

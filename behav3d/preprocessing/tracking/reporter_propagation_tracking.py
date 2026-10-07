@@ -26,7 +26,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from behav3d.io.images import load_image, append_to_zarr
-from behav3d.preprocessing.tracking import convert_tracked_image_to_csv
+from behav3d.preprocessing.tracking import convert_tracked_image_to_csv, prepare_tracking_sample
 from behav3d.preprocessing.tracking.propagation_tracking import (
     _resolve_segments_column,
     _resolve_tracking_output_columns,
@@ -191,6 +191,7 @@ def run_reporter_propagation_tracking(
     segment_size_min=100,
     min_overlap_fraction=0.1,
     progress_cb=None,
+    plan=None,
     **kwargs,
 ):
     """Run Reporter Propagation tracking for near-static, unreliably-segmented objects.
@@ -216,6 +217,9 @@ def run_reporter_propagation_tracking(
         Called as ``progress_cb(current, total, label)`` from inside the
         per-sample loop so a GUI can drive a progress bar. ``None`` is a
         no-op (default).
+    plan : behav3d.core.run_plan.RunPlan, optional
+        Per-(sample, cell type) skip / run / overwrite choices; supersedes
+        ``overwrite`` when given.
     **kwargs : dict
     """
     total_samples = len(metadata)
@@ -254,9 +258,17 @@ def run_reporter_propagation_tracking(
         if not tracked_csv_outdir.exists():
             tracked_csv_outdir.mkdir(parents=True)
 
-        if (
-            (not tracked_csv_outpath.exists() or not tracked_img_outpath.exists())
-            or overwrite
+        if prepare_tracking_sample(
+            sample_name=sample_name,
+            cell_type=cell_type,
+            tracked_img_outpath=tracked_img_outpath,
+            tracked_csv_outpath=tracked_csv_outpath,
+            segments_path=segments_path,
+            element_size_x=element_size_x,
+            element_size_y=element_size_y,
+            element_size_z=element_size_z,
+            overwrite=overwrite,
+            plan=plan,
         ):
             reporter_propagate_tracks(
                 segments_path=segments_path,
@@ -268,8 +280,6 @@ def run_reporter_propagation_tracking(
                 segment_size_min=segment_size_min,
                 min_overlap_fraction=min_overlap_fraction,
             )
-        else:
-            print("Tracking already exists... Provide overwrite=True to overwrite... Loading existing tracking data")
 
         img_col, csv_col = _resolve_tracking_output_columns(cell_type, segments_col)
         _ensure_metadata_output_columns(metadata, img_col, csv_col)

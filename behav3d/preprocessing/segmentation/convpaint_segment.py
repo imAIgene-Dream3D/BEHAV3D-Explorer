@@ -49,6 +49,7 @@ from behav3d.preprocessing.segmentation.convpaint_postprocess import (
     mask_to_instances,
     probability_to_instances,
 )
+from behav3d.core.run_plan import Action, resolve_action
 from behav3d.preprocessing.segmentation.segment_journal import (
     file_fingerprint,
     journal_path,
@@ -354,6 +355,7 @@ def run_convpaint_segmentation(
     other_types=None,
     only_segment=False,
     overwrite_existing=False,
+    plan=None,
     n_workers=1,
     convpaint_strategy=DEFAULT_STRATEGY,
     per_ct_convpaint_strategies=None,
@@ -506,7 +508,7 @@ def run_convpaint_segmentation(
     # ------------------------------------------------------------------
     # Every mismatch is knowable before any frame is written, so find them all now
     # and fail once rather than aborting the batch half-way through.
-    if not overwrite_existing:
+    if plan is not None or not overwrite_existing:
         conflicts = []
         for sample_name in sample_names:
             row = metadata[metadata['sample_name'] == sample_name].iloc[0]
@@ -525,6 +527,10 @@ def run_convpaint_segmentation(
             img_dir = output_dir / "images" / sample_name
             entries = []
             for ct in active_cell_types:
+                # Items the plan skips or overwrites are never resumed into, so their
+                # journals cannot conflict with the current settings.
+                if resolve_action(plan, overwrite_existing, sample_name, ct) is not Action.RUN:
+                    continue
                 strategy = _resolve_effective_strategy(ct, convpaint_strategy, per_ct_norm)
                 class_label = celltype_to_label.get(ct)
                 entries.append((
@@ -543,7 +549,9 @@ def run_convpaint_segmentation(
                         ),
                         f"{ct} mask for {sample_name}",
                     ))
-            if _has_death and model_death and not only_segment:
+            if _has_death and model_death and not only_segment and (
+                resolve_action(plan, overwrite_existing, sample_name, "dead") is Action.RUN
+            ):
                 entries.append((
                     img_dir / f"{sample_name}_mask_dead.zarr", shape, "uint16",
                     _death_fingerprint(death_model_fp, death_input_channels),
@@ -551,7 +559,7 @@ def run_convpaint_segmentation(
                 ))
             conflicts.extend(preflight_conflicts(
                 entries,
-                overwrite_existing=overwrite_existing,
+                overwrite_existing=False if plan is not None else overwrite_existing,
                 timepoint_range=timepoint_range,
                 requested_timepoints=requested_tps,
             ))
@@ -597,6 +605,11 @@ def run_convpaint_segmentation(
         seg_plans, mask_plans = {}, {}
         remaining_cts = []
         for ct in active_cts_for_sample:
+            action = resolve_action(plan, overwrite_existing, sample_name, ct)
+            if action is Action.SKIP:
+                print(f"  ⏭️ {sample_name}/{ct}: skipped by the run plan")
+                continue
+            ow = action is Action.OVERWRITE
             strategy = _resolve_effective_strategy(ct, convpaint_strategy, per_ct_norm)
             class_label = celltype_to_label.get(ct)
             mask_fps[ct] = _mask_fingerprint(
@@ -608,7 +621,7 @@ def run_convpaint_segmentation(
             seg_plans[ct] = plan_output(
                 seg_path_of(ct), out_shape, "uint16", seg_fps[ct],
                 f"{ct} segments for {sample_name}",
-                overwrite_existing=overwrite_existing,
+                overwrite_existing=ow,
                 timepoint_range=timepoint_range,
                 requested_timepoints=t_range,
             )
@@ -617,7 +630,7 @@ def run_convpaint_segmentation(
             mask_plans[ct] = None if only_segment else plan_output(
                 mask_path_of(ct), out_shape, "uint16", mask_fps[ct],
                 f"{ct} mask for {sample_name}",
-                overwrite_existing=overwrite_existing,
+                overwrite_existing=ow,
                 timepoint_range=timepoint_range,
                 requested_timepoints=t_range,
             )
@@ -629,12 +642,13 @@ def run_convpaint_segmentation(
         active_cts_for_sample = remaining_cts
 
         death_plan = None
-        if has_death_for_sample and model_death and not only_segment:
+        death_action = resolve_action(plan, overwrite_existing, sample_name, "dead")
+        if has_death_for_sample and model_death and not only_segment and death_action is not Action.SKIP:
             death_fp = _death_fingerprint(death_model_fp, death_input_channels)
             death_plan = plan_output(
                 death_path, out_shape, "uint16", death_fp,
                 f"dead mask for {sample_name}",
-                overwrite_existing=overwrite_existing,
+                overwrite_existing=death_action is Action.OVERWRITE,
                 timepoint_range=timepoint_range,
                 requested_timepoints=t_range,
             )

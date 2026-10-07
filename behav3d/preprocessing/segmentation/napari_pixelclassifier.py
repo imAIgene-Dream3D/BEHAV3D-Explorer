@@ -23,6 +23,7 @@ from sklearn.ensemble import RandomForestClassifier
 from scipy import ndimage
 from scipy.ndimage import binary_fill_holes, find_objects
 
+from behav3d.core.run_plan import ALL_CELL_TYPES, Action, resolve_action
 from behav3d.core.qt_events import pump_events
 from behav3d.preprocessing.segmentation import segment_size_filter, get_border_segments, remove_boundary_segments, segment_2d_filter
 from behav3d.preprocessing import open_mask, dilate_mask, calculate_edt, zeropad_image_to_match_shape
@@ -1495,6 +1496,7 @@ def run_pixel_classifier_segmentation(
     clf_death_path=None,
     only_segment=False,
     overwrite_existing=False,
+    plan=None,
     n_workers=4,
     log_callback=print,
     progress_cb=None,
@@ -1514,6 +1516,10 @@ def run_pixel_classifier_segmentation(
         EDT thresholds for other cell types
     clf_organoid_paths, clf_immune_paths, clf_other_paths : dict
         Paths to classifier files for each cell type
+    plan : behav3d.core.run_plan.RunPlan, optional
+        Per-sample skip / run / overwrite choices, keyed by
+        ``(sample_name, ALL_CELL_TYPES)`` (this engine segments every cell type of
+        a sample together, so it decides per sample). Supersedes ``overwrite_existing``.
     n_workers : int
         Number of parallel workers for timepoint processing (default: 4)
         Will be capped at available CPU count to prevent overloading
@@ -1761,12 +1767,19 @@ def run_pixel_classifier_segmentation(
         # -----------------------------------------------------------------
         # Resume / skip / overwrite decision
         # -----------------------------------------------------------------
+        sample_action = resolve_action(plan, overwrite_existing, sample_name, ALL_CELL_TYPES)
+        if sample_action is Action.SKIP:
+            _backfill_sample_metadata(preserve_existing=True)
+            _persist_metadata_snapshot()
+            log(f"  Sample {sample_name} skipped (kept as is).")
+            continue
+        sample_overwrite = sample_action is Action.OVERWRITE
         processing_marker = img_outdir / ".seg_processing"
         done_marker_paths = list(img_outdir.glob(".seg_done_*"))
         stale_done_markers = bool(done_marker_paths)
         resuming = False     # will be True when we continue an interrupted run
 
-        if overwrite_existing:
+        if sample_overwrite:
             # Overwrite: start fresh
             for seg_path in segments_outpaths.values():
                 if seg_path.exists():
@@ -2036,7 +2049,7 @@ def run_pixel_classifier_segmentation(
         active_cts_for_sample = list(all_cell_types)
         has_death_for_sample = has_death
 
-        if not resuming and not overwrite_existing and not only_segment:
+        if not resuming and not sample_overwrite and not only_segment:
             remaining_cts = []
             for cell_type in active_cts_for_sample:
                 seg_path = segments_outpaths[cell_type]
@@ -2080,7 +2093,7 @@ def run_pixel_classifier_segmentation(
                 continue
 
         # If we are NOT resuming and NOT overwriting, only clear outputs for cell types that need recompute.
-        if not resuming and not overwrite_existing:
+        if not resuming and not sample_overwrite:
             if not only_segment:
                 for cell_type in active_cts_for_sample:
                     seg_path = segments_outpaths.get(cell_type)
