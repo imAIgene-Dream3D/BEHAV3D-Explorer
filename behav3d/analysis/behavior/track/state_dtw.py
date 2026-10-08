@@ -12,6 +12,7 @@ from sklearn.metrics import silhouette_score
 from scipy.stats import chi2_contingency, ttest_rel, wilcoxon
 
 from behav3d.core.h5_access import write_adata
+from behav3d.core.portable_paths import relocate_path
 from behav3d.core.state_columns import FULL_STATE_COL, resolve_full_state_col
 from behav3d.analysis.behavior.state.utils import (
     _apply_state_order,
@@ -827,6 +828,9 @@ def _load_filtered_state_adata_for_model(
         adata_full_path = _default_behavioral_states_path(output_dir, cell_type)
     adata_full_path = Path(adata_full_path).expanduser()
     if not adata_full_path.exists():
+        # Stored absolute path goes stale when the project folder is moved.
+        adata_full_path = relocate_path(adata_full_path, output_dir) or adata_full_path
+    if not adata_full_path.exists():
         raise FileNotFoundError(f"Could not find behavioral-state h5ad: {adata_full_path}")
 
     groupby_cols = list(meta.get("groupby_cols", ["sample_name", "TrackID"]))
@@ -1138,6 +1142,9 @@ def run_categorical_dtaidistance_trajectory_clustering(
     if adata_full_path is None:
         adata_full_path = _default_behavioral_states_path(output_dir, cell_type)
     adata_full_path = Path(adata_full_path).expanduser()
+    if not adata_full_path.exists():
+        # Stored absolute path goes stale when the project folder is moved.
+        adata_full_path = relocate_path(adata_full_path, output_dir) or adata_full_path
     if not adata_full_path.exists():
         raise FileNotFoundError(f"Could not find behavioral-state h5ad: {adata_full_path}")
 
@@ -1557,6 +1564,9 @@ def train_dtaidistance_trajectory_classifier(
             "Re-run dtaidistance clustering to populate it."
         )
     adata_full_path = Path(adata_full_path).expanduser()
+    if not adata_full_path.exists():
+        # Stored absolute path goes stale when the project folder is moved.
+        adata_full_path = relocate_path(adata_full_path, output_dir) or adata_full_path
     if not adata_full_path.exists():
         raise FileNotFoundError(f"Source behavioral-states file not found: {adata_full_path}")
 

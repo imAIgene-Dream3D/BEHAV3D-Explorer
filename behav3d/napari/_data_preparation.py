@@ -53,6 +53,7 @@ from qtpy.QtWidgets import (
 from behav3d.core.metadata import (
     load_behav3d_metadata,
     check_behav3d_metadata,
+    relink_metadata_csv,
     detect_organoid_types_from_metadata,
     detect_immune_cell_types_from_metadata,
     detect_other_cell_types_from_metadata,
@@ -174,6 +175,12 @@ class _MetadataLoadWorker(QThread):
     def run(self):
         try:
             metadata = load_behav3d_metadata(self.csv_path)
+            if self.out_dir:
+                # Paths in metadata.csv are absolute; re-link them when the
+                # project folder was copied or moved since they were written.
+                metadata, _ = relink_metadata_csv(
+                    metadata, self.csv_path, self.out_dir, log=self.progress.emit
+                )
             check_behav3d_metadata(metadata, func=False)
 
             behav3d_parameters = None
@@ -471,6 +478,9 @@ class DataPreparationTab(QWidget):
         btn.clicked.connect(self._browse_output_dir)
         lay.addWidget(self.output_dir_edit, stretch=1)
         lay.addWidget(btn)
+        from behav3d.napari._transfer import TransferController
+        self._transfer = TransferController(self)
+        lay.addWidget(self._transfer.make_button())
         self._layout.addWidget(grp)
 
     def _browse_output_dir(self):
