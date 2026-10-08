@@ -40,6 +40,7 @@ from behav3d.napari._background_runner import (
     BackgroundOperation,
     ProgressBarRow,
     fire_extra_callback,
+    refuse_if_busy,
 )
 
 
@@ -775,6 +776,10 @@ class CellTypeFilterPanel(QWidget):
         if self._bg.is_running():
             self.log("⚠️ A filtering run is already in progress for this panel.")
             return
+        if interactive and refuse_if_busy(
+            self, "starting filtering", bg=self._bg
+        ):
+            return
 
         if not self._validate_time_range():
             return
@@ -1153,6 +1158,12 @@ class FilteringTab(QWidget):
         if not block and self._bg.is_running():
             self._log("⚠️ A batch filtering run is already in progress.")
             fire_extra_callback(extra_callbacks, "on_failed", "already running")
+            return
+
+        if interactive and refuse_if_busy(
+            self, "starting batch filtering", bg=self._bg,
+            extra_callbacks=extra_callbacks,
+        ):
             return
 
         # The window is global, so one panel's copy speaks for all of them.

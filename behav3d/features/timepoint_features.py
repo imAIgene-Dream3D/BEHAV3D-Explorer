@@ -1367,18 +1367,20 @@ def calculate_death(
         df_tracks["dead"] = df_tracks[threshold_column] >= threshold
         return df_tracks
 
-    df_tracks["dead"] = False
-
     # For any cell crossing the dead_dye_threshold, set the cell to dead. Any timepoint after this timepoint are
-    # Also set to dead, even if the mean dead dye intensity goes under the threshold again
-    for track_id in df_tracks["TrackID"].unique():
-        track_df = df_tracks[df_tracks["TrackID"] == track_id]
-        track_df_reset = track_df.reset_index(drop=True)
-        threshold_indices = track_df_reset.reset_index(drop=True)[track_df_reset[threshold_column] >= threshold].index
-
-        if not threshold_indices.empty:
-            first_threshold_index = threshold_indices.min()
-            df_tracks.loc[track_df.index[first_threshold_index:], "dead"] = True
+    # Also set to dead, even if the mean dead dye intensity goes under the threshold again.
+    # Rows are expected to be time-ordered within each track (row order is used).
+    # TrackIDs are only unique within a sample, so when the table spans several
+    # samples (e.g. the combined CSV used by rerun_death_classification) the
+    # tracks must be keyed by (sample_name, TrackID); keying by TrackID alone
+    # lets one sample's crossing mark the same TrackID dead in every later sample.
+    keys = ["TrackID"]
+    if "sample_name" in df_tracks.columns:
+        keys = ["sample_name", "TrackID"]
+    crossed = (df_tracks[threshold_column] >= threshold).astype(bool)
+    df_tracks["dead"] = crossed.groupby(
+        [df_tracks[k] for k in keys], sort=False, dropna=False
+    ).cummax().astype(bool)
     return df_tracks
            
 def interpolate_missing_positions(

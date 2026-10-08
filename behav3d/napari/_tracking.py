@@ -52,6 +52,7 @@ from behav3d.napari._background_runner import (
     ProgressBarRow,
     ThreadSafeLogger,
     fire_extra_callback,
+    refuse_if_busy,
 )
 
 
@@ -1753,6 +1754,8 @@ class CellTypeTrackingPanel(QWidget):
         if self._bg.is_running():
             self.log("⚠️ A tracking run is already in progress for this panel.")
             return
+        if refuse_if_busy(self, "starting tracking", bg=self._bg):
+            return
 
         self._persist()
         method = self._get_method_key()
@@ -1931,6 +1934,8 @@ class AllOrganoidsPropagationPanel(QWidget):
         """Run propagation tracking for all organoid types in the background."""
         if self._bg.is_running():
             self.log("⚠️ All-organoids tracking is already in progress.")
+            return
+        if refuse_if_busy(self, "starting tracking", bg=self._bg):
             return
 
         md = self.metadata_loader.metadata
@@ -2167,6 +2172,8 @@ class MulticolorTrackingPanel(QWidget):
         inner = self._inner_panel
         if inner._bg.is_running():
             self.log("⚠️ A tracking run is already in progress for this panel.")
+            return
+        if refuse_if_busy(self, "starting tracking", bg=inner._bg):
             return
 
         self._persist()
@@ -2724,6 +2731,12 @@ class TrackingTab(QWidget):
         if not block and self._bg.is_running():
             self._log("⚠️ A batch tracking run is already in progress.")
             fire_extra_callback(extra_callbacks, "on_failed", "already running")
+            return
+
+        if interactive and refuse_if_busy(
+            self, "starting batch tracking", bg=self._bg,
+            extra_callbacks=extra_callbacks,
+        ):
             return
 
         all_organoids_mode = self._all_organoids_panel is not None

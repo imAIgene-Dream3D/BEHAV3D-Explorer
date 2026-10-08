@@ -1866,41 +1866,40 @@ class ProcessingQueuePanel(QWidget):
             raise RuntimeError("Analysis tab not wired to queue.")
         return self.analysis_tab.population_dynamics_tab
 
-    def _run_sync_analysis(self, fn, extra_callbacks):
-        """Run a synchronous analysis-tab call and fire ``extra_callbacks``.
+    def _run_async_analysis(self, dd, fn, desc, extra_callbacks):
+        """Start an analysis-tab job on its worker thread.
 
-        Wraps the existing ``population_dynamics_tab.run_*`` helpers so the
-        state machine sees the same on_done / on_failed flow as the
-        async batch methods.  These calls are synchronous on purpose —
-        napari will briefly freeze for the duration of each step, but
-        the queue still advances cleanly when ``fn`` returns.
+        Wraps the ``population_dynamics_tab.run_*_for`` helpers so the state
+        machine sees the same on_done / on_failed flow as the async batch
+        methods.  ``fn`` runs off the GUI thread, so it must be a closure
+        over values already snapshotted from widgets.  Returns ``dd`` so the
+        queue can subscribe to its ``_bg.progress`` signal.
         """
-        try:
-            result = fn()
-            if extra_callbacks and extra_callbacks.get("on_done") is not None:
-                extra_callbacks["on_done"](result)
-        except Exception as e:
-            traceback.print_exc()
-            if extra_callbacks and extra_callbacks.get("on_failed") is not None:
-                extra_callbacks["on_failed"](str(e))
+        dd.run_in_background(fn, desc=desc, extra_callbacks=extra_callbacks)
+        return dd
 
     def _run_death_dynamics(self, step: QueueStep, extra_callbacks):
         dd = self._require_population_dynamics_tab()
         cell_types = step.params.get("cell_types") or []
-        self._run_sync_analysis(
-            lambda: dd.run_death_dynamics_for(cell_types, interactive=False),
+        group_cols = dd._selected_dd_group_cols()  # widget read: GUI thread
+        return self._run_async_analysis(
+            dd,
+            lambda: dd.run_death_dynamics_for(
+                cell_types, interactive=False, group_cols=group_cols,
+            ),
+            "Death Dynamics",
             extra_callbacks,
         )
-        return None
 
     def _run_multi_org_death(self, step: QueueStep, extra_callbacks):
         dd = self._require_population_dynamics_tab()
         cell_types = step.params.get("cell_types") or []
-        self._run_sync_analysis(
+        return self._run_async_analysis(
+            dd,
             lambda: dd.run_multi_organoid_death_for(cell_types, interactive=False),
+            "Combined Death Dynamics",
             extra_callbacks,
         )
-        return None
 
     def _run_interaction(self, step: QueueStep, extra_callbacks):
         dd = self._require_population_dynamics_tab()
@@ -1909,16 +1908,17 @@ class ProcessingQueuePanel(QWidget):
         group_by_line_condition = bool(
             step.params.get("group_by_line_condition", False)
         )
-        self._run_sync_analysis(
+        return self._run_async_analysis(
+            dd,
             lambda: dd.run_interaction_for(
                 cell_types,
                 interaction_cts,
                 group_by_line_condition=group_by_line_condition,
                 interactive=False,
             ),
+            "Interaction Analysis",
             extra_callbacks,
         )
-        return None
 
     def _run_multi_org_interaction(self, step: QueueStep, extra_callbacks):
         dd = self._require_population_dynamics_tab()
@@ -1932,7 +1932,8 @@ class ProcessingQueuePanel(QWidget):
         analysis_period_t = step.params.get("analysis_period_t")
         if analysis_period_t is None:
             analysis_period_t = step.params.get("analysis_period_min")
-        self._run_sync_analysis(
+        return self._run_async_analysis(
+            dd,
             lambda: dd.run_multi_organoid_interaction_for(
                 cell_types,
                 interaction_cts,
@@ -1942,9 +1943,9 @@ class ProcessingQueuePanel(QWidget):
                 analysis_period_t=analysis_period_t,
                 interactive=False,
             ),
+            "Interaction Overview",
             extra_callbacks,
         )
-        return None
 
     def _run_invasiveness(self, step: QueueStep, extra_callbacks):
         dd = self._require_population_dynamics_tab()
@@ -1962,7 +1963,8 @@ class ProcessingQueuePanel(QWidget):
         analysis_period_t = step.params.get("analysis_period_t")
         if analysis_period_t is None:
             analysis_period_t = step.params.get("analysis_period_min")
-        self._run_sync_analysis(
+        return self._run_async_analysis(
+            dd,
             lambda: dd.run_invasiveness_for(
                 immune,
                 targets,
@@ -1971,9 +1973,9 @@ class ProcessingQueuePanel(QWidget):
                 analysis_period_t=analysis_period_t,
                 interactive=False,
             ),
+            "Invasiveness Analysis",
             extra_callbacks,
         )
-        return None
 
     def _run_apoc_segment(self, step: QueueStep, skip_existing, extra_callbacks, plan=None):
         """Run APOC GPU batch segmentation from a queued params snapshot.

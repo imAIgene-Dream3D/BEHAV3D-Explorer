@@ -64,6 +64,7 @@ from behav3d.napari._background_runner import (
     ThreadSafeLogger,
     fire_extra_callback,
     install_busy_guard,
+    refuse_if_busy,
 )
 
 
@@ -1312,6 +1313,12 @@ class PixelClassifierWidget(QWidget):
             fire_extra_callback(extra_callbacks, "on_failed", "already running")
             return
 
+        if interactive and refuse_if_busy(
+            self, "starting segmentation", bg=self._bg,
+            extra_callbacks=extra_callbacks,
+        ):
+            return
+
         self.log("Starting batch segmentation...")
         self._persist_params()
         # This engine segments every cell type of a sample together, so the plan
@@ -1514,6 +1521,10 @@ class PixelClassifierWidget(QWidget):
                             layer.visible = True
 
     def _on_load_training_clicked(self, interactive=True):
+        if interactive and refuse_if_busy(
+            self, "loading training data", bg=getattr(self, "_bg", None)
+        ):
+            return
         try:
             if self.metadata_loader.metadata is None:
                 self.log("⚠️ Cannot generate training data: No metadata loaded.")
@@ -1521,7 +1532,7 @@ class PixelClassifierWidget(QWidget):
 
             self.log("Loading training data...")
             self._persist_params()
-            
+
             if not self.metadata_loader.metadata_loaded:
                 self.log("Metadata not loaded!")
                 return
@@ -3031,6 +3042,12 @@ class CellposeWidget(QWidget):
             fire_extra_callback(extra_callbacks, "on_failed", "already running")
             return
 
+        if interactive and refuse_if_busy(
+            self, "starting Cellpose", bg=self._bg,
+            extra_callbacks=extra_callbacks,
+        ):
+            return
+
         cell_type = cell_type_override or self.cell_type_combo.currentText()
         model_path = model_path_override or self.pretrained_model_dir
 
@@ -3156,6 +3173,12 @@ class CellposeWidget(QWidget):
         if not block and self._bg.is_running():
             self.log("⚠️ A cellpose/otsu run is already in progress.")
             fire_extra_callback(extra_callbacks, "on_failed", "already running")
+            return
+
+        if interactive and refuse_if_busy(
+            self, "starting Otsu thresholding", bg=self._bg,
+            extra_callbacks=extra_callbacks,
+        ):
             return
 
         self.channel_panel._persist_channel_config()
@@ -4470,6 +4493,11 @@ class CellposeSAMWidget(QWidget):
         ``block=True`` (queue) runs synchronously; ``block=False`` (GUI) runs in
         a background worker. ``extra_callbacks`` is the queue's chaining hook.
         """
+        if interactive and refuse_if_busy(
+            self, "starting Cellpose-SAM", bg=self._bg,
+            extra_callbacks=extra_callbacks,
+        ):
+            return
         self._ensure_torch_devices()
         from behav3d.preprocessing.segmentation.cellpose_sam_prediction import (
             run_cellpose_sam_and_sync_metadata,
@@ -6092,6 +6120,10 @@ class APOCWidget(QWidget):
 
     # ── Load Training Data ──────────────────────────────────────
     def _on_load_training_clicked(self, interactive=True):
+        if interactive and refuse_if_busy(
+            self, "loading training data", bg=getattr(self, "_bg", None)
+        ):
+            return
         try:
             if self.metadata_loader.metadata is None:
                 self.log("⚠️ Cannot generate training data: No metadata loaded.")
@@ -7502,6 +7534,8 @@ class APOCWidget(QWidget):
         tw = self._training_widget
         if tw is None:
             return
+        if refuse_if_busy(self, "starting segmentation", bg=self._bg):
+            return
         idx = tw.tab_widget.currentIndex()
         ct = tw._tab_cell_types[idx] if idx < len(tw._tab_cell_types) else None
         if ct is None:
@@ -7654,6 +7688,12 @@ class APOCWidget(QWidget):
             if not block and self._bg.is_running():
                 self.log("\u26a0\ufe0f An APOC run is already in progress.")
                 fire_extra_callback(extra_callbacks, "on_failed", "already running")
+                return
+
+            if interactive and refuse_if_busy(
+                self, "starting APOC segmentation", bg=self._bg,
+                extra_callbacks=extra_callbacks,
+            ):
                 return
 
             from behav3d.preprocessing.segmentation.apoc_segment import run_apoc_segmentation
@@ -8244,6 +8284,10 @@ class ConvPaintWidget(QWidget):
 
     # ── Generate Training Data ───────────────────────────────────
     def _on_load_training_clicked(self, interactive=True):
+        if interactive and refuse_if_busy(
+            self, "loading training data", bg=getattr(self, "_bg", None)
+        ):
+            return
         self._ensure_torch_devices()
         try:
             md = self.metadata_loader.metadata
@@ -8738,6 +8782,11 @@ class ConvPaintWidget(QWidget):
         currently expose a per-sample progress hook).
         ``extra_callbacks`` is the queue's chaining hook.
         """
+        if interactive and refuse_if_busy(
+            self, "starting ConvPaint segmentation", bg=self._bg,
+            extra_callbacks=extra_callbacks,
+        ):
+            return
         self._ensure_torch_devices()
         try:
             md = self.metadata_loader.metadata

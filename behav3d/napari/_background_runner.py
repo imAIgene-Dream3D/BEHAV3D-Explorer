@@ -82,6 +82,7 @@ __all__ = [
     "queue_dispatch",
     "redispatch_to_gui_thread",
     "set_queue_active",
+    "refuse_if_busy",
     "warn_if_busy",
 ]
 
@@ -295,6 +296,28 @@ def warn_if_busy(parent=None, what: str = "starting something else",
     else:
         _show_busy_warning(parent, descriptions, what)
     return True
+
+
+def refuse_if_busy(parent=None, what: str = "starting something else",
+                   *, bg: Optional["BackgroundOperation"] = None,
+                   extra_callbacks=None) -> bool:
+    """Call first in a Run handler, before any dialog or state change.
+
+    Same check as :func:`warn_if_busy` (queue included, ``bg`` excluded so a
+    panel can restart right after cancelling its own job), but also reports
+    ``on_failed("busy")`` to ``extra_callbacks`` so a queued caller is never
+    left waiting.  Returns ``True`` when the caller must stop::
+
+        if refuse_if_busy(self, "starting segmentation", bg=self._bg):
+            return
+
+    ``BackgroundOperation.run`` keeps its own guard as a backstop, but that
+    only fires after any skip/overwrite prompt has been answered.
+    """
+    if warn_if_busy(parent, what, exclude=bg):
+        fire_extra_callback(extra_callbacks, "on_failed", "busy")
+        return True
+    return False
 
 
 class _ScopeToken:

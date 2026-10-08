@@ -61,6 +61,7 @@ from behav3d.napari._background_runner import (
     ProgressBarRow,
     ThreadSafeLogger,
     install_busy_guard,
+    refuse_if_busy,
     warn_if_busy,
 )
 from behav3d.napari._pdf_view import open_pdf_in_napari
@@ -2900,8 +2901,14 @@ class StateClassificationSubTab(QWidget):
                     pass
         return hmm_model
 
-    def _regenerate_state_diagnostics(self, ct: str, *, model_adata=None, verbose: bool = True):
-        """(Re)generate the HMM state-classification diagnostics PDF/CSVs for `ct`."""
+    def _regenerate_state_diagnostics(self, ct: str, *, model_adata=None, verbose: bool = True,
+                                      hmm_model=None):
+        """(Re)generate the HMM state-classification diagnostics PDF/CSVs for `ct`.
+
+        ``hmm_model`` lets a worker pass an already-loaded model so this does
+        not unpickle the artifact again or write ``self._hmm_model`` off the
+        GUI thread.
+        """
         from behav3d.analysis.behavior.state.classification import (
             INTRINSIC_STATE_COL,
             save_hmm_quality_control_outputs,
@@ -2924,7 +2931,8 @@ class StateClassificationSubTab(QWidget):
         feature_cols = [str(c) for c in feature_cols if str(c) in adata.var_names]
         scaler_meta = preprocessing_meta.get("scaler", {}) if isinstance(preprocessing_meta, dict) else {}
         qc_dir = _resolve_hmm_quality_control_outdir(output_dir=str(out) if out else "", cell_type=ct)
-        hmm_model = self._resolve_hmm_model_for_state_diagnostics(ct)
+        if hmm_model is None:
+            hmm_model = self._resolve_hmm_model_for_state_diagnostics(ct)
         return save_hmm_quality_control_outputs(
             adata,
             feature_cols=feature_cols,
@@ -3388,12 +3396,13 @@ class StateClassificationSubTab(QWidget):
             self._log(f"Could not show results-folder dialog: {e}")
 
     def _on_run_state(self):
+        # Busy check first: don't show validation popups for a run that
+        # would be refused anyway.
+        if refuse_if_busy(self, "starting state classification"):
+            return
         ct = self._cell_type()
         if not ct:
             QMessageBox.warning(self, "No cell type", "Select a cell type first.")
-            return
-        if self._bg.is_running():
-            QMessageBox.warning(self, "Busy", "Another operation is running.")
             return
         self._log(f"▶ Running state classification for '{ct}'…")
         params = self._collect_state_params(ct)
@@ -3403,17 +3412,23 @@ class StateClassificationSubTab(QWidget):
         # ``self._hmm_model_cell_type`` from the worker let the GUI observe the new
         # model paired with the *old* cell type (two non-atomic writes).
         _hmm_out = {}
+        _post_path = self._model_adata_path(ct)
+        _post_out = self._out_dir()
 
         def _run(**kw):
             from behav3d.analysis.behavior.state.classification import run_hmm_state_clustering
             res = run_hmm_state_clustering(**params, verbose=True, return_details=True)
             _hmm_out["model"] = res["hmm_model"]
+            # Heavy follow-up (h5ad reload + artifact pickle) stays off the GUI thread.
+            _hmm_out["post"] = self._state_run_postprocess(
+                ct, res["hmm_model"], _post_path, _post_out,
+            )
             return res["model_adata"]
 
         def _state_done(result):
             self._hmm_model = _hmm_out.get("model")
             self._hmm_model_cell_type = ct
-            self._on_state_done(result)
+            self._on_state_done(result, preloaded=_hmm_out.get("post"))
 
         self._bg.run(
             fn=_run,
@@ -3482,14 +3497,55 @@ class StateClassificationSubTab(QWidget):
         params.setdefault("state_classification", {})[ct] = collected
         _save_behav3d_params(self.metadata_loader, self._out_dir)
 
-    def _on_state_done(self, result, interactive: bool = True):
+    def _state_run_postprocess(self, ct: str, hmm_model, path, out) -> dict:
+        """Worker-side tail of a state-classification run.
+
+        Reloads the freshly written model h5ad (multi-GB for big datasets) and
+        pickles the HMM deployment artifact. Both used to run in
+        ``_on_state_done`` on the GUI thread, freezing napari. Touches no
+        widgets; the caller publishes the returned values on the GUI thread.
+        """
+        path_exists = bool(path and path.exists())
+        loaded = None
+        if path_exists:
+            try:
+                loaded = _read_h5ad_shared(str(path))
+            except Exception:
+                traceback.print_exc()
+        if hmm_model is not None and ct and out:
+            from behav3d.analysis.behavior.state.classification import (
+                save_hmm_deployment_artifact,
+                _resolve_hmm_deployment_artifact_path,
+            )
+            _art_path = _resolve_hmm_deployment_artifact_path(output_dir=str(out), cell_type=ct)
+            try:
+                save_hmm_deployment_artifact(
+                    output_path=_art_path,
+                    model_adata=loaded,
+                    hmm_model=hmm_model,
+                    verbose=False,
+                )
+            except Exception:
+                pass
+        return {"path_exists": path_exists, "model_adata": loaded}
+
+    def _on_state_done(self, result, interactive: bool = True, *, preloaded=None):
+        """GUI-thread completion of a state-classification run.
+
+        ``preloaded`` is the dict from :meth:`_state_run_postprocess` (the heavy
+        reload + artifact write already happened on the worker). When omitted
+        the reload and artifact write run inline, as before.
+        """
         ct = self._cell_type()
         self._persist_state_cfg(ct)
         self._log(f"✅ State classification complete for '{ct}'.")
         path = self._model_adata_path(ct)
-        if path and path.exists():
+        if preloaded is not None:
+            if preloaded["path_exists"]:
+                self._model_adata = preloaded["model_adata"]
+        elif path and path.exists():
             self._load_model_adata(path)
-        if self._hmm_model is not None and ct:
+        if preloaded is None and self._hmm_model is not None and ct:
             out = self._out_dir()
             if out:
                 from behav3d.analysis.behavior.state.classification import (
@@ -3541,17 +3597,24 @@ class StateClassificationSubTab(QWidget):
         on_fail_cb = extra_callbacks.get("on_failed") if extra_callbacks else None
 
         _hmm_out = {}  # published on the GUI thread in _done (see _on_run_state)
+        _post_path = self._model_adata_path(ct)
+        _post_out = self._out_dir()
 
         def _run(**kw):
             from behav3d.analysis.behavior.state.classification import run_hmm_state_clustering
             res = run_hmm_state_clustering(**params, verbose=True, return_details=True)
             _hmm_out["model"] = res["hmm_model"]
+            _hmm_out["post"] = self._state_run_postprocess(
+                ct, res["hmm_model"], _post_path, _post_out,
+            )
             return res["model_adata"]
 
         def _done(result):
             self._hmm_model = _hmm_out.get("model")
             self._hmm_model_cell_type = ct
-            self._on_state_done(result, interactive=interactive)
+            self._on_state_done(
+                result, interactive=interactive, preloaded=_hmm_out.get("post"),
+            )
             if on_done_cb:
                 on_done_cb(result)
 
@@ -3630,37 +3693,24 @@ class StateClassificationSubTab(QWidget):
         from behav3d.analysis.behavior.state.classification import (
             save_hmm_deployment_artifact,
             apply_hmm_deployment_artifact_to_full_dataset,
+            load_hmm_deployment_artifact,
             _resolve_hmm_deployment_artifact_path,
         )
 
         artifact_path = _resolve_hmm_deployment_artifact_path(output_dir=str(out), cell_type=ct)
 
-        hmm_model = self._resolve_hmm_model_for_state_diagnostics(ct)
-
-        if hmm_model is None:
-            self._log(
-                "⚠ Cannot apply states to full dataset: HMM model not in memory and no saved artifact found. "
-                "Re-run state clustering to regenerate."
-            )
-            return
+        # Snapshot on the GUI thread. The unpickle of the saved artifact and the
+        # re-save below can be slow for big models, so they run in the worker.
+        cached_model = (
+            getattr(self, "_hmm_model", None)
+            if getattr(self, "_hmm_model_cell_type", None) == ct
+            else None
+        )
 
         # No column/color/order sync needed here: RenameClusterDialog now
         # writes renamed labels, colors and order directly onto the
         # canonical INTRINSIC_STATE_COL/FULL_STATE_COL columns, which
         # self._model_adata already holds.
-
-        try:
-            save_hmm_deployment_artifact(
-                output_path=artifact_path,
-                model_adata=self._model_adata,
-                hmm_model=hmm_model,
-                cell_type=ct,
-                output_dir=str(out),
-                verbose=False,
-            )
-        except Exception as exc:
-            self._log(f"⚠ Could not save updated HMM artifact: {exc}")
-            return
 
         self._log(f"▶ Applying state labels to full dataset for '{ct}'…")
         _artifact_path = artifact_path
@@ -3668,6 +3718,28 @@ class StateClassificationSubTab(QWidget):
         model_adata = self._model_adata
 
         def _run(**kw):
+            hmm_model = cached_model
+            if hmm_model is None and _artifact_path.exists():
+                try:
+                    hmm_model = load_hmm_deployment_artifact(str(_artifact_path)).get("model")
+                except Exception:
+                    pass
+            if hmm_model is None:
+                return {"skipped": (
+                    "⚠ Cannot apply states to full dataset: HMM model not in memory and no saved artifact found. "
+                    "Re-run state clustering to regenerate."
+                )}
+            try:
+                save_hmm_deployment_artifact(
+                    output_path=_artifact_path,
+                    model_adata=model_adata,
+                    hmm_model=hmm_model,
+                    cell_type=ct,
+                    output_dir=str(_out),
+                    verbose=False,
+                )
+            except Exception as exc:
+                return {"skipped": f"⚠ Could not save updated HMM artifact: {exc}"}
             apply_hmm_deployment_artifact_to_full_dataset(
                 output_dir=str(_out),
                 cell_type=ct,
@@ -3676,10 +3748,32 @@ class StateClassificationSubTab(QWidget):
             )
             diagnostics_warning = None
             try:
-                self._regenerate_state_diagnostics(ct, model_adata=model_adata, verbose=True)
+                self._regenerate_state_diagnostics(
+                    ct, model_adata=model_adata, verbose=True, hmm_model=hmm_model,
+                )
             except Exception as exc:
                 diagnostics_warning = str(exc)
-            return {"diagnostics_warning": diagnostics_warning}
+            return {"diagnostics_warning": diagnostics_warning, "hmm_model": hmm_model}
+
+        def _on_applied(r):
+            if isinstance(r, dict) and r.get("skipped"):
+                self._log(r["skipped"])
+                return
+            # Publish a model loaded from the artifact on the GUI thread
+            # (both fields together, never from the worker).
+            if (
+                isinstance(r, dict) and r.get("hmm_model") is not None
+                and getattr(self, "_hmm_model_cell_type", None) != ct
+            ):
+                self._hmm_model = r["hmm_model"]
+                self._hmm_model_cell_type = ct
+            self._log(f"✅ State labels applied to full dataset for '{ct}'.")
+            if isinstance(r, dict) and r.get("diagnostics_warning"):
+                self._log(f"⚠ Could not refresh state diagnostics: {r.get('diagnostics_warning')}")
+            else:
+                self._log("✅ State diagnostics refreshed.")
+            self._update_bp_buttons()
+            self._update_view_buttons()
 
         self._bg.run(
             fn=_run,
@@ -3688,14 +3782,7 @@ class StateClassificationSubTab(QWidget):
             buttons=[],
             viewer=self.viewer,
             inject_progress=False,
-            on_done=lambda r: (
-                self._log(f"✅ State labels applied to full dataset for '{ct}'."),
-                self._log(f"⚠ Could not refresh state diagnostics: {r.get('diagnostics_warning')}")
-                if isinstance(r, dict) and r.get("diagnostics_warning")
-                else self._log("✅ State diagnostics refreshed."),
-                self._update_bp_buttons(),
-                self._update_view_buttons(),
-            ),
+            on_done=_on_applied,
             on_failed=lambda e: self._log(f"❌ Apply to full dataset failed: {e}"),
         )
 
@@ -8621,12 +8708,11 @@ class TrackClassificationSubTab(QWidget):
             self._on_run_track()
 
     def _on_run_track(self):
+        if refuse_if_busy(self, "starting track clustering"):
+            return
         ct = self._cell_type()
         if not ct:
             QMessageBox.warning(self, "No cell type", "Select a cell type first.")
-            return
-        if self._bg.is_running():
-            QMessageBox.warning(self, "Busy", "Another operation is running.")
             return
         self._log(f"▶ Running track clustering (dtaidistance) for '{ct}'…")
         self._dispatch_track_cluster(ct)
@@ -8941,12 +9027,11 @@ class TrackClassificationSubTab(QWidget):
         self._dispatch_track_cluster(ct, extra_callbacks=extra_callbacks)
 
     def _on_run_original(self):
+        if refuse_if_busy(self, "starting the original BEHAV3D clustering"):
+            return
         ct = self._cell_type()
         if not ct:
             QMessageBox.warning(self, "No cell type", "Select a cell type first.")
-            return
-        if self._bg.is_running():
-            QMessageBox.warning(self, "Busy", "Another operation is running.")
             return
 
         exact_settings = self.chk_use_exact_original_settings.isChecked()
@@ -8976,7 +9061,7 @@ class TrackClassificationSubTab(QWidget):
         n_neigh = int(self.spin_umap_neighbors.value())
         min_dist = float(self.spin_umap_min_dist.value())
 
-        def _run(**kw):
+        def _cluster(**kw):
             from behav3d.analysis.behavior.track.utils import (
                 _peek_track_outfolder,
                 _resolve_track_paths,
@@ -9031,12 +9116,22 @@ class TrackClassificationSubTab(QWidget):
                 output_subdir_name=_original_subdir_name,
             )
 
-        def _done(_):
+        def _run(**kw):
+            res = _cluster(**kw)
+            # Building the h5ad is file I/O; keep it off the GUI thread.
             from behav3d.analysis.behavior.track.feature_dtw import _create_original_behav3d_adata
+            adata_error = None
             try:
                 _create_original_behav3d_adata(str(out), ct)
             except Exception as e:
-                self._log(f"⚠ Could not create h5ad from feature-based BEHAV3D results: {e}")
+                adata_error = str(e)
+            return {"result": res, "adata_error": adata_error}
+
+        def _done(r):
+            if isinstance(r, dict) and r.get("adata_error"):
+                self._log(
+                    f"⚠ Could not create h5ad from feature-based BEHAV3D results: {r['adata_error']}"
+                )
             self._log(f"✅ Feature-based BEHAV3D clustering done for '{ct}'.")
             self._persist_track_cfg(ct)
             self._reload()
@@ -10927,8 +11022,7 @@ class TrackClassificationSubTab(QWidget):
         )
 
     def _on_run_all_contact_analyses(self):
-        if self._bg.is_running():
-            QMessageBox.warning(self, "Busy", "Another operation is running.")
+        if refuse_if_busy(self, "starting the contact analyses"):
             return
         steps = [
             self._on_contact_rate_report,
@@ -11234,6 +11328,8 @@ class TrackClassificationSubTab(QWidget):
             self._log(f"❌ Backprojection failed: {e}")
 
     def _on_export_track_bp(self):
+        if refuse_if_busy(self, "exporting the track backprojection"):
+            return
         ct = self._cell_type()
         sample = self._sample()
         if not ct:
@@ -11243,13 +11339,35 @@ class TrackClassificationSubTab(QWidget):
         if not track_path or not track_path.exists():
             QMessageBox.warning(self, "No track adata", "Run Track Clustering first.")
             return
-        if self._bg.is_running():
-            QMessageBox.warning(self, "Busy", "Another operation is running.")
-            return
-        import scanpy as sc
-        adata_tracks = _read_h5ad_shared(str(track_path))
-        self._sync_track_cluster_combo(adata_tracks)
-        color_by = self.combo_track_color_by.currentText()
+
+        # Stage 1 (worker): import scanpy and read the track h5ad, which used to
+        # block the GUI thread. Stage 2 starts from the GUI thread once the
+        # "Color by" combo has been synced from the loaded adata.
+        def _read(**kw):
+            import scanpy as sc  # noqa: F401  (preload; slow first import)
+            return _read_h5ad_shared(str(track_path))
+
+        def _loaded(adata_tracks):
+            self._sync_track_cluster_combo(adata_tracks)
+            color_by = self.combo_track_color_by.currentText()
+            QTimer.singleShot(
+                0,
+                lambda: self._run_track_bp_export(ct, sample, adata_tracks, color_by),
+            )
+
+        self._bg.run(
+            fn=_read,
+            desc=f"Loading track data ({ct})…",
+            progress_row=self.progress_row,
+            buttons=[self.btn_export_track_bp, self.btn_show_track_bp],
+            viewer=self.viewer,
+            inject_progress=False,
+            indeterminate=True,
+            on_done=_loaded,
+            on_failed=lambda e: self._log(f"❌ Export failed: {e}"),
+        )
+
+    def _run_track_bp_export(self, ct, sample, adata_tracks, color_by):
         out = self._out_dir()
         logger = ThreadSafeLogger(self._log)
         self._log(f"▶ Exporting track backprojection for '{ct}'…")
@@ -11288,6 +11406,7 @@ class TrackClassificationSubTab(QWidget):
             inject_progress=False,
             on_done=lambda r: _log_backprojection_manifest(self._log, r),
             on_failed=lambda e: self._log(f"❌ Export failed: {e}"),
+            chained=True,
         )
 
     # ── View helpers ─────────────────────────────────────────────────────
