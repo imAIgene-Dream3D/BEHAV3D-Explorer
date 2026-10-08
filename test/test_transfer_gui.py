@@ -63,6 +63,28 @@ def test_transfer_menu_runs_pack_in_background():
     _APP.processEvents()
 
 
+def test_progress_label_is_a_percentage_not_a_size():
+    from behav3d.napari._data_preparation import DataPreparationTab
+
+    tab = DataPreparationTab()
+    labels = []
+
+    class _Dlg:
+        def setValue(self, v):
+            pass
+
+        def setLabelText(self, text):
+            labels.append(text)
+
+    tab._transfer._progress_dialog = _Dlg()
+    gb = 1024 ** 3
+    tab._transfer._on_progress(100 * gb, 300 * gb, "Writing: a.zarr")  # 3 passes over 100 GB of data
+    tab._transfer._progress_dialog = None
+    assert labels and labels[0].startswith("33.3%") and "GB" not in labels[0]
+    tab.deleteLater()
+    _APP.processEvents()
+
+
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     test_transfer_menu_runs_pack_in_background()

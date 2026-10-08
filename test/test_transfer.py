@@ -211,6 +211,32 @@ def test_sample_subset_interrupted_marker_cancel_and_guards():
             raise AssertionError(bad)
 
 
+def test_progress_total_is_work_units_with_phase_labels():
+    # The progress total counts I/O passes (write + re-read + hash), so it is a
+    # multiple of the data size: the GUI must show a percentage, not bytes.
+    real = T._Progress
+    T._Progress = lambda total, cb=None, cancel=None: real(total, cb, cancel, interval=0)  # no throttling
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp, src = _setup(tmp)
+            data = T.plan_bundle(src)["total_bytes"]
+            events = []
+            bundle = T.pack_project(src, tmp / "usb", progress=lambda d, t, m: events.append((d, t, m)), **QUIET)
+            assert events and {t for _d, t, _m in events} == {3 * data}
+            done = [d for d, _t, _m in events]
+            assert done == sorted(done)
+            phases = {m.split(":")[0] for _d, _t, m in events}
+            assert {"Writing", "Verifying contents", "Checksum"} <= phases
+
+            events.clear()
+            T.verify_bundle(bundle, deep=True, progress=lambda d, t, m: events.append((d, t, m)), **QUIET)
+            assert events and events[0][1] > data  # checksum pass + content pass
+            phases = {m.split(":")[0] for _d, _t, m in events}
+            assert {"Checksum", "Verifying contents"} <= phases
+    finally:
+        T._Progress = real
+
+
 def test_cli_round_trip():
     with tempfile.TemporaryDirectory() as tmp:
         tmp, src = _setup(tmp)

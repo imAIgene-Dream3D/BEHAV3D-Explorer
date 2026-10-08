@@ -219,7 +219,9 @@ class TransferController:
             return
         frac = (done / total) if total else 0.0
         dlg.setValue(min(1000, int(frac * 1000)))
-        label = f"{_fmt_bytes(done)} of {_fmt_bytes(total)}"
+        # done/total are units of I/O work (a pack writes, re-reads and hashes
+        # every byte), not file sizes: show a percentage, never "X GB of Y GB".
+        label = f"{min(100.0, 100.0 * frac):.1f}%"
         if message:
             label += f"\n{message if len(message) < 90 else '…' + message[-88:]}"
         dlg.setLabelText(label)

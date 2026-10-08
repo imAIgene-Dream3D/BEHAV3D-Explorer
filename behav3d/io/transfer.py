@@ -74,7 +74,12 @@ class InterruptedRunError(TransferError):
 # helpers
 # ---------------------------------------------------------------------------
 class _Progress:
-    """Throttled ``progress(done_bytes, total_bytes, message)`` + cancel checks."""
+    """Throttled ``progress(done, total, message)`` + cancel checks.
+
+    *done* / *total* are units of I/O work, not file sizes: a pack writes,
+    re-reads and hashes every byte, so *total* is a multiple of the data size.
+    Show them as a fraction, never as a size. ``phase`` names the current pass.
+    """
 
     def __init__(self, total, callback=None, cancel=None, interval=0.2):
         self.total = int(total)
@@ -84,6 +89,7 @@ class _Progress:
         self._interval = interval
         self._last = 0.0
         self.message = ""
+        self.phase = ""
 
     def check_cancel(self):
         if self._cancel is not None and self._cancel():
@@ -96,7 +102,8 @@ class _Progress:
         now = time.monotonic()
         if self._callback is not None and (force or now - self._last >= self._interval):
             self._last = now
-            self._callback(self.done, self.total, self.message)
+            text = f"{self.phase}: {self.message}" if self.phase and self.message else (self.phase or self.message)
+            self._callback(self.done, self.total, text)
 
 
 def _behav3d_version():
@@ -516,11 +523,15 @@ def pack_project(
         final = bundle_dir / name
         partial = bundle_dir / (name + ".partial")
         try:
+            prog.phase = "Writing"
             manifest = _write_archive(partial, name, entry, prog, log)
             if verify:
+                prog.phase = "Verifying contents"
                 problems = _check_archive_contents(partial, prog)
                 if problems:
                     raise TransferError(f"{name} failed verification after writing: " + "; ".join(problems[:5]))
+            prog.phase = "Checksum"
+            prog.advance(0, message=name)
             digest = _sha256_file(partial, prog)
             os.replace(partial, final)
         except BaseException:
@@ -548,6 +559,7 @@ def pack_project(
     stray = sorted(p.name for p in bundle_dir.glob("*.zip") if p.name not in order)
     if stray:
         log(f"ℹ️ Not part of this bundle (left untouched): {', '.join(stray)}")
+    prog.phase = ""
     prog.advance(0, message="done", force=True)
     log(f"✅ Bundle ready: {bundle_dir}")
     return bundle_dir
@@ -571,6 +583,7 @@ def verify_bundle(bundle_dir, *, deep=False, progress=None, cancel=None, log=pri
     problems = []
     for a in info["archives"]:
         path = bundle_dir / a["name"]
+        prog.phase = "Checksum"
         prog.advance(0, message=a["name"])
         if not path.exists():
             problems.append(f"{a['name']}: missing")
@@ -582,6 +595,7 @@ def verify_bundle(bundle_dir, *, deep=False, progress=None, cancel=None, log=pri
             problems.append(f"{a['name']}: checksum mismatch (corrupted copy)")
             continue
         if deep:
+            prog.phase = "Verifying contents"
             problems.extend(f"{a['name']}: {p}" for p in _check_archive_contents(path, prog))
         log(f"  ✅ {a['name']}")
     for p in problems:
@@ -664,6 +678,7 @@ def unpack_bundle(
         shutil.rmtree(_lp(tmp))
     tmp.mkdir()
     prog = _Progress(total, progress, cancel)
+    prog.phase = "Extracting"
     log(f"📥 Importing {len(manifests)} archive(s), {_fmt_bytes(total)} → {output_dir}")
     try:
         for path, manifest in manifests:
@@ -731,6 +746,7 @@ def unpack_bundle(
             )
             result["relinked"] = len(report["changed"])
     _update_params_paths(output_dir, result["metadata_csv"])
+    prog.phase = ""
     prog.advance(0, message="done", force=True)
     log(f"✅ Imported into {output_dir}")
     return result

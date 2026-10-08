@@ -15,7 +15,7 @@ The **Transfer** button next to the output directory (Data Preparation â†’ **1 Â
    | `bundle.json` | what is inside, where it came from, the checksum of every archive |
    | `SHA256SUMS.txt` | the same checksums in the standard format |
 
-   The images are already compressed, so the archives are written without further compression: packing runs at disk speed. Each archive is re-read and checked after writing. Packing again into the same destination only rewrites the archives whose samples changed, so an interrupted pack can simply be restarted.
+   The images are already compressed, so the archives are written without further compression: packing runs at disk speed. Each archive is re-read and checked after writing. The progress bar covers writing, re-reading and checksumming, so it shows a percentage (not a size) and reaches 100% only after all three. Packing again into the same destination only rewrites the archives whose samples changed, so an interrupted pack can simply be restarted.
 
 2. **Copy the bundle folder** with any tool. It is only a handful of large files, so this is fast on any drive, share or sync service.
 
