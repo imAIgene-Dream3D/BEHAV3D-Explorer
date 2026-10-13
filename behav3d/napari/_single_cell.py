@@ -8852,7 +8852,8 @@ class TrackClassificationSubTab(QWidget):
                 # unchanged regardless of which basis produced the model.
                 model_path = _traj_dir / get_dtaidistance_track_trajectories_filename(ct)
                 model_path.parent.mkdir(parents=True, exist_ok=True)
-                result.write(model_path, compression="gzip")
+                from behav3d.core.h5_access import prepare_adata_for_write
+                prepare_adata_for_write(result).write(model_path, compression="gzip")
                 return result
             from behav3d.analysis.behavior.track.state_dtw import (
                 run_categorical_dtaidistance_trajectory_clustering,

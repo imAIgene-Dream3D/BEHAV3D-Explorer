@@ -77,7 +77,7 @@ def _normalize_id_column(series):
     ``"5.0"`` after a CSV re-read) doesn't break equality joins."""
     numeric = pd.to_numeric(series, errors="coerce")
     is_whole = numeric.notna() & (numeric == numeric.round())
-    out = series.astype(str)
+    out = series.astype(str).fillna("nan")  # pandas 3 astype(str) keeps NaN
     out = out.where(~is_whole, numeric.where(is_whole).astype("Int64").astype(str))
     return out
 
@@ -372,7 +372,7 @@ def _explode_touching_column(df, touching_col, *, id_col_name):
     """Split a comma-separated ``touching_col`` into one row per touched TrackID, normalized via
     ``_normalize_id_column`` under ``id_col_name`` for joining against a target-class lookup."""
     out = df.copy()
-    out[touching_col] = out[touching_col].astype(str)
+    out[touching_col] = out[touching_col].astype(str).fillna("")  # pandas 3 astype(str) keeps NaN
     out = out.assign(**{touching_col: out[touching_col].str.split(",")}).explode(touching_col)
     out[touching_col] = out[touching_col].str.strip()
     out = out[~out[touching_col].isin(["", "nan", "None", "<NA>"])]

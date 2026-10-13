@@ -188,7 +188,7 @@ def normalize_track_features(
     for column_name in columns:
         if column_name not in df_tracks.columns:
             continue
-        if df_tracks[column_name].dtype == "object":
+        if not pd.api.types.is_numeric_dtype(df_tracks[column_name]):
             try:
                 df_tracks[column_name] = pd.to_numeric(df_tracks[column_name], errors="coerce")
             except Exception:
@@ -1012,10 +1012,11 @@ def _create_original_behav3d_adata(output_dir, cell_type):
 
     df = pd.read_csv(umap_csv, low_memory=False)
     obs = df.copy()
-    obs.index = (
+    obs.index = pd.Index(
         obs.get("TrackID", pd.Series(range(len(obs)))).astype(str)
         + "--"
-        + obs.get("sample_name", pd.Series([""] * len(obs))).astype(str)
+        + obs.get("sample_name", pd.Series([""] * len(obs))).astype(str),
+        dtype=object,
     )
     obs.index.name = None
 

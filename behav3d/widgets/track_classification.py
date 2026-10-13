@@ -96,6 +96,7 @@ from behav3d.core.metadata import (
     list_grouping_candidate_columns,
     merge_condition_columns_into_obs,
 )
+from behav3d.core.h5_access import prepare_adata_for_write
 from behav3d.core.utils import rmtree_ignore_missing
 from behav3d.widgets.utils import build_plot_box, build_row_move_buttons, spinning_loader
 
@@ -1849,7 +1850,7 @@ class TrackClassificationPanel:
         )
         _set_classification_state_colors(adata_tracks, "ClusterID", new_colors)
         _set_classification_state_order(adata_tracks, "ClusterID", new_order)
-        adata_tracks.write(self._model_adata_path(), compression="lzf")
+        prepare_adata_for_write(adata_tracks).write(self._model_adata_path(), compression="lzf")
         qc_dir = _resolve_track_paths(self.output_dir, self._current_cell_type()).clustering_outfolder / "after_renaming"
         plot_paths = save_dtaidistance_diagnostics(
             adata_tracks,
@@ -2212,7 +2213,7 @@ class TrackClassificationPanel:
         # classifier training) keeps working unchanged regardless of which basis produced it.
         model_path = self._model_adata_path()
         model_path.parent.mkdir(parents=True, exist_ok=True)
-        self.model_adata.write(model_path, compression="gzip")
+        prepare_adata_for_write(self.model_adata).write(model_path, compression="gzip")
         self.status_html.value = (
             f"<b style='color:#080;'>Saved bout/proportion model:</b> {model_path.name} "
             f"({self.model_adata.n_obs} tracks)"

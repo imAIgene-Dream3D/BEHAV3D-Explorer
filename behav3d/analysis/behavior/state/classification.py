@@ -2418,9 +2418,11 @@ def apply_hmm_deployment_artifact_to_full_dataset(
         ).isna()
         for col in ["behavioral_clusterid", FULL_STATE_COL]:
             if col in adata_full.obs.columns:
-                adata_full.obs[col] = pd.Series(adata_full.obs[col], index=adata_full.obs.index, dtype="string").where(
-                    ~unassigned_mask,
-                    pd.NA,
+                adata_full.obs[col] = pd.Categorical(
+                    pd.Series(adata_full.obs[col], index=adata_full.obs.index, dtype="string").where(
+                        ~unassigned_mask,
+                        pd.NA,
+                    )
                 )
     raw_full_keys = _build_hmm_raw_full_cluster_keys(
         adata_full.obs,

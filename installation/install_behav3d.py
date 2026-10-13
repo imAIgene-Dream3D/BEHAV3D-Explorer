@@ -42,6 +42,10 @@ CUDA_VERSION = "cu128"  # Default CUDA version for PyTorch
 # Global variable that will be set from command line args
 ENV_NAME = DEFAULT_ENV_NAME
 
+# Set by check_windows_long_paths(): when True, package operations use conda instead
+# of mamba to keep package-cache paths under Windows' 260-character limit.
+PREFER_CONDA = False
+
 # Miniforge download URLs (more reliable than Miniconda for conda-forge)
 MINIFORGE_URLS = {
     "Windows": "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Windows-x86_64.exe",
@@ -347,11 +351,115 @@ def get_gpu_info():
     return info
 
 # =============================================================================
+# WINDOWS LONG PATH SUPPORT
+# =============================================================================
+
+LONG_PATHS_REG_KEY = r"SYSTEM\CurrentControlSet\Control\FileSystem"
+
+def windows_long_paths_enabled():
+    """Return True if Windows long path support (LongPathsEnabled=1) is on."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, LONG_PATHS_REG_KEY) as key:
+            value, _ = winreg.QueryValueEx(key, "LongPathsEnabled")
+        return value == 1
+    except OSError:
+        return False  # value absent = Windows default (disabled)
+
+def enable_windows_long_paths():
+    """Set LongPathsEnabled=1 through an elevated reg.exe (Windows shows a UAC prompt)."""
+    reg_args = f"add HKLM\\{LONG_PATHS_REG_KEY} /v LongPathsEnabled /t REG_DWORD /d 1 /f"
+    ps_cmd = f"Start-Process -FilePath reg.exe -ArgumentList '{reg_args}' -Verb RunAs -Wait -WindowStyle Hidden"
+    # Declining the UAC prompt makes Start-Process fail; the re-read below reports it.
+    subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], check=False)
+    return windows_long_paths_enabled()
+
+def check_windows_long_paths():
+    """Make sure package extraction won't hit Windows' 260-character path limit.
+
+    mamba 2.x unpacks packages into a per-channel cache folder
+    (pkgs\\https\\conda.anaconda.org\\conda-forge\\noarch\\...), which adds ~44 characters
+    to every path. With long paths disabled (the Windows default), packages with deep
+    file trees (jupyterlab, debugpy, referencing) fail with "extraction failed" /
+    "remove_all: The directory is not empty". conda keeps the flat pkgs\\ layout, so it
+    is the fallback when long paths cannot be enabled. No-op on macOS/Linux.
+    """
+    global PREFER_CONDA
+
+    if get_platform() != "Windows":
+        return True
+
+    print_header("WINDOWS LONG PATH SUPPORT")
+    if windows_long_paths_enabled():
+        print_success("Windows long path support is enabled")
+        return True
+
+    print_warning("Windows long path support is disabled (Windows default).")
+    print_info("Some packages contain file paths longer than Windows' 260-character limit")
+    print_info("once unpacked into mamba's package cache, which makes the installation fail.")
+    print()
+    print("Options:")
+    print("  [1] Enable long path support now (recommended; asks for administrator permission)")
+    print("  [2] Continue without it (uses conda instead of mamba; slower, but avoids long paths)")
+    print("  [3] Cancel installation")
+    print()
+    try:
+        response = input("Choose an option [1/2/3] (default 1): ").strip() or "1"
+    except (EOFError, KeyboardInterrupt):
+        response = "2"
+
+    if response == "3":
+        print_info("Installation cancelled by user.")
+        return False
+
+    if response == "1":
+        print_step("Enabling Windows long path support (accept the administrator prompt)...")
+        if enable_windows_long_paths():
+            print_success("Windows long path support enabled")
+            return True
+        print_warning("Could not enable long path support (permission denied or prompt declined).")
+    elif response != "2":
+        print_warning(f"Invalid option '{response}'. Continuing without long path support.")
+
+    conda_exe = find_conda_executable()
+    if conda_exe:
+        PREFER_CONDA = True
+        print_info(f"Using conda for package operations: {conda_exe}")
+    else:
+        print_warning("conda not found; continuing with the current package manager.")
+        print_info("If extraction fails, enable long paths (as administrator) with:")
+        print_info(f'  reg add "HKLM\\{LONG_PATHS_REG_KEY}" /v LongPathsEnabled /t REG_DWORD /d 1 /f')
+    return True
+
+# =============================================================================
 # ENVIRONMENT CREATION
 # =============================================================================
 
+def find_conda_executable():
+    """Find conda itself (not mamba/micromamba), e.g. the conda.bat next to Miniforge's mamba.bat."""
+    path = shutil.which("conda")
+    if path:
+        return path
+    conda_name = "conda.bat" if get_platform() == "Windows" else "conda"
+    mamba_path = shutil.which("mamba") or find_conda()
+    if mamba_path and Path(mamba_path).stem.lower() == "mamba":
+        sibling = Path(mamba_path).with_name(conda_name)
+        if sibling.exists():
+            return str(sibling)
+    for base in ("miniforge3", "mambaforge", "miniconda3", "anaconda3"):
+        candidate = Path.home() / base / "condabin" / conda_name
+        if candidate.exists():
+            return str(candidate)
+    return None
+
 def get_package_manager():
     """Get the best available package manager (prefers mamba > micromamba > conda)."""
+    # Long paths disabled on Windows: use conda (see check_windows_long_paths)
+    if PREFER_CONDA:
+        conda_exe = find_conda_executable()
+        if conda_exe:
+            return conda_exe
+
     # Check for mamba first (fastest)
     mamba_path = shutil.which("mamba")
     if mamba_path:
@@ -1056,7 +1164,11 @@ Examples:
         else:
             print_error("Conda/Miniforge is required for BEHAV3D installation.")
             return 1
-    
+
+    # Windows: avoid the 260-character path limit during package extraction
+    if not check_windows_long_paths():
+        return 0
+
     # Check if environment exists
     env_exists = check_env_exists(conda_path, ENV_NAME)
     

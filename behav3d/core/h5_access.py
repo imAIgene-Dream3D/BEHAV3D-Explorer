@@ -132,10 +132,68 @@ def h5_read():
     return h5_access(blocking=threading.current_thread() is not threading.main_thread())
 
 
+def _sanitize_frame_strings(df) -> None:
+    """In-place: nullable/Arrow string columns -> Categorical with object
+    categories; categoricals with string-dtype categories -> object categories;
+    a string-dtype index -> object."""
+    import pandas as pd
+
+    for col in list(df.columns):
+        s = df[col]
+        dtype = s.dtype
+        if isinstance(dtype, pd.StringDtype):
+            present = s.notna()
+            values = s.astype(object).where(present, None)
+            cats = pd.Index(pd.unique(values[present]), dtype=object)
+            df[col] = pd.Categorical(values, categories=cats)
+        elif isinstance(dtype, pd.CategoricalDtype) and isinstance(
+            dtype.categories.dtype, pd.StringDtype
+        ):
+            cats = pd.Index(list(dtype.categories), dtype=object)
+            df[col] = pd.Categorical.from_codes(
+                s.cat.codes.to_numpy(), categories=cats, ordered=dtype.ordered
+            )
+    if isinstance(df.index.dtype, pd.StringDtype):
+        df.index = df.index.astype(object)
+
+
+def _sanitize_uns_strings(mapping) -> None:
+    import pandas as pd
+
+    for value in mapping.values():
+        if isinstance(value, pd.DataFrame):
+            _sanitize_frame_strings(value)
+        elif isinstance(value, dict):
+            _sanitize_uns_strings(value)
+
+
+def prepare_adata_for_write(adata):
+    """Make ``adata`` writable regardless of ``anndata.settings.allow_write_nullable_strings``.
+
+    anndata >= 0.11 refuses to write pandas nullable strings
+    (``pd.arrays.{StringArray,ArrowStringArray}``) unless that flag is on, and
+    files that *were* written with it come back from disk as StringArray, so a
+    plain read -> modify -> write fails. Rather than opting in (which makes the
+    files unreadable by anndata < 0.11), convert those columns to plain
+    categoricals/object strings. Dtypes are changed in place; values, missing
+    entries and category order are preserved. Returns ``adata`` (an actual
+    copy if it was a view, whose obs/var cannot be changed in place).
+    """
+    if adata.is_view:
+        adata = adata.copy()
+    _sanitize_frame_strings(adata.obs)
+    _sanitize_frame_strings(adata.var)
+    if adata.raw is not None:
+        _sanitize_frame_strings(adata.raw.var)
+    _sanitize_uns_strings(adata.uns)
+    return adata
+
+
 def write_adata(adata, path, **kwargs) -> None:
-    """``adata.write(path, **kwargs)`` under the exclusive HDF5 lock."""
+    """``adata.write(path, **kwargs)`` under the exclusive HDF5 lock (string
+    columns sanitized first, see :func:`prepare_adata_for_write`)."""
     with h5_access(write=True):
-        adata.write(path, **kwargs)
+        prepare_adata_for_write(adata).write(path, **kwargs)
 
 
 def read_h5ad_locked(path, **kwargs):

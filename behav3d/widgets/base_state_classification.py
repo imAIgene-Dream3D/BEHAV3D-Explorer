@@ -904,7 +904,8 @@ class BaseStateClassificationPanel:
             return
         p = self._model_adata_path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        self.model_adata.write(p, compression=compression)
+        from behav3d.core.h5_access import prepare_adata_for_write
+        prepare_adata_for_write(self.model_adata).write(p, compression=compression)
 
     def _set_busy(self, button, spinner, busy=True, disable_buttons=None):
         state = bool(busy)
