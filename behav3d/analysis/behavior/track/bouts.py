@@ -10,7 +10,6 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.colors import to_hex
 import seaborn as sns
-import umap
 import scanpy as sc
 
 from sklearn.cluster import KMeans, HDBSCAN, AgglomerativeClustering
@@ -36,7 +35,8 @@ try:
 except Exception:
     dtw_ndim = None
 from sklearn.metrics import silhouette_score
-from behav3d.analysis.behavior.state.classification import FULL_STATE_COL, resolve_full_state_col
+from behav3d.core.h5_access import write_adata
+from behav3d.core.state_columns import FULL_STATE_COL, resolve_full_state_col
 from behav3d.analysis.behavior.track.feature_dtw import run_tcell_analysis
 from behav3d.analysis.behavior.track.visualization.plots.feature_dtw import (
     plot_cluster_percentage_bars,
@@ -61,6 +61,7 @@ from behav3d.features.state_descriptive_features import (
 )
 from behav3d.analysis.filtering import filter_and_truncate_tracks_anndata
 from behav3d.analysis.behavior.track.utils import (
+    get_track_classifier_filename,
     _filter_tracks_for_dtaidistance,
     _peek_track_outfolder,
     _resolve_track_paths,
@@ -108,11 +109,6 @@ from behav3d.analysis.behavior.utils import (
 def get_track_trajectories_filename(cell_type):
     cell_token = _sanitize_filename_token(cell_type, fallback="cell")
     return f"BEHAV3D_{cell_token}_behavioral_trajectories.h5ad"
-
-
-def get_track_classifier_filename(cell_type):
-    cell_token = _sanitize_filename_token(cell_type, fallback="cell")
-    return f"track_classification_random_forest_{cell_token}.pkl"
 
 
 def _resolve_track_classifier_path(output_dir, cell_type, output_subdir_name=None):
@@ -1451,7 +1447,7 @@ def apply_track_classifier_to_subtracks(
     )
     if bool(save_outputs) and output_path is not None:
         save_started = time.perf_counter()
-        adata_tracks.write(output_path, compression="gzip")
+        write_adata(adata_tracks, output_path, compression="gzip")
         _save_adata_obs_csv(adata_tracks, output_path)
         _vsave(verbose, "trajectory-apply", "classifier-applied trajectory model", output_path)
         _vdone(verbose, "trajectory-apply", "save classifier outputs", save_started)
@@ -2358,7 +2354,7 @@ def run_state_based_analysis(
     adata_feat_out = Path(outfolder, get_track_trajectories_filename(cell_type))
     if save_outputs:
         save_started = time.perf_counter()
-        adata_state_features.write(adata_feat_out, compression="gzip")
+        write_adata(adata_state_features, adata_feat_out, compression="gzip")
         _save_adata_obs_csv(adata_state_features, adata_feat_out)
         _vsave(verbose, "trajectory-clustering", "clustered trajectory model", adata_feat_out)
         _vdone(verbose, "trajectory-clustering", "save clustered model", save_started)

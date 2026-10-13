@@ -27,6 +27,7 @@ from qtpy.QtWidgets import (
 )
 from qtpy.QtCore import Qt, Signal
 
+from behav3d.core.run_plan import ALL_SAMPLES, Action, RunPlan, scan_cell_type_files
 from behav3d.core.qt_help import HelpButton, make_help_row, reset_scroll_on_page_change
 from behav3d.napari._units import UnitGroupManager, TimeUnitGroupManager
 
@@ -39,6 +40,7 @@ from behav3d.napari._background_runner import (
     BackgroundOperation,
     ProgressBarRow,
     fire_extra_callback,
+    refuse_if_busy,
 )
 
 
@@ -774,6 +776,10 @@ class CellTypeFilterPanel(QWidget):
         if self._bg.is_running():
             self.log("⚠️ A filtering run is already in progress for this panel.")
             return
+        if interactive and refuse_if_busy(
+            self, "starting filtering", bg=self._bg
+        ):
+            return
 
         if not self._validate_time_range():
             return
@@ -1132,7 +1138,7 @@ class FilteringTab(QWidget):
         self.run_batch_filtering(interactive=True, block=False)
 
     def run_batch_filtering(self, interactive=True, skip_existing=False, block=False,
-                            extra_callbacks=None):
+                            extra_callbacks=None, plan=None):
         """Run filtering for all cell types sequentially.
 
         ``block=False`` (default) runs in a background worker thread with a
@@ -1154,6 +1160,12 @@ class FilteringTab(QWidget):
             fire_extra_callback(extra_callbacks, "on_failed", "already running")
             return
 
+        if interactive and refuse_if_busy(
+            self, "starting batch filtering", bg=self._bg,
+            extra_callbacks=extra_callbacks,
+        ):
+            return
+
         # The window is global, so one panel's copy speaks for all of them.
         first_panel = next(iter(self.panels.values()))
         if not first_panel._validate_time_range():
@@ -1167,37 +1179,30 @@ class FilteringTab(QWidget):
         print(f"  Running batch filtering for {total} cell types", file=sys.stderr)
         print(f"{'='*60}", file=sys.stderr)
 
-        # Overwrite check
+        # One filtered file per cell type, so the plan has one item per cell type.
         from behav3d.analysis.grouping import filtered_track_features_csv
 
-        all_cts = list(self.panels.keys())
-        existing = []
-        existing_cts = set()
         out_dir = Path(self.metadata_loader.output_dir)
-        for ct in all_cts:
-            filtered = filtered_track_features_csv(out_dir, ct)
-            if filtered.exists():
-                existing.append(f"{ct} filtered data ({filtered.name})")
-                existing_cts.add(ct)
-
-        skip_existing_flag = skip_existing
-        overwrite = not skip_existing
-        if existing:
+        all_cts = list(self.panels.keys())
+        items = scan_cell_type_files(
+            all_cts, lambda ct: filtered_track_features_csv(out_dir, ct)
+        )
+        if plan is None:
+            plan = (
+                RunPlan.skip_existing(items) if skip_existing
+                else RunPlan.overwrite_all(items)
+            )
             if interactive:
-                from behav3d.napari._overwrite_prompt import prompt_overwrite_batch
-                choice = prompt_overwrite_batch(
-                    self,
-                    "Overwrite Existing Filtered Data?",
-                    existing,
-                )
-                if choice == "cancel":
-                    self._log("Batch filtering cancelled.")
-                    fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
-                    return
-                skip_existing_flag = (choice == "skip")
-                overwrite = not skip_existing_flag
-            else:
-                overwrite = True
+                from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
+                if plan_needs_prompt(items):
+                    choice, plan = prompt_run_plan(
+                        self, "Existing Filtered Data", items,
+                        body_prefix="Filtered data already exists for:",
+                    )
+                    if choice == "cancel":
+                        self._log("Batch filtering cancelled.")
+                        fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
+                        return
 
         # Persist + snapshot every panel's Qt widget state on the Qt
         # thread — the worker must not read widgets.
@@ -1214,13 +1219,13 @@ class FilteringTab(QWidget):
                         progress_cb(i, total, f"Filtering: {ct}")
                     except Exception:
                         pass
-                if skip_existing_flag and ct in existing_cts:
+                if plan.action(ALL_SAMPLES, ct) is Action.SKIP:
                     self._log(f"--- [{i + 1}/{total}] Skipping {ct} (existing data) ---")
                     continue
                 print(f"\n▶ [{i + 1}/{total}] Filtering: {ct}…", file=sys.stderr)
                 self._log(f"--- [{i + 1}/{total}] Filtering: {ct} ---")
                 panel._run_filtering_for(
-                    ct, overwrite=overwrite,
+                    ct, overwrite=plan.action(ALL_SAMPLES, ct) is Action.OVERWRITE,
                     params=panel_params[ct],
                 )
                 self._log(f"Done: {ct}")

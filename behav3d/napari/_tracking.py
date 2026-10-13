@@ -29,6 +29,13 @@ from qtpy.QtWidgets import (
 )
 from qtpy.QtCore import Qt, Signal
 
+from behav3d.core.run_plan import (
+    ALL_ORGANOIDS,
+    RunPlan,
+    merge_plan_for_multicolor,
+    scan_all_organoids_items,
+    scan_tracking_items,
+)
 from behav3d.napari._widgets import (
     make_help_row,
     HelpButton,
@@ -45,6 +52,7 @@ from behav3d.napari._background_runner import (
     ProgressBarRow,
     ThreadSafeLogger,
     fire_extra_callback,
+    refuse_if_busy,
 )
 
 
@@ -93,11 +101,16 @@ class _ImportTrackingPage(QWidget):
         self._switch_to_data_prep_edit = switch_to_data_prep_edit_callback
         # sample_name -> {"path_edit", "browse_btn", "status_layout", "last_value", "row_idx"}
         self._rows = {}
+        # The per-sample rows (each one stats its source and destination paths) are
+        # only built while this page is on screen: every metadata (re)load used to
+        # rebuild the page of *every* cell type's panel, shown or not -- including
+        # panels of earlier generations that Qt's QTabWidget.clear() keeps alive.
+        self._stale = False
         self._init_ui()
         if hasattr(metadata_loader, "metadata_loaded"):
             metadata_loader.metadata_loaded.connect(self._on_metadata_updated)
         if getattr(metadata_loader, "metadata", None) is not None:
-            self._rebuild()
+            self._on_metadata_updated()
 
     # ── column helpers ──────────────────────────────────────────────────
     def _tracks_img_col(self):
@@ -179,7 +192,17 @@ class _ImportTrackingPage(QWidget):
         layout.addWidget(self._scroll)
 
     def _on_metadata_updated(self, _=None):
-        self._rebuild()
+        if self.isVisible():
+            self._stale = False
+            self._rebuild()
+        else:
+            self._stale = True
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._stale:
+            self._stale = False
+            self._rebuild()
 
     def _rebuild(self):
         # Detach the old content widget without destroying it — this prevents
@@ -1562,7 +1585,7 @@ class CellTypeTrackingPanel(QWidget):
         }
 
     def _run_tracking_for(self, cell_type: str, overwrite: bool = False,
-                          params: dict = None, progress_cb=None):
+                          params: dict = None, progress_cb=None, plan=None):
         """Run tracking for a single cell type.
 
         Parameters
@@ -1580,6 +1603,9 @@ class CellTypeTrackingPanel(QWidget):
         progress_cb:
             Optional ``progress_cb(current, total, label)`` forwarded
             to the backend so a GUI can drive a progress bar.
+        plan:
+            Optional :class:`~behav3d.core.run_plan.RunPlan` with per-sample
+            skip / run / overwrite choices; supersedes ``overwrite``.
 
         Returns
         -------
@@ -1612,7 +1638,7 @@ class CellTypeTrackingPanel(QWidget):
                 gap_closing_max_frame_count=int(lap["gap_frames"]),
                 merging_cost_cutoff=(mc ** 2 if mc > 0 else False),
                 splitting_cost_cutoff=(sc ** 2 if sc > 0 else False),
-                overwrite=overwrite,
+                overwrite=overwrite, plan=plan,
                 progress_cb=progress_cb,
             )
 
@@ -1621,7 +1647,7 @@ class CellTypeTrackingPanel(QWidget):
             tp = params["trackpy"]
             new_md = run_trackpy_tracking_generic(
                 metadata=metadata, output_dir=out_dir, cell_type=cell_type,
-                overwrite=overwrite,
+                overwrite=overwrite, plan=plan,
                 search_range=int(tp["search_range"]),
                 memory=int(tp["memory"]),
                 adaptive_stop=float(tp["adaptive_stop"]),
@@ -1637,7 +1663,7 @@ class CellTypeTrackingPanel(QWidget):
             use_opt = bool(bt["use_optimize"])
             new_md = run_btracking(
                 metadata=metadata, output_dir=out_dir, cell_type=cell_type,
-                overwrite=overwrite,
+                overwrite=overwrite, plan=plan,
                 config_preset=bt["config_preset"],
                 use_visual_features=bool(bt["use_visual_features"]),
                 max_search_radius=int(bt["max_search_radius"]),
@@ -1657,7 +1683,7 @@ class CellTypeTrackingPanel(QWidget):
             bp = params["bounded_propagation"]
             new_md = run_bounded_propagation_tracking(
                 metadata=metadata, output_dir=out_dir, cell_type=cell_type,
-                overwrite=overwrite,
+                overwrite=overwrite, plan=plan,
                 min_overlap_fraction=float(bp["min_overlap_fraction"]),
                 segment_size_min=int(bp.get("segment_size_min", 20)),
                 progress_cb=progress_cb,
@@ -1668,7 +1694,7 @@ class CellTypeTrackingPanel(QWidget):
             rp = params["reporter_propagation"]
             new_md = run_reporter_propagation_tracking(
                 metadata=metadata, output_dir=out_dir, cell_type=cell_type,
-                overwrite=overwrite,
+                overwrite=overwrite, plan=plan,
                 min_overlap_fraction=float(rp["min_overlap_fraction"]),
                 segment_size_min=int(rp["segment_size_min"]),
                 progress_cb=progress_cb,
@@ -1678,7 +1704,7 @@ class CellTypeTrackingPanel(QWidget):
             from behav3d.preprocessing.tracking.propagation_tracking import run_propagation_tracking
             new_md = run_propagation_tracking(
                 metadata=metadata, output_dir=out_dir, cell_type=cell_type,
-                overwrite=overwrite,
+                overwrite=overwrite, plan=plan,
                 progress_cb=progress_cb,
             )
 
@@ -1696,21 +1722,26 @@ class CellTypeTrackingPanel(QWidget):
             new_md.to_csv(csv_path, sep=",", index=False)
         return new_md
 
-    def _check_existing_tracking(self, cell_types: list) -> list:
-        """Return descriptions of existing tracking data that would be overwritten."""
-        warnings = []
+    def _plan_tracking_run(self):
+        """Ask what to do about existing tracking and return the run plan.
+
+        Returns ``None`` when the user cancels.  Without any existing output the
+        prompt is skipped and every sample is simply run.
+        """
+        from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
+
         md = self.metadata_loader.metadata
-        if md is None:
-            return warnings
-        out_dir = Path(self.metadata_loader.output_dir)
-        for ct in cell_types:
-            for _, sample in md.iterrows():
-                sn = sample.get("sample_name", "unknown")
-                zarr_path = out_dir / "images" / sn / f"{sn}_{ct}_tracked.zarr"
-                csv_dir = out_dir / "trackdata" / sn / ct
-                if zarr_path.exists() or (csv_dir.exists() and list(csv_dir.glob("*.csv"))):
-                    warnings.append(f"{ct} tracking data for {sn}")
-        return warnings
+        out_dir = self.metadata_loader.output_dir
+        items = (
+            scan_tracking_items(md, Path(out_dir), [self.cell_type])
+            if md is not None and out_dir else []
+        )
+        plan = RunPlan.skip_existing(items)
+        if plan_needs_prompt(items):
+            choice, plan = prompt_run_plan(self, "Existing Tracking Data", items)
+            if choice == "cancel":
+                return None
+        return plan
 
     def _on_run_clicked(self):
         """Run tracking for this cell type in the background.
@@ -1723,25 +1754,22 @@ class CellTypeTrackingPanel(QWidget):
         if self._bg.is_running():
             self.log("⚠️ A tracking run is already in progress for this panel.")
             return
+        if refuse_if_busy(self, "starting tracking", bg=self._bg):
+            return
 
         self._persist()
         method = self._get_method_key()
         self.log(f"Running {method.upper()} tracking for: {self.cell_type}")
 
-        # Check for existing data across all samples
-        existing = self._check_existing_tracking([self.cell_type])
-
-        if existing:
-            from behav3d.napari._overwrite_prompt import prompt_overwrite_single
-            choice = prompt_overwrite_single(
-                self,
-                "Overwrite Existing Tracking?",
-                existing,
-            )
-            if choice != "overwrite":
-                self.log(f"Tracking for {self.cell_type} cancelled.")
-                return
-        overwrite = True
+        # Per-sample status: complete samples can be kept, incomplete ones are
+        # resumed, missing ones are tracked.
+        plan = self._plan_tracking_run()
+        if plan is None:
+            self.log(f"Tracking for {self.cell_type} cancelled.")
+            return
+        if not plan.any_work():
+            self.log(f"Tracking for {self.cell_type}: everything is already complete — nothing to do.")
+            return
 
         # Snapshot all Qt widget values now — the worker must not touch them.
         params = self.collect_runtime_params()
@@ -1749,7 +1777,7 @@ class CellTypeTrackingPanel(QWidget):
 
         def _do_tracking(progress_cb=None):
             return self._run_tracking_for(
-                cell_type, overwrite=overwrite,
+                cell_type, overwrite=False, plan=plan,
                 params=params, progress_cb=progress_cb,
             )
 
@@ -1907,6 +1935,8 @@ class AllOrganoidsPropagationPanel(QWidget):
         if self._bg.is_running():
             self.log("⚠️ All-organoids tracking is already in progress.")
             return
+        if refuse_if_busy(self, "starting tracking", bg=self._bg):
+            return
 
         md = self.metadata_loader.metadata
         out_dir = self.metadata_loader.output_dir
@@ -1915,27 +1945,18 @@ class AllOrganoidsPropagationPanel(QWidget):
             return
 
         out_path = Path(out_dir)
-        existing = []
-        for ct in self.organoid_types:
-            for _, sample in md.iterrows():
-                sn = sample.get("sample_name", "unknown")
-                zarr_path = out_path / "images" / sn / f"{sn}_{ct}_tracked.zarr"
-                csv_dir = out_path / "trackdata" / sn / ct
-                if zarr_path.exists() or (csv_dir.exists() and list(csv_dir.glob("*.csv"))):
-                    existing.append(f"{ct} tracking data for {sn}")
+        from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
 
-        overwrite = True
-        if existing:
-            from behav3d.napari._overwrite_prompt import prompt_overwrite_batch
-            choice = prompt_overwrite_batch(
-                self,
-                "Overwrite Existing Tracking?",
-                existing,
-            )
+        items = scan_all_organoids_items(md, out_path, self.organoid_types)
+        plan = RunPlan.skip_existing(items)
+        if plan_needs_prompt(items):
+            choice, plan = prompt_run_plan(self, "Existing Tracking Data", items)
             if choice == "cancel":
                 self.log("All-organoids tracking cancelled.")
                 return
-            overwrite = (choice == "overwrite")
+        if not plan.any_work():
+            self.log("All-organoids tracking: everything is already complete — nothing to do.")
+            return
 
         types_str = ", ".join(self.organoid_types)
         self.btn_run.setText("\u23f3 Running\u2026")
@@ -1950,7 +1971,8 @@ class AllOrganoidsPropagationPanel(QWidget):
                 metadata=md,
                 output_dir=out_dir_str,
                 cell_type=first_ct,
-                overwrite=overwrite,
+                overwrite=False,
+                plan=plan,
                 all_organoids=True,
                 progress_cb=progress_cb,
             )
@@ -2151,6 +2173,8 @@ class MulticolorTrackingPanel(QWidget):
         if inner._bg.is_running():
             self.log("⚠️ A tracking run is already in progress for this panel.")
             return
+        if refuse_if_busy(self, "starting tracking", bg=inner._bg):
+            return
 
         self._persist()
         merged_name = f"{self.base_name}_merged"
@@ -2161,27 +2185,35 @@ class MulticolorTrackingPanel(QWidget):
         )
 
         # One prompt covering every channel plus the merged output.
-        existing = inner._check_existing_tracking(
-            list(self.channel_types) + [merged_name]
-        )
-        if existing:
-            from behav3d.napari._overwrite_prompt import prompt_overwrite_single
-            choice = prompt_overwrite_single(
-                self,
-                "Overwrite Existing Tracking?",
-                existing,
+        from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
+
+        md = self.metadata_loader.metadata
+        out_dir = self.metadata_loader.output_dir
+        items = (
+            scan_tracking_items(
+                md, Path(out_dir), list(self.channel_types) + [merged_name]
             )
-            if choice != "overwrite":
+            if md is not None and out_dir else []
+        )
+        plan = RunPlan.skip_existing(items)
+        if plan_needs_prompt(items):
+            choice, plan = prompt_run_plan(self, "Existing Tracking Data", items)
+            if choice == "cancel":
                 self.log(f"Multicolor tracking for {self.base_name} cancelled.")
                 return
-        overwrite = True
+        if not plan.any_work():
+            self.log(
+                f"Multicolor tracking for {self.base_name}: everything is already "
+                "complete — nothing to do."
+            )
+            return
 
         # Snapshot Qt widget values now — the worker must not touch them.
         params = inner.collect_runtime_params()
 
         def _do_tracking(progress_cb=None):
             return self.run_tracking(
-                overwrite=overwrite, params=params, progress_cb=progress_cb,
+                overwrite=False, plan=plan, params=params, progress_cb=progress_cb,
             )
 
         def _on_done(_new_md):
@@ -2219,7 +2251,7 @@ class MulticolorTrackingPanel(QWidget):
 
     # ------------------------------------------------------------------
     def run_tracking(self, overwrite: bool = False, params: dict = None,
-                     progress_cb=None):
+                     progress_cb=None, plan=None):
         """Track each channel then merge into ``<base_name>_merged``.
 
         ``params`` is an optional Qt-thread-safe snapshot from
@@ -2261,6 +2293,7 @@ class MulticolorTrackingPanel(QWidget):
             self._inner_panel._run_tracking_for(
                 ch,
                 overwrite=overwrite,
+                plan=plan,
                 params=params,
                 progress_cb=_make_channel_cb(i, ch),
             )
@@ -2279,6 +2312,12 @@ class MulticolorTrackingPanel(QWidget):
                 source_cell_types=self.channel_types,
                 combined_cell_type=merged_name,
                 overwrite=overwrite,
+                # The merged output depends on every channel, so it is rebuilt
+                # for any sample where a channel was (re)tracked.
+                plan=(
+                    merge_plan_for_multicolor(plan, self.channel_types, merged_name)
+                    if plan is not None else None
+                ),
             )
             self.metadata_loader.metadata = new_md
             csv_path = self.metadata_loader.behav3d_parameters.get("paths", {}).get("metadata_csv")
@@ -2389,6 +2428,10 @@ class TrackingTab(QWidget):
         self.cell_tabs.addTab(self._placeholder, "—")
 
     def _log(self, msg):
+        from behav3d.napari._background_runner import redispatch_to_gui_thread
+
+        if redispatch_to_gui_thread(self._log, msg):
+            return
         import datetime
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         self.log_box.append(f"[{ts}] {msg}")
@@ -2634,8 +2677,38 @@ class TrackingTab(QWidget):
         """User-triggered batch run — runs asynchronously."""
         self.run_batch_tracking(interactive=True, block=False)
 
+    def scan_plan_items(self):
+        """Per-(sample × cell type) status of everything a batch run produces.
+
+        Covers standalone cell types, the joint all-organoids groups and the
+        multicolor groups (channels plus merged output).
+        """
+        md = self.metadata_loader.metadata
+        out_dir = self.metadata_loader.output_dir
+        if md is None or not out_dir:
+            return []
+        out_dir = Path(out_dir)
+        items = scan_tracking_items(md, out_dir, list(self.panels.keys()))
+        if self._all_organoids_panel is not None and self._organoid_types:
+            items += scan_all_organoids_items(md, out_dir, self._organoid_types)
+        for base, mc_panel in self._multicolor_panels.items():
+            items += scan_tracking_items(
+                md, out_dir, list(mc_panel.channel_types) + [f"{base}_merged"]
+            )
+        return items
+
+    def plan_members(self):
+        """Group key -> member cell types (used to propagate changes through groups)."""
+        members = {
+            f"{base}_merged": list(mc_panel.channel_types)
+            for base, mc_panel in self._multicolor_panels.items()
+        }
+        if self._all_organoids_panel is not None and self._organoid_types:
+            members[ALL_ORGANOIDS] = list(self._organoid_types)
+        return members
+
     def run_batch_tracking(self, interactive=True, skip_existing=False, block=True,
-                           extra_callbacks=None):
+                           extra_callbacks=None, plan=None):
         """Sequential run for all configured cell type panels.
 
         When ``interactive=False``, skips overwrite and visualization
@@ -2660,6 +2733,12 @@ class TrackingTab(QWidget):
             fire_extra_callback(extra_callbacks, "on_failed", "already running")
             return
 
+        if interactive and refuse_if_busy(
+            self, "starting batch tracking", bg=self._bg,
+            extra_callbacks=extra_callbacks,
+        ):
+            return
+
         all_organoids_mode = self._all_organoids_panel is not None
         total = (
             len(self.panels)
@@ -2680,36 +2759,26 @@ class TrackingTab(QWidget):
         print(f"  Running batch tracking for {total} cell types", file=sys.stderr)
         print(f"{'='*60}", file=sys.stderr)
 
-        # Check for existing tracking data across all standalone cell types
-        all_cts = list(self.panels.keys())
-        existing = []
-        existing_cts = set()
+        # Per-(sample × cell type) status of every output this batch can produce:
+        # standalone cell types, the joint all-organoids groups and multicolor
+        # groups (channels + merged).
         out_dir = Path(self.metadata_loader.output_dir)
         md = self.metadata_loader.metadata
-        for ct in all_cts:
-            for _, sample in md.iterrows():
-                sn = sample.get("sample_name", "unknown")
-                zarr_path = out_dir / "images" / sn / f"{sn}_{ct}_tracked.zarr"
-                csv_dir = out_dir / "trackdata" / sn / ct
-                if zarr_path.exists() or (csv_dir.exists() and list(csv_dir.glob("*.csv"))):
-                    existing.append(f"{ct} tracking data for {sn}")
-                    existing_cts.add(ct)
+        items = self.scan_plan_items()
 
-        skip_existing_flag = skip_existing
-        overwrite = not skip_existing
-        if existing and interactive:
-            from behav3d.napari._overwrite_prompt import prompt_overwrite_batch
-            choice = prompt_overwrite_batch(
-                self,
-                "Overwrite Existing Tracking?",
-                existing,
+        if plan is None:
+            plan = (
+                RunPlan.skip_existing(items) if skip_existing
+                else RunPlan.overwrite_all(items)
             )
-            if choice == "cancel":
-                self._log("Batch tracking cancelled by user.")
-                fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
-                return
-            skip_existing_flag = (choice == "skip")
-            overwrite = not skip_existing_flag
+            if interactive:
+                from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
+                if plan_needs_prompt(items):
+                    choice, plan = prompt_run_plan(self, "Existing Tracking Data", items)
+                    if choice == "cancel":
+                        self._log("Batch tracking cancelled by user.")
+                        fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
+                        return
 
         # Persist all panel params before starting so config is saved even if an error occurs
         for ct, panel in self.panels.items():
@@ -2764,11 +2833,7 @@ class TrackingTab(QWidget):
             # ── All-organoids propagation (single step) ─────────────
             organoids_done = set()
             if all_organoids_mode and self._organoid_types:
-                org_cts_to_run = [
-                    ct for ct in self._organoid_types
-                    if not (skip_existing_flag and ct in existing_cts)
-                ]
-                if org_cts_to_run:
+                if plan.for_cell_type(ALL_ORGANOIDS).any_work():
                     self._log(f"--- Tracking ALL organoids together ({', '.join(self._organoid_types)}) ---")
                     print(f"\n▶ Tracking ALL organoids together...", file=sys.stderr)
 
@@ -2778,7 +2843,8 @@ class TrackingTab(QWidget):
                         metadata=self.metadata_loader.metadata,
                         output_dir=str(Path(self.metadata_loader.output_dir).expanduser()),
                         cell_type=first_org_ct,
-                        overwrite=overwrite,
+                        overwrite=False,
+                        plan=plan,
                         all_organoids=True,
                         progress_cb=_step_progress(
                             steps_done[0], "all organoids"
@@ -2793,7 +2859,7 @@ class TrackingTab(QWidget):
                     organoids_done = set(self._organoid_types)
                     steps_done[0] += len(self._organoid_types)
                 else:
-                    self._log("All organoid tracking data already exists — skipping.")
+                    self._log("All organoid tracking is already complete — skipping.")
                     organoids_done = set(self._organoid_types)
                     steps_done[0] += len(self._organoid_types)
 
@@ -2801,14 +2867,14 @@ class TrackingTab(QWidget):
             for i, (ct, panel) in enumerate(self.panels.items(), 1):
                 if ct in organoids_done:
                     continue
-                if skip_existing_flag and ct in existing_cts:
-                    self._log(f"--- Skipping {ct} (existing data) ---")
+                if not plan.for_cell_type(ct).any_work():
+                    self._log(f"--- Skipping {ct} (already complete) ---")
                     steps_done[0] += 1
                     continue
                 print(f"\n▶ [{steps_done[0] + 1}/{total}] Tracking {ct}...", file=sys.stderr)
                 self._log(f"--- [{steps_done[0] + 1}/{total}] Tracking {ct} ---")
                 panel._run_tracking_for(
-                    ct, overwrite=overwrite,
+                    ct, overwrite=False, plan=plan,
                     params=panel_params.get(ct),
                     progress_cb=_step_progress(steps_done[0], ct)
                     if progress_cb is not None else None,
@@ -2839,8 +2905,15 @@ class TrackingTab(QWidget):
                       file=sys.stderr)
                 self._log(f"--- [{steps_done[0] + 1}/{total}] Multicolor tracking: {base} "
                           f"({', '.join(mc_panel.channel_types)}) → {merged_name} ---")
+                if not any(
+                    plan.for_cell_type(c).any_work()
+                    for c in list(mc_panel.channel_types) + [merged_name]
+                ):
+                    self._log(f"--- Skipping multicolor {base} (already complete) ---")
+                    steps_done[0] += 1
+                    continue
                 mc_panel.run_tracking(
-                    overwrite=overwrite,
+                    overwrite=False, plan=plan,
                     params=mc_params.get(base),
                     progress_cb=_step_progress(steps_done[0], f"multicolor {base}")
                     if progress_cb is not None else None,

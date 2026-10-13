@@ -55,7 +55,7 @@ from qtpy.QtWidgets import (
 )
 
 from behav3d.analysis.behavior.utils import _mixed_label_sort_key
-from behav3d.analysis.behavior.state.classification import (
+from behav3d.core.state_columns import (
     FULL_STATE_COL,
     HMM_INTRINSIC_RAW_STATE_COL,
     INTRINSIC_STATE_COL,
@@ -714,7 +714,11 @@ class RenameClusterDialog(QDialog):
             from behav3d.analysis.behavior.utils import _save_adata_obs_csv
 
             self._adata_path.parent.mkdir(parents=True, exist_ok=True)
-            self._adata.write_h5ad(str(self._adata_path), compression="lzf")
+            from behav3d.core.h5_access import h5_access
+
+            # Wait for any worker still reading/writing this file (modal dialog, rare).
+            with h5_access(write=True):
+                self._adata.write_h5ad(str(self._adata_path), compression="lzf")
             _save_adata_obs_csv(self._adata, self._adata_path)
 
     # ── Reset to original ───────────────────────────────────────────────

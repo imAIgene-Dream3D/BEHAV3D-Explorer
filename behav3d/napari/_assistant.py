@@ -26,7 +26,11 @@ from qtpy.QtWidgets import (
     QPlainTextEdit, QProgressBar, QTextBrowser, QFrame, QSizePolicy, QScrollArea,
 )
 
-from behav3d.napari._assistant_context import build_context, context_summary_line
+from behav3d.napari._assistant_context import (
+    build_context,
+    build_summary_context,
+    context_summary_line,
+)
 from behav3d.napari._assistant_actions import (
     build_actions, apply_action, TOOL_SCHEMA, ProposedAction, humanize_parameter_key,
 )
@@ -562,9 +566,25 @@ class AssistantDock(QWidget):
     # Context bar
     # ------------------------------------------------------------------
     def refresh_context_bar(self):
+        """Update the one-line context bar.
+
+        Only the few fields the bar shows are gathered (see
+        ``build_summary_context``), and bursts of calls (a tab switch and a
+        metadata load each fire several) are coalesced into one update on the
+        next event-loop turn, instead of rebuilding the full LLM context each
+        time on the GUI thread."""
+        if getattr(self, "_context_bar_pending", False):
+            return
+        self._context_bar_pending = True
+        QTimer.singleShot(0, self._do_refresh_context_bar)
+
+    def _do_refresh_context_bar(self):
+        self._context_bar_pending = False
         try:
-            ctx = build_context(self.main_widget)
+            ctx = build_summary_context(self.main_widget)
             self.context_bar.setText(context_summary_line(ctx))
+        except RuntimeError:
+            return  # widget already deleted (shutdown)
         except Exception:
             self.context_bar.setText("BEHAV3D Assistant")
 
@@ -1228,6 +1248,37 @@ class AssistantDock(QWidget):
             })
         if had_text:
             self._append_log()
+
+    def shutdown_threads(self, timeout_ms: int = 500) -> int:
+        """Detach and stop this dock's network threads before teardown.
+
+        Called from ``BEHAV3DWidget._shutdown_background_operations``. These
+        ``QThread``s are parentless, so the widget's ``findChildren`` sweep never
+        saw them and quitting mid-request ended in "QThread: Destroyed while
+        thread is still running". A request blocked inside ``requests`` cannot be
+        interrupted (it ends by its own timeout), so stragglers are kept referenced
+        in ``self._zombie_threads`` rather than dropped. Their completion handlers
+        are disconnected first so a late finish cannot call into a destroyed dock.
+        Returns the number of threads still running.
+        """
+        if not hasattr(self, "_zombie_threads"):
+            self._zombie_threads = []
+        still_running = 0
+        for thread, worker in list(self._threads):
+            try:
+                thread.finished.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+            try:
+                thread.quit()
+                if thread.wait(timeout_ms):
+                    continue
+            except RuntimeError:
+                continue  # C++ thread object already gone
+            still_running += 1
+            self._zombie_threads.append((thread, worker))
+        self._threads = [(t, w) for (t, w) in self._threads if t.isRunning()]
+        return still_running
 
     def _cleanup_thread(self, thread, worker):
         self._threads = [(t, w) for (t, w) in self._threads if t is not thread]

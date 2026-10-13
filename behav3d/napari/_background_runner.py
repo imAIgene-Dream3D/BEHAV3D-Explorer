@@ -34,13 +34,17 @@ ipywidgets layer) so notebook behaviour is unaffected.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 import traceback
+import weakref
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from qtpy.QtCore import QObject, QThread, QTimer, Qt, Signal
+from behav3d.core.qt_events import pump_events
+from qtpy.QtCore import QEvent, QObject, QThread, QTimer, Qt, Signal
 from qtpy.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -62,11 +66,24 @@ __all__ = [
     "BackgroundOperation",
     "ThreadSafeLogger",
     "make_activity_progress",
+    "detach_from_tqdm_terminal",
     "update_activity_progress",
     "close_activity_progress",
     "show_napari_activity_panel",
     "hide_napari_activity_panel",
     "fire_extra_callback",
+    "any_background_work",
+    "background_work_descriptions",
+    "busy_notifier",
+    "begin_busy",
+    "busy_scope",
+    "end_busy",
+    "install_busy_guard",
+    "queue_dispatch",
+    "redispatch_to_gui_thread",
+    "set_queue_active",
+    "refuse_if_busy",
+    "warn_if_busy",
 ]
 
 
@@ -88,6 +105,444 @@ def fire_extra_callback(extra_callbacks, key: str, *args) -> None:
         cb(*args)
     except Exception:
         traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# Global "is something running?" state
+# ---------------------------------------------------------------------------
+# Every BackgroundOperation lives on its own widget and used to know only about
+# itself, so nothing could tell the user (or a click handler) that *another*
+# tab was still busy. Starting a second heavy job -- or switching to a tab whose
+# showEvent imports torch / reads an h5ad -- while the first was still running is
+# the main source of crashes and freezes. The helpers below aggregate the busy
+# state of all live operations on demand (no separate registry to keep in sync),
+# plus two opt-outs:
+#
+# * ``silent=True`` instances (automatic background scans/preloads) are never
+#   counted as "work the user must wait for" and are never blocked themselves.
+#   ``notify=True`` on top of that makes such a scan *visible*: it is listed in
+#   the main widget's banner (see :func:`informational_work_descriptions`) as
+#   "loading in the background, you can keep working", but still never blocks
+#   anything -- read-only loads whose results arrive via GUI-thread callbacks.
+# * the Processing Queue marks itself active (so tab switches / selectors / run
+#   buttons that call :func:`warn_if_busy` are refused while it runs) and wraps
+#   each step dispatch in :func:`queue_dispatch`, so a queue step can start
+#   while the previous step's chained follow-up is still finishing.
+#   ``BackgroundOperation.run`` itself deliberately does NOT treat the queue's
+#   mere "active" flag as busy: queue steps may legitimately start work after
+#   an event-loop hop, outside :func:`queue_dispatch`, and refusing those would
+#   hang the queue. Only genuinely *running* operations block a run.
+
+_INSTANCES: "weakref.WeakSet[BackgroundOperation]" = weakref.WeakSet()
+_queue_active_count = 0
+_queue_dispatch_depth = 0
+_warning_open = False
+
+
+class _BusyNotifier(QObject):
+    """Emits ``changed()`` whenever any operation starts or stops."""
+
+    changed = Signal()
+
+
+_notifier: Optional[_BusyNotifier] = None
+
+
+def _alive(obj) -> bool:
+    """False if ``obj``'s underlying C++ QObject has been deleted.
+
+    Process-wide helper QObjects live in module globals, but Qt can still
+    destroy them underneath us (observed after a QApplication is torn down and
+    re-created, e.g. across test modules), after which any use raises
+    ``RuntimeError: wrapped C/C++ object ... has been deleted``.
+    """
+    if obj is None:
+        return False
+    try:
+        obj.objectName()
+        return True
+    except RuntimeError:
+        return False
+
+
+def busy_notifier() -> _BusyNotifier:
+    """Return the process-wide :class:`_BusyNotifier` (created lazily, and
+    re-created if Qt deleted the previous one). GUI thread only."""
+    global _notifier
+    if not _alive(_notifier):
+        _notifier = _BusyNotifier()
+    return _notifier
+
+
+def _emit_busy_changed() -> None:
+    try:
+        busy_notifier().changed.emit()
+    except Exception:
+        pass
+
+
+def set_queue_active(active: bool) -> None:
+    """Called by the Processing Queue when a queue run starts / ends."""
+    global _queue_active_count
+    _queue_active_count = max(0, _queue_active_count + (1 if active else -1))
+    _emit_busy_changed()
+
+
+@contextmanager
+def queue_dispatch():
+    """Mark runs started inside this block as queue-driven (never blocked)."""
+    global _queue_dispatch_depth
+    _queue_dispatch_depth += 1
+    try:
+        yield
+    finally:
+        _queue_dispatch_depth -= 1
+
+
+def background_work_descriptions(exclude: Optional["BackgroundOperation"] = None,
+                                 *, include_queue: bool = True) -> List[str]:
+    """Human-readable descriptions of everything the user would have to wait for.
+
+    Silent (automatic) operations are not listed. A cancelled run whose thread
+    hasn't stopped yet (a "zombie") still counts: it's still executing backend
+    code.
+    """
+    out: List[str] = []
+    for op in list(_INSTANCES):
+        if exclude is not None and op is exclude:
+            # An instance may restart itself right after cancel() even if its
+            # old thread is still winding down (documented contract, see
+            # cancel()); only *other* instances' lingering work blocks it.
+            continue
+        try:
+            if op.silent:
+                continue
+            out.extend(op._busy_descriptions())
+        except RuntimeError:
+            # Underlying C++ QObject already deleted.
+            continue
+    out.extend(_live_scope_descriptions())
+    if include_queue and _queue_active_count > 0:
+        out.append("Processing queue")
+    return out
+
+
+def informational_work_descriptions() -> List[str]:
+    """Descriptions of running ``silent`` operations that asked to be shown
+    (``notify=True``): automatic loads the user may like to know about but never
+    has to wait for. Not counted by :func:`any_background_work`."""
+    out: List[str] = []
+    for op in list(_INSTANCES):
+        try:
+            if op.silent and op.notify:
+                out.extend(op._busy_descriptions())
+        except RuntimeError:
+            continue
+    return out
+
+
+def any_background_work(exclude: Optional["BackgroundOperation"] = None,
+                        *, include_queue: bool = True) -> bool:
+    return bool(background_work_descriptions(exclude, include_queue=include_queue))
+
+
+def _dialogs_suppressed() -> bool:
+    return os.environ.get("BEHAV3D_NO_BUSY_DIALOG", "") not in ("", "0", "false", "False")
+
+
+def _show_busy_warning(parent, descriptions: Sequence[str], what: str) -> None:
+    """Pop a single non-stacking 'please wait' dialog."""
+    global _warning_open
+    if _warning_open:
+        return
+    _warning_open = True
+    try:
+        from qtpy.QtWidgets import QMessageBox
+
+        shown = list(dict.fromkeys(str(d) for d in descriptions))[:6]
+        bullets = "\n".join(f"  • {d}" for d in shown)
+        text = (
+            f"Something is still running in the background:\n\n{bullets}\n\n"
+            f"Please wait for it to finish before {what}. "
+            "Starting another job or switching tabs while it runs can crash the app."
+        )
+        logger.info("Busy guard blocked an action (%s): %s", what, shown)
+        box_parent = parent if isinstance(parent, QWidget) else None
+        QMessageBox.warning(box_parent, "Please wait — something is running", text)
+    finally:
+        _warning_open = False
+
+
+def warn_if_busy(parent=None, what: str = "starting something else",
+                 *, exclude: Optional["BackgroundOperation"] = None,
+                 include_queue: bool = True) -> bool:
+    """Warn the user and return ``True`` when background work is in progress.
+
+    Call at the top of any click handler that starts work or triggers a load::
+
+        if warn_if_busy(self, "loading metadata"):
+            return
+
+    Returns ``False`` (and shows nothing) when idle. Never raises.
+    """
+    try:
+        descriptions = background_work_descriptions(exclude, include_queue=include_queue)
+    except Exception:
+        return False
+    if not descriptions:
+        return False
+    if _dialogs_suppressed():
+        logger.info("Busy guard blocked an action (%s): %s", what, descriptions)
+    else:
+        _show_busy_warning(parent, descriptions, what)
+    return True
+
+
+def refuse_if_busy(parent=None, what: str = "starting something else",
+                   *, bg: Optional["BackgroundOperation"] = None,
+                   extra_callbacks=None) -> bool:
+    """Call first in a Run handler, before any dialog or state change.
+
+    Same check as :func:`warn_if_busy` (queue included, ``bg`` excluded so a
+    panel can restart right after cancelling its own job), but also reports
+    ``on_failed("busy")`` to ``extra_callbacks`` so a queued caller is never
+    left waiting.  Returns ``True`` when the caller must stop::
+
+        if refuse_if_busy(self, "starting segmentation", bg=self._bg):
+            return
+
+    ``BackgroundOperation.run`` keeps its own guard as a backstop, but that
+    only fires after any skip/overwrite prompt has been answered.
+    """
+    if warn_if_busy(parent, what, exclude=bg):
+        fire_extra_callback(extra_callbacks, "on_failed", "busy")
+        return True
+    return False
+
+
+class _ScopeToken:
+    __slots__ = ("desc", "alive")
+
+    def __init__(self, desc: str, alive: Optional[Callable[[], bool]] = None) -> None:
+        self.desc = desc
+        self.alive = alive
+
+
+_SCOPES: List[_ScopeToken] = []
+
+
+def begin_busy(desc: str, alive: Optional[Callable[[], bool]] = None) -> _ScopeToken:
+    """Mark non-BackgroundOperation work (e.g. a plain ``QThread``) as busy.
+
+    ``alive`` is an optional zero-arg callable (typically ``thread.isRunning``).
+    When given, the token stops counting as soon as it returns ``False``, so a
+    missed :func:`end_busy` (a worker that never emitted its finished signal)
+    can never leave the app permanently "busy". Pair with :func:`end_busy`.
+    """
+    token = _ScopeToken(desc, alive)
+    _SCOPES.append(token)
+    _emit_busy_changed()
+    return token
+
+
+def end_busy(token: Optional[_ScopeToken]) -> None:
+    """Release a token from :func:`begin_busy`. Idempotent; ``None`` is ignored."""
+    if token is None:
+        return
+    try:
+        _SCOPES.remove(token)
+    except ValueError:
+        return
+    _emit_busy_changed()
+
+
+@contextmanager
+def busy_scope(desc: str):
+    """Context-manager form of :func:`begin_busy` / :func:`end_busy`."""
+    token = begin_busy(desc)
+    try:
+        yield token
+    finally:
+        end_busy(token)
+
+
+def _live_scope_descriptions() -> List[str]:
+    out: List[str] = []
+    for token in list(_SCOPES):
+        if token.alive is not None:
+            try:
+                alive = bool(token.alive())
+            except Exception:  # e.g. C++ object already deleted
+                alive = False
+            if not alive:
+                try:
+                    _SCOPES.remove(token)
+                except ValueError:
+                    pass
+                continue
+        out.append(token.desc)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Interaction guard for tab bars / combo boxes
+# ---------------------------------------------------------------------------
+class _BusyGuardFilter(QObject):
+    """Swallow user interaction with a tab bar or combo box while work runs.
+
+    Used for controls whose *change* triggers a load or a ``showEvent`` import
+    (main tabs, the Single Cell cell-type selector, ...). Only real user input is
+    intercepted (mouse press / wheel / navigation keys); programmatic changes
+    (``setCurrentIndex`` from the queue, assistant, "go to tab" links) are not
+    events and pass through untouched.
+
+    Swallow-only on purpose: never re-sends events (a previous app-wide filter
+    that re-sent wheel events caused a native stack-overflow crash -- see
+    ``core/qt_help.py``).
+    """
+
+    _NAV_KEYS = None
+
+    def __init__(self, target: QWidget, owner: QWidget, what: str, tab_widget=None) -> None:
+        super().__init__(target)
+        self._target = target
+        self._owner = owner
+        self._what = what
+        self._tab_widget = tab_widget  # QTabWidget when guarding its tab bar
+        if _BusyGuardFilter._NAV_KEYS is None:
+            _BusyGuardFilter._NAV_KEYS = {
+                Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down,
+                Qt.Key_Home, Qt.Key_End, Qt.Key_PageUp, Qt.Key_PageDown,
+                Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter,
+            }
+        target.installEventFilter(self)
+
+    def _busy(self) -> bool:
+        try:
+            return any_background_work()
+        except Exception:
+            return False
+
+    def _warn_later(self) -> None:
+        owner, what = self._owner, self._what
+        QTimer.singleShot(0, lambda: warn_if_busy(owner, what))
+
+    def eventFilter(self, obj, event):  # noqa: N802 (Qt API)
+        try:
+            et = event.type()
+            if et in (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick):
+                if event.button() != Qt.LeftButton or not self._busy():
+                    return False
+                if self._tab_widget is not None:
+                    pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                    idx = self._tab_widget.tabBar().tabAt(pos)
+                    if idx < 0 or idx == self._tab_widget.currentIndex():
+                        return False  # clicking the current tab / empty space: harmless
+                self._warn_later()
+                return True
+            if et == QEvent.Wheel:
+                # Silent: the wheel would change the selection, the status
+                # indicator already says why it is held.
+                return self._busy()
+            if et == QEvent.KeyPress and event.key() in self._NAV_KEYS:
+                return self._busy()
+        except Exception:
+            return False
+        return False
+
+
+def install_busy_guard(target: QWidget, owner: Optional[QWidget] = None,
+                       what: str = "changing this") -> Optional[QObject]:
+    """Block user interaction with ``target`` while background work runs.
+
+    ``target`` may be a ``QTabWidget`` (its tab bar is guarded; clicking the
+    already-current tab is allowed), a ``QComboBox`` or a button. Returns the filter
+    object (parented to the target) or ``None`` if the target type is
+    unsupported. Never raises.
+    """
+    try:
+        from qtpy.QtWidgets import QAbstractButton, QComboBox, QTabWidget
+
+        owner = owner if owner is not None else target
+        if isinstance(target, QTabWidget):
+            return _BusyGuardFilter(target.tabBar(), owner, what, tab_widget=target)
+        if isinstance(target, (QComboBox, QAbstractButton)):
+            return _BusyGuardFilter(target, owner, what)
+    except Exception:
+        logger.debug("install_busy_guard failed", exc_info=True)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# GUI-thread marshalling
+# ---------------------------------------------------------------------------
+class _GuiInvoker(QObject):
+    """Runs ``fn(*args)`` payloads on the thread this object lives in (the GUI
+    thread), however they were emitted. Must be created on the GUI thread."""
+
+    invoke = Signal(object)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.invoke.connect(self._run, Qt.QueuedConnection)
+
+    def _run(self, payload) -> None:
+        fn, args = payload
+        try:
+            fn(*args)
+        except Exception:
+            traceback.print_exc()
+
+
+_gui_invoker: Optional[_GuiInvoker] = None
+
+
+def _ensure_gui_invoker() -> Optional[_GuiInvoker]:
+    """(Re)create the invoker if missing or deleted. GUI thread only -- the
+    object's thread affinity is the thread that creates it."""
+    global _gui_invoker
+    if not _alive(_gui_invoker) and _on_gui_thread():
+        _gui_invoker = _GuiInvoker()
+    return _gui_invoker
+
+
+def _on_gui_thread() -> bool:
+    app = QApplication.instance()
+    return app is None or QThread.currentThread() is app.thread()
+
+
+def redispatch_to_gui_thread(fn: Callable[..., Any], *args: Any) -> bool:
+    """Guard for GUI-only methods that background workers also call.
+
+    Put at the top of a method that touches widgets (e.g. a ``_log`` that does
+    ``QTextEdit.append``)::
+
+        def _log(self, msg):
+            if redispatch_to_gui_thread(self._log, msg):
+                return
+            ...  # now guaranteed to be on the GUI thread
+
+    On a worker thread it queues ``fn(*args)`` onto the GUI thread and returns
+    ``True`` (the caller must return); on the GUI thread it returns ``False``.
+    Mutating a ``QTextEdit`` from a worker raises Qt's "Cannot queue arguments of
+    type 'QTextCursor'" and can corrupt the widget.
+    """
+    if _on_gui_thread():
+        return False
+    invoker = _gui_invoker
+    if invoker is None:
+        # Never created on the GUI thread (no BackgroundOperation yet), so there
+        # is nowhere safe to deliver to; drop rather than touch a widget.
+        return True
+    try:
+        invoker.invoke.emit((fn, args))
+    except RuntimeError:
+        # Invoker deleted underneath us. A worker can't safely create a
+        # replacement (wrong thread affinity); the next run() on the GUI
+        # thread re-creates it. Dropping a log line beats touching a widget
+        # from the wrong thread.
+        logger.debug("GUI invoker deleted; dropped a cross-thread call", exc_info=True)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -262,11 +717,32 @@ def make_activity_progress(viewer, desc: str = "Running…"):
         return None
     try:
         pbr = _NapariProgress(total=0, desc=desc)
+        detach_from_tqdm_terminal(pbr)
         if viewer is not None:
             show_napari_activity_panel(viewer)
         return pbr
     except Exception:
         return None
+
+
+def detach_from_tqdm_terminal(pbr) -> None:
+    """Stop a napari activity-dock bar from claiming a tqdm terminal row.
+
+    ``napari.utils.progress`` subclasses tqdm, so it registers in
+    ``tqdm._instances`` and holds terminal position 0 for the whole run even
+    though it only draws in the GUI. Every real tqdm bar the pipeline then
+    opens is pushed to position 1, which makes tqdm redraw it with a
+    cursor-up escape (``ESC[A``) -- shown literally, one new line per update,
+    on consoles that don't interpret ANSI. The GUI is driven by napari's own
+    ``progress._all_instances``, and ``tqdm.close()`` tolerates an instance
+    that is no longer registered, so dropping it here is safe.
+    """
+    if pbr is None:
+        return
+    try:
+        type(pbr)._instances.discard(pbr)
+    except Exception:
+        pass
 
 
 def show_napari_activity_panel(viewer) -> None:
@@ -419,7 +895,9 @@ def _wait_pumping(thread: QThread, timeout_ms: int) -> bool:
                 slice_ms = max(0, min(20, remaining_ms))
             if thread.wait(slice_ms):
                 return True
-            app.processEvents()
+            # Queued signals / paints only: a click delivered from inside this wait
+            # (cancel() / shutdown) would re-enter whatever handler is mid-teardown.
+            pump_events()
     except Exception:
         return False
 
@@ -542,16 +1020,54 @@ class BackgroundOperation(QObject):
 
     progress = Signal(int, int, str)
 
-    def __init__(self, parent: Optional[QObject] = None) -> None:
+    def __init__(self, parent: Optional[QObject] = None, *, silent: bool = False,
+                 notify: bool = False) -> None:
+        """``silent=True`` marks an automatic background task (results scan,
+        column scan, data preload) that the user never asked for: it is never
+        counted as work to wait for, and is never blocked by the busy guard.
+
+        ``notify=True`` (only meaningful with ``silent``) lists the running task
+        in the main widget's banner as an informational "loading in the
+        background" entry, without ever blocking tab switches or other actions.
+        """
         super().__init__(parent)
         self._state: Optional[_RunState] = None
+        # True while run() is between its guards and ``self._state`` being set.
+        # That window contains napari calls that pump the event loop, so a second
+        # click / showEvent can re-enter run() before ``_state`` exists.
+        self._starting = False
+        self.silent = bool(silent)
+        self.notify = bool(notify)
         # Threads that didn't stop within a cancel() timeout. Kept
         # referenced (never dereferenced) so Qt can't destroy a QThread
         # while its OS thread is still alive -- see cancel()'s docstring.
         self._zombie_threads: List[Tuple[QThread, _AsyncWorker]] = []
+        _INSTANCES.add(self)
+        _ensure_gui_invoker()  # GUI thread: instances are created by widgets
+
+    # ------------------------------------------------------------------
+    def _zombie_descriptions(self) -> List[str]:
+        out = []
+        for thread, _worker in self._zombie_threads:
+            try:
+                if thread.isRunning():
+                    out.append("A cancelled job that is still finishing")
+            except RuntimeError:
+                pass
+        return out
+
+    def _busy_descriptions(self) -> List[str]:
+        out = []
+        if self.is_running():
+            desc = (self._state.desc if self._state is not None else "") or "A background job"
+            out.append(desc)
+        out.extend(self._zombie_descriptions())
+        return out
 
     # ------------------------------------------------------------------
     def is_running(self) -> bool:
+        if self._starting:
+            return True
         st = self._state
         # ``st.thread.isRunning()`` reflects Qt's own view of whether the OS
         # thread is still alive, not just whether we haven't cleared
@@ -578,6 +1094,7 @@ class BackgroundOperation(QObject):
         inject_cancel_check: bool = False,
         indeterminate: bool = False,
         finish_delay_ms: int = 600,
+        chained: bool = False,
     ) -> None:
         """Kick off a background run.
 
@@ -620,11 +1137,78 @@ class BackgroundOperation(QObject):
         finish_delay_ms:
             How long the activity-dock bar lingers at 100 % before
             disappearing.
+        chained:
+            ``True`` for a run that is the deliberate continuation of the
+            previous one (e.g. started from its ``on_done``). Exempts it from
+            the busy guard below.
+
+        The busy guard: unless this instance is ``silent``, ``chained`` or being
+        driven by the Processing Queue, the run is refused (with a "please wait"
+        dialog) while *any other* background work is in progress. Concurrent
+        heavy jobs share the metadata DataFrame, HDF5 files, the OpenCL/torch
+        device and the import lock, and were a main source of crashes.
         """
+        _ensure_gui_invoker()  # heal if Qt deleted it; we are on the GUI thread
         if self.is_running():
             print("BackgroundOperation already running, ignoring request.", flush=True)
+            if not self.silent:
+                warn_if_busy(self.parent(), "starting this again", exclude=None)
             return
 
+        if not (self.silent or chained or _queue_dispatch_depth > 0):
+            if warn_if_busy(self.parent(), "starting something else",
+                            exclude=self, include_queue=False):
+                return
+
+        # Claim the instance *before* anything that can pump the event loop
+        # (make_activity_progress -> napari's QApplication.processEvents(),
+        # button/progress-row repaints). A second click or showEvent delivered
+        # there would otherwise re-enter run(), see no state, start its own
+        # thread, and then this call would overwrite ``self._state`` and drop the
+        # last reference to that running QThread ("Destroyed while thread is
+        # still running" -> process abort).
+        self._starting = True
+        try:
+            self._launch(
+                fn, args, kwargs, desc=desc, progress_row=progress_row,
+                buttons=buttons, viewer=viewer, on_done=on_done,
+                on_failed=on_failed, inject_progress=inject_progress,
+                inject_cancel_check=inject_cancel_check,
+                indeterminate=indeterminate, finish_delay_ms=finish_delay_ms,
+            )
+        finally:
+            self._starting = False
+
+    # ------------------------------------------------------------------
+    def _park(self, old_state: _RunState, *, cleanup_ui: bool = True) -> None:
+        """Detach ``old_state`` from this instance and keep its thread alive.
+
+        Never lets the last Python reference to a possibly-still-running
+        ``QThread`` go; parks it in ``_zombie_threads`` instead.
+        """
+        if old_state.cancel_event is not None:
+            old_state.cancel_event.set()
+        if old_state.thread is not None:
+            for signal, slot in (
+                (old_state.thread.finished, self._on_thread_finished),
+                (old_state.worker.done, self._on_done),
+                (old_state.worker.failed, self._on_failed),
+                (old_state.worker.progress, self._on_progress),
+            ):
+                try:
+                    signal.disconnect(slot)
+                except (TypeError, RuntimeError):
+                    pass
+        if cleanup_ui:
+            self._cleanup_ui()
+        if old_state.thread is not None:
+            self._zombie_threads.append((old_state.thread, old_state.worker))
+        self._state = None
+
+    # ------------------------------------------------------------------
+    def _launch(self, fn, args, kwargs, *, desc, progress_row, buttons, viewer,
+                on_done, on_failed, inject_progress, inject_cancel_check,
+                indeterminate, finish_delay_ms) -> None:
         # self._state may still reference a previous run. Note that
         # is_running() above reads the same live QThread.isRunning() flag
         # we'd have to re-read here to decide whether it's still alive --
@@ -659,23 +1243,7 @@ class BackgroundOperation(QObject):
                     "misreported it as finished.",
                     old_state.fn_name, getattr(fn, "__name__", repr(fn)),
                 )
-            if old_state.cancel_event is not None:
-                old_state.cancel_event.set()
-            if old_state.thread is not None:
-                for signal, slot in (
-                    (old_state.thread.finished, self._on_thread_finished),
-                    (old_state.worker.done, self._on_done),
-                    (old_state.worker.failed, self._on_failed),
-                    (old_state.worker.progress, self._on_progress),
-                ):
-                    try:
-                        signal.disconnect(slot)
-                    except (TypeError, RuntimeError):
-                        pass
-            self._cleanup_ui()
-            if old_state.thread is not None:
-                self._zombie_threads.append((old_state.thread, old_state.worker))
-            self._state = None
+            self._park(old_state)
 
         kwargs = dict(kwargs or {})
         btn_list = [b for b in (buttons or []) if b is not None]
@@ -713,6 +1281,18 @@ class BackgroundOperation(QObject):
             self.parent(), fn_name, desc,
         )
 
+        # Safety net: the calls above can pump events. If anything still managed to
+        # install a state meanwhile, park it rather than drop a live QThread.
+        # (Its buttons/progress row are shared with this run, so don't clean them.)
+        stray = self._state
+        if stray is not None:
+            logger.warning(
+                "BackgroundOperation.run: state for fn=%s appeared while "
+                "starting fn=%s -- parking it as zombie.",
+                stray.fn_name, getattr(fn, "__name__", repr(fn)),
+            )
+            self._park(stray, cleanup_ui=False)
+
         state = _RunState(
             thread=thread,
             worker=worker,
@@ -737,6 +1317,7 @@ class BackgroundOperation(QObject):
         thread.finished.connect(self._on_thread_finished, Qt.QueuedConnection)
 
         thread.start()
+        _emit_busy_changed()
 
     # ------------------------------------------------------------------
     def _on_progress(self, current: int, total: int, label: str) -> None:
@@ -831,20 +1412,26 @@ class BackgroundOperation(QObject):
         """
         st = self._state
         self._state = None
+        _emit_busy_changed()
         if st is not None:
             logger.info(
                 "BackgroundOperation run finished: owner=%r fn=%s",
                 self.parent(), st.fn_name,
             )
-        # Also the safest point to reclaim any pyplot figure the backend
-        # opened and never closed: the worker is gone, so nothing can be
-        # mid-draw.
+        # Also a safe point to reclaim any pyplot figure the backend opened and
+        # never closed -- but only when *no other* operation is running.
+        # ``pyplot.close("all")`` is process-wide, so closing here while a
+        # sibling worker (another tab's report) is mid-draw would pull its
+        # figure out from under it. Silent scans never draw figures, so they
+        # don't count; if something else is running, its own completion
+        # will do the sweep.
         try:
-            from behav3d.napari._matplotlib_guard import (
-                close_leftover_pyplot_figures,
-            )
+            if not any_background_work(include_queue=False):
+                from behav3d.napari._matplotlib_guard import (
+                    close_leftover_pyplot_figures,
+                )
 
-            close_leftover_pyplot_figures()
+                close_leftover_pyplot_figures()
         except Exception:
             pass
         if st is not None and st.pending_result is not None:
@@ -934,6 +1521,7 @@ class BackgroundOperation(QObject):
             self._zombie_threads.append((st.thread, st.worker))
 
         self._state = None
+        _emit_busy_changed()
         return finished_cleanly
 
     # ------------------------------------------------------------------
@@ -952,10 +1540,17 @@ class BackgroundOperation(QObject):
                 logger.info("BackgroundOperation zombie thread finished: %r", worker)
             else:
                 still_alive.append((thread, worker))
+        changed = len(still_alive) != len(self._zombie_threads)
         self._zombie_threads = still_alive
+        if changed:
+            _emit_busy_changed()
         if still_alive:
             logger.warning(
                 "BackgroundOperation: %d zombie thread(s) still running after drain",
                 len(still_alive),
             )
         return len(still_alive)
+
+
+# Plugin load imports this module on the GUI thread, so create the invoker now.
+_ensure_gui_invoker()

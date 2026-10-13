@@ -76,7 +76,9 @@ def _state_file_feature_info(state_path):
         from anndata.experimental import read_elem
 
     x_features, obs_numeric, state_features = [], [], []
-    with h5py.File(state_path, "r") as f:
+    from behav3d.core.h5_access import h5_read
+
+    with h5_read(), h5py.File(state_path, "r") as f:
         if "var" in f:
             x_features = [str(v) for v in read_elem(f["var"]).index]
         obs = f.get("obs")

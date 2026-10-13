@@ -11,7 +11,9 @@ from matplotlib.backends.backend_pdf import PdfPages
 from sklearn.metrics import silhouette_score
 from scipy.stats import chi2_contingency, ttest_rel, wilcoxon
 
-from behav3d.analysis.behavior.state.classification import FULL_STATE_COL, resolve_full_state_col
+from behav3d.core.h5_access import write_adata
+from behav3d.core.portable_paths import relocate_path
+from behav3d.core.state_columns import FULL_STATE_COL, resolve_full_state_col
 from behav3d.analysis.behavior.state.utils import (
     _apply_state_order,
     _get_classification_state_colors,
@@ -607,7 +609,7 @@ def _write_model_if_requested(adata_tracks, output_dir, cell_type, *, save_outpu
         / get_dtaidistance_track_trajectories_filename(cell_type)
     )
     if bool(save_outputs):
-        adata_tracks.write(output_path, compression="gzip")
+        write_adata(adata_tracks, output_path, compression="gzip")
         _save_adata_obs_csv(adata_tracks, output_path)
     return output_path
 
@@ -825,6 +827,9 @@ def _load_filtered_state_adata_for_model(
     if adata_full_path is None:
         adata_full_path = _default_behavioral_states_path(output_dir, cell_type)
     adata_full_path = Path(adata_full_path).expanduser()
+    if not adata_full_path.exists():
+        # Stored absolute path goes stale when the project folder is moved.
+        adata_full_path = relocate_path(adata_full_path, output_dir) or adata_full_path
     if not adata_full_path.exists():
         raise FileNotFoundError(f"Could not find behavioral-state h5ad: {adata_full_path}")
 
@@ -1137,6 +1142,9 @@ def run_categorical_dtaidistance_trajectory_clustering(
     if adata_full_path is None:
         adata_full_path = _default_behavioral_states_path(output_dir, cell_type)
     adata_full_path = Path(adata_full_path).expanduser()
+    if not adata_full_path.exists():
+        # Stored absolute path goes stale when the project folder is moved.
+        adata_full_path = relocate_path(adata_full_path, output_dir) or adata_full_path
     if not adata_full_path.exists():
         raise FileNotFoundError(f"Could not find behavioral-state h5ad: {adata_full_path}")
 
@@ -1513,7 +1521,7 @@ def run_categorical_dtaidistance_trajectory_clustering(
 
     output_path = paths.outfolder / get_dtaidistance_track_trajectories_filename(cell_type)
     if bool(save_outputs):
-        adata_tracks.write(output_path, compression="gzip")
+        write_adata(adata_tracks, output_path, compression="gzip")
         _save_adata_obs_csv(adata_tracks, output_path)
         if bool(verbose):
             _winfo("trajectory-dtai", f"saved trajectory model: {output_path}")
@@ -1556,6 +1564,9 @@ def train_dtaidistance_trajectory_classifier(
             "Re-run dtaidistance clustering to populate it."
         )
     adata_full_path = Path(adata_full_path).expanduser()
+    if not adata_full_path.exists():
+        # Stored absolute path goes stale when the project folder is moved.
+        adata_full_path = relocate_path(adata_full_path, output_dir) or adata_full_path
     if not adata_full_path.exists():
         raise FileNotFoundError(f"Source behavioral-states file not found: {adata_full_path}")
 

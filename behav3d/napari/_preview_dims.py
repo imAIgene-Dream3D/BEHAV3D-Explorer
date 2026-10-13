@@ -185,6 +185,16 @@ def stop_dim_playback(viewer) -> None:
         pass
 
 
+def get_dock_wrappers(viewer) -> list:
+    """The viewer's ``QtViewerDockWidget`` wrapper objects.
+
+    napari's public ``dock_widgets`` returns only the *inner* widgets, which is not
+    enough to remove a dock, and the private ``_dock_widgets`` emits a ``FutureWarning``
+    on every access, so read ``_wrapped_dock_widgets`` directly.
+    """
+    return list(viewer.window._wrapped_dock_widgets.values())
+
+
 def close_backprojection_legend_docks(viewer) -> None:
     """Close any open state/track backprojection legend or statebar dock.
 
@@ -202,7 +212,7 @@ def close_backprojection_legend_docks(viewer) -> None:
     ``_behav3d_backprojection_legend_dock = True`` at creation time (same
     trick used by ``behav3d/napari/_pdf_view.py:_install_result_dock``)
     instead of storing a reference on the viewer or on the owning tab. This
-    function scans ``viewer.window._dock_widgets`` (private napari API, same
+    function scans the viewer's dock wrappers (private napari API, same
     as ``_install_result_dock``) for that tag and removes every match, so it
     finds stale docks even if the tab instance that created them is no
     longer reachable.
@@ -217,7 +227,7 @@ def close_backprojection_legend_docks(viewer) -> None:
     if viewer is None:
         return
     try:
-        docks = list(viewer.window._dock_widgets.values())
+        docks = get_dock_wrappers(viewer)
     except Exception:
         return
     for dock in docks:

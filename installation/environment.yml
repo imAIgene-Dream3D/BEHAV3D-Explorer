@@ -1,7 +1,7 @@
 # =============================================================================
 # BEHAV3D Environment - Cross-Platform (Windows, macOS, Linux)
 # =============================================================================
-# 
+#
 # This is the BASE environment. PyTorch/Cellpose with CUDA support should be
 # installed separately using the install script (install_behav3d.py)
 #
@@ -10,6 +10,34 @@
 #   conda activate behav3d
 #   # Then run: python install_behav3d.py --pytorch-only
 #
+# -----------------------------------------------------------------------------
+# GUI stack: PyQt6 + napari 0.9
+# -----------------------------------------------------------------------------
+# napari and its Qt binding come from pip so they are resolved together from one index.
+# Pins (napari 0.9.2 requirements):
+#   napari[pyqt6]>=0.9.2,<0.10
+#   PyQt6>6.5 + PyQt6-Qt6, excluding 6.11.0/6.11.1 (napari 0.9 excludes those two releases)
+#   vispy>=0.17,<0.18, napari-console>=0.1.4, pyopengl>=3.1.10, magicgui>=0.10, superqt>=0.7.8
+#   zarr>=3.0.8     (code uses zarr.storage.LocalStore, zarr 3 only)
+#   numpy>=2.0,<2.1 (cellpose==3.1.1.2 pins numpy<2.1; pinned in conda so pip never has to
+#                    replace a conda-owned numpy)
+# cellpose[gui] (installed later by install_behav3d.py) brings pyqtgraph + PyQt6.
+#
+# WINDOWS ONLY - ICU DLL clash:
+#   conda-forge's `icu` ships unversioned icuuc.dll/icuin.dll next to the versioned ones, and
+#   conda's Python puts Library/bin ahead of System32 on the DLL search path. PyQt6 wheels
+#   import the bare name `icuuc.dll` expecting Windows' built-in ICU, get conda's (different
+#   exports) and fail with "ImportError: DLL load failed while importing QtCore". The
+#   installer (fix_icu_for_pyqt6_windows) moves the unversioned copies to
+#   Library/bin/_icu_unversioned_disabled; nothing else in the env imports them.
+#
+# Known `pip check` notices (metadata only; verified importable / working under numpy 2.0.2):
+#   czifile 2026.x declares numpy>=2.1, pyclesperanto-prototype 0.24.x declares numpy<2.
+#   numpy cannot move: cellpose==3.1.1.2 requires numpy<2.1. Revisit when cellpose moves.
+#
+# Testing note: napari 0.9 queries OpenGL when it builds its canvas, so a headless run needs a
+# real Qt platform (QT_QPA_PLATFORM=windows on Windows, an X server such as Xvfb on Linux),
+# not "offscreen".
 # =============================================================================
 
 name: behav3d
@@ -19,14 +47,14 @@ channels:
 
 dependencies:
   # -------------------------------------------------------------------------
-  # Python
+  # Python  (napari 0.9 requires >=3.11)
   # -------------------------------------------------------------------------
   - python=3.12
 
   # -------------------------------------------------------------------------
   # Core Scientific Computing
   # -------------------------------------------------------------------------
-  - numpy>=2.0
+  - numpy>=2.0,<2.1          # cellpose==3.1.1.2 requires numpy<2.1
   - pandas>=2.0
   - scipy>=1.14
   - dask-core>=2024.0
@@ -48,7 +76,7 @@ dependencies:
   - pillow>=10.0
   - aicspylibczi>=3.1
   - czifile>=2019.7  # reads the CZI "TimeStamps" attachment; aicspylibczi has no attachment API
-  - zarr>=2.16
+  - zarr>=3.0.8      # code needs zarr 3 (zarr.storage.LocalStore); napari 0.9 optional floor
   - h5py>=3.10
   - readlif>=0.6.6
 
@@ -67,6 +95,7 @@ dependencies:
   - dtaidistance>=2.3
   - pyopencl>=2024.1,<2026.1    # 2026.1.1 conda-forge build has SafetyError on win-64
   - pocl                        # Portable Computing Language for CPU OpenCL support
+
   # -------------------------------------------------------------------------
   # Graph Analysis & Single-Cell
   # -------------------------------------------------------------------------
@@ -75,24 +104,11 @@ dependencies:
   - scanpy>=1.10
 
   # -------------------------------------------------------------------------
-  # GUI & Visualization Tools
+  # Jupyter / IPython
   # -------------------------------------------------------------------------
-  - napari==0.5.6
-  - napari-console>=0.1
-  - napari-svg>=0.2
-  - magicgui>=0.8
-  - qtpy>=2.4
-  - pyqt>=5.15.1,<6.0   # Older version of PyQt5
-  # - pyqt6>=6.5,<7.0   # Newer version of PyQt6
   - ipywidgets>=8.1
   - ipyfilechooser>=0.6
   - traitlets>=5.14
-  - pyopengl>=3.1
-  - vispy>=0.14
-
-  # -------------------------------------------------------------------------
-  # Jupyter / IPython
-  # -------------------------------------------------------------------------
   - ipython>=8.0
   - ipykernel>=6.0
   - jupyter >=1.0
@@ -119,9 +135,21 @@ dependencies:
   - wheel>=0.40
 
   # -------------------------------------------------------------------------
-  # Pip-only packages (not available on conda-forge)
+  # Pip packages
   # -------------------------------------------------------------------------
   - pip:
+    # --- GUI stack: napari 0.9 + PyQt6 resolved together --------------------
+    - "napari[pyqt6]>=0.9.2,<0.10"
+    - "PyQt6>6.5,!=6.11.0,!=6.11.1"
+    - "PyQt6-Qt6!=6.11.0,!=6.11.1"
+    - "qtpy>=2.4"
+    - "magicgui>=0.10"
+    - "superqt>=0.7.8"
+    - "napari-console>=0.1.4"
+    - "napari-svg>=0.2"
+    - "vispy>=0.17,<0.18"
+    - "pyopengl>=3.1.10"
+    # --- other pip-only packages ---------------------------------------------
     - btrack>=0.6
     - kaleido>=1.2
     - pypdf>=6.7

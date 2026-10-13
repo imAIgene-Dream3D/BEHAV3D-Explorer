@@ -3,7 +3,7 @@
 Runs the *real* napari GUI (``napari.Viewer`` + ``BEHAV3DWidget``) on a virtual
 X display inside the Colab VM and streams it to the visitor's browser::
 
-    napari (PyQt5) -> Xvfb -> x11vnc -> websockify -> noVNC -> browser tab
+    napari (PyQt6) -> Xvfb -> x11vnc -> websockify -> noVNC -> browser tab
 
 Nothing in ``behav3d/`` is modified or reimplemented; only ``$DISPLAY`` differs
 from a normal desktop install. napari is started through the repository's own
@@ -72,7 +72,7 @@ GUI_ENV = {
     "GALLIUM_DRIVER": "llvmpipe",
     "QT_X11_NO_MITSHM": "1",        # shared memory is restricted in containers
     "QT_QPA_PLATFORM": "xcb",
-    "QT_API": "pyqt5",           # cellpose[gui] can pull PyQt6 in; pin qtpy to PyQt5
+    "QT_API": "pyqt6",           # the env ships PyQt6 only (environment.yml); pin qtpy explicitly
     "PYOPENCL_NO_CACHE": "1",       # matches napari/run_behav3d_linux.sh
     "PYOPENCL_COMPILER_OUTPUT": "0",
     "MPLBACKEND": "Agg",

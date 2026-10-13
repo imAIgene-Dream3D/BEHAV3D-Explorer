@@ -5,7 +5,7 @@ from skimage.measure import regionprops_table
 from laptrack import LapTrack
 from tqdm import tqdm
 from behav3d.io.images import _ensure_zarr, load_image, get_filepath_stem
-from behav3d.preprocessing.tracking import convert_segments_to_tracks
+from behav3d.preprocessing.tracking import convert_segments_to_tracks, prepare_tracking_sample
 
 def laptrack_image(
     segments=None,
@@ -121,6 +121,7 @@ def run_laptracking(
     return_trackimg=True,
     overwrite=False,
     progress_cb=None,
+    plan=None,
     **kwargs
     ):
     """Run LapTrack tracking on any cell type.
@@ -151,6 +152,9 @@ def run_laptracking(
         Called as ``progress_cb(current, total, label)`` from inside the
         per-sample loop so a GUI can drive a progress bar.  ``None`` is a
         no-op (default).  Notebook callers omit this kwarg.
+    plan : behav3d.core.run_plan.RunPlan, optional
+        Per-(sample, cell type) skip / run / overwrite choices; supersedes
+        ``overwrite`` when given.
     **kwargs : dict
      """
     total_samples = len(metadata)
@@ -192,12 +196,18 @@ def run_laptracking(
         element_size_y = sample["pixel_distance_xy"]
         element_size_z = sample["pixel_distance_z"]
         
-        if (
-            (
-                not tracked_csv_outpath.exists() or 
-                not tracked_img_outpath.exists()
-            ) or overwrite
-            ):
+        if prepare_tracking_sample(
+            sample_name=sample_name,
+            cell_type=cell_type,
+            tracked_img_outpath=tracked_img_outpath,
+            tracked_csv_outpath=tracked_csv_outpath,
+            segments_path=segments_path,
+            element_size_x=element_size_x,
+            element_size_y=element_size_y,
+            element_size_z=element_size_z,
+            overwrite=overwrite,
+            plan=plan,
+        ):
             laptrack_image(
                 segments_path=segments_path,
                 tracked_img_outpath=tracked_img_outpath,
@@ -213,9 +223,7 @@ def run_laptracking(
                 n_workers=n_workers,
                 return_trackimg=return_trackimg
             )
-        else:
-            print("Tracking already exists... Provide overwrite=True to overwrite... Loading existing tracking data")
-        
+
         # Update metadata with prefixed column names
         if segments_col is not None and segments_col.startswith(('or_', 'im_', 'ot_')):
             # Use the same prefix as the segments column

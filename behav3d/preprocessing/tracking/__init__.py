@@ -166,7 +166,54 @@ def convert_tracked_image_to_csv(
         df_tracks.to_csv(outpath, sep=",", index=False)
         
     return(df_tracks)
-        
+
+
+def prepare_tracking_sample(
+    *,
+    sample_name,
+    cell_type,
+    tracked_img_outpath,
+    tracked_csv_outpath,
+    segments_path=None,
+    element_size_x=1,
+    element_size_y=1,
+    element_size_z=1,
+    overwrite=False,
+    plan=None,
+    log=print,
+):
+    """Decide what one sample needs and do the cheap part of it.
+
+    Returns ``True`` when the caller must run the tracker for this sample, and
+    ``False`` when the sample is handled (already complete, skipped by the plan,
+    or its csv was just rebuilt from an intact tracked zarr).
+    """
+    from behav3d.core.run_plan import (
+        Action, Status, resolve_action, tracking_status_for_paths,
+    )
+
+    action = resolve_action(plan, overwrite, sample_name, cell_type)
+    if action is Action.OVERWRITE:
+        return True
+
+    probe = tracking_status_for_paths(tracked_img_outpath, tracked_csv_outpath, segments_path)
+    if probe.status is Status.COMPLETE:
+        log(f"Tracking already complete for {sample_name} / {cell_type} — keeping existing data.")
+        return False
+    if probe.csv_only:
+        log(f"Tracking zarr exists for {sample_name} / {cell_type}; rebuilding the missing csv.")
+        Path(tracked_csv_outpath).parent.mkdir(parents=True, exist_ok=True)
+        convert_tracked_image_to_csv(
+            img_path=tracked_img_outpath,
+            outpath=tracked_csv_outpath,
+            element_size_x=element_size_x,
+            element_size_y=element_size_y,
+            element_size_z=element_size_z,
+        )
+        return False
+    return True
+
+
 def visualize_tracks(
     metadata_row,
     timepoint_range = None,

@@ -30,6 +30,7 @@ import pandas as pd
 from skimage.filters import threshold_otsu
 
 from behav3d.io.images import save_as_zarr, load_zarr, load_image, append_to_zarr
+from behav3d.core.run_plan import Action, resolve_action
 from behav3d.preprocessing.segmentation import segment_2d_filter
 from behav3d.core.metadata import (
     detect_organoid_types_from_metadata,
@@ -270,9 +271,14 @@ def run_cellpose_segmentation(
     timepoint_range: Optional[Tuple[int, int]] = None,
     channel_labels_config: Optional[dict] = None,
     progress_cb=None,
+    plan=None,
     **cellpose_kwargs,
 ):
     """Batch run Cellpose segmentation for all samples in *metadata*.
+
+    ``plan`` (a ``RunPlan`` keyed by ``(sample_name, label_name)``) decides per
+    sample: ``SKIP`` keeps the existing segments, anything else re-segments.
+    Without a plan every sample is re-segmented, as before.
 
     The function mirrors the API of ``run_pixel_classifier_segmentation`` so it
     can be dropped into existing notebooks with minimal changes.
@@ -387,12 +393,19 @@ def run_cellpose_segmentation(
             summary["skipped"].append(sample_name)
             continue
 
-        images = load_image(raw_image_zarr)
-        
-
         masks_outpath = cellpose_dir / f"{sample_name}_{label_name}_segments.zarr"
 
-        # Always remove existing file if present (running cell = want new segmentation)
+        if plan is not None and masks_outpath.exists() and (
+            resolve_action(plan, True, sample_name, label_name) is Action.SKIP
+        ):
+            print(f"  [SKIP] Segments already exist for {sample_name}: {masks_outpath}")
+            metadata.at[idx, path_col] = str(masks_outpath)
+            summary["skipped"].append(sample_name)
+            continue
+
+        images = load_image(raw_image_zarr)
+
+        # Re-segmenting this sample: drop what is there so no frames of the old run survive
         if masks_outpath.exists():
             print(f"  [OVERWRITE] Removing existing: {masks_outpath}")
             shutil.rmtree(masks_outpath)
@@ -519,6 +532,7 @@ def run_otsu_threshold_segmentation_from_zarr(
     timepoint_range: tuple[int, int] | None = None,
     progress_cb=None,
     overwrite: bool = True,
+    plan=None,
 ):
     """Run Otsu thresholding segmentation on the dead channel for all samples.
     
@@ -536,6 +550,8 @@ def run_otsu_threshold_segmentation_from_zarr(
         When False, samples that already have a mask at
         ``images/<sample>/<sample><mask_suffix>.zarr`` are left untouched and
         reported under ``summary["skipped"]``.
+    plan:
+        Optional ``RunPlan`` keyed by ``(sample_name, "dead")``; supersedes ``overwrite``.
     
     Returns
     -------
@@ -617,7 +633,9 @@ def run_otsu_threshold_segmentation_from_zarr(
         masks_outpath = mask_dir / f"{sample_name}{mask_suffix}.zarr"
         
         if masks_outpath.exists():
-            if not overwrite:
+            if resolve_action(plan, overwrite, sample_name, "dead") is Action.SKIP or (
+                plan is None and not overwrite
+            ):
                 print(f"[SKIP] Dead mask already exists for {sample_name}: {masks_outpath}")
                 metadata.at[idx, 'dead_mask_path'] = str(masks_outpath)
                 summary["skipped"].append(sample_name)
@@ -685,6 +703,7 @@ def run_otsu_and_sync_metadata(
     timepoint_range=None,
     progress_cb=None,
     overwrite=True,
+    plan=None,
 ):
     """
     Wrapper around run_otsu_threshold_segmentation_from_zarr that automatically handles
@@ -698,6 +717,7 @@ def run_otsu_and_sync_metadata(
         timepoint_range=timepoint_range,
         progress_cb=progress_cb,
         overwrite=overwrite,
+        plan=plan,
     )
 
     # 2. Update the in-memory metadata

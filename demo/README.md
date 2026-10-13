@@ -43,7 +43,7 @@ For real analysis, [install BEHAV3D locally](../README.md#installation).
 ```
       Colab VM (free, ~12.7 GB RAM, CPU-only)
  ┌───────────────────────────────────────────────────────────┐
- │  napari (PyQt5) + BEHAV3DWidget                           │
+ │  napari (PyQt6) + BEHAV3DWidget                           │
  │        │ renders into                                     │
  │  Xvfb :99  (software OpenGL / llvmpipe)                   │
  │        │ captured by                                      │

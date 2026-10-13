@@ -268,8 +268,10 @@ def test_checkbox_unchecked_still_builds_features_only_adata(tmp_path):
         )
         tab._apply_clustering_family_mode("feature_based")
         tab.chk_use_state_features_preset.setChecked(False)
-        # populate() ran automatically above (CSV now exists), so "speed" is
-        # a real checkbox this time -- set_params can actually select it.
+        # populate() ran automatically above (CSV now exists). Its column scan
+        # runs on a worker thread, so wait for the checkboxes to exist: then
+        # "speed" is a real checkbox and set_params can actually select it.
+        assert _pump_until(lambda: not tab.traj_feature_selector.is_populating())
         tab.traj_feature_selector.set_params({"features": ["speed"]})
         assert "speed" in tab.traj_feature_selector.params()["features"]
 

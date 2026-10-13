@@ -1,4 +1,4 @@
-# System packages needed to run the napari (Qt5) GUI headlessly and stream it
+# System packages needed to run the napari (Qt6) GUI headlessly and stream it
 # to a browser. One package per line; '#' comments and blank lines are ignored.
 # Used by demo/colab/colab_setup.py (Colab) and demo/build_env.sh (Docker test).
 
@@ -17,7 +17,7 @@ libglx-mesa0
 libgl1-mesa-dri         # llvmpipe: vispy/napari render through this
 libegl1
 
-# --- Qt5 xcb platform plugin dependencies -----------------------------------
+# --- Qt6 xcb platform plugin dependencies (libxcb-cursor0 is required by Qt >= 6.5) ------
 # Missing any one of these gives the classic
 # "Could not load the Qt platform plugin 'xcb'" crash.
 libglib2.0-0

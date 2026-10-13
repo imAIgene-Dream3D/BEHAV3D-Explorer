@@ -8,12 +8,7 @@ try:
 except Exception:
     dtw_ndim = None
 
-try:
-    import umap
-except Exception:
-    umap = None
-
-from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+from behav3d.core.state_columns import FULL_STATE_COL
 from behav3d.analysis.behavior.track.utils import _winfo
 
 
@@ -502,6 +497,12 @@ def _ensure_dtaidistance_umap(
     cached_params = adata_tracks.uns.get("_umap_params")
     if "X_umap" in adata_tracks.obsm and cached_params == requested_params:
         return np.asarray(adata_tracks.obsm["X_umap"], dtype=float)
+    # Imported here, not at module level: umap pulls in pynndescent, whose numba
+    # JIT costs ~9 s, and this module is imported by every track-clustering report.
+    try:
+        import umap
+    except Exception:
+        umap = None
     if umap is None:
         raise ImportError("umap-learn is required to create DTAI UMAP quality-control plots.")
     n_obs = int(adata_tracks.n_obs)

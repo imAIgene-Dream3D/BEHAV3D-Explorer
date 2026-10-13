@@ -20,6 +20,8 @@ You **must** set the output directory before any other tab can run.
 
 Click **Browse** and pick a folder. Everything BEHAV3D EXPLORER writes goes under it, following the canonical layout documented in [Output Directory & File Layout](plugin_essentials/output_layout). We recommend short paths and no special characters.
 
+The **Transfer** button next to it packs the project into a few verified archives for moving it to another drive or computer, and imports such bundles. See [Moving Projects](plugin_essentials/moving_projects).
+
 ## 2 · Metadata Builder
 
 The Metadata Builder is collapsed by default. Tick the checkbox in the section header to expand it and build a metadata.csv from scratch.

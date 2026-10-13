@@ -339,7 +339,123 @@ def load_behav3d_metadata(
                 pass  # Skip if conversion fails
 
     metadata = metadata.dropna(how="all").reset_index(drop=True)
-    return metadata 
+    return metadata
+
+
+def _clean_path_value(value):
+    """Return the stripped path string of a metadata cell, or None when empty."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip().strip('"').strip("'")
+    if not text or text.lower() == "nan":
+        return None
+    return text
+
+
+def rebase_metadata_paths(metadata, output_dir, old_output_dir=None):
+    """Re-link ``*_path`` columns that point into a moved copy of *output_dir*.
+
+    A path is rewritten to ``output_dir/<anchor>/<rest>`` when that file
+    exists in the current output directory (anchors: ``images``,
+    ``trackdata``, ``analysis``) - also when the old location still exists,
+    so a copied project never keeps reading or writing the original. Once
+    an old root is known (passed in, e.g. from a transfer bundle, or found
+    via an anchor) every other path below it is mapped too, unless the old
+    file still exists and the new one does not.
+
+    Paths outside any old root (raw images elsewhere, sources of combined
+    experiments) are left untouched.
+
+    Returns ``(metadata_copy, report)`` where report is a dict with
+    ``changed`` [(row, column, old, new)], ``old_roots`` [str] and
+    ``unresolved`` [(row, column, path)] for paths that exist nowhere.
+    """
+    from behav3d.core.portable_paths import (
+        find_anchor_tail,
+        is_under,
+        join_parts_for_display,
+        rebase_onto,
+        split_path_parts,
+    )
+
+    report = {"changed": [], "old_roots": [], "unresolved": []}
+    if metadata is None or not output_dir or not Path(output_dir).is_dir():
+        return metadata, report
+
+    new_root = Path(output_dir)
+    path_cols = [c for c in metadata.columns if str(c).endswith("_path")]
+    known_roots = [split_path_parts(old_output_dir)] if old_output_dir else []
+
+    def _remember(root):
+        if not any(len(r) == len(root) and all(a.casefold() == b.casefold() for a, b in zip(r, root))
+                   for r in known_roots):
+            known_roots.append(root)
+
+    # Pass 1: discover old roots from paths whose tail exists here.
+    candidates = []
+    for col in path_cols:
+        for idx, value in metadata[col].items():
+            text = _clean_path_value(value)
+            if text is None or is_under(text, new_root):
+                continue
+            candidates.append((idx, col, text))
+            found = find_anchor_tail(text, new_root)
+            if found is not None:
+                _remember(found[0])
+
+    # Pass 2: rewrite.
+    out = metadata.copy()
+    for idx, col, text in candidates:
+        new_path = None
+        found = find_anchor_tail(text, new_root)
+        if found is not None:
+            new_path = found[1]
+        else:
+            old_exists = Path(text).exists()
+            for root in known_roots:
+                cand = rebase_onto(text, root, new_root)
+                if cand is not None and (cand.exists() or not old_exists):
+                    new_path = cand
+                    break
+        if new_path is None:
+            if not Path(text).exists():
+                report["unresolved"].append((idx, col, text))
+            continue
+        if out[col].dtype != object:
+            out[col] = out[col].astype(object)
+        out.at[idx, col] = str(new_path)
+        report["changed"].append((idx, col, text, str(new_path)))
+
+    report["old_roots"] = [join_parts_for_display(r) for r in known_roots]
+    return out, report
+
+
+def relink_metadata_csv(metadata, csv_path, output_dir, old_output_dir=None, log=print, backup=True):
+    """Run :func:`rebase_metadata_paths` and persist the result to *csv_path*.
+
+    With *backup*, the first time a CSV is rewritten a ``.bak`` copy of the
+    original is kept next to it. Returns the (possibly updated) metadata and
+    the report.
+    """
+    metadata, report = rebase_metadata_paths(metadata, output_dir, old_output_dir=old_output_dir)
+    if report["changed"]:
+        roots = ", ".join(report["old_roots"]) or "?"
+        log(f"🔗 Re-linked {len(report['changed'])} path(s) from {roots} to {output_dir}")
+        if csv_path:
+            csv_path = Path(csv_path)
+            backup_path = csv_path.with_name(csv_path.name + ".bak")
+            if backup and csv_path.exists() and not backup_path.exists():
+                import shutil
+                shutil.copy2(csv_path, backup_path)
+            metadata.to_csv(csv_path, index=False)
+    for _idx, col, text in report["unresolved"][:10]:
+        log(f"⚠️ {col} not found in this output folder or at its stored location: {text}")
+    return metadata, report
 
 def check_behav3d_metadata(
     metadata,
