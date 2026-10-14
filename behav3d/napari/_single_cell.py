@@ -74,7 +74,10 @@ from behav3d.napari._preview_dims import (
     stop_dim_playback,
     unregister_preview_dims_listener,
 )
-from behav3d.core.qt_help import HelpButton, make_help_row, reset_scroll_on_page_change
+from behav3d.core.qt_help import (
+    HelpButton, make_help_row, reset_scroll_on_page_change, scroll_to_top,
+    set_scroll_content_enabled,
+)
 from behav3d.core.utils import rmtree_ignore_missing, format_timepoints_as_time
 from behav3d.core.metadata import resolve_metadata_csv_path
 
@@ -1022,7 +1025,7 @@ class StateClassificationSubTab(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # Pinned above the scroll area (not inside it) so it stays visible
+        # Pinned above the stack (outside any scroll area) so it stays visible
         # regardless of how far the plotting page's content scrolls. Only
         # shown while the plotting page (outer page 1) is active.
         self._plotting_header, self._pipeline_title = make_back_header(
@@ -1031,28 +1034,24 @@ class StateClassificationSubTab(QWidget):
         self._plotting_header.hide()
         outer.addWidget(self._plotting_header)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        outer.addWidget(scroll)
-
-        content = QWidget()
-        content_lay = QVBoxLayout(content)
-        content_lay.setContentsMargins(0, 0, 0, 0)
-        content_lay.setSpacing(0)
-        scroll.setWidget(content)
-
         # Outer per-subtab stack: page 0 = clustering settings (Steps 1/2/4 +
         # the "Generate analysis and plots" trigger), page 1 = the fully
-        # isolated plotting page, reached only via that trigger.
+        # isolated plotting page, reached only via that trigger. Each page owns
+        # its scroll area; the stack must not sit inside a shared one, since a
+        # QStackedWidget sizes to its tallest page and would pad the short
+        # plotting page with page 0's height (blank space, mid-page scroll).
         self._subtab_stack = QStackedWidget()
-        content_lay.addWidget(self._subtab_stack)
+        outer.addWidget(self._subtab_stack, stretch=1)
 
+        self._settings_scroll = QScrollArea()
+        self._settings_scroll.setWidgetResizable(True)
+        self._settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         settings_page = QWidget()
         lay = QVBoxLayout(settings_page)
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(6)
-        self._subtab_stack.addWidget(settings_page)  # outer page 0
+        self._settings_scroll.setWidget(settings_page)
+        self._subtab_stack.addWidget(self._settings_scroll)  # outer page 0
 
         # ── Warning label (prerequisite check) ──────────────────────────
         self.warning_label = QLabel("")
@@ -1817,10 +1816,11 @@ class StateClassificationSubTab(QWidget):
 
         # Entry trigger stays inline on the clustering-settings page; Start
         # navigates to the fully isolated plotting page (outer page 1) below.
-        lay.addWidget(
-            GuidedPanel([STATE_REPORTS_ENTRY],
-                        start_cb=lambda _id: self._open_plotting_page())
-        )
+        plots_entry = GuidedPanel([STATE_REPORTS_ENTRY],
+                                  start_cb=lambda _id: self._open_plotting_page())
+        # Greyed out by _refresh_buttons until a behavioral clustering exists.
+        self._plots_entry_btn = plots_entry.explainers[STATE_REPORTS_ENTRY["id"]].start_button
+        lay.addWidget(plots_entry)
 
         plotting_page = QWidget()
         plotting_lay = QVBoxLayout(plotting_page)
@@ -1865,8 +1865,9 @@ class StateClassificationSubTab(QWidget):
 
         self._plots_stack.setCurrentIndex(0)
         plotting_lay.addWidget(self._plots_stack)
+        # No reset_scroll_on_page_change on _subtab_stack: Back must return
+        # page 0 to where the user left it; _open_plotting_page resets page 1.
         self._subtab_stack.addWidget(plotting_page)  # outer page 1
-        reset_scroll_on_page_change(self._subtab_stack)
 
         self._subtab_stack.setCurrentIndex(0)
 
@@ -2139,8 +2140,10 @@ class StateClassificationSubTab(QWidget):
 
         if csv_filtered.exists():
             self.warning_label.hide()
-            for grp in [self.grp_train, self._subtab_stack, self.grp_bp]:
+            for grp in [self.grp_train, self.grp_bp]:
                 grp.setEnabled(True)
+            # Not _subtab_stack.setEnabled: keep its pages scrollable.
+            set_scroll_content_enabled(self._subtab_stack, True)
             _apply_group_tracked_gate(self.warning_label, self.grp_bp, self.metadata_loader, ct)
             return True
         elif csv_unfiltered.exists():
@@ -2150,8 +2153,10 @@ class StateClassificationSubTab(QWidget):
                 "Using unfiltered data as a fallback."
             )
             self.warning_label.show()
-            for grp in [self.grp_train, self._subtab_stack, self.grp_bp]:
+            for grp in [self.grp_train, self.grp_bp]:
                 grp.setEnabled(True)
+            # Not _subtab_stack.setEnabled: keep its pages scrollable.
+            set_scroll_content_enabled(self._subtab_stack, True)
             _apply_group_tracked_gate(self.warning_label, self.grp_bp, self.metadata_loader, ct)
             return True
         else:
@@ -2160,8 +2165,10 @@ class StateClassificationSubTab(QWidget):
                 "Run Filtering first, then return here."
             )
             self.warning_label.show()
-            for grp in [self.grp_train, self._subtab_stack, self.grp_bp]:
+            for grp in [self.grp_train, self.grp_bp]:
                 grp.setEnabled(False)
+            # Not _subtab_stack.setEnabled: keep its pages scrollable.
+            set_scroll_content_enabled(self._subtab_stack, False)
             return False
 
     # ── Guided pipeline dispatch (Step 3 reports) ────────────────────────
@@ -2180,7 +2187,9 @@ class StateClassificationSubTab(QWidget):
             return
         self._focus_pipeline(pipeline_id)
         self._plots_stack.setCurrentIndex(1)
-        self._pipeline_scroll.verticalScrollBar().setValue(0)
+        scroll_to_top(self._pipeline_scroll)
+        # Again once the shown/hidden groups have been laid out.
+        QTimer.singleShot(0, lambda: scroll_to_top(self._pipeline_scroll))
 
     def _focus_pipeline(self, pipeline_id: str):
         """Show only the group box relevant to ``pipeline_id``, hide the rest."""
@@ -2211,6 +2220,7 @@ class StateClassificationSubTab(QWidget):
         self._pipeline_title.setText("")
         self._subtab_stack.setCurrentIndex(1)
         self._plotting_header.show()
+        scroll_to_top(self._plots_stack.widget(0))
 
     def _plotting_back(self):
         """Contextual Back inside the plotting page: report settings → report
@@ -2972,6 +2982,17 @@ class StateClassificationSubTab(QWidget):
         self.btn_rename_intrinsic.setEnabled(has_intrinsic)
         self.btn_rename_full.setEnabled(has_full)
         self.btn_state_diagnostics.setEnabled(has_intrinsic)
+
+        # Checks the file, not the (slow, async) loaded model, so the entry
+        # unlocks as soon as a clustering result is on disk.
+        ct_now = self._cell_type()
+        model_path = self._model_adata_path(ct_now) if ct_now else None
+        has_clustering = bool(model_path and model_path.exists())
+        self._plots_entry_btn.setEnabled(has_clustering)
+        self._plots_entry_btn.setToolTip(
+            "" if has_clustering
+            else "Run Behavioral State clustering first to generate analysis and plots."
+        )
 
         if has_intrinsic:
             n_intr = self._cluster_count(self._model_adata, intrinsic_col)
@@ -5561,7 +5582,7 @@ class TrackClassificationSubTab(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # Pinned above the scroll area (not inside it) so it stays visible
+        # Pinned above the stack (outside any scroll area) so it stays visible
         # regardless of how far the plotting page's content scrolls. Only
         # shown while the plotting page (outer page 1) is active.
         self._plotting_header, self._pipeline_title = make_back_header(
@@ -5570,28 +5591,25 @@ class TrackClassificationSubTab(QWidget):
         self._plotting_header.hide()
         outer.addWidget(self._plotting_header)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        outer.addWidget(scroll)
-
-        content = QWidget()
-        content_lay = QVBoxLayout(content)
-        content_lay.setContentsMargins(0, 0, 0, 0)
-        content_lay.setSpacing(0)
-        scroll.setWidget(content)
         # Outer per-subtab stack: page 0 = clustering settings (track clustering,
         # train classifier, backprojection + the "Generate analysis and plots"
         # trigger), page 1 = the fully isolated plotting page, reached only via
-        # that trigger.
+        # that trigger. Each page owns its scroll area; the stack must not sit
+        # inside a shared one, since a QStackedWidget sizes to its tallest page
+        # and would pad the short plotting page with page 0's height (blank
+        # space, mid-page scroll).
         self._subtab_stack = QStackedWidget()
-        content_lay.addWidget(self._subtab_stack)
+        outer.addWidget(self._subtab_stack, stretch=1)
 
+        self._settings_scroll = QScrollArea()
+        self._settings_scroll.setWidgetResizable(True)
+        self._settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         settings_page = QWidget()
         lay = QVBoxLayout(settings_page)
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(6)
-        self._subtab_stack.addWidget(settings_page)  # outer page 0
+        self._settings_scroll.setWidget(settings_page)
+        self._subtab_stack.addWidget(self._settings_scroll)  # outer page 0
 
         # ── Warning label (prerequisite check) ──────────────────────────
         self.warning_label = QLabel("")
@@ -6915,10 +6933,11 @@ class TrackClassificationSubTab(QWidget):
 
         # Entry trigger stays inline on the clustering-settings page; Start
         # navigates to the fully isolated plotting page (outer page 1) below.
-        lay.addWidget(
-            GuidedPanel([TRACK_PLOTS_ENTRY],
-                        start_cb=lambda _id: self._open_plotting_page())
-        )
+        plots_entry = GuidedPanel([TRACK_PLOTS_ENTRY],
+                                  start_cb=lambda _id: self._open_plotting_page())
+        # Greyed out by _refresh_buttons until a trajectory clustering exists.
+        self._plots_entry_btn = plots_entry.explainers[TRACK_PLOTS_ENTRY["id"]].start_button
+        lay.addWidget(plots_entry)
 
         plotting_page = QWidget()
         plotting_lay = QVBoxLayout(plotting_page)
@@ -6971,8 +6990,9 @@ class TrackClassificationSubTab(QWidget):
         # page 0's track-clustering block (grp_track) and its "Run Original
         # BEHAV3D DTW" button.
         self._plotting_page = plotting_page
+        # No reset_scroll_on_page_change on _subtab_stack: Back must return
+        # page 0 to where the user left it; _open_plotting_page resets page 1.
         self._subtab_stack.addWidget(plotting_page)  # outer page 1
-        reset_scroll_on_page_change(self._subtab_stack)
 
         self._subtab_stack.setCurrentIndex(0)
 
@@ -7157,8 +7177,10 @@ class TrackClassificationSubTab(QWidget):
             # would also grey out its "Run Feature-based BEHAV3D Clustering"
             # button despite the setEnabled(True) above.
             self.grp_track.setEnabled(True)
-            for grp in [self.grp3, self._plotting_page, self.grp_bp]:
+            for grp in [self.grp3, self.grp_bp]:
                 grp.setEnabled(False)
+            # Not _plotting_page.setEnabled: keep its lists scrollable.
+            set_scroll_content_enabled(self._plotting_page, False)
 
             # Force the method dropdown to Feature-based and prevent switching.
             self.combo_clustering_family.blockSignals(True)
@@ -7172,8 +7194,9 @@ class TrackClassificationSubTab(QWidget):
             return False
         else:
             self.warning_label.hide()
-            for grp in [self.grp_track, self.grp3, self._plotting_page, self.grp_bp]:
+            for grp in [self.grp_track, self.grp3, self.grp_bp]:
                 grp.setEnabled(True)
+            set_scroll_content_enabled(self._plotting_page, True)
 
             # Only revert to State-based if the dropdown was previously force-locked
             # (i.e. disabled because state adata was missing). Otherwise preserve the
@@ -7287,7 +7310,9 @@ class TrackClassificationSubTab(QWidget):
             return
         self._focus_pipeline(pipeline_id)
         self._plots_stack.setCurrentIndex(1)
-        self._pipeline_scroll.verticalScrollBar().setValue(0)
+        scroll_to_top(self._pipeline_scroll)
+        # Again once the shown/hidden groups have been laid out.
+        QTimer.singleShot(0, lambda: scroll_to_top(self._pipeline_scroll))
 
     def _focus_pipeline(self, pipeline_id: str):
         """Show only the group box relevant to ``pipeline_id``, hide the rest."""
@@ -7318,6 +7343,7 @@ class TrackClassificationSubTab(QWidget):
         self._pipeline_title.setText("")
         self._subtab_stack.setCurrentIndex(1)
         self._plotting_header.show()
+        scroll_to_top(self._plots_stack.widget(0))
 
     def _plotting_back(self):
         """Contextual Back inside the plotting page: report settings → report
@@ -8143,6 +8169,15 @@ class TrackClassificationSubTab(QWidget):
         self.btn_exemplars.setEnabled(has_adata and has_state_file)
         self.btn_track_proportions.setEnabled(has_adata)
         self.btn_feature_heatmap.setEnabled(has_adata)
+        # Checks the file, not the (slow, async) loaded adata, so the entry
+        # unlocks as soon as a clustering result is on disk.
+        track_path = self._track_adata_path(ct_now) if ct_now else None
+        has_trajectory = bool(track_path and track_path.exists())
+        self._plots_entry_btn.setEnabled(has_trajectory)
+        self._plots_entry_btn.setToolTip(
+            "" if has_trajectory
+            else "Run State Trajectory clustering first to generate analysis and plots."
+        )
         if has_adata:
             self.rename_track_status.setText(
                 f"✅ Track adata loaded: {self._track_adata.n_obs} rows."

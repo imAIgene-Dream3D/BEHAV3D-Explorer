@@ -229,8 +229,7 @@ STATE_DIAGNOSTICS = {
     "concept": None,
     "what_get": "Diagnostic PDF(s) with state means, transitions, and feature distributions.",
     "decide": [],
-    "has_params": False,
-    "start_label": "Generate Diagnostics plots  ▸",
+    "has_params": True,
     "seed": (
         "Explain the BEHAV3D behavioral-state HMM diagnostics: what the "
         "state-means, transition, and feature-distribution plots tell you "
@@ -426,8 +425,7 @@ TRACK_DIAGNOSTICS = {
     "concept": None,
     "what_get": "Diagnostic PDF(s) with silhouette and distance plots.",
     "decide": [],
-    "has_params": False,
-    "start_label": "Generate Diagnostics plots  ▸",
+    "has_params": True,
     "seed": (
         "Explain the BEHAV3D track-clustering diagnostics: what a "
         "silhouette plot tells you about cluster quality."
@@ -507,8 +505,7 @@ TRACK_WINDOW_TRANSITIONS = {
     },
     "what_get": "A window-transition Sankey PDF per sample (+ pooled), and the underlying link-count CSVs.",
     "decide": [],
-    "has_params": False,
-    "start_label": "Generate Window Transition Sankey  ▸",
+    "has_params": True,
     "seed": (
         "Explain the BEHAV3D Window Transitions Sankey: what a track window is, "
         "and how to read a track moving from one trajectory cluster to another "

@@ -263,6 +263,45 @@ def disable_spinbox_wheel_scroll() -> None:
     _wheel_scroll_disabled = True
 
 
+def scroll_to_top(widget: Optional[QWidget]) -> None:
+    """Scroll ``widget`` (if it is a ``QScrollArea``) and every descendant
+    ``QScrollArea`` back to the top."""
+    if widget is None:
+        return
+    scrolls = widget.findChildren(QScrollArea)
+    if isinstance(widget, QScrollArea):
+        scrolls = [widget, *scrolls]
+    for scroll in scrolls:
+        scroll.verticalScrollBar().setValue(0)
+
+
+def set_scroll_content_enabled(widget: QWidget, enabled: bool) -> None:
+    """Enable/disable everything inside ``widget`` while keeping its scroll
+    areas scrollable.
+
+    ``widget.setEnabled(False)`` would also disable any ``QScrollArea`` it
+    contains, and a disabled scroll area ignores wheel and scrollbar input —
+    so a greyed-out page could no longer be scrolled to read it. Instead this
+    toggles the content of each outermost ``QScrollArea`` (``widget`` itself
+    if it is one), leaving the scroll areas enabled.
+    """
+    if isinstance(widget, QScrollArea):
+        outermost = [widget]
+    else:
+        outermost = []
+        for scroll in widget.findChildren(QScrollArea):
+            parent = scroll.parentWidget()
+            while parent is not None and parent is not widget:
+                if isinstance(parent, QScrollArea):
+                    break
+                parent = parent.parentWidget()
+            if parent is widget:
+                outermost.append(scroll)
+    for scroll in outermost:
+        if scroll.widget() is not None:
+            scroll.widget().setEnabled(enabled)
+
+
 def reset_scroll_on_page_change(container: Union[QStackedWidget, QTabWidget]) -> None:
     """Scroll any ``QScrollArea`` inside a page back to the top whenever
     ``container`` (a ``QStackedWidget`` or ``QTabWidget``) switches to it.
@@ -273,17 +312,7 @@ def reset_scroll_on_page_change(container: Union[QStackedWidget, QTabWidget]) ->
     time it's shown, because the visible viewport lands mid-content
     instead of at the top.
     """
-    def _reset(index: int) -> None:
-        page = container.widget(index)
-        if page is None:
-            return
-        scrolls = page.findChildren(QScrollArea)
-        if isinstance(page, QScrollArea):
-            scrolls = [page, *scrolls]
-        for scroll in scrolls:
-            scroll.verticalScrollBar().setValue(0)
-
-    container.currentChanged.connect(_reset)
+    container.currentChanged.connect(lambda index: scroll_to_top(container.widget(index)))
 
 
 __all__ = [
@@ -293,6 +322,8 @@ __all__ = [
     "IllustratedHelpButton",
     "make_help_row",
     "disable_spinbox_wheel_scroll",
+    "scroll_to_top",
+    "set_scroll_content_enabled",
     "reset_scroll_on_page_change",
 ]
 
