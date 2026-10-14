@@ -32,7 +32,7 @@ def plot_per_cluster_proportions(
     ):
     prop_df = (
         df
-        .groupby(groupby)
+        .groupby(groupby, observed=False)
         .size()
         .groupby(level=0)
         .apply(lambda x: x / x.sum())  # normalize within each cluster

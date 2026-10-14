@@ -178,6 +178,16 @@ mamba install nomkl
 ```
 The automated installer handles this automatically.
 
+### Windows: "extraction failed" / "remove_all: The directory is not empty"
+mamba 2.x unpacks packages into a deep cache folder (`pkgs\https\conda.anaconda.org\conda-forge\...`), and some files end up longer than Windows' 260-character path limit, which is on by default. On Windows the installer checks this first and offers to turn on long path support (asks for administrator permission). If you skip that, it uses `conda` instead, which keeps the shorter cache layout. To do it by hand, run in an administrator terminal:
+```bash
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
+```
+Then delete the half-extracted cache (a normal delete fails on the long paths) and rerun the installer:
+```bash
+rmdir /s /q "\\?\%USERPROFILE%\miniforge3\pkgs\https"
+```
+
 ## 📞 Support
 
 If you encounter issues:

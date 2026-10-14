@@ -267,7 +267,7 @@ def _series_setup(long_df: pd.DataFrame):
         and long_df["line_condition"].notna().any()
     )
     if has_lc:
-        lc_vals = long_df["line_condition"].astype(str).str.strip()
+        lc_vals = long_df["line_condition"].astype(str).str.strip().fillna("")
         has_lc = not lc_vals.isin(["(no line condition)", "", "nan"]).all()
 
     def _series_label(row):

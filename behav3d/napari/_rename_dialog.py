@@ -714,11 +714,11 @@ class RenameClusterDialog(QDialog):
             from behav3d.analysis.behavior.utils import _save_adata_obs_csv
 
             self._adata_path.parent.mkdir(parents=True, exist_ok=True)
-            from behav3d.core.h5_access import h5_access
+            from behav3d.core.h5_access import h5_access, prepare_adata_for_write
 
             # Wait for any worker still reading/writing this file (modal dialog, rare).
             with h5_access(write=True):
-                self._adata.write_h5ad(str(self._adata_path), compression="lzf")
+                prepare_adata_for_write(self._adata).write_h5ad(str(self._adata_path), compression="lzf")
             _save_adata_obs_csv(self._adata, self._adata_path)
 
     # ── Reset to original ───────────────────────────────────────────────

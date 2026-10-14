@@ -2034,7 +2034,8 @@ class StateClassificationHMMPanel(BaseStateClassificationPanel):
             return None
 
         state_paths.full_output_adata_path.parent.mkdir(parents=True, exist_ok=True)
-        adata_full.write(state_paths.full_output_adata_path, compression="gzip")
+        from behav3d.core.h5_access import prepare_adata_for_write
+        prepare_adata_for_write(adata_full).write(state_paths.full_output_adata_path, compression="gzip")
         if verbose:
             _winfo(
                 "state-hmm-widget",

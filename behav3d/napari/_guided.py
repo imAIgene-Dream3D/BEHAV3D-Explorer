@@ -200,8 +200,10 @@ class AnalysisExplainer(QWidget):
             "QPushButton { background:#1e88e5; color:white; font-weight:bold; "
             "border:none; border-radius:6px; padding:7px 16px; font-size:13px; }"
             "QPushButton:hover { background:#1976d2; }"
+            "QPushButton:disabled { background:#3a3a40; color:#7f858d; }"
         )
         start.clicked.connect(lambda: self._on_start())
+        self.start_button = start
         start_row = QHBoxLayout()
         start_row.addWidget(start)
         start_row.addStretch()
@@ -244,11 +246,13 @@ class GuidedPanel(QScrollArea):
             )
             lay.addWidget(intro_lbl)
 
+        # Keyed by analysis id so callers can reach a card's Start button.
+        self.explainers: dict[str, AnalysisExplainer] = {}
         for spec in analyses:
             aid = spec["id"]
-            lay.addWidget(
-                AnalysisExplainer(spec, on_start=lambda a=aid: start_cb(a))
-            )
+            explainer = AnalysisExplainer(spec, on_start=lambda a=aid: start_cb(a))
+            self.explainers[aid] = explainer
+            lay.addWidget(explainer)
 
         lay.addStretch()
         self.setWidget(content)

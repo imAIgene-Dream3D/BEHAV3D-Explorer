@@ -102,6 +102,10 @@ dependencies:
   - igraph>=0.11
   - leidenalg>=0.10
   - scanpy>=1.10
+  # anndata>=0.11 refuses nullable pandas strings unless opted in; BEHAV3D sanitizes them on
+  # write instead (core/h5_access.prepare_adata_for_write) so .h5ad files stay readable by
+  # older anndata. Keep writes going through that helper.
+  - anndata>=0.11
 
   # -------------------------------------------------------------------------
   # Jupyter / IPython
