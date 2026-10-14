@@ -7579,10 +7579,12 @@ class APOCWidget(QWidget):
         btn.setText(f"▶ Run {ct.capitalize()} Segmentation")
 
     # ── Helper: unify organoid settings ────────────────────────
-    def _on_unify_organoids_changed(self, state):
+    def _on_unify_organoids_changed(self, *_):
         """When toggled ON, do an initial full sync from the first organoid tab."""
-        from qtpy.QtCore import Qt
-        self._unify_organoids = (state == Qt.Checked)
+        # Same int-vs-enum trap as ActiveKillingPanel._on_abs_toggle: under
+        # PyQt6, Qt.CheckState is a plain Enum, so comparing stateChanged's
+        # int payload to Qt.Checked is always False.
+        self._unify_organoids = self._check_unify_organoids.isChecked()
         if not self._unify_organoids or self._training_widget is None:
             return
         # Perform initial full sync from the first organoid tab

@@ -3016,8 +3016,12 @@ class ActiveKillingPanel(QWidget):
         self._update_abs_hint()
 
     # ── Helpers ──────────────────────────────────────────────────────────────
-    def _on_abs_toggle(self, state):
-        enabled = (state == Qt.Checked)
+    def _on_abs_toggle(self, *_):
+        # Read the checkbox itself instead of comparing stateChanged's int
+        # payload to Qt.Checked: under PyQt6 Qt.CheckState is a plain Enum,
+        # so ``2 == Qt.Checked`` is False and the Absolute threshold field
+        # stayed disabled no matter how the box was ticked.
+        enabled = self.check_abs_threshold.isChecked()
         self.spin_abs_threshold.setEnabled(enabled)
         self.spin_threshold_mult.setEnabled(not enabled)
         self._update_abs_hint()
