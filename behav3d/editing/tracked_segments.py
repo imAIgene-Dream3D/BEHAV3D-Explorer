@@ -103,6 +103,23 @@ def _next_label_id(buf, taken: Iterable[int] = ()) -> int:
     return max(used) + 1
 
 
+def _check_ids_fit(buf, ids: Iterable[int]) -> None:
+    """Raise a clear error if a new label ID does not fit the volume's dtype.
+
+    Happens with tracking imported in a narrow dtype (e.g. int8, max 127)
+    before imports were normalised to uint16.
+    """
+    dtype = np.dtype(getattr(buf, "dtype", np.int64))
+    if not np.issubdtype(dtype, np.integer):
+        return
+    top = max((int(i) for i in ids), default=0)
+    if top > np.iinfo(dtype).max:
+        raise ValueError(
+            f"New label ID {top} does not fit in the tracked zarr's dtype {dtype} "
+            f"(max {np.iinfo(dtype).max}). Re-import the tracking so it is converted to uint16."
+        )
+
+
 def lifetime_of(buf, label_id: int) -> Tuple[Optional[int], Optional[int]]:
     """Return ``(t_first, t_last)`` inclusive frames where ``label_id`` exists.
 
@@ -386,6 +403,7 @@ def split_label(
         seed_ids = [label_id] + new_ids
     else:
         seed_ids = list(new_ids)
+    _check_ids_fit(buf, seed_ids)
 
     # ---- Reference frame split ------------------------------------------
     ref = buf.peek(t_ref).copy()
@@ -545,6 +563,7 @@ def create_label(
     else:
         next_id = _next_label_id(buf)
         new_ids = [next_id + i for i in range(n_seeds)]
+    _check_ids_fit(buf, new_ids)
 
     # ---- Reference frame watershed on background mask -------------------
     ref = buf.peek(t_ref).copy()
