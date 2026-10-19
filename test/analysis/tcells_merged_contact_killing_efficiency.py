@@ -22,6 +22,13 @@ Two killing-efficiency numbers are reported for every contact timepoint, no thre
 When a T cell touches more than one organoid at the same timepoint, only the organoid with the
 largest raw increase is credited for that timepoint (mirrors the "best target" convention used by
 the existing Active Killing analysis), carrying both its raw and normalized values.
+
+An optional `active_killing_threshold` (flat, same units as killing_efficiency_raw) additionally
+flags which of those contact timepoints count as "active killing" -- the same absolute-threshold
+definition the existing per-lineage Active Killing analysis uses, applied here per-timepoint
+instead of gating a whole event. For active-killing timepoints, a behav3d-style efficiency
+(the raw increase as a percentage of that threshold) is reported alongside this script's own
+baseline-relative killing_efficiency_normalized.
 """
 
 from __future__ import annotations
@@ -37,6 +44,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from matplotlib.backends.backend_pdf import PdfPages
 
 from behav3d.features.advanced_timepoint_features import identify_contact_events_global
 
@@ -44,7 +52,7 @@ from behav3d.features.advanced_timepoint_features import identify_contact_events
 # --------------------------------------------------------------------------- #
 # Configuration -- edit these to change what the script computes
 # --------------------------------------------------------------------------- #
-output_dir = Path("/Users/s.deblank-3/Documents/LowDensity_MultiColor")  # run root (parent of analysis/)
+output_dir = Path("/Users/s.deblank-3/Documents/LowDensity_Multicolor_Maria")  # run root (parent of analysis/)
 immune_cell_type = "tcells_merged"
 target_cell_type = "organoid"
 
@@ -53,6 +61,13 @@ death_signal_column = "nr_dead_mask_pixels"
 contact_column = "contact"       # "contact" (pixel/mask adjacency) or "contact_on_distance" (um threshold)
 min_contact_duration = 1         # minimum contiguous contact length (timepoints) to count as an event
 baseline_epsilon = 0.1           # substituted for death_at_start when it's exactly 0, avoids divide-by-zero
+
+# A contact timepoint whose killing_efficiency_raw exceeds this flat value counts as "active
+# killing" -- same units as death_signal_column (pixels, by default) and the same
+# absolute-threshold definition used by the existing per-lineage Active Killing analysis
+# (behav3d/features/advanced_timepoint_features.py, analyze_active_killing_per_timepoint),
+# applied here per-timepoint instead of gating a whole contact event.
+active_killing_threshold = 75
 
 # Purely a floating-point noise floor, not a biological detection threshold: the organoid
 # track-features table has interpolated/smoothed frames, so death_signal_column isn't always
@@ -179,6 +194,32 @@ def compute_contact_killing_efficiency_per_timepoint(
     return pd.DataFrame(results)
 
 
+def add_active_killing_columns(
+    df_per_timepoint: pd.DataFrame,
+    active_killing_threshold: float,
+) -> pd.DataFrame:
+    """
+    Adds two columns to df_per_timepoint:
+    - is_active_killing: killing_efficiency_raw exceeds active_killing_threshold -- the same
+      flat-threshold definition as the absolute-threshold mode of the existing per-lineage
+      Active Killing analysis (behav3d/features/advanced_timepoint_features.py,
+      analyze_active_killing_per_timepoint), applied per-timepoint here instead of gating a
+      whole contact event.
+    - killing_efficiency_behav3d_pct: killing_efficiency_raw expressed as a percentage of
+      active_killing_threshold. That analysis's own "efficiency" metric, in absolute-threshold
+      mode, is raw_increase / threshold -- this is that ratio as a percentage (e.g. 200% means
+      the increase was twice the threshold). Distinct from killing_efficiency_normalized, which
+      divides by the organoid's own baseline signal instead of the fixed threshold.
+    """
+    if df_per_timepoint.empty:
+        return df_per_timepoint
+
+    df = df_per_timepoint.copy()
+    df["is_active_killing"] = df["killing_efficiency_raw"] > active_killing_threshold
+    df["killing_efficiency_behav3d_pct"] = 100.0 * df["killing_efficiency_raw"] / active_killing_threshold
+    return df
+
+
 def summarize_killing_efficiency_by_behavioral_state(
     df_per_timepoint: pd.DataFrame,
     state_column: str = "full_behavioral_state",
@@ -208,6 +249,44 @@ def summarize_killing_efficiency_by_behavioral_state(
     return summary
 
 
+def summarize_active_killing_by_behavioral_state(
+    df_per_timepoint: pd.DataFrame,
+    state_column: str = "full_behavioral_state",
+) -> pd.DataFrame:
+    """
+    One row per behavioral state: how many of that state's credited contact timepoints are
+    active killing (requires add_active_killing_columns to have been run first), and the
+    distribution of killing_efficiency_raw/normalized/behav3d_pct among just those
+    active-killing timepoints. A state with zero active-killing timepoints still gets a row
+    (active_killing_rate_pct = 0, metric columns NaN) so it isn't silently dropped from the
+    by-state comparison.
+    """
+    df = df_per_timepoint.dropna(subset=[state_column])
+    if df.empty:
+        return pd.DataFrame()
+
+    totals = df.groupby(state_column).size().rename("n_contact_timepoints")
+    active = df[df["is_active_killing"]]
+    grouped = active.groupby(state_column).agg(
+        n_active_killing_timepoints=("position_t", "count"),
+        mean_killing_efficiency_raw=("killing_efficiency_raw", "mean"),
+        median_killing_efficiency_raw=("killing_efficiency_raw", "median"),
+        mean_killing_efficiency_normalized=("killing_efficiency_normalized", "mean"),
+        median_killing_efficiency_normalized=("killing_efficiency_normalized", "median"),
+        mean_killing_efficiency_behav3d_pct=("killing_efficiency_behav3d_pct", "mean"),
+        median_killing_efficiency_behav3d_pct=("killing_efficiency_behav3d_pct", "median"),
+    )
+
+    summary = grouped.reindex(totals.index)
+    summary["n_active_killing_timepoints"] = summary["n_active_killing_timepoints"].fillna(0).astype(int)
+    summary["n_contact_timepoints"] = totals
+    summary["active_killing_rate_pct"] = (
+        100.0 * summary["n_active_killing_timepoints"] / summary["n_contact_timepoints"]
+    )
+    summary = summary.reset_index().sort_values("active_killing_rate_pct", ascending=False).reset_index(drop=True)
+    return summary
+
+
 def _style_axis(ax: plt.Axes) -> None:
     """Minimal, consistent styling shared with the rest of the codebase's dashboard panels."""
     ax.set_facecolor("#fafafa")
@@ -231,9 +310,21 @@ def _state_palette(states: list) -> dict:
     return dict(zip(states, colors))
 
 
+def _finalize_figure(fig: plt.Figure, out: Path | PdfPages) -> None:
+    """
+    Saves `fig` either as a standalone image (when `out` is a Path) or as the next page of an
+    already-open combined PDF (when `out` is a PdfPages instance), then closes the figure.
+    """
+    if isinstance(out, PdfPages):
+        out.savefig(fig, dpi=150, bbox_inches="tight")
+    else:
+        fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_killing_efficiency_by_behavioral_state(
     df_summary_by_state: pd.DataFrame,
-    out_path: Path,
+    out: Path | PdfPages,
     state_column: str = "full_behavioral_state",
     palette: dict = None,
 ) -> None:
@@ -285,13 +376,12 @@ def plot_killing_efficiency_by_behavioral_state(
         fontsize=13, fontweight="semibold", y=1.02,
     )
     fig.tight_layout()
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    _finalize_figure(fig, out)
 
 
 def plot_killing_efficiency_distribution_by_state(
     df_per_timepoint: pd.DataFrame,
-    out_path: Path,
+    out: Path | PdfPages,
     state_column: str = "full_behavioral_state",
     state_order: list = None,
     palette: dict = None,
@@ -299,12 +389,13 @@ def plot_killing_efficiency_distribution_by_state(
 ) -> None:
     """
     For each metric (raw, normalized): a "responder rate" panel (% of contact timepoints with
-    any measurable increase, i.e. value > responder_noise_floor) next to a violin+strip of the
-    magnitude among only the responding timepoints, on a log x-axis. responder_noise_floor is
-    a floating-point noise floor (see the module-level constant of the same name), not a
-    biological threshold -- it exists so an interpolated frame's near-zero float artifact
-    (e.g. 1e-13) isn't counted as "a response" and doesn't get log-transformed into an
-    extreme outlier that swamps the rest of the violin.
+    any measurable increase, i.e. value > responder_noise_floor) next to two violin+strip views
+    of the magnitude among only the responding timepoints -- one on a linear x-axis (the increase
+    sizes as they actually are) and one on a log x-axis (so the long right tail doesn't swamp the
+    small-increase majority). responder_noise_floor is a floating-point noise floor (see the
+    module-level constant of the same name), not a biological threshold -- it exists so an
+    interpolated frame's near-zero float artifact (e.g. 1e-13) isn't counted as "a response" and
+    doesn't get log-transformed into an extreme outlier that swamps the rest of the violin.
 
     A combined violin/box over ALL timepoints would be dominated by the large mass of exact
     zeros (every state's raw and normalized median is 0 -- most contact timepoints show no
@@ -322,7 +413,8 @@ def plot_killing_efficiency_distribution_by_state(
     y = np.arange(len(states))
 
     fig, axes = plt.subplots(
-        2, 2, figsize=(12, (max(3, 0.55 * len(states) + 1.5)) * 2),
+        2, 3, figsize=(17, (max(3, 0.55 * len(states) + 1.5)) * 2),
+        gridspec_kw={"width_ratios": [1.0, 1.1, 1.1]},
     )
 
     for row, (metric, metric_label) in enumerate((
@@ -330,7 +422,7 @@ def plot_killing_efficiency_distribution_by_state(
         ("normalized", "Normalized (fold-change vs. baseline)"),
     )):
         col = f"killing_efficiency_{metric}"
-        ax_rate, ax_mag = axes[row]
+        ax_rate, ax_mag_linear, ax_mag_log = axes[row]
 
         responder_pct, ns = [], []
         for s in states:
@@ -350,49 +442,59 @@ def plot_killing_efficiency_distribution_by_state(
         ax_rate.set_title(f"{metric_label}\nresponder rate", fontsize=11, fontweight="semibold", pad=8)
 
         df_nonzero = df[df[col] > responder_noise_floor]
-        _style_axis(ax_mag)
-        if not df_nonzero.empty:
-            # Fit the violin's KDE in log10 space, not linear space -- these nonzero values
-            # span many orders of magnitude (especially killing_efficiency_normalized, which
-            # can reach huge values when baseline_epsilon kicks in), so a linear-space KDE
-            # rescaled onto a log axis afterward comes out as a degenerate sliver/shark-fin
-            # shape rather than a real violin. Plotting log10(value) directly and relabeling
-            # the ticks back to the original units fits the KDE in the space the data is
-            # actually shaped for.
-            df_nonzero = df_nonzero.assign(_log10_value=np.log10(df_nonzero[col]))
-            sns.violinplot(
-                data=df_nonzero, y=state_column, x="_log10_value", order=states,
-                orient="h", ax=ax_mag, hue=state_column, hue_order=states, palette=palette,
-                legend=False, cut=0, inner=None, linewidth=0.8, saturation=0.9,
+
+        for ax_mag, use_log in ((ax_mag_linear, False), (ax_mag_log, True)):
+            _style_axis(ax_mag)
+            if not df_nonzero.empty:
+                if use_log:
+                    # Fit the violin's KDE in log10 space, not linear space -- these nonzero
+                    # values span many orders of magnitude (especially killing_efficiency_normalized,
+                    # which can reach huge values when baseline_epsilon kicks in), so a linear-space
+                    # KDE rescaled onto a log axis afterward comes out as a degenerate sliver/shark-fin
+                    # shape rather than a real violin. Plotting log10(value) directly and relabeling
+                    # the ticks back to the original units fits the KDE in the space the data is
+                    # actually shaped for.
+                    plot_df = df_nonzero.assign(_plot_value=np.log10(df_nonzero[col]))
+                else:
+                    plot_df = df_nonzero.assign(_plot_value=df_nonzero[col])
+
+                sns.violinplot(
+                    data=plot_df, y=state_column, x="_plot_value", order=states,
+                    orient="h", ax=ax_mag, hue=state_column, hue_order=states, palette=palette,
+                    legend=False, cut=0, inner=None, linewidth=0.8, saturation=0.9,
+                )
+                sns.stripplot(
+                    data=plot_df, y=state_column, x="_plot_value", order=states,
+                    orient="h", ax=ax_mag, color="#333333", alpha=0.15, size=2, jitter=0.3,
+                )
+                if use_log:
+                    ax_mag.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{10 ** v:.3g}"))
+            else:
+                ax_mag.text(
+                    0.5, 0.5, "No nonzero timepoints", transform=ax_mag.transAxes,
+                    ha="center", va="center", fontsize=11, color="#999999",
+                )
+            ax_mag.set_ylabel("")
+            ax_mag.set_yticklabels([])
+            ax_mag.tick_params(left=False)
+            scale_name = "log scale" if use_log else "linear scale"
+            ax_mag.set_xlabel(f"{metric_label} ({scale_name}, nonzero only)", fontsize=10, labelpad=8)
+            ax_mag.set_title(
+                f"{metric_label}\nmagnitude when it happens ({scale_name})",
+                fontsize=11, fontweight="semibold", pad=8,
             )
-            sns.stripplot(
-                data=df_nonzero, y=state_column, x="_log10_value", order=states,
-                orient="h", ax=ax_mag, color="#333333", alpha=0.15, size=2, jitter=0.3,
-            )
-            ax_mag.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{10 ** v:.3g}"))
-        else:
-            ax_mag.text(
-                0.5, 0.5, "No nonzero timepoints", transform=ax_mag.transAxes,
-                ha="center", va="center", fontsize=11, color="#999999",
-            )
-        ax_mag.set_ylabel("")
-        ax_mag.set_yticklabels([])
-        ax_mag.tick_params(left=False)
-        ax_mag.set_xlabel(f"{metric_label} (log scale, nonzero only)", fontsize=10, labelpad=8)
-        ax_mag.set_title(f"{metric_label}\nmagnitude when it happens", fontsize=11, fontweight="semibold", pad=8)
 
     fig.suptitle(
         f"Killing efficiency distribution by behavioral state ({state_column})",
         fontsize=13, fontweight="semibold", y=1.01,
     )
     fig.tight_layout()
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    _finalize_figure(fig, out)
 
 
 def plot_killing_efficiency_ecdf_by_state(
     df_per_timepoint: pd.DataFrame,
-    out_path: Path,
+    out: Path | PdfPages,
     state_column: str = "full_behavioral_state",
     state_order: list = None,
     palette: dict = None,
@@ -437,8 +539,123 @@ def plot_killing_efficiency_ecdf_by_state(
         edgecolor="#cccccc", title=state_column,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.86])
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    _finalize_figure(fig, out)
+
+
+def plot_active_killing_magnitude_by_state(
+    df_per_timepoint: pd.DataFrame,
+    df_active_summary: pd.DataFrame,
+    out: Path | PdfPages,
+    active_killing_threshold: float,
+    state_column: str = "full_behavioral_state",
+    state_order: list = None,
+    palette: dict = None,
+) -> None:
+    """
+    Active-killing-only view: "active killing" means a contact timepoint's raw death-signal
+    increase (killing_efficiency_raw) exceeds the flat active_killing_threshold -- the same
+    absolute-threshold definition used by the existing per-lineage Active Killing analysis
+    (behav3d/features/advanced_timepoint_features.py, analyze_active_killing_per_timepoint),
+    applied here per-timepoint instead of gating a whole contact event.
+
+    Top panel: what fraction of each state's credited contact timepoints clear the threshold
+    (active_killing_rate_pct from summarize_active_killing_by_behavioral_state).
+
+    Below that, for active-killing timepoints only, one linear+log violin+strip row per metric:
+    - the raw death-signal increase (pixels)
+    - this script's normalized killing efficiency (fold-change vs. the organoid's own baseline)
+    - the behav3d-style efficiency: the raw increase as a percentage of active_killing_threshold
+      (that analysis's own "efficiency" metric in absolute-threshold mode is
+      raw_increase / threshold -- always > 100% here since every plotted row is already active)
+    """
+    if df_active_summary.empty:
+        return
+
+    states = state_order or df_active_summary[state_column].tolist()
+    palette = palette or _state_palette(states)
+    colors = [palette[s] for s in states]
+    y = np.arange(len(states))
+
+    df = df_per_timepoint.dropna(subset=[state_column])
+    df_active = df[df["is_active_killing"] & df[state_column].isin(states)]
+
+    metrics = (
+        ("killing_efficiency_raw", "Raw death-signal increase (pixels)"),
+        ("killing_efficiency_normalized", "Normalized (fold-change vs. baseline)"),
+        ("killing_efficiency_behav3d_pct", f"% of {active_killing_threshold:g}px threshold (behav3d method)"),
+    )
+
+    row_height = max(3, 0.55 * len(states) + 1.5)
+    fig = plt.figure(figsize=(17, 0.65 * row_height + len(metrics) * row_height), layout="constrained")
+    gs = fig.add_gridspec(1 + len(metrics), 2, height_ratios=[0.6] + [1] * len(metrics))
+
+    summary_indexed = df_active_summary.set_index(state_column).reindex(states)
+    rates = summary_indexed["active_killing_rate_pct"].fillna(0).to_numpy()
+    n_active = summary_indexed["n_active_killing_timepoints"].fillna(0).to_numpy()
+    n_total = summary_indexed["n_contact_timepoints"].fillna(0).to_numpy()
+
+    ax_rate = fig.add_subplot(gs[0, :])
+    _style_axis(ax_rate)
+    ax_rate.barh(y, rates, height=0.6, color=colors, edgecolor="white", linewidth=0.8, alpha=0.9)
+    for yi, pct, na, nt in zip(y, rates, n_active, n_total):
+        ax_rate.text(
+            pct + 1.5, yi, f"{pct:.0f}% ({int(na)}/{int(nt)})", ha="left", va="center",
+            fontsize=8.5, color="#444444",
+        )
+    ax_rate.set_xlim(0, max(float(rates.max()) if len(rates) else 0.0, 10.0) * 1.25 + 5)
+    ax_rate.set_yticks(y)
+    ax_rate.set_yticklabels(states, fontsize=9.5)
+    ax_rate.invert_yaxis()
+    ax_rate.set_xlabel("Active-killing contact timepoints (% of state's credited timepoints)", fontsize=10, labelpad=8)
+    ax_rate.set_title(
+        f"Active killing rate by behavioral state (raw increase > {active_killing_threshold:g} px)",
+        fontsize=12, fontweight="semibold", pad=10,
+    )
+
+    for row, (col, metric_label) in enumerate(metrics, start=1):
+        ax_linear = fig.add_subplot(gs[row, 0])
+        ax_log = fig.add_subplot(gs[row, 1])
+        for ax, use_log, show_labels in ((ax_linear, False, True), (ax_log, True, False)):
+            _style_axis(ax)
+            if not df_active.empty and (df_active[col] > 0).any():
+                plot_data = df_active[df_active[col] > 0]
+                if use_log:
+                    plot_df = plot_data.assign(_plot_value=np.log10(plot_data[col]))
+                else:
+                    plot_df = plot_data.assign(_plot_value=plot_data[col])
+
+                sns.violinplot(
+                    data=plot_df, y=state_column, x="_plot_value", order=states,
+                    orient="h", ax=ax, hue=state_column, hue_order=states, palette=palette,
+                    legend=False, cut=0, inner=None, linewidth=0.8, saturation=0.9,
+                )
+                sns.stripplot(
+                    data=plot_df, y=state_column, x="_plot_value", order=states,
+                    orient="h", ax=ax, color="#333333", alpha=0.15, size=2, jitter=0.3,
+                )
+                if use_log:
+                    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{10 ** v:.3g}"))
+            else:
+                ax.text(
+                    0.5, 0.5, "No active-killing timepoints", transform=ax.transAxes,
+                    ha="center", va="center", fontsize=11, color="#999999",
+                )
+            ax.set_ylabel("")
+            ax.set_yticks(y)
+            if show_labels:
+                ax.set_yticklabels(states, fontsize=9.5)
+            else:
+                ax.set_yticklabels([])
+                ax.tick_params(left=False)
+            scale_name = "log scale" if use_log else "linear scale"
+            ax.set_xlabel(f"{metric_label} ({scale_name})", fontsize=10, labelpad=8)
+            ax.set_title(f"{metric_label} ({scale_name})", fontsize=10.5, fontweight="semibold", pad=8)
+
+    fig.suptitle(
+        f"Active killing (raw increase > {active_killing_threshold:g} px) by behavioral state ({state_column})",
+        fontsize=13, fontweight="semibold",
+    )
+    _finalize_figure(fig, out)
 
 
 def main() -> None:
@@ -485,6 +702,7 @@ def main() -> None:
         death_signal_column=death_signal_column,
         baseline_epsilon=baseline_epsilon,
     )
+    df_per_timepoint = add_active_killing_columns(df_per_timepoint, active_killing_threshold)
 
     # Context columns -- what behavioral state the T cell was in, and which original lineage
     # it came from. Informational only: never used to filter which rows get credited.
@@ -608,30 +826,49 @@ def main() -> None:
                 out_dir / f"contact_killing_efficiency_summary_by_behavioral_state_{immune_cell_type}.csv",
                 index=False,
             )
+            df_active_summary = summarize_active_killing_by_behavioral_state(
+                df_per_timepoint, state_column=behavioral_state_column
+            )
+            if not df_active_summary.empty:
+                df_active_summary.to_csv(
+                    out_dir / f"contact_active_killing_summary_by_behavioral_state_{immune_cell_type}.csv",
+                    index=False,
+                )
+
             plots_dir = out_dir / "plots"
             plots_dir.mkdir(parents=True, exist_ok=True)
 
-            # Same state order and colors reused across all three plots below, so e.g.
-            # "idle engager" is always the same color whichever figure you're looking at.
+            # Same state order and colors reused across every plot below, so e.g.
+            # "idle engager" is always the same color whichever page you're looking at.
             state_order = df_by_state[behavioral_state_column].tolist()
             palette = _state_palette(state_order)
 
-            plot_killing_efficiency_by_behavioral_state(
-                df_by_state, plots_dir / f"killing_efficiency_by_{behavioral_state_column}.png",
-                state_column=behavioral_state_column, palette=palette,
-            )
-            plot_killing_efficiency_distribution_by_state(
-                df_per_timepoint,
-                plots_dir / f"killing_efficiency_distribution_by_{behavioral_state_column}.png",
-                state_column=behavioral_state_column, state_order=state_order, palette=palette,
-                responder_noise_floor=responder_noise_floor,
-            )
-            plot_killing_efficiency_ecdf_by_state(
-                df_per_timepoint,
-                plots_dir / f"killing_efficiency_ecdf_by_{behavioral_state_column}.png",
-                state_column=behavioral_state_column, state_order=state_order, palette=palette,
-            )
-            print(f"  Behavioral-state summary + 3 plots saved ({len(df_by_state)} states) -> {plots_dir}")
+            combined_pdf_path = plots_dir / f"killing_efficiency_plots_{immune_cell_type}.pdf"
+            n_pages = 0
+            with PdfPages(combined_pdf_path) as pdf:
+                plot_killing_efficiency_by_behavioral_state(
+                    df_by_state, pdf,
+                    state_column=behavioral_state_column, palette=palette,
+                )
+                n_pages += 1
+                plot_killing_efficiency_distribution_by_state(
+                    df_per_timepoint, pdf,
+                    state_column=behavioral_state_column, state_order=state_order, palette=palette,
+                    responder_noise_floor=responder_noise_floor,
+                )
+                n_pages += 1
+                plot_killing_efficiency_ecdf_by_state(
+                    df_per_timepoint, pdf,
+                    state_column=behavioral_state_column, state_order=state_order, palette=palette,
+                )
+                n_pages += 1
+                if not df_active_summary.empty:
+                    plot_active_killing_magnitude_by_state(
+                        df_per_timepoint, df_active_summary, pdf, active_killing_threshold,
+                        state_column=behavioral_state_column, state_order=state_order, palette=palette,
+                    )
+                    n_pages += 1
+            print(f"  Behavioral-state summary + {n_pages}-page plots PDF ({len(df_by_state)} states) -> {combined_pdf_path}")
         else:
             print(f"  No rows had a {behavioral_state_column!r} value -- skipped behavioral-state summary/plot.")
     else:
@@ -643,7 +880,12 @@ def main() -> None:
         f"({death_signal_column}) over {observation_window} timepoints.\n"
         "killing_efficiency_normalized = that same increase divided by the organoid's own "
         "signal at contact time -- a unitless fold-change, comparable across organoids of "
-        "different sizes."
+        "different sizes.\n"
+        f"is_active_killing = killing_efficiency_raw > active_killing_threshold ({active_killing_threshold:g} "
+        f"{death_signal_column}).\n"
+        "killing_efficiency_behav3d_pct = killing_efficiency_raw as a percentage of "
+        "active_killing_threshold (the existing per-lineage Active Killing analysis's own "
+        "efficiency metric in absolute-threshold mode)."
     )
     print()
     print(f"Saved outputs to {out_dir}")
@@ -654,6 +896,12 @@ def main() -> None:
     print(f"  Median killing_efficiency_raw: {df_per_timepoint['killing_efficiency_raw'].median():.3f}")
     print(f"  Mean killing_efficiency_normalized: {df_per_timepoint['killing_efficiency_normalized'].mean():.3f}")
     print(f"  Median killing_efficiency_normalized: {df_per_timepoint['killing_efficiency_normalized'].median():.3f}")
+    n_active = int(df_per_timepoint["is_active_killing"].sum())
+    n_total = len(df_per_timepoint)
+    print(
+        f"  Active killing (raw increase > {active_killing_threshold:g} {death_signal_column}): "
+        f"{n_active}/{n_total} ({n_active / n_total:.0%})" if n_total else "  Active killing: n/a (no credited timepoints)"
+    )
 
 
 if __name__ == "__main__":

@@ -792,6 +792,7 @@ def _compute_optional_window_feature_frame(
     time_col="position_t",
     id_cols=("sample_name", "TrackID"),
     window_size=1,
+    incomplete_window_policy="partial",
     verbose=True,
 ):
     window_features = _dedupe_preserve_order(window_features)
@@ -827,7 +828,7 @@ def _compute_optional_window_feature_frame(
         id_cols=id_cols,
         features_to_compute=window_features,
         only_nonbinary=True,
-        incomplete_window_policy="partial",
+        incomplete_window_policy=incomplete_window_policy,
     )
     keep_cols = list(id_cols) + [time_col] + window_features
     if len(df_window) == 0:

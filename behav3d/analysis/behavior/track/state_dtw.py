@@ -25,9 +25,11 @@ from behav3d.analysis.behavior.track.dtw import (
     _add_cluster_medoids,
     _cluster_precomputed_distances,
     _cluster_precomputed_distances_leiden,
+    _compute_tracklet_net_displacement_features,
     _ensure_dtaidistance_umap,
     _relabel_by_cluster_size,
     _validate_distance_matrix,
+    _zscore_columns,
     compute_dtaidistance_numeric_distance_matrix,
     compute_dtaidistance_onehot_distance_matrix,
     extract_categorical_track_sequences,
@@ -1104,6 +1106,8 @@ def run_categorical_dtaidistance_trajectory_clustering(
     feature_cols=None,
     binary_cols=None,
     binary_feature_weight=1.0,
+    include_tracklet_net_displacement=False,
+    include_tracklet_net_displacement_squared=False,
     missing_policy="keep",
     cluster_key="ClusterID",
     save_outputs=True,
@@ -1215,6 +1219,68 @@ def run_categorical_dtaidistance_trajectory_clustering(
         window_col=trajectory_window_col,
     )
 
+    # Full-tracklet net displacement: distance from each trajectory unit's own
+    # first timepoint (0 at that first timepoint). Computed here, after the split
+    # above, so it resets at each tracklet's own start rather than the original
+    # track's -- unlike the small rolling-window features in adata_full.obsm,
+    # which are computed before splitting and so bridge across tracklet boundaries.
+    tracklet_summary_df = None
+    tracklet_summary_cols = []
+    if sequence_source == "features" and (
+        include_tracklet_net_displacement or include_tracklet_net_displacement_squared
+    ):
+        missing_coord_cols = [
+            c for c in ("position_x", "position_y", "position_z") if c not in adata_filt.obs.columns
+        ]
+        if missing_coord_cols:
+            raise ValueError(
+                f"Missing coordinate columns {missing_coord_cols} in adata.obs; cannot compute "
+                "full-tracklet net displacement features. These are not retained when reusing "
+                "the behavioral-state feature preset (sequence_source='features' with the saved "
+                "behavioral-states h5ad) -- build fresh trajectory features instead."
+            )
+        net_disp, net_disp_sq = _compute_tracklet_net_displacement_features(
+            adata_filt.obs, sequence_groupby_cols, time_col=str(time_col),
+        )
+        tracklet_feature_cols = []
+        tracklet_feature_values = []
+        if include_tracklet_net_displacement:
+            tracklet_feature_cols.append("net_displacement_tracklet")
+            tracklet_feature_values.append(net_disp)
+        if include_tracklet_net_displacement_squared:
+            tracklet_feature_cols.append("net_displacement_tracklet_squared")
+            tracklet_feature_values.append(net_disp_sq)
+        extra_matrix = _zscore_columns(np.column_stack(tracklet_feature_values))
+        adata_filt.obsm["_dtw_features"] = np.hstack([adata_filt.obsm["_dtw_features"], extra_matrix])
+        feature_info["continuous_feature_cols"] = (
+            list(feature_info.get("continuous_feature_cols", [])) + tracklet_feature_cols
+        )
+        if bool(verbose):
+            _winfo("trajectory-dtai", f"added full-tracklet displacement features: {tracklet_feature_cols}")
+
+        # Per-tracklet mean/max of the same two signals -- a summary scalar per
+        # trajectory unit (not a per-timepoint signal), for the Feature Heatmap
+        # (list_track_feature_candidates / save_track_feature_heatmap read these
+        # off adata_tracks.obs directly via tracklet_summary_feature_cols below).
+        disp_df = adata_filt.obs[list(sequence_groupby_cols)].copy()
+        agg_map = {}
+        if include_tracklet_net_displacement:
+            disp_df["_net_disp"] = net_disp
+            agg_map["mean_net_displacement_tracklet"] = ("_net_disp", "mean")
+            agg_map["max_net_displacement_tracklet"] = ("_net_disp", "max")
+        if include_tracklet_net_displacement_squared:
+            disp_df["_net_disp_sq"] = net_disp_sq
+            agg_map["mean_net_displacement_tracklet_squared"] = ("_net_disp_sq", "mean")
+            agg_map["max_net_displacement_tracklet_squared"] = ("_net_disp_sq", "max")
+        tracklet_summary_df = (
+            disp_df.groupby(list(sequence_groupby_cols), sort=False, observed=True)
+            .agg(**agg_map)
+            .reset_index()
+        )
+        tracklet_summary_cols = list(agg_map.keys())
+        if bool(verbose):
+            _winfo("trajectory-dtai", f"added full-tracklet summary features: {tracklet_summary_cols}")
+
     line_condition_cols = [c for c in adata_filt.obs.columns if c.endswith("_line_condition")]
     extra_meta_cols = ("origin_cell_type", "well", *line_condition_cols)
     if has_states:
@@ -1234,6 +1300,9 @@ def run_categorical_dtaidistance_trajectory_clustering(
             extra_meta_cols=extra_meta_cols,
         )
         sequences = [[] for _ in range(len(track_obs))]
+
+    if tracklet_summary_df is not None:
+        track_obs = track_obs.merge(tracklet_summary_df, on=list(sequence_groupby_cols), how="left")
 
     # Feature basis: the state sequences above still provide track metadata and the
     # state timelines used in plots; the distances come from the numeric features.
@@ -1342,6 +1411,7 @@ def run_categorical_dtaidistance_trajectory_clustering(
         # False = trajectories built directly from features, without behavioral states.
         "has_behavioral_states": bool(has_states),
         **feature_info,
+        "tracklet_summary_feature_cols": list(tracklet_summary_cols),
         "clustering_method": str(clustering_method),
         "dtw_backend": str(dtw_backend),
         "local_encoding": "state_features" if sequence_source == "features" else "one_hot",

@@ -612,6 +612,11 @@ def _fit_list_widget_height(list_widget, min_rows: int = 2, max_rows: int = 5) -
     list_widget.setFixedHeight(n * row_h + 2 * list_widget.frameWidth() + 4)
 
 
+def _list_widget_items(list_widget) -> list[str]:
+    """A QListWidget's item texts in row order (drag-reordering changes this)."""
+    return [list_widget.item(i).text() for i in range(list_widget.count())]
+
+
 def _inject_known_metadata_cols(adata, md_snapshot) -> None:
     """Inject known metadata grouping columns (exp_nr, well, *_line_condition) from the loaded
     metadata CSV into `adata.obs` when missing (for existing h5ad files that predate Fix 1 in
@@ -2079,12 +2084,12 @@ class StateClassificationSubTab(QWidget):
         self.btn_state_heatmap_remove.clicked.connect(self._state_heatmap_remove_selected)
         self.list_state_heatmap_available.itemDoubleClicked.connect(
             lambda item: self._set_state_heatmap_picked(
-                self._list_widget_items(self.list_state_heatmap_picked) + [item.text()]
+                _list_widget_items(self.list_state_heatmap_picked) + [item.text()]
             )
         )
         self.list_state_heatmap_picked.itemDoubleClicked.connect(
             lambda item: self._set_state_heatmap_picked(
-                [c for c in self._list_widget_items(self.list_state_heatmap_picked) if c != item.text()]
+                [c for c in _list_widget_items(self.list_state_heatmap_picked) if c != item.text()]
             )
         )
         self.btn_condition_comparison.clicked.connect(self._on_condition_comparison)
@@ -3023,11 +3028,6 @@ class StateClassificationSubTab(QWidget):
             counts[col] = int(adata.obs[col].astype(str).nunique())
         return counts[col]
 
-    @staticmethod
-    def _list_widget_items(list_widget):
-        """A QListWidget's item texts in row order (drag-reordering changes this)."""
-        return [list_widget.item(i).text() for i in range(list_widget.count())]
-
     def _set_state_heatmap_picked(self, picked):
         """Set the "Selected features" list (in ``picked``'s order - the plot's row
         order) and put every other candidate back into "Available features"."""
@@ -3049,7 +3049,7 @@ class StateClassificationSubTab(QWidget):
             if self.list_state_heatmap_available.item(i).isSelected()
         ]
         if chosen:
-            self._set_state_heatmap_picked(self._list_widget_items(self.list_state_heatmap_picked) + chosen)
+            self._set_state_heatmap_picked(_list_widget_items(self.list_state_heatmap_picked) + chosen)
 
     def _state_heatmap_remove_selected(self):
         remove = {
@@ -3059,7 +3059,7 @@ class StateClassificationSubTab(QWidget):
         }
         if remove:
             self._set_state_heatmap_picked(
-                [c for c in self._list_widget_items(self.list_state_heatmap_picked) if c not in remove]
+                [c for c in _list_widget_items(self.list_state_heatmap_picked) if c not in remove]
             )
 
     def _refresh_state_heatmap_features(self):
@@ -3093,7 +3093,7 @@ class StateClassificationSubTab(QWidget):
         except Exception as exc:
             self._log(f"⚠ Could not list features for the state heatmap: {exc}")
             candidates, defaults = [], []
-        previous_picked = self._list_widget_items(self.list_state_heatmap_picked)
+        previous_picked = _list_widget_items(self.list_state_heatmap_picked)
         keep_previous = (
             self._state_heatmap_cache_key is not None and key[:2] == self._state_heatmap_cache_key[:2]
         )
@@ -3121,7 +3121,7 @@ class StateClassificationSubTab(QWidget):
         if not full_path or not full_path.exists():
             QMessageBox.warning(self, "No data", "Run state classification first.")
             return
-        features = self._list_widget_items(self.list_state_heatmap_picked)
+        features = _list_widget_items(self.list_state_heatmap_picked)
         if not features:
             QMessageBox.warning(self, "No features", "Add at least one feature to the heatmap.")
             return
@@ -4645,7 +4645,7 @@ class StateClassificationSubTab(QWidget):
         if not ct:
             QMessageBox.warning(self, "No cell type", "Select a cell type first.")
             return
-        target_states = self._list_widget_items(self.list_bp_sequence)
+        target_states = _list_widget_items(self.list_bp_sequence)
         if len(target_states) == 0:
             QMessageBox.warning(self, "No sequence", "Add at least one state to the sequence.")
             return
@@ -5200,6 +5200,19 @@ class TrajectoryFeatureSelector(QWidget):
             cb.stateChanged.connect(self._rebuild_logscale)
             self._window_checkboxes[name] = cb
             win_lay.addWidget(cb)
+
+        win_lay.addWidget(_make_info_label(
+            "Full-tracklet descriptors (not windowed): straight-line distance from the "
+            "first timepoint of each trajectory unit -- the whole track, or each tracklet "
+            "when 'Divide long tracks' is on -- back to that point at every later timepoint."
+        ))
+        self.chk_tracklet_net_disp = QCheckBox("net_displacement_tracklet")
+        self.chk_tracklet_net_disp.stateChanged.connect(self._update_tab_labels)
+        win_lay.addWidget(self.chk_tracklet_net_disp)
+        self.chk_tracklet_net_disp_sq = QCheckBox("net_displacement_tracklet_squared")
+        self.chk_tracklet_net_disp_sq.stateChanged.connect(self._update_tab_labels)
+        win_lay.addWidget(self.chk_tracklet_net_disp_sq)
+
         win_lay.addStretch(1)
         self.tabs.addTab(win_tab, "Window Features")
 
@@ -5459,7 +5472,11 @@ class TrajectoryFeatureSelector(QWidget):
     def _update_tab_labels(self, *_):
         self.paramsChanged.emit()
         n_tp = sum(cb.isChecked() for cb in self._timepoint_checkboxes.values())
-        n_win = sum(cb.isChecked() for cb in self._window_checkboxes.values())
+        n_win = (
+            sum(cb.isChecked() for cb in self._window_checkboxes.values())
+            + int(self.chk_tracklet_net_disp.isChecked())
+            + int(self.chk_tracklet_net_disp_sq.isChecked())
+        )
         n_bin = sum(cb.isChecked() for cb in self._binary_checkboxes.values())
         self.tabs.setTabText(0, f"Timepoint Features ({n_tp})")
         self.tabs.setTabText(1, f"Window Features ({n_win})")
@@ -6421,13 +6438,24 @@ class TrackClassificationSubTab(QWidget):
         g_fheat.addWidget(_make_info_label(
             "Heatmap of trajectory clusters x features: each feature is averaged over "
             "every track's trajectory timepoints, then per cluster. The features the "
-            "clustering / states used are preselected; add any other per-timepoint "
-            "feature. Cell labels show the unscaled cluster mean."
+            "clustering / states used are preselected below; move others across from "
+            "Available, then drag rows in Selected to set the order they appear in the "
+            "plot. Cell labels show the unscaled cluster mean."
         ))
-        g_fheat.addWidget(QLabel("Features (Ctrl/Cmd click for multiple):"))
-        self.list_feature_heatmap_features = QListWidget()
-        self.list_feature_heatmap_features.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        g_fheat.addWidget(self.list_feature_heatmap_features)
+        g_fheat.addWidget(QLabel("Available features (click to select, then Add):"))
+        self.list_feature_heatmap_available = QListWidget()
+        self.list_feature_heatmap_available.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        g_fheat.addWidget(self.list_feature_heatmap_available)
+        self.btn_feature_heatmap_add = QPushButton("Add ▼")
+        g_fheat.addWidget(self.btn_feature_heatmap_add)
+        g_fheat.addWidget(QLabel("Selected features - drag to set the plot order:"))
+        self.list_feature_heatmap_picked = QListWidget()
+        self.list_feature_heatmap_picked.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.list_feature_heatmap_picked.setDragDropMode(QAbstractItemView.InternalMove)
+        self.list_feature_heatmap_picked.setDefaultDropAction(Qt.MoveAction)
+        g_fheat.addWidget(self.list_feature_heatmap_picked)
+        self.btn_feature_heatmap_remove = QPushButton("▲ Remove")
+        g_fheat.addWidget(self.btn_feature_heatmap_remove)
         fheat_sel_row = QHBoxLayout()
         self.btn_feature_heatmap_defaults = QPushButton("Select used features")
         self.btn_feature_heatmap_all = QPushButton("Select all")
@@ -6436,6 +6464,18 @@ class TrackClassificationSubTab(QWidget):
                    self.btn_feature_heatmap_clear):
             fheat_sel_row.addWidget(_b)
         g_fheat.addLayout(fheat_sel_row)
+
+        # Selected-features summary -- mirrors config_summary_label / traj_config_summary_label
+        # so the current pick is visible at a glance instead of having to scroll the list above.
+        self.feature_heatmap_summary_label = QLabel("")
+        self.feature_heatmap_summary_label.setWordWrap(True)
+        self.feature_heatmap_summary_label.setStyleSheet(
+            "QLabel { background: #1a2e2e; color: #66ddcc; border-radius: 4px; "
+            "padding: 6px 8px; font-size: 11px; font-family: monospace; }"
+        )
+        self.feature_heatmap_summary_label.hide()
+        g_fheat.addWidget(self.feature_heatmap_summary_label)
+
         fheat_form = QFormLayout()
         fheat_form.setSpacing(3)
         self.combo_feature_heatmap_scaling = QComboBox()
@@ -6455,6 +6495,7 @@ class TrackClassificationSubTab(QWidget):
         self.btn_view_feature_heatmap = _make_view_btn()
         fheat_row.addWidget(self.btn_view_feature_heatmap)
         g_fheat.addLayout(fheat_row)
+        self._feature_heatmap_candidates = []
         self._feature_heatmap_defaults = []
         self._feature_heatmap_cache_key = None
 
@@ -7107,8 +7148,22 @@ class TrackClassificationSubTab(QWidget):
         self.btn_feature_heatmap.clicked.connect(self._on_feature_heatmap)
         _wire_view_btn(self.btn_view_feature_heatmap, self._on_view, "feature_heatmap")
         self.btn_feature_heatmap_defaults.clicked.connect(self._select_feature_heatmap_defaults)
-        self.btn_feature_heatmap_all.clicked.connect(self.list_feature_heatmap_features.selectAll)
-        self.btn_feature_heatmap_clear.clicked.connect(self.list_feature_heatmap_features.clearSelection)
+        self.btn_feature_heatmap_all.clicked.connect(
+            lambda: self._set_feature_heatmap_picked(self._feature_heatmap_candidates)
+        )
+        self.btn_feature_heatmap_clear.clicked.connect(lambda: self._set_feature_heatmap_picked([]))
+        self.btn_feature_heatmap_add.clicked.connect(self._feature_heatmap_add_selected)
+        self.btn_feature_heatmap_remove.clicked.connect(self._feature_heatmap_remove_selected)
+        self.list_feature_heatmap_available.itemDoubleClicked.connect(
+            lambda item: self._set_feature_heatmap_picked(
+                _list_widget_items(self.list_feature_heatmap_picked) + [item.text()]
+            )
+        )
+        self.list_feature_heatmap_picked.itemDoubleClicked.connect(
+            lambda item: self._set_feature_heatmap_picked(
+                [c for c in _list_widget_items(self.list_feature_heatmap_picked) if c != item.text()]
+            )
+        )
         self.btn_window_transitions.clicked.connect(self._on_window_transitions)
         _wire_view_btn(self.btn_view_window_transitions, self._on_view, "window_transitions")
         self.btn_transition_analysis.clicked.connect(self._on_transition_analysis)
@@ -7388,6 +7443,12 @@ class TrackClassificationSubTab(QWidget):
         self.traj_feature_selector.setEnabled(not checked)
         if checked:
             self._apply_state_features_preset()
+            # position_x/y/z aren't retained in the saved behavioral-states h5ad,
+            # so the full-tracklet displacement features can't be computed under
+            # this preset; setEnabled(False) above already greys them out, but
+            # clear them too so a stale checked state doesn't silently persist.
+            self.traj_feature_selector.chk_tracklet_net_disp.setChecked(False)
+            self.traj_feature_selector.chk_tracklet_net_disp_sq.setChecked(False)
         else:
             self.lbl_state_features_preset.hide()
 
@@ -7522,6 +7583,14 @@ class TrackClassificationSubTab(QWidget):
         exact_settings = self.chk_use_exact_original_settings.isChecked()
         return is_feature_based and not (is_legacy and exact_settings)
 
+    def _tracklet_displacement_feature_names(self):
+        names = []
+        if self.traj_feature_selector.chk_tracklet_net_disp.isChecked():
+            names.append("net_displacement_tracklet")
+        if self.traj_feature_selector.chk_tracklet_net_disp_sq.isChecked():
+            names.append("net_displacement_tracklet_squared")
+        return names
+
     def _update_track_config_summary(self):
         """Mirror StateClassificationSubTab._update_config_summary: show which
         features (and preprocessing) feed feature-based trajectory clustering,
@@ -7553,6 +7622,7 @@ class TrackClassificationSubTab(QWidget):
             f"Binary features ({len(p['binary_features'])}): {', '.join(sorted(p['binary_features'])) or '—'}",
             f"Window features: {', '.join(p['additional_window_features']) or '—'}  |  "
             f"Window size: {p['window_features_window']}",
+            f"Full-tracklet features: {', '.join(self._tracklet_displacement_feature_names()) or '—'}",
             f"Smoothing window: {p['feature_smoothing_window']}",
             f"Log-scaled: {', '.join(sorted(p['log_scale_features'])) or '—'}",
             f"Quantile capping: {capping}",
@@ -7587,6 +7657,16 @@ class TrackClassificationSubTab(QWidget):
 
         self._state_features_preset_frame.setVisible(show_state_preset)
         self._traj_features_section.setVisible(shows_feature_selector)
+
+        # Full-tracklet net displacement needs position_x/y/z, which the
+        # state-features preset's saved h5ad doesn't retain -- keep it in sync
+        # with the preset, same force-reset precedent as above.
+        if show_state_preset and self.chk_use_state_features_preset.isChecked():
+            self.traj_feature_selector.setEnabled(False)
+            self.traj_feature_selector.chk_tracklet_net_disp.setChecked(False)
+            self.traj_feature_selector.chk_tracklet_net_disp_sq.setChecked(False)
+        elif shows_feature_selector:
+            self.traj_feature_selector.setEnabled(True)
 
         self._feature_based_sep.setVisible(is_feature_based)
         self._feature_based_frame.setVisible(is_feature_based)
@@ -7780,6 +7860,8 @@ class TrackClassificationSubTab(QWidget):
             "bouts_drop_redundant":       self.chk_bouts_drop_redundant.isChecked(),
             "trajectory_trim_mode":       self.combo_trim.currentText(),
             "split_long_tracks":          self.chk_split_long_tracks.isChecked(),
+            "include_tracklet_net_displacement": self.traj_feature_selector.chk_tracklet_net_disp.isChecked(),
+            "include_tracklet_net_displacement_squared": self.traj_feature_selector.chk_tracklet_net_disp_sq.isChecked(),
             "parallel":                   self.chk_parallel.isChecked(),
             "save_distance_matrix":       self.chk_save_dist.isChecked(),
             "random_state":               int(self.spin_seed.value()),
@@ -7860,6 +7942,10 @@ class TrackClassificationSubTab(QWidget):
             self.combo_trim.setCurrentText(cfg["trajectory_trim_mode"])
         if "split_long_tracks" in cfg:
             self.chk_split_long_tracks.setChecked(bool(cfg["split_long_tracks"]))
+        if "include_tracklet_net_displacement" in cfg:
+            self.traj_feature_selector.chk_tracklet_net_disp.setChecked(bool(cfg["include_tracklet_net_displacement"]))
+        if "include_tracklet_net_displacement_squared" in cfg:
+            self.traj_feature_selector.chk_tracklet_net_disp_sq.setChecked(bool(cfg["include_tracklet_net_displacement_squared"]))
         if "parallel" in cfg:
             self.chk_parallel.setChecked(bool(cfg["parallel"]))
         if "save_distance_matrix" in cfg:
@@ -8192,13 +8278,52 @@ class TrackClassificationSubTab(QWidget):
         self._refresh_contact_columns()
         self._refresh_feature_heatmap_features()
 
+    def _set_feature_heatmap_picked(self, picked):
+        """Set the "Selected features" list (in ``picked``'s order - the plot's row
+        order) and put every other candidate back into "Available features", which
+        stays alphabetical for browsing."""
+        picked = [c for c in dict.fromkeys(picked) if c in self._feature_heatmap_candidates]
+        picked_set = set(picked)
+        self.list_feature_heatmap_picked.clear()
+        self.list_feature_heatmap_picked.addItems(picked)
+        self.list_feature_heatmap_available.clear()
+        self.list_feature_heatmap_available.addItems(
+            [c for c in self._feature_heatmap_candidates if c not in picked_set]
+        )
+        _fit_list_widget_height(self.list_feature_heatmap_available, max_rows=10)
+        _fit_list_widget_height(self.list_feature_heatmap_picked, max_rows=10)
+        self._update_feature_heatmap_summary()
+
+    def _feature_heatmap_add_selected(self):
+        chosen = [
+            self.list_feature_heatmap_available.item(i).text()
+            for i in range(self.list_feature_heatmap_available.count())
+            if self.list_feature_heatmap_available.item(i).isSelected()
+        ]
+        if chosen:
+            self._set_feature_heatmap_picked(_list_widget_items(self.list_feature_heatmap_picked) + chosen)
+
+    def _feature_heatmap_remove_selected(self):
+        remove = {
+            self.list_feature_heatmap_picked.item(i).text()
+            for i in range(self.list_feature_heatmap_picked.count())
+            if self.list_feature_heatmap_picked.item(i).isSelected()
+        }
+        if remove:
+            self._set_feature_heatmap_picked(
+                [c for c in _list_widget_items(self.list_feature_heatmap_picked) if c not in remove]
+            )
+
     def _refresh_feature_heatmap_features(self):
-        """Fill the feature-heatmap list; keeps the user's selection when possible."""
+        """Fill the feature-heatmap available/selected lists (the clustering's own
+        features preselected); keeps the user's picked list and its order when
+        nothing changed on disk."""
         ct = self._cell_type()
         out = self._out_dir()
         if not ct or not out or self._track_adata is None:
-            self.list_feature_heatmap_features.clear()
+            self._feature_heatmap_candidates = []
             self._feature_heatmap_cache_key = None
+            self._set_feature_heatmap_picked([])
             return
         from behav3d.analysis.behavior.state.utils import _resolve_positions_csv_path
         from behav3d.analysis.behavior.track.utils import _default_behavioral_states_path
@@ -8225,25 +8350,35 @@ class TrackClassificationSubTab(QWidget):
         except Exception as exc:
             self._log(f"⚠ Could not list features for the heatmap: {exc}")
             candidates, defaults = [], []
-        previous = {i.text() for i in self.list_feature_heatmap_features.selectedItems()}
+        previous_picked = _list_widget_items(self.list_feature_heatmap_picked)
         keep_previous = self._feature_heatmap_cache_key is not None and key[:3] == self._feature_heatmap_cache_key[:3]
         self._feature_heatmap_cache_key = key
+        # Available stays alphabetical for easy browsing; Selected keeps the model's
+        # own feature order, since that order is the heatmap's plot row order and the
+        # user re-arranges it by dragging.
+        self._feature_heatmap_candidates = sorted(candidates)
         self._feature_heatmap_defaults = list(defaults)
-        self.list_feature_heatmap_features.clear()
-        wanted = previous if keep_previous and previous else set(defaults)
-        for col in candidates:
-            self.list_feature_heatmap_features.addItem(col)
-            if col in wanted:
-                self.list_feature_heatmap_features.item(
-                    self.list_feature_heatmap_features.count() - 1
-                ).setSelected(True)
-        _fit_list_widget_height(self.list_feature_heatmap_features, max_rows=10)
+        candidate_set = set(self._feature_heatmap_candidates)
+        picked = (
+            [c for c in previous_picked if c in candidate_set]
+            if keep_previous and previous_picked else list(defaults)
+        )
+        self._set_feature_heatmap_picked(picked)
 
     def _select_feature_heatmap_defaults(self):
-        wanted = set(self._feature_heatmap_defaults)
-        for i in range(self.list_feature_heatmap_features.count()):
-            item = self.list_feature_heatmap_features.item(i)
-            item.setSelected(item.text() in wanted)
+        self._set_feature_heatmap_picked(self._feature_heatmap_defaults)
+
+    def _update_feature_heatmap_summary(self):
+        """Show which features are currently picked for the Feature Heatmap,
+        mirroring config_summary_label / traj_config_summary_label."""
+        if not self._feature_heatmap_candidates:
+            self.feature_heatmap_summary_label.hide()
+            return
+        selected = sorted(_list_widget_items(self.list_feature_heatmap_picked))
+        self.feature_heatmap_summary_label.setText(
+            f"Selected features ({len(selected)}): {', '.join(selected) or '—'}"
+        )
+        self.feature_heatmap_summary_label.show()
 
     def _track_proportion_candidate_columns(self):
         cols = []
@@ -8792,6 +8927,9 @@ class TrackClassificationSubTab(QWidget):
             return
         if features_only and not use_state_preset:
             feature_build_params = self.traj_feature_selector.params()
+            # Full-tracklet net displacement is additive on top of this base selection --
+            # build_trajectory_feature_adata itself still needs at least one timepoint/
+            # window/binary feature to build adata.X from, so it doesn't count here.
             if not (feature_build_params["features"] or feature_build_params["additional_window_features"]
                     or feature_build_params["binary_features"]):
                 msg = "Select at least one trajectory feature."
@@ -8813,6 +8951,20 @@ class TrackClassificationSubTab(QWidget):
                 else:
                     QMessageBox.warning(self, "No behavioral-state features", msg)
                 return
+
+        # Full-tracklet net displacement needs position_x/y/z, which only the
+        # freshly-built trajectory-feature adata retains (not the state-features
+        # preset's saved behavioral-states h5ad) -- see run_categorical_
+        # dtaidistance_trajectory_clustering's own ValueError guard for the case
+        # this doesn't catch (e.g. a stale saved config).
+        include_tracklet_disp = (
+            features_only and not use_state_preset
+            and self.traj_feature_selector.chk_tracklet_net_disp.isChecked()
+        )
+        include_tracklet_disp_sq = (
+            features_only and not use_state_preset
+            and self.traj_feature_selector.chk_tracklet_net_disp_sq.isChecked()
+        )
 
         if is_bouts:
             params = {
@@ -8855,6 +9007,8 @@ class TrackClassificationSubTab(QWidget):
                 **self._dtw_umap_params(),
                 "sequence_source": "features" if features_only else "states",
                 "binary_feature_weight": float(self.spin_binary_weight.value()),
+                "include_tracklet_net_displacement": include_tracklet_disp,
+                "include_tracklet_net_displacement_squared": include_tracklet_disp_sq,
                 "trajectory_trim_mode": self.combo_trim.currentText(),
                 "split_long_tracks": self.chk_split_long_tracks.isChecked(),
                 "parallel": self.chk_parallel.isChecked(),
@@ -9998,9 +10152,9 @@ class TrackClassificationSubTab(QWidget):
         if self._bg.is_running():
             QMessageBox.warning(self, "Busy", "Another operation is running.")
             return
-        features = [item.text() for item in self.list_feature_heatmap_features.selectedItems()]
+        features = _list_widget_items(self.list_feature_heatmap_picked)
         if not features:
-            QMessageBox.warning(self, "No features", "Select at least one feature for the heatmap.")
+            QMessageBox.warning(self, "No features", "Add at least one feature to the heatmap.")
             return
         out = self._out_dir()
         track_adata = self._track_adata

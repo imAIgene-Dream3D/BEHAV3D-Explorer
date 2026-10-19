@@ -12,14 +12,14 @@ The analysis runs on the **cell type chosen in the dropdown at the top of the Si
 
 ## Workflow at a glance
 
-1. [Two ways to run](#two-ways-to-run) — decide whether to train a fresh model or apply a previously saved classification.
+1. [Train a new model, or reuse an existing one](#train-a-new-model-or-reuse-an-existing-one) — decide whether to train a fresh model or apply a previously saved classification.
 2. [Behavioral state clustering](#behavioral-state-clustering) — choose features, set the number of states, and fit the HMM.
 3. [Renaming clusters](#renaming-clusters) — give the intrinsic and full behavioral states meaningful biological names.
 4. [Reports](#reports) — generate composition, transition, feature-heatmap and condition-comparison reports.
 5. [Contact Analysis](#contact-analysis) — compare contact types and behavioral-state shifts around contact.
 6. [Backprojection](#backprojection) — paint the states back onto the raw images to validate them, or search for a specific sequence of states to jump straight to a matching track ([Find a Behavior](#find-a-behavior)).
 
-## Two ways to run
+## Train a new model, or reuse an existing one
 
 At the very top is a checkbox: **Apply existing behavioral state classification**.
 
@@ -93,7 +93,7 @@ Most users never need to touch these — sensible defaults are pre-filled.
 
 | Control | Default | Meaning |
 |---|---|---|
-| **Start offset** | 1 | Number of leading timepoints to skip per track before classifying, backfilling the skipped frames from the next timepoint's state. **Leave at 1; changing it is not recommended.** The first timepoint of a track has no speed by definition (there is no previous position), so without this offset every track would start in a "static" state. Window features also use an *expanding* rolling window (timepoints 1–2, then 1–3, …) until the full window is available. |
+| **Start offset** | 1 | Number of leading timepoints to skip per track before classifying, backfilling the skipped frames from the next timepoint's state. **0 is not recommended.** The first timepoint of a track has no speed by definition (there is no previous position), so without this offset every track would start in a "static" state. Window features also use an *expanding* rolling window (timepoints 1–2, then 1–3, …) until the full window is available. |
 | **Skipped frames** | backfill | What to do with those skipped frames: `backfill` assigns them the first classified state; `leave_unassigned` leaves them out. |
 | **Covariance type** | full | Shape of each state's feature distribution (`full`, `diag`, `spherical`, `tied`). `full` is the most flexible; `diag` is a lighter, more stable choice when you have many features or few cells. |
 | **n_iter** | 200 | Maximum training iterations. Increase if the model reports it has not converged. |
@@ -132,7 +132,7 @@ Alongside the classified data, the run also saves the **full trained workflow** 
 <output_dir>/analysis/<cell_type>/behavioral_states/processing/hmm_behavioral_classification/hmm_state_deployment_<cell_type>.pkl
 ```
 
-This is the `.pkl` file you point **Apply existing behavioral state classification** (see *Two ways to run* above) at to classify new datasets with exactly the same, already-defined states — no need to retrain or re-choose features.
+This is the `.pkl` file you point **Apply existing behavioral state classification** (see *Train a new model, or reuse an existing one* above) at to classify new datasets with exactly the same, already-defined states — no need to retrain or re-choose features.
 
 ```{note}
 You can run State Clustering interactively with the button, or add it to the [Processing Queue](../../plugin_essentials/processing_queue) with the **+🛒** button next to it (the queue exposes it as **🔬 State Clustering**, with separate **Train** / **Apply State Classifier** queue steps for the apply-existing workflow).
@@ -447,7 +447,7 @@ The most important files there are:
 <output_dir>/analysis/<cell_type>/behavioral_states/processing/hmm_behavioral_classification/hmm_state_deployment_<cell_type>.pkl
 ```
 
-This is the file to **Browse…** to when applying an existing classification to new data (see *Two ways to run* above).
+This is the file to **Browse…** to when applying an existing classification to new data (see *Train a new model, or reuse an existing one* above).
 
 The five reports on the **Generate analysis and plots ▸** page are each saved as a PDF (the composition, feature-heatmap, and condition-comparison reports also write a CSV of the underlying values).
 

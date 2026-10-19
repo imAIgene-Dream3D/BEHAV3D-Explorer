@@ -133,6 +133,16 @@ def list_track_feature_candidates(output_dir, cell_type, track_adata=None):
         if col not in candidates and col not in _NON_FEATURE_COLS and not col.startswith("_"):
             candidates.append(col)
 
+    # Per-tracklet summary scalars (e.g. mean/max full-tracklet net displacement)
+    # computed once per track/tracklet directly on track_adata.obs -- an explicit
+    # allowlist via uns, not a blanket scan of obs (which also carries non-feature
+    # columns like ClusterID / medoid flags / position_t_min/max).
+    if track_adata is not None:
+        meta = track_adata.uns.get("dtai_trajectory_clustering", {}) or {}
+        for col in _as_list(meta.get("tracklet_summary_feature_cols")):
+            if col not in candidates and col in track_adata.obs.columns:
+                candidates.append(col)
+
     defaults = []
     if track_adata is not None:
         meta = track_adata.uns.get("dtai_trajectory_clustering", {}) or {}
@@ -202,18 +212,24 @@ def _load_timepoint_features(output_dir, cell_type, features, track_adata=None, 
     return out
 
 
-def compute_track_feature_means(track_adata, df_timepoints, features, *, cluster_key):
-    """One row per track (same order as ``track_adata.obs``): cluster + feature means."""
-    obs = track_adata.obs.copy()
+def _track_identity_frame(track_adata, cluster_key):
+    """One row per track (same order as ``track_adata.obs``): identifiers + cluster_key only."""
+    obs = track_adata.obs
     missing_ids = [c for c in ID_COLS if c not in obs.columns]
     if missing_ids:
         raise KeyError(f"Track model is missing identifier columns {missing_ids}.")
-    tracks = pd.DataFrame({
-        "_track_row": np.arange(len(obs)),
+    return pd.DataFrame({
         "sample_name": obs["sample_name"].astype(str).str.strip().to_numpy(),
         "TrackID": _track_id_key(obs["TrackID"]),
         cluster_key: obs[cluster_key].astype(str).to_numpy(),
     })
+
+
+def compute_track_feature_means(track_adata, df_timepoints, features, *, cluster_key):
+    """One row per track (same order as ``track_adata.obs``): cluster + feature means."""
+    obs = track_adata.obs
+    tracks = _track_identity_frame(track_adata, cluster_key)
+    tracks.insert(0, "_track_row", np.arange(len(obs)))
     has_window = "position_t_min" in obs.columns and "position_t_max" in obs.columns
     if has_window:
         tracks["_tmin"] = pd.to_numeric(obs["position_t_min"], errors="coerce").to_numpy()
@@ -364,10 +380,23 @@ def save_track_feature_heatmap(
     if outfolder is None:
         outfolder = _resolve_track_paths(output_dir, cell_type).outfolder / FEATURE_HEATMAP_SUBDIR
 
+    # Per-tracklet summary scalars (e.g. mean/max full-tracklet net displacement)
+    # are already one value per track/tracklet row on track_adata.obs -- used
+    # directly, not averaged from per-timepoint data like the rest of `features`.
+    meta = track_adata.uns.get("dtai_trajectory_clustering", {}) or {}
+    tracklet_summary_cols = set(_as_list(meta.get("tracklet_summary_feature_cols")))
+    track_level_features = [f for f in features if f in tracklet_summary_cols and f in track_adata.obs.columns]
+    timepoint_features = [f for f in features if f not in track_level_features]
+
     if verbose:
         _winfo("feature-heatmap", f"loading {len(features)} feature(s) for {track_adata.n_obs} tracks")
-    df_tp = _load_timepoint_features(output_dir, cell_type, features, track_adata=track_adata)
-    per_track = compute_track_feature_means(track_adata, df_tp, features, cluster_key=cluster_key)
+    if timepoint_features:
+        df_tp = _load_timepoint_features(output_dir, cell_type, timepoint_features, track_adata=track_adata)
+        per_track = compute_track_feature_means(track_adata, df_tp, timepoint_features, cluster_key=cluster_key)
+    else:
+        per_track = _track_identity_frame(track_adata, cluster_key)
+    for f in track_level_features:
+        per_track[f] = pd.to_numeric(track_adata.obs[f], errors="coerce").to_numpy()
     if int(per_track[features].notna().any(axis=1).sum()) == 0:
         raise ValueError("No timepoints matched the tracks of the clustering model (check sample_name / TrackID).")
 

@@ -124,6 +124,10 @@ def build_trajectory_feature_adata(
             time_col=TIME_COL,
             id_cols=ID_COLS,
             window_size=window_features_window,
+            # Trajectory clustering zero-fills a track's first (window_size - 1)
+            # timepoints instead of computing them over a shorter, partial window
+            # (unlike HMM state classification, which still uses "partial").
+            incomplete_window_policy="zero",
             verbose=verbose,
         )
         df = _merge_optional_window_features(df, df_window, join_cols=sort_cols)

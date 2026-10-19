@@ -225,11 +225,11 @@ Worked example: you have 6 organoid lines — 3 healthy, 3 tumor. Pick the line-
 
 ### Feature Heatmap
 
-Heatmap of trajectory clusters × features: each feature is averaged over every track's trajectory timepoints, then per cluster. The features the clustering used are preselected; add any other per-timepoint feature. Cell labels show the unscaled cluster mean.
+Heatmap of trajectory clusters × features: each feature is averaged over every track's trajectory timepoints, then per cluster. The features the clustering used are preselected; move any other per-timepoint feature across from **Available features**, and drag rows in **Selected features** to set the order they appear in the plot (top row = first). Cell labels show the unscaled cluster mean.
 
 | Control | Default | Meaning |
 |---|---|---|
-| **Features** | the clustering's own features | Multi-select list (Ctrl/Cmd-click for multiple); **Select used features** restores the clustering's own selection, **Select all** / **Clear** adjust it in bulk. |
+| **Available / Selected features** | the clustering's own features | Two lists: select rows in **Available** and click **Add ▼** (or double-click a row) to move them into **Selected**; **▲ Remove** (or double-click) sends them back. **Selected** is the plot's row order — drag rows to re-order. **Select used features** restores the clustering's own set, **Select all** / **Clear** fill or empty **Selected** in bulk. |
 | **Colour scaling** | z-score | `z-score`: each feature is standardized across all tracks, then averaged per cluster; 0 = the average track, red = higher, blue = lower. `min-max`: cluster means rescaled 0–1 per feature, showing which cluster is highest/lowest. |
 
 Click **▶ Create Feature Heatmap**. Output, under `analysis/<cell_type>/behavioral_trajectories/feature_heatmaps/`: `feature_heatmap.pdf`, `feature_heatmap_cluster_means.csv`, and `feature_heatmap_track_means.csv` (the per-track means the cluster means are built from).

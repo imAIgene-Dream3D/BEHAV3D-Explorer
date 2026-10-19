@@ -187,6 +187,49 @@ def _zscore_columns(X):
     return (X - mean) / std
 
 
+def _compute_tracklet_net_displacement_features(
+    obs,
+    groupby_cols,
+    *,
+    time_col="position_t",
+    coord_cols=("position_x", "position_y", "position_z"),
+):
+    """Straight-line distance from each group's own first timepoint.
+
+    For every ``groupby_cols`` group (a full track, or a tracklet when tracks have
+    been split into fixed-length windows), coordinates are shifted so the group's
+    first timepoint is the origin (0, 0, 0); the returned ``net_displacement`` is
+    the Euclidean distance of every later timepoint from that origin (0 at the
+    first timepoint, rising and falling as the group moves away from / back toward
+    its own start -- not a cumulative sum of step lengths), and ``net_displacement_sq``
+    is its square. Both arrays are aligned to ``obs``'s row order.
+    """
+    groupby_cols = [str(c) for c in list(groupby_cols)]
+    coord_cols = [str(c) for c in coord_cols]
+    missing = [c for c in coord_cols if c not in obs.columns]
+    if missing:
+        raise ValueError(
+            f"Missing coordinate columns {missing} in adata.obs; cannot compute "
+            "tracklet net displacement features."
+        )
+
+    n = len(obs)
+    net_disp = np.zeros(n, dtype=float)
+    net_disp_sq = np.zeros(n, dtype=float)
+
+    coords_all = obs[coord_cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    order = obs.sort_values(groupby_cols + [str(time_col)], kind="mergesort").index
+    for _, group_idx in obs.loc[order].groupby(groupby_cols, sort=False, observed=True).groups.items():
+        pos = obs.index.get_indexer(list(group_idx))
+        coords = coords_all[pos]
+        coords_rel = coords - coords[0]
+        sq = np.sum(coords_rel**2, axis=1)
+        net_disp[pos] = np.sqrt(sq)
+        net_disp_sq[pos] = sq
+
+    return net_disp, net_disp_sq
+
+
 def resolve_state_feature_matrix(adata, *, feature_cols=None, binary_cols=None, binary_weight=1.0):
     """Per-timepoint numeric matrix built from the features behind the behavioral states.
 
