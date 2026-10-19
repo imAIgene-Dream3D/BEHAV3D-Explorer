@@ -13,6 +13,7 @@ from .utils import (
 from behav3d.preprocessing import convert_input_files_to_zarr
 from behav3d.io.images import load_image, get_image_shape, get_image_dimension_order
 from behav3d.io.parameters import record_zarr_conversion, make_zarr_sample_record
+from behav3d.core.dimensionality import allowed_dim_orders, get_dimensionality
 #from behav3d.preprocessing.unmixing import visualize_unmix
 #from behav3d.preprocessing.unmixing.signal_unmixing import signal_unmixing
 
@@ -184,6 +185,7 @@ class DimOrderTable:
     PLACEHOLDER = "-- select --"
     DIM_ORDER_OPTIONS = DIM_ORDER_OPTIONS
     DEFAULT_ORDER = "TCZYX"
+    dimensionality = "3D"
 
     def __init__(
         self,
@@ -240,7 +242,9 @@ class DimOrderTable:
             self._status.value = f"<b>Metadata missing columns: {missing}</b>"
             return
         self._build_rows_from(df)
-        self._status.value = "<span style='color:green'>Metadata loaded ✅</span>"
+        self._status.value = (
+            f"<span style='color:green'>Metadata loaded ✅ ({self.dimensionality} experiment)</span>"
+        )
 
     def _on_refresh(self, _btn):
         df = getattr(self.metadata_loader, "metadata", None)
@@ -257,7 +261,9 @@ class DimOrderTable:
             return
 
         self._build_rows_from(df)
-        self._status.value = "<span style='color:green'>Metadata loaded ✅</span>"
+        self._status.value = (
+            f"<span style='color:green'>Metadata loaded ✅ ({self.dimensionality} experiment)</span>"
+        )
         
     def display(self):
         widgets.display(self.widget)
@@ -313,13 +319,21 @@ class DimOrderTable:
         if self.dim_col in df.columns:
             prefill = df[self.dim_col].astype(str).to_dict()
 
-        opts_with_placeholder = [self.PLACEHOLDER] + self.DIM_ORDER_OPTIONS
+        # Orders offered depend on the experiment mode (2D / 3D, read from
+        # the metadata 'dimensionality' column) and each image's ndim.
+        mode = get_dimensionality(df)
+        self.dimensionality = mode
 
         for idx, r in df.iterrows():
             sample = str(r[self.sample_col])
             path = r[self.path_col]
 
             probed_shape = self._probe_image_shape(path)
+            ndim = len(probed_shape.split("\u00d7")) if probed_shape[:1].isdigit() else None
+            options = allowed_dim_orders(mode, ndim) if ndim else allowed_dim_orders(mode)
+            if not options:
+                options = allowed_dim_orders(mode)
+            opts_with_placeholder = [self.PLACEHOLDER] + options
             sample_lbl = widgets.Label(sample, layout=widgets.Layout(width=self._width_sample, overflow="hidden"))
             shape_lbl  = widgets.Label(probed_shape, layout=widgets.Layout(width=self._width_shape, overflow="hidden"))
 
@@ -332,18 +346,18 @@ class DimOrderTable:
             default_val = None
             val_source = None
 
-            if detected_from_image is not None and detected_from_image in self.DIM_ORDER_OPTIONS:
+            if detected_from_image is not None and detected_from_image in options:
                 default_val = detected_from_image
                 val_source = "image"
             elif prefill is not None:
                 s = prefill.get(idx, None)
-                if isinstance(s, str) and s.upper() in self.DIM_ORDER_OPTIONS:
+                if isinstance(s, str) and s.upper() in options:
                     default_val = s.upper()
                     val_source = "csv"
 
             if default_val is not None:
                 dd = widgets.Dropdown(
-                    options=self.DIM_ORDER_OPTIONS,
+                    options=options,
                     value=default_val,
                     layout=widgets.Layout(width=self._width_order),
                 )
@@ -378,7 +392,8 @@ class DimOrderTable:
             self._selections[sample] = dd.value
             dd.observe(lambda ch, s=sample: self._on_dd_changed(s, ch), names='value')
 
-            self._rows.append({"sample": sample, "path": path, "shape_label": shape_lbl, "dd": dd})
+            self._rows.append({"sample": sample, "path": path, "shape_label": shape_lbl,
+                               "dd": dd, "options": options})
             row_boxes.append(widgets.HBox([sample_lbl, shape_lbl, dd, detected_lbl]))
 
         self._table_body.children = tuple(row_boxes)
@@ -394,7 +409,7 @@ class DimOrderTable:
                     if row["sample"] == sample_name:
                         dd = row["dd"]
                         if self.PLACEHOLDER in dd.options:
-                            dd.options = self.DIM_ORDER_OPTIONS
+                            dd.options = row.get("options") or self.DIM_ORDER_OPTIONS
                         break
 
             if self.auto_write:

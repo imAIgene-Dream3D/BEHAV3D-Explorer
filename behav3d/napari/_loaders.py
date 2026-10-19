@@ -33,6 +33,90 @@ def _noop(_msg: str) -> None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Axis helpers shared by every raw/label/track viewer loader
+# ---------------------------------------------------------------------------
+def _to_tczyx(img, dim_order: str):
+    """Return ``img`` as 5D TCZYX, or ``None`` when its layout is unclear.
+
+    Converted zarrs are already TCZYX. Other arrays are reordered by the
+    letters of ``dim_order`` (when it matches ``img.ndim``) and missing
+    T/C/Z axes are added as singletons.
+    """
+    order = str(dim_order or "").strip().upper() or "TCZYX"
+    if img.ndim == 5 and order == "TCZYX":
+        return img
+    if len(order) != img.ndim or len(set(order)) != len(order) or set(order) - set("TCZYX"):
+        return img if img.ndim == 5 else None
+    present = "".join(ax for ax in "TCZYX" if ax in order)
+    if present != order:
+        img = da.transpose(img, [order.index(ax) for ax in present])
+    index = tuple(slice(None) if ax in present else None for ax in "TCZYX")
+    return img[index]
+
+
+def iter_raw_channels(img, dim_order: str = "TCZYX", squeeze_z: bool = False):
+    """Yield ``(channel_index, array)`` for every channel of a raw image.
+
+    Each array is TZYX, or TYX when ``squeeze_z`` is set and the image has a
+    single Z plane (2D experiments are stored as TCZYX with Z=1). An image
+    whose layout cannot be worked out is yielded whole as channel 0.
+    """
+    tczyx = _to_tczyx(img, dim_order)
+    if tczyx is None:
+        yield 0, img
+        return
+    for c in range(int(tczyx.shape[1])):
+        ch = tczyx[:, c]
+        if squeeze_z and ch.shape[1] == 1:
+            ch = ch[:, 0]
+        yield c, ch
+
+
+def squeeze_label_z(labels):
+    """TZYX labels with a single Z plane -> TYX (2D experiments)."""
+    if getattr(labels, "ndim", 0) == 4 and labels.shape[1] == 1:
+        return labels[:, 0]
+    return labels
+
+
+def tracks_layer_data(tracks_df: pd.DataFrame, is_2d: bool = False):
+    """``(N, 4|5)`` array for ``viewer.add_tracks`` from a tracks CSV.
+
+    2D experiments drop ``pixel_position_z`` (always 0) so the tracks line
+    up with TYX image and label layers.
+    """
+    cols = ["TrackID", "position_t", "pixel_position_y", "pixel_position_x"]
+    if not is_2d and "pixel_position_z" in tracks_df.columns:
+        cols.insert(2, "pixel_position_z")
+    return tracks_df[cols].values
+
+
+def configure_viewer_for_dimensionality(viewer, is_2d: bool) -> None:
+    """2D experiments: stay in 2D display and label the axes t/y/x.
+
+    The napari 2D/3D view button is disabled for 2D data, where the 3D
+    view would render time as depth. Best effort: the button lives in
+    private napari Qt internals.
+    """
+    try:
+        if is_2d:
+            viewer.dims.ndisplay = 2
+            if viewer.dims.ndim == 3:
+                viewer.dims.axis_labels = ("t", "y", "x")
+    except Exception:
+        pass
+    try:
+        qt_viewer = getattr(viewer.window, "_qt_viewer", None) or getattr(viewer.window, "qt_viewer", None)
+        button = qt_viewer.viewerButtons.ndisplayButton
+        button.setEnabled(not is_2d)
+        button.setToolTip(
+            "3D view is disabled for 2D experiments" if is_2d else "Toggle 2D / 3D view"
+        )
+    except Exception:
+        pass
+
+
 def detect_cell_type_columns(row: pd.Series) -> Dict[str, str]:
     """Return ``{cell_type_name: prefix}`` for all detected cell types in a row.
 
@@ -154,18 +238,11 @@ def load_raw_into_viewer(
         return []
 
     dim_order = str(row.get("dimension_order", "TCZYX")).strip() or "TCZYX"
-    if dim_order != "TCZYX" and len(dim_order) == 5:
-        try:
-            axes = [dim_order.index(d) for d in "TCZYX"]
-            dask_img = da.transpose(dask_img, axes)
-        except ValueError:
-            pass
-
-    n_channels = dask_img.shape[1] if dask_img.ndim >= 5 else 1
     saved_channels = display_settings or {}
     added: List[str] = []
-    for c in range(n_channels):
-        ch_data = dask_img[:, c, :, :, :] if dask_img.ndim >= 5 else dask_img
+    # squeeze_z stays off: the manual-correction editor that uses these
+    # loaders still works on TZYX labels (2D editing is not supported yet).
+    for c, ch_data in iter_raw_channels(dask_img, dim_order, squeeze_z=False):
         saved = saved_channels.get(c) or saved_channels.get(str(c))
         color = (saved["colormap"] if saved and "colormap" in saved
                  else _CHANNEL_COLORS[c % len(_CHANNEL_COLORS)])

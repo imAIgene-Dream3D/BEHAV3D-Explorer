@@ -1,6 +1,7 @@
 import json
 import tempfile
 import numpy as np
+from behav3d.preprocessing.tracking._positions import linking_position_columns
 import pandas as pd
 from pathlib import Path
 from skimage.measure import regionprops_table
@@ -544,11 +545,14 @@ def btrack_image(
             x_coords = [o.x for o in objects]
             y_coords = [o.y for o in objects]
             z_coords = [o.z for o in objects]
-            tracker.volume = (
+            volume = (
                 (min(x_coords) - volume_padding, max(x_coords) + volume_padding),
                 (min(y_coords) - volume_padding, max(y_coords) + volume_padding),
-                (min(z_coords) - volume_padding, max(z_coords) + volume_padding),
             )
+            if len(linking_position_columns(df_centroids)) == 3:
+                volume += ((min(z_coords) - volume_padding, max(z_coords) + volume_padding),)
+            # else: 2D experiment (z == 0 everywhere) -> btrack's 2-D mode.
+            tracker.volume = volume
 
             # Set update method
             if update_method.upper() == "APPROXIMATE":

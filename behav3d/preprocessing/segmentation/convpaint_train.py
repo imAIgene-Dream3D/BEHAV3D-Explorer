@@ -41,6 +41,7 @@ import traceback
 from pathlib import Path
 
 import numpy as np
+from behav3d.core.dimensionality import is_2d
 import napari
 from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
@@ -276,6 +277,21 @@ def _derive_convpaint_input_channels(metadata, n_channels):
     if not unified_channels:
         unified_channels = all_channels
     return unified_channels, [dead_channel]
+
+
+def _training_planes(images, annotations):
+    """2D experiments (Z=1): hand ConvPaint ``(C, Y, X)`` images and ``(Y, X)``
+    annotations, the same per-plane input :func:`segment_per_z` predicts on.
+    3D frames pass through unchanged."""
+    out_images, out_annots = [], []
+    for img, ann in zip(images, annotations):
+        img = np.asarray(img)
+        ann = np.asarray(ann)
+        if img.ndim == 4 and img.shape[1] == 1 and ann.ndim == 3 and ann.shape[0] == 1:
+            img, ann = img[:, 0], ann[0]
+        out_images.append(img)
+        out_annots.append(ann)
+    return out_images, out_annots
 
 
 def _slice_image_channels(image, channel_indices):
@@ -897,6 +913,7 @@ class CellTypeConvPaintTab(QWidget):
             xy_um=self._pixel_sizes.get("xy_um"),
             z_um=self._pixel_sizes.get("z_um"),
             default_physical=self._units_physical,
+            is_2d=self._pixel_sizes.get("is_2d"),
         )
         self._unit_mgr.switch.toggled.connect(self._on_units_toggled)
         layout.addWidget(self._unit_mgr.header_row("Units:"))
@@ -2104,7 +2121,7 @@ class ConvPaintTrainingWidget(QWidget):
                 f"({len(active_cell_types)} cell types: {active_cell_types})…"
             )
             model.train(
-                train_images, train_annots,
+                *_training_planes(train_images, train_annots),
                 fe_use_device=fe_device, clf_use_device=fe_device,
             )
 
@@ -2247,7 +2264,7 @@ class ConvPaintTrainingWidget(QWidget):
                         except Exception:
                             pass  # older ConvpaintModel may not support all params
                         d_model.train(
-                            train_d_images, train_d_annots,
+                            *_training_planes(train_d_images, train_d_annots),
                             fe_use_device=fe_device, clf_use_device=fe_device,
                         )
                         mp = _death_model_path(pixel_class_outdir)
@@ -2451,7 +2468,7 @@ class ConvPaintTrainingWidget(QWidget):
         try:
             model, fe_device = self._build_model()
             model.train(
-                train_images, train_annots,
+                *_training_planes(train_images, train_annots),
                 fe_use_device=fe_device, clf_use_device=fe_device,
             )
 
@@ -2593,7 +2610,7 @@ class ConvPaintTrainingWidget(QWidget):
         try:
             model, fe_device = self._build_model()
             model.train(
-                train_images, train_annots,
+                *_training_planes(train_images, train_annots),
                 fe_use_device=fe_device, clf_use_device=fe_device,
             )
             mp = _death_model_path(self.pixel_class_outdir)
@@ -2938,6 +2955,7 @@ def train_pixel_classifier_convpaint(
     pixel_sizes = {
         "xy_um": ip.get("pixel_size_xy") or ip.get("pixel_size_xy_um") or _xy_from_md,
         "z_um": ip.get("pixel_size_z") or ip.get("pixel_size_z_um") or _z_from_md,
+        "is_2d": is_2d(metadata) if metadata is not None else False,
     }
 
     # Build (or rebuild) the label map for the active cell-type set.

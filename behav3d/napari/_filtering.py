@@ -30,6 +30,7 @@ from qtpy.QtCore import Qt, Signal
 from behav3d.core.run_plan import ALL_SAMPLES, Action, RunPlan, scan_cell_type_files
 from behav3d.core.qt_help import HelpButton, make_help_row, reset_scroll_on_page_change
 from behav3d.napari._units import UnitGroupManager, TimeUnitGroupManager
+from behav3d.core.dimensionality import is_2d
 
 logger = logging.getLogger(__name__)
 from behav3d.napari._results_panel import (
@@ -429,17 +430,26 @@ class CellTypeFilterPanel(QWidget):
         _toggle_max(None)
 
         # ── Min size at first timepoint filter ───────────────────────────
+        experiment_is_2d = is_2d(self.metadata_loader)
         size_row = QHBoxLayout()
         self.check_filter_min_size = QCheckBox("Filter by minimal size at first timepoint")
         self.check_filter_min_size.setChecked(bool(cfg.get("filter_min_size_t1", False)))
         size_row.addWidget(self.check_filter_min_size)
+        size_help = (
+            "'Min size' is a pixel count (the cell's area in this 2D "
+            "experiment), so it is compared against the 'nr_pixels' column "
+            "when available, otherwise 'area' (physical µm²) is used as a "
+            "fallback."
+            if experiment_is_2d else
+            "'Min size' is a voxel count, so it is compared against "
+            "the 'nr_pixels' column when available, otherwise 'volume' "
+            "(physical um³) is used as a fallback."
+        )
         size_row.addWidget(HelpButton(
             "Filter By Minimal Size At T1",
             "When enabled, a track is removed entirely if the cell's size "
             "at its first timepoint (relative_time == 1) is below 'Min "
-            "size'. 'Min size' is a voxel count, so it is compared against "
-            "the 'nr_pixels' column when available, otherwise 'volume' "
-            "(physical um³) is used as a fallback.\n\n"
+            "size'. " + size_help + "\n\n"
             "Runs after the 'Max timepoints' trim but before the 'Min "
             "length' and 'Max length' filters, so it removes small/spurious "
             "objects (e.g. segmentation fragments) before track-length "
@@ -454,9 +464,11 @@ class CellTypeFilterPanel(QWidget):
         self.spin_min_size_t1.setRange(1, 1000000000)
         self.spin_min_size_t1.setValue(int(cfg.get("min_size_t1", 1000)))
         self.spin_min_size_t1.setMaximumWidth(110)
-        # Physical(µm³)/voxel unit toggle for the size filter (native = voxels).
+        # Physical(µm³)/voxel unit toggle for the size filter (native = voxels);
+        # µm²/px in a 2D experiment, where the size is an area.
         self._size_unit_mgr = UnitGroupManager(
-            self.metadata_loader.metadata, default_physical=True
+            self.metadata_loader.metadata, default_physical=True,
+            is_2d=experiment_is_2d,
         )
         size_form = QFormLayout()
         size_form.setContentsMargins(20, 0, 0, 0)

@@ -35,6 +35,7 @@ from behav3d.core.run_plan import RunPlan, Status, scan_feature_items
 from behav3d.core.qt_help import HelpButton, make_help_row, reset_scroll_on_page_change
 from behav3d.napari._analysis import CollapsibleSection
 from behav3d.napari._units import UnitGroupManager
+from behav3d.core.dimensionality import is_2d
 from behav3d.napari._results_panel import (
     ResultsPanel,
     notify_results_changed,
@@ -884,6 +885,7 @@ class CellTypeFeaturePanel(QWidget):
         # below only changes how the value is *displayed*.
         self._contact_unit_mgr = UnitGroupManager(
             self.metadata_loader.metadata, default_physical=True,
+            is_2d=is_2d(self.metadata_loader),
         )
         contact_unit_row = QHBoxLayout()
         contact_unit_row.setSpacing(4)
@@ -940,7 +942,8 @@ class CellTypeFeaturePanel(QWidget):
                 "Per-timepoint measure of how much of this immune cell's surface\n"
                 "is embedded in an organoid, not a voxel count inside the mask.\n\n"
                 "'Surface' pixels are those within 2 µm of the immune cell's\n"
-                "segment boundary. Of those, the fraction that also lies within\n"
+                "segment boundary (in a 2D experiment: a ring around the\n"
+                "cell outline instead of a 3D shell). Of those, the fraction that also lies within\n"
                 "the Contact Threshold distance of an organoid segment gives\n"
                 "'{organoid}_invasiveness_perc' (0-100%).\n\n"
                 "'{organoid}_invasiveness' (bool) is True when that percentage is\n"
@@ -973,6 +976,13 @@ class CellTypeFeaturePanel(QWidget):
                 # Contact was already added above; invasiveness is rendered
                 # inline within contact_row (or skipped for non-immune types).
                 continue
+            elif f == "morphology" and f in self.feature_checks:
+                morph_row = QHBoxLayout()
+                morph_row.setSpacing(6)
+                morph_row.addWidget(self.feature_checks[f])
+                morph_row.addWidget(self._morphology_help_button())
+                morph_row.addStretch()
+                feat_lay.addLayout(morph_row)
             elif f in self.feature_checks:
                 feat_lay.addWidget(self.feature_checks[f])
 
@@ -1893,6 +1903,38 @@ class CellTypeFeaturePanel(QWidget):
             indeterminate=True,
         )
 
+    def _morphology_help_button(self):
+        """Help listing the morphology columns of this experiment's mode."""
+        if is_2d(self.metadata_loader):
+            return HelpButton(
+                "Morphology (2D experiment)",
+                "Shape of each segment on its single image plane. Lengths in "
+                "µm, areas in µm².\n\n"
+                "- nr_pixels, area, bbox_area, convex_area\n"
+                "- perimeter, equivalent_diameter (circle of equal area)\n"
+                "- circularity: 4π·area / perimeter² (1 = disk)\n"
+                "- eccentricity, orientation (radians): from the ellipse with "
+                "the same second moments\n"
+                "- solidity: area / convex_area\n"
+                "- major/minor_axis_length, elongation (major/minor), extent "
+                "(area / principal-axis box area)\n"
+                "- border_touching_segment: touches the X/Y image border\n\n"
+                "3D-only features (volume, surface_area, sphericity, "
+                "oblateness, ...) are not computed in 2D. Without Morphology "
+                "only nr_pixels and area are computed.",
+            )
+        return HelpButton(
+            "Morphology (3D experiment)",
+            "Shape of each segment in 3D. Lengths in µm, volumes in µm³.\n\n"
+            "- nr_pixels, volume, bbox_volume, convex_volume, solidity\n"
+            "- surface_area, sphericity, surface_to_volume_ratio\n"
+            "- major/minor_axis_length, axis1-3_length, elongation, extent, "
+            "oblateness, prolateness, orientation_vector\n"
+            "- equivalent_diameter\n"
+            "- border_touching_segment: touches any image border\n\n"
+            "Without Morphology only nr_pixels and volume are computed.",
+        )
+
     def _run_feature_extraction_for(self, cell_type: str, overwrite: bool = False,
                                     params: dict = None, progress_cb=None, plan=None):
         """Run feature extraction for a single cell type.
@@ -1922,6 +1964,7 @@ class CellTypeFeaturePanel(QWidget):
             overwrite=overwrite,
             progress_cb=progress_cb,
             plan=plan,
+            is_2d=is_2d(self.metadata_loader),
         )
 
     def _run_death_only_for(self, cell_type: str, params: dict = None):

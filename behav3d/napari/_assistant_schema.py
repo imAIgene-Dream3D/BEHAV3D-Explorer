@@ -36,6 +36,7 @@ STEP_MAP = {
     "seed": "general",
     "paths": "data_preparation",
     "dim_order": "data_preparation",
+    "dimensionality": "data_preparation",
     "signal_unmixing": "preprocessing",
     "pixel_classifier": "segmentation",
     "cellpose": "segmentation",

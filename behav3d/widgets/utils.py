@@ -72,6 +72,9 @@ _DEFAULT_CONFIG = {
     # cell type and iterated as such, and the window must be identical
     # for every cell type or cross-cell-type analyses break silently.
     "timepoint_range": {"enabled": False, "start": 0, "end": 0},
+    # Experiment dimensionality, "3D" (default) or "2D"; see
+    # behav3d.core.dimensionality. Mirrored in the metadata CSV column.
+    "dimensionality": "3D",
     "seed": 42,
     "paths": {
         "metadata_csv": "",
@@ -481,12 +484,28 @@ _DEFAULT_CONFIG = {
     },
 }
 
+MORPHOLOGY_FEATURES_3D = [
+    "nr_pixels", "volume", "bbox_volume", "extent", "solidity",
+    "equivalent_diameter", "major_axis_length", "minor_axis_length",
+    "elongation", "oblateness", "prolateness",
+    "surface_area", "sphericity", "convex_volume", "surface_to_volume_ratio",
+]
+
+# Morphology columns of a 2D experiment (see timepoint_features
+# ``_calculate_morphology_2d_single_timepoint``).
+MORPHOLOGY_FEATURES_2D = [
+    "nr_pixels", "area", "bbox_area", "extent", "solidity",
+    "equivalent_diameter", "major_axis_length", "minor_axis_length",
+    "elongation", "eccentricity", "orientation",
+    "perimeter", "circularity", "convex_area",
+]
+
 behav3d_calculated_features = {
-    "morphology": [
-        "nr_pixels", "volume", "bbox_volume", "extent", "solidity",
-        "equivalent_diameter", "major_axis_length", "minor_axis_length",
-        "elongation", "oblateness", "prolateness",
-        "surface_area", "sphericity", "convex_volume", "surface_to_volume_ratio",
+    # Patterns are matched against the columns actually present, so the 2D
+    # names only ever match 2D data. Use calculated_features_for() when the
+    # experiment's mode is known.
+    "morphology": MORPHOLOGY_FEATURES_3D + [
+        f for f in MORPHOLOGY_FEATURES_2D if f not in MORPHOLOGY_FEATURES_3D
     ],
     "movement": [
         "displacement", "cumulative_displacement", "displacement_from_origin",
@@ -510,6 +529,20 @@ behav3d_calculated_features = {
         "is_active_killing", "killing_efficiency", "death_signal_increase_*tp",
     ],
 }
+
+
+def calculated_features_for(source=None):
+    """``behav3d_calculated_features`` with the morphology group of one mode.
+
+    ``source`` is anything ``behav3d.core.dimensionality.get_dimensionality``
+    accepts (metadata loader, params dict, metadata DataFrame/row, "2D"/"3D");
+    without a 2D flag the 3D names are used.
+    """
+    from behav3d.core.dimensionality import is_2d
+
+    groups = deepcopy(behav3d_calculated_features)
+    groups["morphology"] = list(MORPHOLOGY_FEATURES_2D if is_2d(source) else MORPHOLOGY_FEATURES_3D)
+    return groups
 
 
 def excluded_non_behavior_columns(cols, metadata=None):

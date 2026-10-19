@@ -36,6 +36,7 @@ from behav3d.core.metadata import (
     has_dead_channel,
 )
 from behav3d.core.run_plan import Action, resolve_action
+from behav3d.preprocessing.segmentation import single_plane
 from behav3d.preprocessing.segmentation.segment_journal import (
     file_fingerprint,
     journal_path,
@@ -53,6 +54,13 @@ from behav3d.preprocessing.segmentation.segment_journal import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _with_z(prediction, frame):
+    """Prediction of a single-plane ``(C, 1, Y, X)`` frame -> ``(1, Y, X)``."""
+    if prediction.ndim == 2 and getattr(frame, "ndim", 0) == 4 and frame.shape[1] == 1:
+        return prediction[None]
+    return prediction
+
 
 def _read_classifier_header_value(opencl_path, key, default=None):
     """Read a single APOC metadata value from the header of a trained .cl file."""
@@ -719,7 +727,8 @@ def run_apoc_segmentation(
                             if "channel" in str(_e).lower():
                                 raise
                     indices = clf_channels[ct] or [0]
-                    imgs = [t_img[i_ch] for i_ch in indices]
+                    # 2D experiment (Z=1): classify (Y, X) planes, as trained.
+                    imgs = [single_plane(t_img[i_ch]) for i_ch in indices]
                     imgs_to_pass = imgs[0] if len(imgs) == 1 else imgs
 
                     # Resolve effective strategy: per-cell-type override takes precedence when provided
@@ -737,9 +746,9 @@ def run_apoc_segmentation(
                         if not only_segment:
                             _t0 = time.time()
                             prob_clf = _get_probability_classifier(classifiers[ct])
-                            prob_map = np.asarray(
+                            prob_map = _with_z(np.asarray(
                                 prob_clf.predict(image=imgs_to_pass)
-                            ).astype(np.float32)
+                            ).astype(np.float32), t_img)
                             if _diag: tqdm.write(f"    ⏱ {ct} predict (prob): {time.time()-_t0:.2f}s  range=[{prob_map.min():.3f}, {prob_map.max():.3f}]")
 
                             _t0 = time.time()
@@ -811,7 +820,7 @@ def run_apoc_segmentation(
                         )
                         _diag = (i == 0)  # print timings/params on first timepoint only
                         if not only_segment:
-                            seg_out = np.asarray(classifiers[ct].predict(image=imgs_to_pass)).astype(np.uint16)
+                            seg_out = _with_z(np.asarray(classifiers[ct].predict(image=imgs_to_pass)).astype(np.uint16), t_img)
                             mask_out = (seg_out > 0).astype(np.uint16)
                             zarr_masks[ct][t] = mask_out
                         else:
@@ -849,7 +858,7 @@ def run_apoc_segmentation(
                         if i == 0:
                             tqdm.write(f"    ⚙ {ct}: Direct APOC strategy — no postprocessing parameters applied")
                         if not only_segment:
-                            seg_out = np.asarray(classifiers[ct].predict(image=imgs_to_pass)).astype(np.uint16)
+                            seg_out = _with_z(np.asarray(classifiers[ct].predict(image=imgs_to_pass)).astype(np.uint16), t_img)
                             mask_out = (seg_out > 0).astype(np.uint16)
                             zarr_masks[ct][t] = mask_out
                         else:
@@ -883,9 +892,9 @@ def run_apoc_segmentation(
                                 if "channel" in str(_e).lower():
                                     raise
                         indices = death_channels or [0]
-                        imgs = [t_img[i_ch] for i_ch in indices]
+                        imgs = [single_plane(t_img[i_ch]) for i_ch in indices]
                         imgs_to_pass = imgs[0] if len(imgs) == 1 else imgs
-                        death_mask = (np.asarray(clf_death.predict(image=imgs_to_pass)) > 0).astype(np.uint16)
+                        death_mask = _with_z((np.asarray(clf_death.predict(image=imgs_to_pass)) > 0).astype(np.uint16), t_img)
                         zarr_death[t] = death_mask
                         mark_done(death_journal, journal_path(death_path), t)
 

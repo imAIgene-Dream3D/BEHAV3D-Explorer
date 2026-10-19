@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+from behav3d.preprocessing.tracking._positions import linking_position_columns
 from pathlib import Path
 from skimage.measure import regionprops_table
 from laptrack import LapTrack
@@ -77,7 +78,7 @@ def laptrack_image(
     
     df_tracks, df_splits, df_merges = laptracker.predict_dataframe(
         df_centroids.copy(),
-        coordinate_cols=["position_z", "position_y", "position_x"],
+        coordinate_cols=linking_position_columns(df_centroids),
         frame_col="position_t",
         only_coordinate_cols=False,
     )

@@ -65,7 +65,15 @@ def _safe(fn, default=None):
         return default
 
 
-_DIMENSION_ORDERS = {"TCZYX", "TZCYX", "ZCTYX", "ZTCYX", "CZTYX", "CTZYX"}
+def _dimension_orders(mode) -> set:
+    """Orders a user may enter for an experiment in ``mode`` (2D / 3D)."""
+    from behav3d.core.dimensionality import DIM_2D, DIM_3D, allowed_dim_orders
+
+    orders = set(allowed_dim_orders(mode))
+    if mode == DIM_2D:
+        # LIF/IMS/CZI report 2D images as 5D with Z=1.
+        orders |= set(allowed_dim_orders(DIM_3D, 5))
+    return orders
 _RAW_IMAGE_SUFFIXES = (".zarr", ".zarr.zip", ".czi", ".lif", ".liff",
                        ".tif", ".tiff", ".ims", ".h5")
 _EXPERIMENT_NOTE_PATTERNS = (
@@ -435,10 +443,20 @@ def validate_metadata_records(records: list[dict]) -> list[dict]:
         issues.append({"row": row, "field": field, "severity": severity,
                        "message": message})
 
-    required = (
-        "sample_name", "exp_nr", "well", "raw_image_path",
-        "pixel_distance_xy", "pixel_distance_z", "distance_unit",
-        "time_interval", "time_unit",
+    from behav3d.core.dimensionality import DIM_2D, get_dimensionality
+
+    mode = get_dimensionality(next(
+        (r for r in records if isinstance(r, dict) and r.get("dimensionality")), None
+    ))
+    dimension_orders = _dimension_orders(mode)
+    required = tuple(
+        field for field in (
+            "sample_name", "exp_nr", "well", "raw_image_path",
+            "pixel_distance_xy", "pixel_distance_z", "distance_unit",
+            "time_interval", "time_unit",
+        )
+        # 2D experiments have no Z spacing (stored as 1.0).
+        if not (mode == DIM_2D and field == "pixel_distance_z")
     )
     for index, record in enumerate(records):
         sample = record.get("sample_name") or f"row {index + 1}"
@@ -498,9 +516,10 @@ def validate_metadata_records(records: list[dict]) -> list[dict]:
                     f"{sample}: the raw image path does not exist on this machine.")
 
         order = str(record.get("dimension_order") or "").strip().upper()
-        if order and order not in _DIMENSION_ORDERS:
+        if order and order not in dimension_orders:
             add(index, "dimension_order", "error",
-                f"{sample}: dimension order must be one of {', '.join(sorted(_DIMENSION_ORDERS))}.")
+                f"{sample}: for a {mode} experiment the dimension order must be one of "
+                f"{', '.join(sorted(dimension_orders))}.")
         for field in ("pixel_distance_xy", "pixel_distance_z", "time_interval"):
             value = record.get(field)
             if value is None or value == "":
@@ -744,6 +763,8 @@ def _metadata_builder_state(dp) -> dict:
                 "cell_types": cell_types,
             })
             record = dict(basic)
+            # Experiment mode from the master toggle (decides valid orders).
+            record["dimensionality"] = getattr(dp, "dimensionality", None)
             if "number" in dead:
                 record["dead_channel"] = dead["number"]
             if "mask_path" in dead:

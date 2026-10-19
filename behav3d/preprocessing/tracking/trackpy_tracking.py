@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 import numpy as np
+from behav3d.preprocessing.tracking._positions import linking_position_columns
 import pandas as pd
 import shutil
 from skimage.measure import regionprops, regionprops_table
@@ -146,7 +147,7 @@ def run_trackpy_tracking(
         memory=memory, 
         adaptive_stop=adaptive_stop, 
         adaptive_step=adaptive_step,
-        pos_columns=['position_z','position_y','position_x'],
+        pos_columns=linking_position_columns(df_centroids),
         t_column='position_t'
         )
     df_tracks=df_tracks.rename(columns={'particle':'track_id'})
@@ -321,7 +322,7 @@ def run_trackpy_tracking_generic(
                         memory=memory,
                         adaptive_stop=adaptive_stop,
                         adaptive_step=adaptive_step,
-                        pos_columns=['position_z', 'position_y', 'position_x'],
+                        pos_columns=linking_position_columns(df_centroids),
                         t_column='position_t',
                     )
                 except SubnetOversizeException as e:
@@ -337,7 +338,7 @@ def run_trackpy_tracking_generic(
                         memory=memory,
                         adaptive_stop=adaptive_stop,
                         adaptive_step=adaptive_step,
-                        pos_columns=['position_z', 'position_y', 'position_x'],
+                        pos_columns=linking_position_columns(df_centroids),
                         t_column='position_t',
                         link_strategy='recursive'
                     )

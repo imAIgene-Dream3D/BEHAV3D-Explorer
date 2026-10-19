@@ -16,6 +16,13 @@ from behav3d.core.metadata import (
     detect_immune_cell_types_from_metadata,
     detect_other_cell_types_from_metadata
 )
+from behav3d.core.dimensionality import (
+    DIM_2D,
+    DIM_3D,
+    DIMENSIONALITY_KEY,
+    PIXEL_DISTANCE_Z_2D,
+    get_dimensionality,
+)
 
 from traitlets import Bool
 from copy import deepcopy
@@ -73,6 +80,19 @@ class MetadataBuilder(widgets.VBox):
             description='Number of samples*:',
             style={'description_width': '150px'}
         )
+
+        # Experiment-wide master switch (see behav3d.core.dimensionality).
+        self.dimensionality_toggle = widgets.ToggleButtons(
+            options=[('3D  (TZYX / TCZYX)', DIM_3D), ('2D  (TYX / TCYX)', DIM_2D)],
+            value=DIM_3D,
+            description='Experiment*:',
+            style={'description_width': '150px'},
+            tooltips=[
+                '3D time-lapse: raw images TZYX (single channel) or TCZYX',
+                '2D time-lapse: raw images TYX (single channel) or TCYX; Pixel z is not used',
+            ],
+        )
+        self.dimensionality_toggle.observe(self._on_dimensionality_change, names='value')
         
         self.btn_load_csv = widgets.Button(
             description='Load Existing CSV',
@@ -94,11 +114,27 @@ class MetadataBuilder(widgets.VBox):
         self.children = [
             header,
             instructions,
+            self.dimensionality_toggle,
             widgets.HBox([self.n_samples_input, self.btn_load_csv]),
             self.btn_configure,
             self.main_container
         ]
     
+    def _on_dimensionality_change(self, change=None):
+        """Hide Pixel z in 2D and adapt the dimension-order hint."""
+        for form in self.sample_forms:
+            self._apply_dimensionality_to_form(form)
+
+    def _apply_dimensionality_to_form(self, form):
+        is_2d = self.dimensionality_toggle.value == DIM_2D
+        basic = form.get('basic', {})
+        if 'pixel_distance_z' in basic:
+            basic['pixel_distance_z'].layout.display = 'none' if is_2d else None
+        if 'dimension_order' in basic:
+            basic['dimension_order'].placeholder = (
+                'Optional - e.g., TCYX or TYX' if is_2d else 'Optional - e.g., TCZYX or TZYX'
+            )
+
     def _on_load_csv(self, btn):
         """Load existing CSV and populate the form"""
         if self.output_dir_picker is None:
@@ -125,6 +161,7 @@ class MetadataBuilder(widgets.VBox):
     def _populate_from_dataframe(self, df):
         """Populate the form from an existing DataFrame"""
         self.loaded_df = df.copy()
+        self.dimensionality_toggle.value = get_dimensionality(df)
         
         organoid_types = detect_organoid_types_from_metadata(df)
         immune_types = detect_immune_cell_types_from_metadata(df)
@@ -367,6 +404,7 @@ class MetadataBuilder(widgets.VBox):
         
         for i in range(n_samples):
             sample_form = self._create_sample_form(i)
+            self._apply_dimensionality_to_form(sample_form)
             self.sample_forms.append(sample_form)
             form_widgets.append(sample_form['widget'])
         
@@ -748,6 +786,11 @@ class MetadataBuilder(widgets.VBox):
             # Save basic fields
             for field_name, widget in form['basic'].items():
                 row[field_name] = widget.value
+
+            # Experiment mode; 2D has no Z spacing.
+            row[DIMENSIONALITY_KEY] = self.dimensionality_toggle.value
+            if self.dimensionality_toggle.value == DIM_2D:
+                row['pixel_distance_z'] = PIXEL_DISTANCE_Z_2D
             
             # Save dead channel fields (only if dead channel is included)
             if self.include_dead_channel:
@@ -791,7 +834,7 @@ class MetadataBuilder(widgets.VBox):
         
         # 1. Basic columns first
         basic_order = ['sample_name', 'exp_nr', 'well', 'raw_image_path', 'dimension_order',
-                       'pixel_distance_xy', 'pixel_distance_z', 'distance_unit', 
+                       DIMENSIONALITY_KEY, 'pixel_distance_xy', 'pixel_distance_z', 'distance_unit', 
                        'time_interval', 'time_unit']
         for col in basic_order:
             if col in df.columns:
@@ -832,6 +875,11 @@ class MetadataBuilder(widgets.VBox):
         
         csv_path = output_dir / 'metadata.csv'
         df.to_csv(csv_path, index=False)
+
+        # Keep an existing parameters file in sync with the chosen mode.
+        from behav3d.io.parameters import params_path_for, save_dimensionality
+        if params_path_for(output_dir).exists():
+            save_dimensionality(output_dir, self.dimensionality_toggle.value)
         
         with self.save_output:
             self.save_output.clear_output()

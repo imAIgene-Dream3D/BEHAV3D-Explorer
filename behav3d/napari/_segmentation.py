@@ -47,6 +47,44 @@ import joblib
 
 from behav3d.core.utils import convert_distance
 from behav3d.napari._units import UnitGroupManager
+from behav3d.core.dimensionality import is_2d as _is_2d_experiment
+
+
+def _item_contains(item, widget) -> bool:
+    if item is None:
+        return False
+    w = item.widget()
+    if w is not None:
+        return w is widget or w.isAncestorOf(widget)
+    lay = item.layout()
+    if lay is not None:
+        return any(_item_contains(lay.itemAt(i), widget) for i in range(lay.count()))
+    return False
+
+
+def _set_item_visible(item, visible: bool) -> None:
+    if item is None:
+        return
+    if item.widget() is not None:
+        item.widget().setVisible(visible)
+    elif item.layout() is not None:
+        lay = item.layout()
+        for i in range(lay.count()):
+            _set_item_visible(lay.itemAt(i), visible)
+
+
+def set_form_row_visible(form, widget, visible: bool) -> None:
+    """Show/hide the whole QFormLayout row that holds ``widget``."""
+    roles = (QFormLayout.LabelRole, QFormLayout.FieldRole, QFormLayout.SpanningRole)
+    for row in range(form.rowCount()):
+        if any(_item_contains(form.itemAt(row, role), widget) for role in roles):
+            if hasattr(form, "setRowVisible"):
+                form.setRowVisible(row, visible)
+            else:
+                for role in roles:
+                    _set_item_visible(form.itemAt(row, role), visible)
+            return
+    widget.setVisible(visible)
 from behav3d.napari._analysis import CollapsibleSection
 from behav3d.io.images import load_image, get_image_shape, save_as_zarr, append_to_zarr, load_zarr, convert_label_file_to_zarr
 from behav3d.preprocessing import zeropad_image_to_match_shape
@@ -3682,6 +3720,7 @@ class CellposeSAMWidget(QWidget):
 
         set_form_widget = QWidget()
         set_form = QFormLayout()
+        self._sam_set_form = set_form
         set_form.setContentsMargins(0, 0, 0, 0)
         set_form_widget.setLayout(set_form)
         set_outer.addWidget(set_form_widget)
@@ -3816,6 +3855,7 @@ class CellposeSAMWidget(QWidget):
         adv_scroll.setMaximumHeight(280)
         adv_content = QWidget()
         adv_form = QFormLayout()
+        self._sam_adv_form = adv_form
         adv_content.setLayout(adv_form)
         adv_scroll.setWidget(adv_content)
         adv_section.addWidget(adv_scroll)
@@ -4478,11 +4518,32 @@ class CellposeSAMWidget(QWidget):
         # against metadata=None at __init__ time and locks itself as invalid.
         # Re-check it now that real metadata may be available.
         self._unit_mgr.refresh(self.metadata_loader.metadata)
+        self._apply_dimensionality()
 
         self.channel_panel.refresh()
         self._load_size_filter_for_cell_type()
         self._refresh_env_status()
         self.btn_queue_cellpose_sam.setVisible(True)
+
+    def _apply_dimensionality(self):
+        """2D experiments run per-plane 2-D inference only (the backend
+        forces it too), so the 3D / stitching / flat-slice controls go."""
+        two_d = _is_2d_experiment(self.metadata_loader)
+        for form, widget in (
+            (self._sam_set_form, self.check_do_3d),
+            (self._sam_set_form, self.spin_stitch),
+            (self._sam_set_form, self.check_drop_2d),
+            (self._sam_adv_form, self.check_norm3d),
+            (self._sam_adv_form, self.spin_flow3d_smooth),
+            (self._sam_adv_form, self.spin_tile_norm_smooth),
+        ):
+            set_form_row_visible(form, widget, not two_d)
+        if two_d:
+            # Flow threshold applies to 2-D inference.
+            self.spin_flow_threshold.setEnabled(True)
+            self.lbl_flow_threshold.setText("Flow threshold:")
+        else:
+            self._on_do_3d_toggled(self.check_do_3d.isChecked())
 
     # \u2500\u2500 run \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     def run_batch_cellpose_sam(self, interactive=True, skip_existing=False,
@@ -6640,6 +6701,7 @@ class APOCWidget(QWidget):
         _pixel_sizes = {
             "xy_um": _pc_params.get("pixel_size_xy") or _pc_params.get("pixel_size_xy_um") or _xy_from_md,
             "z_um":  _pc_params.get("pixel_size_z")  or _pc_params.get("pixel_size_z_um")  or _z_from_md,
+            "is_2d": _is_2d_experiment(self.metadata_loader),
         }
 
         self._training_widget = APOCTrainingWidget(
@@ -8235,6 +8297,7 @@ class ConvPaintWidget(QWidget):
         _pixel_sizes = {
             "xy_um": ip.get("pixel_size_xy") or ip.get("pixel_size_xy_um") or _xy_from_md,
             "z_um":  ip.get("pixel_size_z")  or ip.get("pixel_size_z_um")  or _z_from_md,
+            "is_2d": _is_2d_experiment(self.metadata_loader),
         }
 
         self._training_widget = ConvPaintTrainingWidget(
@@ -8584,6 +8647,7 @@ class ConvPaintWidget(QWidget):
             _pixel_sizes = {
                 "xy_um": ip.get("pixel_size_xy") or ip.get("pixel_size_xy_um") or _xy_from_md,
                 "z_um":  ip.get("pixel_size_z")  or ip.get("pixel_size_z_um")  or _z_from_md,
+                "is_2d": _is_2d_experiment(self.metadata_loader),
             }
 
             self._training_widget = ConvPaintTrainingWidget(

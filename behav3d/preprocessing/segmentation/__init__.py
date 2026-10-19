@@ -11,6 +11,18 @@ from .multicolor_segment_processing import (
     apply_multicolor_segment_correction_for_base,
 )
 
+def single_plane(volume):
+    """``(1, Y, X)`` -> ``(Y, X)``; anything else is returned unchanged.
+
+    2D experiments are stored with Z=1. Pixel classifiers must see those
+    frames as real 2-D images (3-D edge filters on a one-slice volume give
+    different features), for training and prediction alike.
+    """
+    if getattr(volume, "ndim", 0) == 3 and volume.shape[0] == 1:
+        return volume[0]
+    return volume
+
+
 def keep_largest_connected_components(segments):
     """
     Select all separate connected components of the same segment ID
@@ -61,7 +73,12 @@ def segment_size_filter(segments, size_min=None, size_max=None, fill_holes=True)
             vol[to_remove_mask] = 0
             return vol
 
-        filled_mask = ndimage.binary_fill_holes(kept_mask)
+        if kept_mask.ndim == 3 and kept_mask.shape[0] == 1:
+            # Single-plane (2D) volume: every voxel touches the Z border, so a
+            # 3-D fill would never find a hole. Fill the plane in 2-D instead.
+            filled_mask = ndimage.binary_fill_holes(kept_mask[0])[None]
+        else:
+            filled_mask = ndimage.binary_fill_holes(kept_mask)
         holes_to_fill = filled_mask & ~kept_mask
 
         if np.any(holes_to_fill):
@@ -94,6 +111,10 @@ def segment_size_filter(segments, size_min=None, size_max=None, fill_holes=True)
 def segment_2d_filter(segments):
     """
     Remove segments from a 3D labeled array that are 2D in any axis (Z, Y, or X).
+
+    Axes of length 1 are not checked: a single-plane image (a 2D experiment,
+    stored with Z=1) would otherwise lose every object, so there only
+    segments that are one pixel thin along Y or X are removed.
     
     Parameters:
     - segments (ndarray): 3D labeled array (z, y, x)
@@ -120,10 +141,14 @@ def segment_2d_filter(segments):
         label_to_y[label].add(y)
         label_to_x[label].add(x)
 
-    # Identify flat (2D) labels: only 1 slice along any axis
+    # Identify flat (2D) labels: only 1 slice along any axis that has more
+    # than one slice in the image.
+    check_z, check_y, check_x = (int(n) > 1 for n in segments.shape[-3:])
     flat_labels = {
         label for label in set(labels)
-        if len(label_to_z[label]) == 1 or len(label_to_y[label]) == 1 or len(label_to_x[label]) == 1
+        if (check_z and len(label_to_z[label]) == 1)
+        or (check_y and len(label_to_y[label]) == 1)
+        or (check_x and len(label_to_x[label]) == 1)
     }
 
     # Zero out flat segments
@@ -139,8 +164,11 @@ def get_border_segments(segments):
     shape = segments.shape
     ndim = segments.ndim
     border_values = set()
-    # Iterate over each dimension to collect the border values
+    # Iterate over each dimension to collect the border values. A length-1
+    # axis (the Z of a 2D experiment) is all border, so it is skipped.
     for dim in range(ndim):
+        if shape[dim] == 1:
+            continue
         slices = [slice(None)] * len(shape)
         # Collect the values from the minimum edge of this dimension
         slices[dim] = 0

@@ -65,12 +65,13 @@ def make_zarr_sample_record(
     original_dimension_order=None,
     new_shape=None,
     mode="converted",
+    dimensionality=None,
 ) -> dict:
     """Build one per-sample entry of the ``zarr_conversion.samples`` block.
 
     ``original_shape`` is in ``original_dimension_order`` (whatever the raw
     file used); ``new_shape`` is always TCZYX, since that is what the
-    conversion writes.
+    conversion writes (a 2D image keeps a singleton Z).
     """
     original_shape = _as_int_list(original_shape)
     new_shape = _as_int_list(new_shape)
@@ -81,7 +82,7 @@ def make_zarr_sample_record(
         if len(order) == len(original_shape):
             original_n_t = original_shape[order.index("T")]
 
-    return {
+    record = {
         "original_shape": original_shape,
         "original_dimension_order": (
             str(original_dimension_order) if original_dimension_order else None
@@ -92,6 +93,9 @@ def make_zarr_sample_record(
         "new_n_timepoints": new_shape[0] if new_shape else None,
         "mode": mode,
     }
+    if dimensionality:
+        record["dimensionality"] = str(dimensionality)
+    return record
 
 
 def record_zarr_conversion(
@@ -220,6 +224,48 @@ def save_timepoint_range(
         "start": int(start) if start is not None else None,
         "end": int(end) if end is not None else None,
     }
+
+    if write and output_dir:
+        save_params(params, output_dir)
+    return params
+
+
+# ---------------------------------------------------------------------------
+# Experiment dimensionality (2D / 3D)
+# ---------------------------------------------------------------------------
+# One value per experiment, mirrored in the metadata CSV column of the same
+# name (see behav3d.core.dimensionality). A file without the key is 3D.
+
+
+def load_dimensionality(output_dir=None, params: dict | None = None) -> str:
+    """Return ``"2D"`` or ``"3D"`` from the parameters file (default 3D)."""
+    from behav3d.core.dimensionality import get_dimensionality
+
+    if params is None:
+        params = load_params(output_dir) if output_dir else {}
+    return get_dimensionality(params)
+
+
+def save_dimensionality(
+    output_dir,
+    dimensionality: str,
+    params: dict | None = None,
+    write: bool = True,
+) -> dict:
+    """Write the experiment dimensionality into the parameters file.
+
+    ``params`` is the caller's in-memory dict; when given it is updated in
+    place (and returned) so the caller stays in sync with disk.
+    """
+    from behav3d.core.dimensionality import (
+        DIMENSIONALITY_KEY,
+        DEFAULT_DIMENSIONALITY,
+        normalize_dimensionality,
+    )
+
+    if params is None:
+        params = load_params(output_dir)
+    params[DIMENSIONALITY_KEY] = normalize_dimensionality(dimensionality) or DEFAULT_DIMENSIONALITY
 
     if write and output_dir:
         save_params(params, output_dir)

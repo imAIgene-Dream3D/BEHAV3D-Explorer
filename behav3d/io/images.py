@@ -306,6 +306,30 @@ def _has_tp_loader(path):
         return True
     return False
 
+def _reconcile_singleton_axes(path, source_order, source_shape):
+    """Expand a short ``source_order`` to the file's native order when the
+    extra native axes are all singletons.
+
+    CZI/LIF/IMS readers always report every axis (e.g. T, C, Z, Y, X with
+    C=Z=1 for a 2D time-lapse), so a user order such as 'TYX' is shorter than
+    the reported shape. When the omitted axes have size 1 and the remaining
+    axes keep their relative order, the data are identical and the native
+    order is used instead. Otherwise ``source_order`` is returned unchanged.
+    """
+    if len(source_order) >= len(source_shape) or not _has_tp_loader(path):
+        return source_order
+    native = get_image_dimension_order(path)
+    if not native or len(native) != len(source_shape):
+        return source_order
+    if "".join(ax for ax in native if ax in source_order) != source_order:
+        return source_order
+    sizes = dict(zip(native, source_shape))
+    if any(sizes[ax] != 1 for ax in native if ax not in source_order):
+        return source_order
+    print(f"  axis_order '{source_order}' expanded to the file's native '{native}' (omitted axes are singletons)")
+    return native
+
+
 def _load_czyx_for_timepoint(path, t, source_order):
     """
     Load a single timepoint from a format that supports per-timepoint I/O.
@@ -383,6 +407,7 @@ def convert_file_to_zarr(
     t_start=None,
     t_end=None,
     n_workers=1,
+    dimensionality=None,
     ):
     """
     Convert a single image file to .zarr in TCZYX axis order.
@@ -411,6 +436,10 @@ def convert_file_to_zarr(
         Inclusive timepoint range to convert. None means full range.
     n_workers : int
         Number of parallel workers for writing.
+    dimensionality : {"2D", "3D"}, optional
+        Experiment mode. When given, ``axis_order`` and the image shape are
+        validated against it (e.g. a 5D stack with Z>1 is rejected in 2D).
+        2D images are still written as TCZYX with a singleton Z.
     """
     path = Path(path)
     outpath = Path(outpath)
@@ -442,13 +471,22 @@ def convert_file_to_zarr(
     source_shape = get_image_shape(path)
     print(f"  Source shape: {source_shape}, axis_order: {source_order}")
 
+    source_order = _reconcile_singleton_axes(path, source_order, source_shape)
+
     if len(source_shape) != len(source_order):
         raise ValueError(
             f"axis_order '{source_order}' has {len(source_order)} axes but the "
             f"source image has {len(source_shape)} dimensions {source_shape}. "
             f"Provide an axis_order that matches the actual number of dimensions "
-            f"(e.g., 'ZYX' for 3D, 'CZYX' for 4D, 'TCZYX' for 5D)."
+            f"(e.g. 'TYX' or 'TCYX' for 2D, 'TZYX' or 'TCZYX' for 3D)."
         )
+
+    if dimensionality is not None:
+        from behav3d.core.dimensionality import validate_order_for_mode
+
+        error = validate_order_for_mode(source_order, dimensionality, source_shape)
+        if error:
+            raise ValueError(f"'{path.name}': {error}")
 
     # Raw contract: always write TCZYX (insert missing T/C/Z as singletons)
     if "Y" not in source_order or "X" not in source_order:
@@ -712,6 +750,7 @@ def convert_raw_file_to_zarr(
     t_start=None,
     t_end=None,
     n_workers: int = 1,
+    dimensionality=None,
 ):
     """
     Convert a raw intensity image to Zarr enforcing the TCZYX contract.
@@ -726,6 +765,7 @@ def convert_raw_file_to_zarr(
         t_start=t_start,
         t_end=t_end,
         n_workers=n_workers,
+        dimensionality=dimensionality,
     )
 
 

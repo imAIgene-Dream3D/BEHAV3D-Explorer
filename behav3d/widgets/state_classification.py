@@ -2587,7 +2587,7 @@ class StateClassificationHMMPanel(BaseStateClassificationPanel):
 
     _METADATA_TECHNICAL_PATTERNS = (
         "_path", "_dir", "pixel_distance", "time_interval", "unit_",
-        "channel_", "dead_channel", "zarr", "dimension_order",
+        "channel_", "dead_channel", "zarr", "dimension_order", "dimensionality",
     )
 
     def _merge_metadata_into_obs(self, adata):

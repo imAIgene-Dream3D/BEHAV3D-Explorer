@@ -757,13 +757,16 @@ def filter_tracks(
     # in napari/_filtering.py), so it must be compared against 'nr_pixels'
     # (also voxels) rather than 'volume', which is physical um^3 and not on the
     # same scale. 'volume' is only used as a fallback for input CSVs that lack
-    # 'nr_pixels' (e.g. some advanced-features exports).
+    # 'nr_pixels' (e.g. some advanced-features exports); 2D experiments have
+    # no 'volume' and fall back to 'area' (physical um^2) instead.
     size_col = None
     if min_size is not None:
         if "nr_pixels" in df_all_tracks_filt.columns:
             size_col = "nr_pixels"
         elif "volume" in df_all_tracks_filt.columns:
             size_col = "volume"
+        elif "area" in df_all_tracks_filt.columns:
+            size_col = "area"
 
     if min_size is not None and size_col is not None:
         first_tp = df_all_tracks_filt[

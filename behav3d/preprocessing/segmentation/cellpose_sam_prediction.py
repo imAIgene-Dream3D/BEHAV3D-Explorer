@@ -33,6 +33,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from behav3d.io.images import load_image
+from behav3d.core.dimensionality import is_2d
 from behav3d.io.formats.zarr import write_zarr_parallel
 from behav3d.core.metadata import (
     detect_organoid_types_from_metadata,
@@ -317,6 +318,25 @@ def _effective_params(sam_params=None, size_filter=None) -> Tuple[dict, dict, bo
     return sam, resolved_filter, drop_2d
 
 
+def _params_for_dimensionality(sample, sam_params=None) -> Optional[dict]:
+    """Force the per-plane 2-D path for 2D experiments.
+
+    2D images are stored with Z=1, so 3-D / stitched inference and the
+    flat-slice cleanup make no sense there; the worker then takes its
+    ``batched_2d`` route. 3D experiments get ``sam_params`` unchanged.
+    """
+    if not is_2d(sample):
+        return sam_params
+    forced = dict(sam_params or {})
+    forced.update(
+        do_3D=False,
+        stitch_threshold=0.0,
+        flow3D_smooth=0.0,
+        drop_2d_segments=False,
+    )
+    return forced
+
+
 def _build_job(**kwargs) -> dict:
     """Assemble a worker job spec, filling in BEHAV3D defaults."""
     sam, size_filter, drop_2d = _effective_params(
@@ -518,8 +538,9 @@ def run_cellpose_sam_segmentation(
             channels = _channels_for_cell_type(config, cell_type)
 
             anisotropy = float(sample["pixel_distance_z"]) / float(sample["pixel_distance_xy"])
+            sample_sam_params = _params_for_dimensionality(sample, sam_params)
 
-            eff_sam, eff_size_filter, eff_drop_2d = _effective_params(sam_params, size_filter)
+            eff_sam, eff_size_filter, eff_drop_2d = _effective_params(sample_sam_params, size_filter)
             fingerprint = _params_fingerprint(
                 model_name, channels, anisotropy, eff_sam, eff_size_filter, eff_drop_2d
             )
@@ -604,7 +625,7 @@ def run_cellpose_sam_segmentation(
                 model_name=model_name,
                 force_cpu=force_cpu,
                 anisotropy=anisotropy,
-                sam_params=sam_params,
+                sam_params=sample_sam_params,
                 size_filter=size_filter,
                 n_threads=n_threads,
                 cooldown_s=cooldown_s,
@@ -743,7 +764,7 @@ def preview_cellpose_sam(
             model_name=model_name,
             force_cpu=force_cpu,
             anisotropy=anisotropy,
-            sam_params=sam_params,
+            sam_params=_params_for_dimensionality(sample, sam_params),
             size_filter={},
         )
         log(f"Cellpose-SAM preview: {sample_name} / {cell_type} / t={timepoint}, channels {channels}")

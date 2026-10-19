@@ -112,7 +112,18 @@ _SUFFIX = {
     ("distance", False): " px",
     ("volume", True): " µm³",
     ("volume", False): " vox",
+    ("area", True): " µm²",
+    ("area", False): " px",
 }
+
+
+def _metadata_is_2d(metadata) -> bool:
+    from behav3d.core.dimensionality import is_2d
+
+    try:
+        return metadata is not None and is_2d(metadata)
+    except Exception:
+        return False
 
 
 class UnitGroupManager:
@@ -125,14 +136,18 @@ class UnitGroupManager:
     drift.
     """
 
-    def __init__(self, metadata=None, default_physical=True, xy_um=None, z_um=None):
+    def __init__(self, metadata=None, default_physical=True, xy_um=None, z_um=None, is_2d=None):
         """``metadata`` is a DataFrame with ``pixel_distance_xy``/``_z``
         columns (the common case). Callers that only have a resolved
         ``{"xy_um": ..., "z_um": ...}`` dict (e.g. the APOC/ConvPaint
         training widgets, which receive pixel sizes directly rather than
         full metadata) can instead pass ``xy_um``/``z_um`` explicitly —
         these take precedence over ``metadata`` when both are given.
+
+        In a 2D experiment (read from ``metadata``, or given as ``is_2d``)
+        "volume" parameters are object areas: µm² / px instead of µm³ / vox.
         """
+        self.is_2d = bool(is_2d) if is_2d is not None else _metadata_is_2d(metadata)
         if xy_um is not None and z_um is not None and xy_um > 0 and z_um > 0:
             self.xy, self.z, self.valid = float(xy_um), float(z_um), True
         else:
@@ -216,7 +231,7 @@ class UnitGroupManager:
         widget._unit_native = float(native_value)
         self._set_display(widget)
 
-    def refresh(self, metadata=None, xy_um=None, z_um=None):
+    def refresh(self, metadata=None, xy_um=None, z_um=None, is_2d=None):
         """Re-check resolution validity and redisplay every registered widget.
 
         Widgets are frequently built before metadata is loaded (napari builds
@@ -228,6 +243,10 @@ class UnitGroupManager:
         ("no resolution in metadata") never revisits its own premise.
         """
         was_valid = self.valid
+        if is_2d is not None:
+            self.is_2d = bool(is_2d)
+        elif metadata is not None:
+            self.is_2d = _metadata_is_2d(metadata)
         if xy_um is not None and z_um is not None and xy_um > 0 and z_um > 0:
             self.xy, self.z, self.valid = float(xy_um), float(z_um), True
         else:
@@ -253,7 +272,12 @@ class UnitGroupManager:
             self._update_suffix(w)
 
     # -- internal -------------------------------------------------------
+    def _kind(self, kind):
+        """A segment size is an area in 2D experiments, a volume in 3D."""
+        return "area" if (kind == "volume" and self.is_2d) else kind
+
     def _display_to_native(self, value, kind, native_unit):
+        kind = self._kind(kind)
         if not self.valid:
             return float(value)
         if native_unit == "physical":
@@ -267,6 +291,7 @@ class UnitGroupManager:
         return float(value)
 
     def _native_to_display(self, native, kind, native_unit):
+        kind = self._kind(kind)
         if not self.valid:
             return float(native)
         if native_unit == "physical":
@@ -295,7 +320,7 @@ class UnitGroupManager:
 
     def _update_suffix(self, widget):
         try:
-            widget.setSuffix(_SUFFIX.get((widget._unit_kind, self.physical), ""))
+            widget.setSuffix(_SUFFIX.get((self._kind(widget._unit_kind), self.physical), ""))
         except Exception:
             pass
 

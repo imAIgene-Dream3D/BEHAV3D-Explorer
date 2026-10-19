@@ -86,7 +86,11 @@ def load_czi_metadata(path):
     except:
         elsize_x = float(metadata["Metadata"]["Scaling"]["Items"]["Distance"][0]["Value"]["Value"])*(10**6)
         elsize_y = float(metadata["Metadata"]["Scaling"]["Items"]["Distance"][1]["Value"]["Value"])*(10**6)
-        elsize_z = float(metadata["Metadata"]["Scaling"]["Items"]["Distance"][2]["Value"]["Value"])*(10**6)
+        try:
+            elsize_z = float(metadata["Metadata"]["Scaling"]["Items"]["Distance"][2]["Value"]["Value"])*(10**6)
+        except (KeyError, TypeError, IndexError, ValueError):
+            # 2D acquisitions carry no Z distance entry.
+            elsize_z = None
     
     #LSM880
     try:
@@ -124,7 +128,11 @@ def load_elsizes_czi(path):
     except:
         elsize_x = float(metadata["Metadata"]["Scaling"]["Items"]["Distance"][0]["Value"]["Value"])*(10**6)
         elsize_y = float(metadata["Metadata"]["Scaling"]["Items"]["Distance"][1]["Value"]["Value"])*(10**6)
-        elsize_z = float(metadata["Metadata"]["Scaling"]["Items"]["Distance"][2]["Value"]["Value"])*(10**6)
+        try:
+            elsize_z = float(metadata["Metadata"]["Scaling"]["Items"]["Distance"][2]["Value"]["Value"])*(10**6)
+        except (KeyError, TypeError, IndexError, ValueError):
+            # 2D acquisitions carry no Z distance entry.
+            elsize_z = None
 
     # Prefer the actual measured interval (from real per-timepoint
     # AcquisitionTime stamps) over the nominal/configured SetIntervalAction

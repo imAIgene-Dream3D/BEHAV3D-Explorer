@@ -56,6 +56,9 @@ MORPHOLOGY FEATURES:
 - nr_pixels, volume, bbox_volume, elongation, extent, equivalent_diameter
 - major_axis_length, minor_axis_length, surface_area, sphericity
 - convex_volume, orientation_vector
+- 2D experiments instead: nr_pixels, area, bbox_area, perimeter, circularity,
+  eccentricity, major_axis_length, minor_axis_length, elongation, extent,
+  orientation, solidity, convex_area, equivalent_diameter
 
 MOVEMENT FEATURES:
 - displacement
@@ -186,6 +189,7 @@ import time
 import traceback
 from behav3d.analysis import smooth_value_over_time
 from behav3d.core.utils import get_current_time, format_time, convert_time, convert_distance
+from behav3d.core.dimensionality import PIXEL_DISTANCE_Z_2D, is_2d as dimensionality_is_2d
 from behav3d.core.metadata import is_multicolor_celltype, resolve_immune_track_paths_for_sample
 from behav3d.core.run_plan import Action, resolve_action
 from behav3d.io.images import load_image, load_image_timepoint, convert_raw_file_to_zarr
@@ -240,6 +244,9 @@ def _segment_touches_border(mask=None, *, slices=None, stack_shape=None):
     Can be called with either:
     - mask: full boolean mask (legacy)
     - slices + stack_shape: bounding-box slices from find_objects (fast path)
+
+    2D experiments pass the (Y, X) plane's slices and shape: with Z=1 every
+    segment spans the whole stack in Z and would always count as touching.
     """
     if slices is not None and stack_shape is not None:
         for sl, dim_size in zip(slices, stack_shape):
@@ -332,6 +339,32 @@ def _principal_axis_metrics(coords, voxel_spacing):
         "oblateness": oblateness,
         "prolateness": prolateness,
     }
+
+
+def _principal_box_lengths_2d(coords, pixel_spacing):
+    """Side lengths (long, short) of the principal-axis box around 2D pixels.
+
+    Same construction as the 3D ``_principal_axis_metrics``: the spread of the
+    pixel centres along each principal axis plus the pixel's own width along
+    that axis, so a 1-pixel-wide object still gets a finite short side.
+    """
+    coords = np.asarray(coords, dtype=float)
+    if coords.ndim != 2 or coords.shape[0] == 0 or coords.shape[1] != 2:
+        return np.nan, np.nan
+    spacing = np.asarray(pixel_spacing, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        pts = coords * spacing
+        X = pts - pts.mean(axis=0, keepdims=True)
+        # full_matrices keeps V 2x2 even for a single pixel.
+        _, _, Vt = np.linalg.svd(X, full_matrices=True)
+        V = Vt.T
+        if V.shape != (2, 2) or not np.all(np.isfinite(V)):
+            return np.nan, np.nan
+        lengths = np.ptp(X @ V, axis=0) + np.abs(V).T @ spacing
+    if lengths.shape != (2,) or not np.all(np.isfinite(lengths)):
+        return np.nan, np.nan
+    long_side, short_side = sorted(lengths.tolist(), reverse=True)
+    return float(long_side), float(short_side)
 
 
 def calculate_smoothed_death_columns(df_tracks, window_size):
@@ -467,8 +500,18 @@ def run_feature_extraction(
     n_workers=1,
     progress_cb=None,
     plan=None,
+    is_2d=None,
     ):
     """Extract per-track features for one cell type, sample by sample.
+
+    ``is_2d`` declares a 2D experiment (images TC1YX, labels with Z=1). When
+    ``None`` it is read per sample from the metadata ``dimensionality``
+    column (missing means 3D). In 2D, morphology gives 2D features (area,
+    perimeter, circularity, ...), the border check ignores the single Z
+    plane and the Z spacing is fixed to 1.0; movement, contact and distance
+    features need no change because z is 0 everywhere. The invasiveness
+    "surface" (pixels within 2 µm of the cell) becomes a ring around the
+    cell outline instead of a shell.
 
     ``plan`` (a ``RunPlan`` keyed by ``(sample_name, cell_type)``) supersedes
     ``overwrite``: ``SKIP`` reuses the sample's existing feature csv in the
@@ -532,12 +575,19 @@ def run_feature_extraction(
             
             element_size_x=sample_metadata['pixel_distance_xy']
             element_size_y=sample_metadata['pixel_distance_xy'] 
-            element_size_z=sample_metadata['pixel_distance_z']
+            sample_is_2d = bool(is_2d) if is_2d is not None else dimensionality_is_2d(sample_metadata)
+            # 2D: one Z plane, so Z spacing (often absent) is set below.
+            element_size_z=None if sample_is_2d else sample_metadata['pixel_distance_z']
             
             #Convert elekment size to um and hours, default settings for behav3d
             element_size_x = convert_distance(element_size_x, distance_unit)
             element_size_y = convert_distance(element_size_y, distance_unit)
-            element_size_z = convert_distance(element_size_z, distance_unit)
+            if sample_is_2d:
+                # One Z plane: Z spacing only has to be a valid divisor
+                # (contact cut-out, distance-transform sampling).
+                element_size_z = PIXEL_DISTANCE_Z_2D
+            else:
+                element_size_z = convert_distance(element_size_z, distance_unit)
             
             time_interval = sample_metadata['time_interval']
             time_unit = sample_metadata['time_unit']
@@ -756,7 +806,8 @@ def run_feature_extraction(
                         immune_segments_paths=immune_segments_paths,
                         other_segments_paths=other_segments_paths,
                         overwrite=sample_overwrite,
-                        n_workers=n_workers
+                        n_workers=n_workers,
+                        is_2d=sample_is_2d,
                     )
             else:
                 print(f"{get_current_time()} - Skipping image-based features as none requested in features_choice (morphology, intensity, contact, death)")
@@ -916,10 +967,15 @@ def calculate_image_based_track_features(
     dead_mask_percentage_threshold=None,
     n_workers=1,
     overwrite=False,
+    is_2d=False,
     ):
     """
     This code calculates the various features for each timepoint in a track for each 
     separate experiment.
+
+    ``is_2d`` (2D experiment, labels stored with Z=1) switches morphology to
+    the 2D features (area, perimeter, circularity, ...); every other feature
+    works unchanged on the single plane.
     
     Fully flexible - works with any cell type from metadata.
     
@@ -956,6 +1012,15 @@ def calculate_image_based_track_features(
             "surface_to_volume_ratio": float,
             "orientation_vector": object,
             "border_touching_segment": "boolean",
+            # 2D experiments
+            "area": float,
+            "bbox_area": float,
+            "perimeter": float,
+            "circularity": float,
+            "eccentricity": float,
+            "orientation": float,
+            "solidity": float,
+            "convex_area": float,
         }
         
         if df_morphology_outpath.exists() and not overwrite:
@@ -969,7 +1034,8 @@ def calculate_image_based_track_features(
             df_morphology=calculate_morphology_features(
                 segments_path=segments_path,
                 n_workers=n_workers,
-                voxel_spacing=(element_size_z, element_size_y, element_size_x)
+                voxel_spacing=(element_size_z, element_size_y, element_size_x),
+                is_2d=is_2d,
             )
             if df_morphology_outpath != "":
                 df_morphology.to_csv(df_morphology_outpath, sep=",", index=False)  
@@ -985,18 +1051,20 @@ def calculate_image_based_track_features(
         df_tracks = pd.merge(df_tracks, df_morphology, how="left", on=merge_keys)
     
     else:
-        print(f"{get_current_time()} - Skipping full morphology features, only computing fast nr_pixels & volume")
+        size_col = "area" if is_2d else "volume"
+        print(f"{get_current_time()} - Skipping full morphology features, only computing fast nr_pixels & {size_col}")
         df_basic = calculate_basic_morphology(
             segments_path=segments_path,
             voxel_spacing=(element_size_z, element_size_y, element_size_x),
             n_workers=n_workers,
+            is_2d=is_2d,
         )
 
         basic_dtypes = {
             "TrackID": "Int64",
             "position_t": "Int64",
             "nr_pixels": "Int64",
-            "volume": float,
+            size_col: float,
         }
         df_basic = df_basic.astype(basic_dtypes, copy=False)
         df_basic = _normalize_merge_keys(df_basic, keys=merge_keys)
@@ -1874,7 +1942,9 @@ def _calculate_contact_single_timepoint(args):
         
         # Calculate invasiveness for immune cells (only if requested and organoids exist)
         if calculate_invasiveness and organoid_segments_dict:
-            # Define "surface" as pixels within 2 µm of cell boundary
+            # Define "surface" as pixels within 2 µm of cell boundary.
+            # In a 2D experiment (one Z plane) this is a ring around the cell
+            # outline rather than a shell, so the percentage is per outline.
             surface_threshold = 2.0  # µm
             surface_mask = real_distances <= surface_threshold
             total_surface_pixels = np.sum(surface_mask)
@@ -2380,19 +2450,23 @@ def calculate_dead_mask(segments, dead_mask, n_workers=1, immune_segments_paths=
 def _basic_counts_single_timepoint(args):
     """
     Worker: compute nr_pixels and volume for one timepoint using np.bincount.
+
+    ``size_col`` names the physical size column: "volume" (µm³) in 3D,
+    "area" (µm²) in 2D, where ``voxel_volume`` is the pixel area.
     """
-    t, segments_path, voxel_volume = args
+    t, segments_path, voxel_volume = args[:3]
+    size_col = args[3] if len(args) > 3 else "volume"
     seg_t = load_image_timepoint(segments_path, t)
     labels = seg_t.astype(np.int64).ravel()
 
     if labels.size == 0:
-        return pd.DataFrame(columns=["TrackID", "position_t", "nr_pixels", "volume"])
+        return pd.DataFrame(columns=["TrackID", "position_t", "nr_pixels", size_col])
 
     # Count voxels per label (0 is background)
     counts = np.bincount(labels)
     if counts.size <= 1:
         # no foreground labels
-        return pd.DataFrame(columns=["TrackID", "position_t", "nr_pixels", "volume"])
+        return pd.DataFrame(columns=["TrackID", "position_t", "nr_pixels", size_col])
 
     # Build per-object table (skip background index 0)
     track_ids = np.nonzero(counts[1:] > 0)[0] + 1
@@ -2404,11 +2478,11 @@ def _basic_counts_single_timepoint(args):
             "TrackID": track_ids.astype(np.int64),
             "position_t": np.full(track_ids.shape[0], t, dtype=np.int64),
             "nr_pixels": nr_pixels.astype(np.int64),
-            "volume": volumes.astype(np.float64),
+            size_col: volumes.astype(np.float64),
         }
     )
 
-def calculate_basic_morphology(segments_path, voxel_spacing=(1.0, 1.0, 1.0), n_workers=8):
+def calculate_basic_morphology(segments_path, voxel_spacing=(1.0, 1.0, 1.0), n_workers=8, is_2d=False):
     """
     Fast calculation of nr_pixels and volume per object per timepoint.
 
@@ -2416,16 +2490,20 @@ def calculate_basic_morphology(segments_path, voxel_spacing=(1.0, 1.0, 1.0), n_w
         segments_path: path to segments .zarr
         voxel_spacing: (z, y, x) physical spacing
         n_workers: number of processes
+        is_2d: 2D experiment; the size column is "area" (µm², y * x spacing)
+            instead of "volume"
 
     Returns:
         pd.DataFrame with columns: TrackID, position_t, nr_pixels, volume
+        (or area in 2D)
     """
     segments = load_image(segments_path)
     timepoints = int(segments.shape[0])
     vz, vy, vx = map(float, voxel_spacing)
-    voxel_volume = vz * vy * vx
+    voxel_volume = vy * vx if is_2d else vz * vy * vx
+    size_col = "area" if is_2d else "volume"
 
-    args_list = [(t, segments_path, voxel_volume) for t in range(timepoints)]
+    args_list = [(t, segments_path, voxel_volume, size_col) for t in range(timepoints)]
     if n_workers and n_workers > 1:
         results = _run_parallel_with_fallback(_basic_counts_single_timepoint, args_list, int(n_workers))
     else:
@@ -2438,7 +2516,7 @@ def calculate_basic_morphology(segments_path, voxel_spacing=(1.0, 1.0, 1.0), n_w
         ]
 
     if not results:
-        return pd.DataFrame(columns=["TrackID", "position_t", "nr_pixels", "volume"])
+        return pd.DataFrame(columns=["TrackID", "position_t", "nr_pixels", size_col])
 
     return pd.concat(results, ignore_index=True)
 
@@ -2625,24 +2703,127 @@ def _calculate_morphology_single_timepoint(args):
 
     return properties
 
-def calculate_morphology_features(segments_path, voxel_spacing=(1.0, 1.0, 1.0), n_workers=8):
+MORPHOLOGY_2D_COLUMNS = [
+    "TrackID", "position_t", "nr_pixels", "area", "bbox_area", "perimeter",
+    "circularity", "eccentricity", "major_axis_length", "minor_axis_length",
+    "elongation", "extent", "orientation", "solidity", "convex_area",
+    "equivalent_diameter", "border_touching_segment",
+]
+
+
+def _calculate_morphology_2d_single_timepoint(args):
+    """2D morphology for one timepoint of a 2D experiment (labels stored Z=1).
+
+    Measured on the single plane ``stack[0]`` with ``spacing=(xy, xy)``;
+    lengths are in µm, areas in µm²:
+
+    - area, bbox_area, convex_area, perimeter, equivalent_diameter
+      (diameter of the circle with the same area)
+    - circularity: 4·pi·area / perimeter², 1 for a disk, capped at 1
+      (the pixel perimeter estimate makes very small objects overshoot)
+    - eccentricity, orientation (radians, -pi/2..pi/2, from the row axis):
+      from the ellipse with the same second moments
+    - solidity: area / convex_area
+    - major/minor_axis_length, elongation (major/minor), extent
+      (area / principal-axis box area): same principal-axis box as the 3D
+      features, so the shared names keep one meaning in both modes
+    - border_touching_segment: touches the Y/X border of the image
+    """
+    t, segments_path, voxel_spacing = args
+    stack = load_image_timepoint(segments_path, t)
+    plane = np.asarray(stack)[0] if np.ndim(stack) == 3 else np.asarray(stack)
+    _, vy, vx = map(float, voxel_spacing)
+    pixel_spacing = (vy, vx)
+
+    if not np.any(plane):
+        return pd.DataFrame(columns=MORPHOLOGY_2D_COLUMNS)
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*convex hull image.*")
+        warnings.filterwarnings("ignore", message="divide by zero encountered in scalar divide")
+        properties = pd.DataFrame(
+            regionprops_table(
+                label_image=plane,
+                properties=[
+                    "label",
+                    "num_pixels",
+                    "area",
+                    "area_bbox",
+                    "area_convex",
+                    "perimeter",
+                    "eccentricity",
+                    "orientation",
+                    "solidity",
+                    "equivalent_diameter_area",
+                ],
+                spacing=pixel_spacing,
+            )
+        )
+
+    properties.rename(columns={
+        "label": "TrackID",
+        "num_pixels": "nr_pixels",
+        "area_bbox": "bbox_area",
+        "area_convex": "convex_area",
+        "equivalent_diameter_area": "equivalent_diameter",
+    }, inplace=True)
+    properties["position_t"] = t
+
+    area = properties["area"].to_numpy(dtype=float)
+    perimeter = properties["perimeter"].to_numpy(dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        circularity = 4.0 * np.pi * area / (perimeter ** 2)
+    circularity[~np.isfinite(circularity) | (perimeter <= 0)] = np.nan
+    properties["circularity"] = np.minimum(circularity, 1.0)
+
+    label_slices = find_objects(plane)
+    major_lengths, minor_lengths, elongations, extents, border_flags = [], [], [], [], []
+    for region_label, region_area in zip(properties["TrackID"], area):
+        slices = label_slices[region_label - 1]
+        coords = np.argwhere(plane[slices] == region_label)
+        major, minor = _principal_box_lengths_2d(coords, pixel_spacing)
+        major_lengths.append(major)
+        minor_lengths.append(minor)
+        elongations.append(major / minor if np.isfinite(major) and np.isfinite(minor) and minor > 0 else np.nan)
+        box_area = major * minor
+        extents.append(
+            float(region_area / box_area)
+            if np.isfinite(box_area) and box_area > 0 and np.isfinite(region_area) and region_area > 0
+            else np.nan
+        )
+        border_flags.append(bool(_segment_touches_border(slices=slices, stack_shape=plane.shape)))
+
+    properties["major_axis_length"] = major_lengths
+    properties["minor_axis_length"] = minor_lengths
+    properties["elongation"] = elongations
+    properties["extent"] = extents
+    properties["border_touching_segment"] = border_flags
+
+    return properties[MORPHOLOGY_2D_COLUMNS]
+
+
+def calculate_morphology_features(segments_path, voxel_spacing=(1.0, 1.0, 1.0), n_workers=8, is_2d=False):
     """
     Calculates morphological features (volume, shape, sphericity, etc.) for 3D segments.
-    
+
     Parameters:
         segments_path: path to segments .zarr
         voxel_spacing: Tuple of (z, y, x) spacing in physical units (e.g., µm). Default is isotropic.
-    
+        is_2d: 2D experiment (labels stored with Z=1). Computes the 2D
+            features of ``_calculate_morphology_2d_single_timepoint`` (area,
+            perimeter, circularity, ...) instead of the 3D ones.
+
     Returns:
         pd.DataFrame with one row per object per time point.
     """
     segments=load_image(segments_path)
     timepoints = segments.shape[0]
     args_list = [(t, segments_path, voxel_spacing) for t in range(timepoints)]
+    worker = _calculate_morphology_2d_single_timepoint if is_2d else _calculate_morphology_single_timepoint
     if n_workers > 1:
-        results = _run_parallel_with_fallback(_calculate_morphology_single_timepoint, args_list, n_workers)
+        results = _run_parallel_with_fallback(worker, args_list, n_workers)
     else:
-        results = [_calculate_morphology_single_timepoint(args) for args in tqdm(args_list)]
+        results = [worker(args) for args in tqdm(args_list)]
 
     return pd.concat(results, ignore_index=True)
 

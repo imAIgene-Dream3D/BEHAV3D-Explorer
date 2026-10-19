@@ -162,6 +162,10 @@ def make_features(
     def _features(image):
         image = np.asarray(image, dtype=np.float32)
         # image: (C, [Z,] Y, X) — channel_axis=0
+        if image.ndim == 4 and image.shape[1] == 1:
+            # 2D experiment (Z=1): 2-D sigmas/edges on the plane, Z kept as 1
+            # so callers see the same (Z, Y, X, F) layout as for 3D.
+            return _features(image[:, 0])[None]
         n_channels = image.shape[0]
         is_3d = image.ndim == 4     # (C, Z, Y, X)
         sigma_list = sigma_list_3d if is_3d else sigma_list_2d

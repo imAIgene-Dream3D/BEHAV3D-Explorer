@@ -77,7 +77,7 @@ def segment_per_z(model, frame, fe_use_device=None):
     Returns a ``(Z, Y, X)`` array of class labels (1 = background, 2 = foreground
     for the binary annotations used in BEHAV3D).
     """
-    if frame.ndim == 4 and frame.shape[1] > 1:
+    if frame.ndim == 4:  # (C, Z, Y, X): per plane, also when Z=1 (2D experiments)
         z_slices = []
         seen: set[str] = set()
         for z in range(frame.shape[1]):
@@ -99,7 +99,7 @@ def predict_probas_per_z(model, frame, fe_use_device=None):
 
     Returns a ``(n_classes, Z, Y, X)`` array.
     """
-    if frame.ndim == 4 and frame.shape[1] > 1:
+    if frame.ndim == 4:  # (C, Z, Y, X): per plane, also when Z=1 (2D experiments)
         slices = []
         seen: set[str] = set()
         for z in range(frame.shape[1]):

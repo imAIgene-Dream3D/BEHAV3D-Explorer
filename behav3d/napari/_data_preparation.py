@@ -45,6 +45,7 @@ from qtpy.QtWidgets import (
     QTextEdit,
     QSplitter,
     QTabWidget,
+    QButtonGroup,
 )
 
 # ---------------------------------------------------------------------------
@@ -57,6 +58,19 @@ from behav3d.core.metadata import (
     detect_organoid_types_from_metadata,
     detect_immune_cell_types_from_metadata,
     detect_other_cell_types_from_metadata,
+)
+from behav3d.core.dimensionality import (
+    DIM_2D,
+    DIM_3D,
+    DEFAULT_DIMENSIONALITY,
+    DIMENSIONALITY_KEY,
+    PIXEL_DISTANCE_Z_2D,
+    allowed_dim_orders,
+    get_dimensionality,
+    is_dimensionality_locked,
+    normalize_dimensionality,
+    validate_order_for_mode,
+    validate_shape_for_mode,
 )
 from behav3d.core.qt_help import HelpButton
 from behav3d.napari._background_runner import begin_busy, end_busy, warn_if_busy
@@ -78,6 +92,9 @@ _DEFAULT_CONFIG: dict = {
     # cell type and iterated as such, and the window must be identical
     # for every cell type or cross-cell-type analyses break silently.
     "timepoint_range": {"enabled": False, "start": 0, "end": 0},
+    # Experiment dimensionality, "3D" (default) or "2D"; see
+    # behav3d.core.dimensionality. Mirrored in the metadata CSV column.
+    "dimensionality": "3D",
     "seed": 42,
     "paths": {"metadata_csv": "", "output_dir": ""},
     "dim_order": {"default_apply_all": "TCZYX"},
@@ -92,7 +109,13 @@ _DEFAULT_CONFIG: dict = {
     },
 }
 
-DIM_ORDER_OPTIONS = ["TCZYX", "TZCYX", "ZCTYX", "ZTCYX", "CZTYX", "CTZYX"]
+# 5D orders offered in 3D mode (kept for callers that import it); the table
+# itself offers behav3d.core.dimensionality.allowed_dim_orders(mode, ndim).
+DIM_ORDER_OPTIONS = allowed_dim_orders(DIM_3D, 5)
+DIM_ORDER_PLACEHOLDER = "-- select --"
+
+# Accent colour per experiment mode (toggle, badges).
+DIMENSIONALITY_COLORS = {DIM_3D: "#1976D2", DIM_2D: "#EF6C00"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -134,7 +157,7 @@ def _compute_dim_order_data(metadata: pd.DataFrame, progress_callback=None):
 
         raw_path = metadata.loc[metadata["sample_name"] == sample, "raw_image_path"]
         shape_str = ""
-        detected_order = "TCZYX"
+        detected_order = None
         if not raw_path.empty:
             p = Path(str(raw_path.iloc[0]).strip())
             if p.exists():
@@ -157,6 +180,34 @@ def _compute_dim_order_data(metadata: pd.DataFrame, progress_callback=None):
                         pass
         data.append((sample, shape_str, detected_order))
     return data
+
+
+def _all_samples_single_plane(metadata: pd.DataFrame, dim_order_data) -> bool:
+    """True when every sample's raw image has a Z axis of size 1.
+
+    Used to warn about a project with no recorded dimensionality that looks
+    2D. The axis order comes from the image (detected) or the metadata
+    ``dimension_order`` column; a sample whose Z cannot be determined makes
+    the answer False, so the warning is only raised on clear evidence.
+    """
+    import ast
+
+    if not dim_order_data:
+        return False
+    for sample, shape_str, detected in dim_order_data:
+        try:
+            shape = tuple(int(v) for v in ast.literal_eval(str(shape_str)))
+        except Exception:
+            return False
+        order = str(detected or "").strip().upper()
+        if len(order) != len(shape) and "dimension_order" in metadata.columns:
+            vals = metadata.loc[metadata["sample_name"] == sample, "dimension_order"]
+            order = str(vals.iloc[0]).strip().upper() if not vals.empty and pd.notna(vals.iloc[0]) else ""
+        if len(order) != len(shape) or "Z" not in order:
+            return False
+        if shape[order.index("Z")] != 1:
+            return False
+    return True
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -184,12 +235,62 @@ class _MetadataLoadWorker(QThread):
             check_behav3d_metadata(metadata, func=False)
 
             behav3d_parameters = None
+            raw_params = {}
             params_path = Path(self.out_dir) / "behav3d_parameters.yml" if self.out_dir else None
+            if params_path and params_path.exists():
+                raw_params = _load_config(params_path)
+
+            # Experiment dimensionality: the parameters file wins, then the
+            # CSV column; a project with neither predates the flag -> 3D.
+            yaml_dim = normalize_dimensionality(raw_params.get(DIMENSIONALITY_KEY))
+            csv_dim = (
+                get_dimensionality(metadata, default=None)
+                if DIMENSIONALITY_KEY in metadata.columns else None
+            )
+            dimensionality = yaml_dim or csv_dim or DEFAULT_DIMENSIONALITY
+            dim_conflict = bool(yaml_dim and csv_dim and yaml_dim != csv_dim)
+            if dim_conflict:
+                self.progress.emit(
+                    f"\u26a0\ufe0f behav3d_parameters.yml says {yaml_dim} but metadata.csv says "
+                    f"{csv_dim}; using {yaml_dim}."
+                )
+            if not yaml_dim and not csv_dim:
+                self.progress.emit("No dimensionality recorded for this project; assuming 3D.")
+
+            # Mirror it in the CSV so row-only readers (backends, reloads
+            # after processing) see the same value.
+            csv_values = (
+                metadata[DIMENSIONALITY_KEY].tolist()
+                if DIMENSIONALITY_KEY in metadata.columns else []
+            )
+            csv_changed = False
+            if not csv_values or any(normalize_dimensionality(v) != dimensionality for v in csv_values):
+                metadata[DIMENSIONALITY_KEY] = dimensionality
+                # A project that predates the flag is 3D by default: keep
+                # the value in memory only and leave its CSV untouched.
+                if csv_values or dimensionality == DIM_2D:
+                    csv_changed = True
+                    self.progress.emit(
+                        f"Recorded dimensionality={dimensionality} in {Path(self.csv_path).name}"
+                    )
+            # 2D has no Z spacing; CSVs written outside the builder may still
+            # carry one.
+            if dimensionality == DIM_2D and (
+                "pixel_distance_z" not in metadata.columns
+                or (pd.to_numeric(metadata["pixel_distance_z"], errors="coerce") != PIXEL_DISTANCE_Z_2D).any()
+            ):
+                metadata["pixel_distance_z"] = PIXEL_DISTANCE_Z_2D
+                csv_changed = True
+                self.progress.emit(f"2D experiment: pixel_distance_z set to {PIXEL_DISTANCE_Z_2D}")
+            if csv_changed:
+                try:
+                    metadata.to_csv(self.csv_path, index=False)
+                except OSError as e:  # e.g. CSV open in Excel; don't block loading
+                    self.progress.emit(f"⚠️ Could not update {Path(self.csv_path).name}: {e}")
+
             if params_path:
-                if params_path.exists():
-                    behav3d_parameters = _deep_merge(deepcopy(_DEFAULT_CONFIG), _load_config(params_path))
-                else:
-                    behav3d_parameters = deepcopy(_DEFAULT_CONFIG)
+                behav3d_parameters = _deep_merge(deepcopy(_DEFAULT_CONFIG), raw_params)
+                behav3d_parameters[DIMENSIONALITY_KEY] = dimensionality
                 behav3d_parameters["paths"]["metadata_csv"] = self.csv_path
                 behav3d_parameters["paths"]["output_dir"] = self.out_dir
                 with open(params_path, "w") as f:
@@ -197,13 +298,27 @@ class _MetadataLoadWorker(QThread):
 
             dim_order_data = _compute_dim_order_data(metadata, progress_callback=self.progress.emit)
 
+            # No recorded mode + every image single-plane: probably a 2D
+            # project that lost its flag, which would silently run as 3D.
+            assumed_3d_single_plane = bool(
+                not yaml_dim and not csv_dim
+                and _all_samples_single_plane(metadata, dim_order_data)
+            )
+            if assumed_3d_single_plane:
+                self.progress.emit(
+                    "⚠️ No dimensionality recorded, assumed 3D, but every image has Z=1."
+                )
+
             self.finished.emit({
+                "assumed_3d_single_plane": assumed_3d_single_plane,
                 "ok": True,
                 "metadata": metadata,
                 "behav3d_parameters": behav3d_parameters,
                 "dim_order_data": dim_order_data,
                 "csv_path": self.csv_path,
                 "out_dir": self.out_dir,
+                "dimensionality": dimensionality,
+                "dimensionality_conflict": (yaml_dim, csv_dim) if dim_conflict else None,
             })
         except Exception as e:
             self.finished.emit({"ok": False, "error": str(e)})
@@ -223,8 +338,10 @@ class _ZarrWorker(QThread):
 
     def __init__(self, output_dir: str, metadata: pd.DataFrame,
                  t_start: int = None, t_end: int = None,
-                 n_workers: int = 1, originals: dict = None, parent=None):
+                 n_workers: int = 1, originals: dict = None,
+                 dimensionality: str = DEFAULT_DIMENSIONALITY, parent=None):
         super().__init__(parent)
+        self.dimensionality = dimensionality
         self.output_dir = output_dir
         self.metadata = metadata
         self.t_start = t_start
@@ -256,6 +373,7 @@ class _ZarrWorker(QThread):
                 t_start=self.t_start,
                 t_end=self.t_end,
                 n_workers=self.n_workers,
+                dimensionality=self.dimensionality,
             )
 
             # Pair each original with the new zarr path now stored in raw_image_path.
@@ -295,6 +413,7 @@ class _ZarrWorker(QThread):
                     original_dimension_order=original.get("order"),
                     new_shape=new_shape,
                     mode="converted",
+                    dimensionality=self.dimensionality,
                 )
 
             self.finished.emit(
@@ -382,6 +501,8 @@ class DataPreparationTab(QWidget):
 
     # Signal emitted when metadata is successfully loaded
     metadata_loaded = Signal(object)  # pd.DataFrame
+    # Experiment mode changed ("2D" / "3D"); see the `dimensionality` property.
+    dimensionality_changed = Signal(str)
 
     # The shared metadata table ---------------------------------------------
     # Background workers used to receive this very DataFrame and the backends
@@ -422,6 +543,12 @@ class DataPreparationTab(QWidget):
         self._metadata_builder_dirty: bool = False
         # Session-level opt-out for the numeric sample-name warning.
         self._skip_numeric_name_warning: bool = False
+        # Experiment mode; every tab reads it through `dimensionality`.
+        self._dimensionality: str = DEFAULT_DIMENSIONALITY
+        self._zarr_converting: bool = False
+        # (sample, shape_str, detected_order) rows of the Dimension Order
+        # table, kept so a mode switch can rebuild it without disk access.
+        self._dim_order_data: list = []
 
         # Build UI --------------------------------------------------------
         scroll = QScrollArea(self)
@@ -438,6 +565,7 @@ class DataPreparationTab(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
 
+        self._build_dimensionality_section()
         self._build_output_dir_section()
         self._build_metadata_builder_section()
         self._build_metadata_loader_section()
@@ -463,6 +591,204 @@ class DataPreparationTab(QWidget):
             return
         self.log.append(msg)
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Section 0 – Image Dimensionality (experiment-wide 2D / 3D switch)
+    # ══════════════════════════════════════════════════════════════════════
+    @property
+    def dimensionality(self) -> str:
+        """Experiment mode, ``"3D"`` (default) or ``"2D"``.
+
+        Every tab receives this widget as its ``metadata_loader`` and reads
+        the mode from here (see behav3d.core.dimensionality.get_dimensionality).
+        """
+        return self._dimensionality
+
+    def is_2d(self) -> bool:
+        return self._dimensionality == DIM_2D
+
+    def _build_dimensionality_section(self):
+        self.dim_mode_grp = QGroupBox("0 · Image Dimensionality")
+        lay = QVBoxLayout(self.dim_mode_grp)
+        lay.setSpacing(4)
+
+        row = QHBoxLayout()
+        self.dim_mode_group = QButtonGroup(self)
+        self.dim_mode_group.setExclusive(True)
+        self.dim_mode_buttons: dict = {}
+        for mode, text in (
+            (DIM_3D, "3D   (TZYX / TCZYX)"),
+            (DIM_2D, "2D   (TYX / TCYX)"),
+        ):
+            btn = QPushButton(text)
+            btn.setCheckable(True)
+            btn.setMinimumHeight(34)
+            btn.clicked.connect(lambda _checked=False, m=mode: self._on_dimensionality_clicked(m))
+            self.dim_mode_group.addButton(btn)
+            self.dim_mode_buttons[mode] = btn
+            row.addWidget(btn, stretch=1)
+        row.addWidget(HelpButton(
+            "Image Dimensionality",
+            "Choose whether this experiment holds 3D or 2D time-lapses. The "
+            "choice applies to every sample and to every step of the pipeline.\n\n"
+            "3D (default): raw images are TZYX (single channel; a channel axis "
+            "is added) or TCZYX.\n"
+            "2D: raw images are TYX (single channel; a channel axis is added) "
+            "or TCYX. Pixel Z is not used and is stored as 1.0.\n\n"
+            "The mode is saved in metadata.csv (column 'dimensionality') and in "
+            "behav3d_parameters.yml.\n\n"
+            "Once images have been converted to zarr the mode is locked."
+        ))
+        lay.addLayout(row)
+
+        self.dim_mode_info = QLabel("")
+        self.dim_mode_info.setWordWrap(True)
+        lay.addWidget(self.dim_mode_info)
+
+        self._layout.addWidget(self.dim_mode_grp)
+        self._refresh_dimensionality_ui()
+
+    def _dimensionality_locked(self) -> bool:
+        if self._zarr_converting:
+            return True
+        return is_dimensionality_locked(self.behav3d_parameters, self._metadata)
+
+    def _refresh_dimensionality_ui(self):
+        """Sync the toggle buttons, colours and info line with the state."""
+        if not hasattr(self, "dim_mode_buttons"):
+            return
+        mode = self._dimensionality
+        locked = self._dimensionality_locked()
+        color = DIMENSIONALITY_COLORS[mode]
+        for m, btn in self.dim_mode_buttons.items():
+            btn.blockSignals(True)
+            btn.setChecked(m == mode)
+            btn.blockSignals(False)
+            if m == mode:
+                btn.setStyleSheet(
+                    f"QPushButton {{ background-color: {DIMENSIONALITY_COLORS[m]}; color: white; "
+                    "font-weight: bold; font-size: 13px; border-radius: 4px; }"
+                )
+            else:
+                btn.setStyleSheet("QPushButton { font-size: 13px; }")
+            btn.setEnabled(not locked or m == mode)
+        self.dim_mode_grp.setStyleSheet(
+            f"QGroupBox {{ border: 2px solid {color}; border-radius: 6px; "
+            "margin-top: 10px; font-weight: bold; } "
+            "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; "
+            f"color: {color}; }}"
+        )
+        if mode == DIM_2D:
+            text = (
+                "<b>2D experiment.</b> Raw images: <b>TYX</b> (single channel, a "
+                "channel axis is added) or <b>TCYX</b>. Pixel Z is not used."
+            )
+        else:
+            text = (
+                "<b>3D experiment.</b> Raw images: <b>TZYX</b> (single channel, a "
+                "channel axis is added) or <b>TCZYX</b>."
+            )
+        if locked:
+            text = (
+                "&#128274; <b>Locked</b>: images are already converted to zarr, "
+                "so the mode can no longer change.<br>" + text
+            )
+        self.dim_mode_info.setText(text)
+
+    def _set_dimensionality(self, mode, emit: bool = True):
+        """Apply ``mode`` to the whole tab (no prompts, no file writes)."""
+        mode = normalize_dimensionality(mode) or DEFAULT_DIMENSIONALITY
+        changed = mode != self._dimensionality
+        self._dimensionality = mode
+        self.behav3d_parameters[DIMENSIONALITY_KEY] = mode
+        self._refresh_dimensionality_ui()
+        self._apply_dimensionality_to_forms()
+        if self._metadata is not None and hasattr(self, "dim_table"):
+            self._populate_dim_order_table(self._dim_order_data)
+        if hasattr(self, "dim_apply_all_combo"):
+            self._refresh_dim_apply_all_options()
+        if changed and emit:
+            self.dimensionality_changed.emit(mode)
+
+    def _on_dimensionality_clicked(self, mode: str):
+        if mode == self._dimensionality:
+            self._refresh_dimensionality_ui()
+            return
+        if self._dimensionality_locked():
+            self._refresh_dimensionality_ui()
+            QMessageBox.information(
+                self, "Dimensionality locked",
+                "The images of this experiment are already converted to zarr "
+                f"as {self._dimensionality}, so the mode cannot change.\n\n"
+                "To process the data as "
+                f"{mode}, start a new project in an empty output directory.",
+            )
+            return
+        if self._metadata is not None:
+            extra = (
+                "Pixel Z will be set to 1.0 for every sample."
+                if mode == DIM_2D else
+                "Check Pixel Z for every sample afterwards (Edit Metadata CSV)."
+            )
+            res = QMessageBox.question(
+                self, f"Switch to {mode}?",
+                f"Switch this experiment from {self._dimensionality} to {mode}?\n\n"
+                f"metadata.csv and behav3d_parameters.yml will be updated. {extra}",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if res != QMessageBox.Yes:
+                self._refresh_dimensionality_ui()
+                return
+        self._set_dimensionality(mode)
+        self._persist_dimensionality()
+        self._log(f"Experiment set to {mode}.")
+
+    def _persist_dimensionality(self):
+        """Write the current mode to the loaded metadata CSV and params file."""
+        from behav3d.io.parameters import params_path_for, save_dimensionality
+
+        mode = self._dimensionality
+        md = self._metadata
+        if md is not None:
+            md[DIMENSIONALITY_KEY] = mode
+            if mode == DIM_2D:
+                md["pixel_distance_z"] = PIXEL_DISTANCE_Z_2D
+            csv_path = self._loaded_csv_path or self.csv_path_edit.text().strip()
+            if csv_path and Path(csv_path).exists():
+                try:
+                    md.to_csv(csv_path, index=False)
+                except Exception as e:
+                    self._log(f"\u26a0 Could not update {csv_path}: {e}")
+            self._populate_metadata_overview()
+
+        out_dir = self.output_dir_edit.text().strip() or self.output_dir
+        if out_dir and Path(out_dir).is_dir() and (
+            md is not None or params_path_for(out_dir).exists()
+        ):
+            try:
+                save_dimensionality(out_dir, mode, params=self.behav3d_parameters)
+            except Exception as e:
+                self._log(f"\u26a0 Could not update behav3d_parameters.yml: {e}")
+
+        if md is not None:
+            self.metadata_loaded.emit(md)
+
+    def _apply_dimensionality_to_forms(self):
+        """Show/hide 2D-irrelevant builder fields on every sample form."""
+        for form in getattr(self, "_sample_forms", []):
+            self._apply_dimensionality_to_form(form["group"].layout(), form["basic"])
+
+    def _apply_dimensionality_to_form(self, layout, fields: dict):
+        is_2d = self.is_2d()
+        pz = fields.get("pixel_distance_z")
+        if pz is not None:
+            pz.setVisible(not is_2d)
+            label = layout.labelForField(pz) if layout is not None else None
+            if label is not None:
+                label.setVisible(not is_2d)
+        dim_edit = fields.get("dimension_order")
+        if dim_edit is not None:
+            dim_edit.setPlaceholderText("e.g. TCYX or TYX" if is_2d else "e.g. TCZYX or TZYX")
 
     # ══════════════════════════════════════════════════════════════════════
     # Section 1 – Output Directory
@@ -855,6 +1181,8 @@ class DataPreparationTab(QWidget):
         fields["pixel_distance_z"] = QDoubleSpinBox(); fields["pixel_distance_z"].setDecimals(4)
         fields["pixel_distance_z"].setMaximum(9999); fields["pixel_distance_z"].setValue(2.0); fields["pixel_distance_z"].setMaximumWidth(90)
         layout.addRow("Pixel Z (μm)*:", fields["pixel_distance_z"])
+        # Hidden in 2D experiments (pixel_distance_z is then written as 1.0).
+        self._apply_dimensionality_to_form(layout, fields)
 
         fields["distance_unit"] = QLineEdit("μm")
         fields["distance_unit"].setMaximumWidth(60)
@@ -1430,9 +1758,33 @@ class DataPreparationTab(QWidget):
                 row[f"{pfx}_{ct}_tracks_image_path"] = fields["tracks_image_path"].text().strip().strip('"').strip("'")
                 row[f"{pfx}_{ct}_tracks_csv_path"] = fields["tracks_csv_path"].text().strip().strip('"').strip("'")
 
+            # Experiment-wide mode (master toggle); 2D has no Z spacing.
+            row[DIMENSIONALITY_KEY] = self._dimensionality
+            if self.is_2d():
+                row["pixel_distance_z"] = PIXEL_DISTANCE_Z_2D
+
             rows.append(row)
 
         df = pd.DataFrame(rows)
+
+        # Dimension orders typed in the builder must fit the experiment mode
+        # (the image shape is checked later, in the Dimension Order table).
+        order_errors = []
+        for row in rows:
+            order = str(row.get("dimension_order", "") or "").strip().upper()
+            if not order:
+                continue
+            err = validate_order_for_mode(order, self._dimensionality)
+            if err:
+                order_errors.append(f"• {row.get('sample_name') or '?'}: {err}")
+        if order_errors:
+            QMessageBox.warning(
+                self, "Invalid dimension order",
+                f"Dimension orders that do not fit a {self._dimensionality} experiment:\n\n"
+                + "\n".join(order_errors),
+            )
+            self._log("\u274c Dimension order does not match the experiment mode; save cancelled.")
+            return False
 
         # Validate before persisting anything to disk.
         try:
@@ -1466,6 +1818,16 @@ class DataPreparationTab(QWidget):
 
         # Update behav3d_parameters
         self.behav3d_parameters["paths"]["metadata_csv"] = str(csv_path)
+        self.behav3d_parameters[DIMENSIONALITY_KEY] = self._dimensionality
+        params_dir = self.output_dir_edit.text().strip() or self.output_dir
+        if params_dir and Path(params_dir).is_dir():
+            try:
+                from behav3d.io.parameters import save_dimensionality
+
+                save_dimensionality(params_dir, self._dimensionality, params=self.behav3d_parameters)
+            except Exception as e:
+                self._log(f"\u26a0 Could not record dimensionality in behav3d_parameters.yml: {e}")
+        self._refresh_dimensionality_ui()
 
         # If we were in edit mode, exit it and reset button
         if self._edit_mode:
@@ -1589,8 +1951,28 @@ class DataPreparationTab(QWidget):
 
         # Populate overview and dim-order table (dim-order data was already
         # computed on the background thread — no extra image I/O here).
+        # Setting the mode rebuilds the dim-order table for that mode.
         self._populate_metadata_overview()
-        self._populate_dim_order_table(result["dim_order_data"])
+        self._dim_order_data = result["dim_order_data"] or []
+        self._set_dimensionality(result.get("dimensionality"))
+        self._log(f"Experiment dimensionality: {self._dimensionality}")
+        conflict = result.get("dimensionality_conflict")
+        if conflict:
+            QMessageBox.warning(
+                self, "Dimensionality mismatch",
+                f"behav3d_parameters.yml says {conflict[0]} but metadata.csv says "
+                f"{conflict[1]}.\n\nThe parameters file wins: the experiment is "
+                f"treated as {conflict[0]} and metadata.csv was updated.",
+            )
+        if result.get("assumed_3d_single_plane"):
+            QMessageBox.warning(
+                self, "Is this a 2D experiment?",
+                "This project does not record whether it is 2D or 3D, so it is "
+                "treated as 3D, but every image has a single Z plane (Z=1).\n\n"
+                "If these are 2D time-lapses, switch the experiment to 2D in "
+                "section 0 (Image Dimensionality) before processing. If the "
+                "data really are 3D, you can ignore this message.",
+            )
 
         # Emit signal for other tabs
         self.metadata_loaded.emit(self.metadata)
@@ -1677,20 +2059,23 @@ class DataPreparationTab(QWidget):
     # Section 5 – Dimension Order Table
     # ══════════════════════════════════════════════════════════════════════
     def _build_dim_order_section(self):
-        grp = QGroupBox("5 · Dimension Order (Optional)")
+        grp = QGroupBox("5 · Dimension Order")
         lay = QVBoxLayout(grp)
 
-        self.dim_table = QTableWidget(0, 3)
-        self.dim_table.setHorizontalHeaderLabels(["Sample", "Shape", "Dim Order"])
+        # Columns 0-2 are read by the assistant (_assistant_context); the
+        # check column is appended after them.
+        self.dim_table = QTableWidget(0, 4)
+        self.dim_table.setHorizontalHeaderLabels(["Sample", "Shape", "Dim Order", "Check"])
         self.dim_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.dim_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.dim_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.dim_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self.dim_table.setMaximumHeight(200)
         lay.addWidget(self.dim_table)
 
         row = QHBoxLayout()
         self.dim_apply_all_combo = QComboBox()
-        self.dim_apply_all_combo.addItems(DIM_ORDER_OPTIONS)
+        self._refresh_dim_apply_all_options()
         btn_apply_all = QPushButton("Apply to All")
         btn_apply_all.clicked.connect(self._apply_dim_order_all)
         btn_save_dim = QPushButton("Save to Metadata CSV")
@@ -1703,6 +2088,28 @@ class DataPreparationTab(QWidget):
 
         self._layout.addWidget(grp)
 
+    @staticmethod
+    def _parse_shape(shape_str):
+        """``"(3, 2, 512, 512)"`` -> tuple of ints, or ``None``."""
+        import ast
+
+        try:
+            shape = ast.literal_eval(str(shape_str))
+            return tuple(int(v) for v in shape)
+        except Exception:
+            return None
+
+    def _refresh_dim_apply_all_options(self):
+        combo = self.dim_apply_all_combo
+        current = combo.currentText()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(allowed_dim_orders(self._dimensionality))
+        idx = combo.findText(current)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+        combo.blockSignals(False)
+
     def _populate_dim_order_table(self, dim_order_data=None):
         if self.metadata is None:
             return
@@ -1712,7 +2119,9 @@ class DataPreparationTab(QWidget):
         # tuples so this method only ever touches Qt widgets, never the disk.
         if dim_order_data is None:
             dim_order_data = _compute_dim_order_data(self.metadata)
+        self._dim_order_data = list(dim_order_data)
 
+        mode = self._dimensionality
         self.dim_table.setRowCount(len(dim_order_data))
         self._sample_t_counts = {}
 
@@ -1722,29 +2131,88 @@ class DataPreparationTab(QWidget):
             item.setFlags(item.flags() & ~Qt.ItemIsEditable)
             self.dim_table.setItem(i, 0, item)
 
+            shape = self._parse_shape(shape_str)
             shape_item = QTableWidgetItem(shape_str)
             shape_item.setFlags(shape_item.flags() & ~Qt.ItemIsEditable)
+            shape_item.setData(Qt.UserRole, shape)
             self.dim_table.setItem(i, 1, shape_item)
 
-            # Dim order combo
+            # Dim order combo: only the orders that fit the experiment mode
+            # and the image's number of dimensions. Nothing valid to
+            # preselect -> placeholder, which blocks conversion until chosen.
+            options = allowed_dim_orders(mode, len(shape)) if shape else allowed_dim_orders(mode)
             combo = QComboBox()
-            combo.addItems(DIM_ORDER_OPTIONS)
-            # Use value from metadata if present
+            combo.addItem(DIM_ORDER_PLACEHOLDER)
+            combo.addItems(options)
             existing = self.metadata.loc[
                 self.metadata["sample_name"] == sample, "dimension_order"
             ]
+            existing_val = None
             if not existing.empty and pd.notna(existing.iloc[0]) and str(existing.iloc[0]).strip():
-                val = str(existing.iloc[0]).strip()
-                if val in DIM_ORDER_OPTIONS:
-                    combo.setCurrentText(val)
-                else:
-                    combo.setCurrentText(detected_order if detected_order in DIM_ORDER_OPTIONS else "TCZYX")
-            else:
-                combo.setCurrentText(detected_order if detected_order in DIM_ORDER_OPTIONS else "TCZYX")
-            combo.currentTextChanged.connect(self._recompute_sample_t_counts_from_table)
+                existing_val = str(existing.iloc[0]).strip().upper()
+            detected_val = str(detected_order).strip().upper() if detected_order else None
+            choice = None
+            for candidate in (existing_val, detected_val):
+                if candidate and candidate in options:
+                    choice = candidate
+                    break
+            if choice is None and len(options) == 1:
+                choice = options[0]
+            if choice is None and mode == DIM_3D and "TCZYX" in options and (shape is None or len(shape) == 5):
+                choice = "TCZYX"  # long-standing 3D default for undetectable 5D images
+            combo.setCurrentText(choice or DIM_ORDER_PLACEHOLDER)
+            combo.currentTextChanged.connect(self._on_dim_order_combo_changed)
             self.dim_table.setCellWidget(i, 2, combo)
 
+            check_item = QTableWidgetItem("")
+            check_item.setFlags(check_item.flags() & ~Qt.ItemIsEditable)
+            self.dim_table.setItem(i, 3, check_item)
+
+        self._refresh_dim_order_checks()
         self._recompute_sample_t_counts_from_table()
+
+    def _on_dim_order_combo_changed(self, *_args):
+        self._refresh_dim_order_checks()
+        self._recompute_sample_t_counts_from_table()
+
+    def _dim_order_row_error(self, i: int):
+        """Error text for table row ``i`` in the current mode, or ``None``."""
+        shape_item = self.dim_table.item(i, 1)
+        combo = self.dim_table.cellWidget(i, 2)
+        shape = shape_item.data(Qt.UserRole) if shape_item is not None else None
+        if shape:
+            err = validate_shape_for_mode(self._dimensionality, shape)
+            if err:
+                return err
+        order = combo.currentText() if combo is not None else ""
+        return validate_order_for_mode(order, self._dimensionality, shape)
+
+    def _refresh_dim_order_checks(self):
+        from qtpy.QtGui import QColor
+
+        for i in range(self.dim_table.rowCount()):
+            item = self.dim_table.item(i, 3)
+            if item is None:
+                continue
+            err = self._dim_order_row_error(i)
+            if err:
+                item.setText(f"\u26a0 {err}")
+                item.setForeground(QColor("#e57373"))
+                item.setToolTip(err)
+            else:
+                item.setText(f"\u2713 OK ({self._dimensionality})")
+                item.setForeground(QColor("#81c784"))
+                item.setToolTip("")
+
+    def _dim_order_errors(self) -> list:
+        """``[(sample, error), ...]`` for every row that blocks conversion."""
+        errors = []
+        for i in range(self.dim_table.rowCount()):
+            err = self._dim_order_row_error(i)
+            if err:
+                sample_item = self.dim_table.item(i, 0)
+                errors.append((sample_item.text() if sample_item else f"row {i + 1}", err))
+        return errors
 
     def _recompute_sample_t_counts_from_table(self, *_args):
         """Re-derive each sample's T count from the dim_table's Shape/Dim Order
@@ -1792,10 +2260,21 @@ class DataPreparationTab(QWidget):
 
     def _apply_dim_order_all(self):
         order = self.dim_apply_all_combo.currentText()
+        skipped = []
         for i in range(self.dim_table.rowCount()):
             combo = self.dim_table.cellWidget(i, 2)
             if combo:
-                combo.setCurrentText(order)
+                # Only rows whose image has as many dimensions as the order.
+                if combo.findText(order) >= 0:
+                    combo.setCurrentText(order)
+                else:
+                    sample_item = self.dim_table.item(i, 0)
+                    skipped.append(sample_item.text() if sample_item else str(i + 1))
+        if skipped:
+            self._log(
+                f"\u26a0 '{order}' does not fit the image dimensions of: {', '.join(skipped)}"
+            )
+        self._refresh_dim_order_checks()
         self._recompute_sample_t_counts_from_table()
 
     def _save_dim_order(self):
@@ -1807,7 +2286,7 @@ class DataPreparationTab(QWidget):
         for i in range(self.dim_table.rowCount()):
             sample = self.dim_table.item(i, 0).text()
             combo = self.dim_table.cellWidget(i, 2)
-            if combo:
+            if combo and combo.currentText() != DIM_ORDER_PLACEHOLDER:
                 self.metadata.loc[
                     self.metadata["sample_name"] == sample, "dimension_order"
                 ] = combo.currentText()
@@ -2002,6 +2481,19 @@ class DataPreparationTab(QWidget):
             QMessageBox.warning(self, "Error", "Please set output directory first.")
             return
 
+        # Every image must fit the experiment mode before anything is written.
+        errors = self._dim_order_errors()
+        if errors:
+            QMessageBox.critical(
+                self, "Cannot convert",
+                f"These samples do not fit a {self._dimensionality} experiment:\n\n"
+                + "\n".join(f"\u2022 {s}: {e}" for s, e in errors)
+                + "\n\nFix the dimension orders in section 5, or switch the "
+                "experiment mode in section 0.",
+            )
+            self._log(f"\u274c Conversion blocked: {len(errors)} sample(s) do not fit {self._dimensionality}.")
+            return
+
         # Save dim orders first
         self._save_dim_order()
 
@@ -2093,11 +2585,13 @@ class DataPreparationTab(QWidget):
             out_dir, self.metadata.copy(),
             t_start=t_start, t_end=t_end,
             n_workers=self.zarr_workers_spin.value(),
-            originals=originals, parent=self
+            originals=originals, dimensionality=self._dimensionality, parent=self
         )
         self._zarr_worker.progress.connect(self._log, Qt.QueuedConnection)
         self._zarr_worker.finished.connect(self._on_zarr_done)
         self._zarr_worker.start()
+        self._zarr_converting = True
+        self._refresh_dimensionality_ui()  # no mode switch while converting
         self._zarr_busy = begin_busy(
             "Converting images to zarr", alive=self._zarr_worker.isRunning
         )
@@ -2108,6 +2602,8 @@ class DataPreparationTab(QWidget):
         self.zarr_btn.setEnabled(True)
         self.zarr_status.setText(message.split("\n")[0])
         self._log(message)
+        self._zarr_converting = False
+        self._refresh_dimensionality_ui()
 
         if not success or updated_metadata is None:
             return
@@ -2152,6 +2648,8 @@ class DataPreparationTab(QWidget):
         # even if the raw files are removed in the next step.
         t_start, t_end = self._zarr_cut
         self._persist_zarr_conversion(t_start, t_end, sample_records)
+        # Converted images fix the mode for good.
+        self._refresh_dimensionality_ui()
 
         # 6) Offer deletion of the now-redundant original files
         self._offer_delete_originals(originals_map or [])

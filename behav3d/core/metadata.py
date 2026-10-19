@@ -323,6 +323,7 @@ def load_behav3d_metadata(
         "time_interval": float,
         "time_unit": str,
         "dimension_order": str, 
+        "dimensionality": str,
         "raw_image_path": str,
         "signal_unmixing_image_path": str, #FUNC
         "original_raw_image_path": str, # FUNC
@@ -485,6 +486,30 @@ def check_behav3d_metadata(
     if immune_validation_types:
         immune_types = immune_validation_types
     
+    # Experiment dimensionality: one value for every row (missing = 3D).
+    from behav3d.core.dimensionality import (
+        DIMENSIONALITY_KEY,
+        DIM_2D,
+        normalize_dimensionality,
+    )
+    experiment_is_2d = False
+    if DIMENSIONALITY_KEY in metadata.columns:
+        raw_values = metadata[DIMENSIONALITY_KEY].tolist()
+        modes = {normalize_dimensionality(v) for v in raw_values}
+        invalid = sorted({str(v) for v in raw_values
+                          if normalize_dimensionality(v) is None and pd.notna(v) and str(v).strip()})
+        if invalid:
+            raise AssertionError(
+                f"Invalid dimensionality value(s) {invalid}. Use '2D' or '3D'."
+            )
+        modes.discard(None)
+        if len(modes) > 1:
+            raise AssertionError(
+                f"Different rows have different dimensionality values: {sorted(modes)}. "
+                "All samples of an experiment must be either 2D or 3D."
+            )
+        experiment_is_2d = modes == {DIM_2D}
+
     # Basic required columns (always needed)
     required_columns = [
         "sample_name", 
@@ -497,6 +522,10 @@ def check_behav3d_metadata(
         "time_unit",
         "raw_image_path",
     ]
+    if experiment_is_2d:
+        # 2D experiments have no Z spacing; the builder writes 1.0, but an
+        # empty or missing value must not block a 2D project.
+        required_columns.remove("pixel_distance_z")
     
     # Build dynamic required columns for each detected cell type
     path_columns = []  # Columns that can be empty (filled by pipeline)
@@ -828,7 +857,7 @@ def check_behav3d_metadata(
 
 METADATA_TECHNICAL_PATTERNS = (
     "_path", "_dir", "pixel_distance", "time_interval", "unit_",
-    "channel_", "dead_channel", "zarr", "dimension_order",
+    "channel_", "dead_channel", "zarr", "dimension_order", "dimensionality",
 )
 
 

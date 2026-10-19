@@ -331,12 +331,23 @@ def convert_input_files_to_zarr(
     t_start=None,
     t_end=None,
     n_workers=1,
+    dimensionality=None,
     ):
     """
     Convert all raw images listed in metadata to .zarr in TCZYX order.
     Reads the per-sample ``dimension_order`` column to determine the
     source axis order for each image.
+
+    ``dimensionality`` ("2D"/"3D") is the experiment mode; when omitted it is
+    read from the metadata ``dimensionality`` column (missing = 3D). Each
+    image's order is validated against it, and 2D images are written with a
+    singleton Z (TC1YX).
     """
+    from behav3d.core.dimensionality import DIMENSIONALITY_KEY, get_dimensionality
+
+    if dimensionality is None:
+        dimensionality = get_dimensionality(metadata)
+
     for idx, sample in metadata.iterrows():
         print(f"Processing sample: {sample['sample_name']}") 
         start_time = time.time()
@@ -360,10 +371,13 @@ def convert_input_files_to_zarr(
             t_start=t_start,
             t_end=t_end,
             n_workers=n_workers,
+            dimensionality=dimensionality,
         )
 
         metadata.at[idx, "raw_image_path"] = str(raw_image_zarr)
+        # Physical axis order of the zarr; a 2D image has Z=1.
         metadata.at[idx, "dimension_order"] = "TCZYX"
+        metadata.at[idx, DIMENSIONALITY_KEY] = dimensionality
     
     return(metadata)
 

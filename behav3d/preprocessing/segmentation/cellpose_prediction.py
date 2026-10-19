@@ -32,6 +32,7 @@ from skimage.filters import threshold_otsu
 from behav3d.io.images import save_as_zarr, load_zarr, load_image, append_to_zarr
 from behav3d.core.run_plan import Action, resolve_action
 from behav3d.preprocessing.segmentation import segment_2d_filter
+from behav3d.core.dimensionality import is_2d
 from behav3d.core.metadata import (
     detect_organoid_types_from_metadata,
     detect_immune_cell_types_from_metadata,
@@ -98,8 +99,12 @@ def run_cellpose_prediction(  # noqa: WPS231 (complexity) - unavoidable for pipe
     masks_suffix: str = "_cellpose_masks.zarr",
     masks_outpath: Optional[str | Path] = None,
     verbose: bool = True,
+    do_3D: bool = True,
 ) -> Tuple[np.ndarray, Path]:
     """Run 3-D Cellpose prediction on *image_path*.
+
+    With ``do_3D=False`` (2D experiments, stored with Z=1) each timepoint's
+    single plane is segmented in 2-D, without anisotropy.
 
     Parameters
     ----------
@@ -220,18 +225,32 @@ def run_cellpose_prediction(  # noqa: WPS231 (complexity) - unavoidable for pipe
         if start_ts is not None:
             start_ts.record()
 
-        # Cellpose expects channels first (C, Z, Y, X) with channel_axis=0, z_axis=1.
-        mask_t, *_ = model.eval(
-            img_t,
-            diameter=diameter,
-            channels=channels,
-            min_size=min_size,
-            do_3D=True,
-            normalize=True,
-            channel_axis=0,
-            z_axis=1,
-            anisotropy=anisotropy,
-        )
+        if do_3D:
+            # Cellpose expects channels first (C, Z, Y, X) with channel_axis=0, z_axis=1.
+            mask_t, *_ = model.eval(
+                img_t,
+                diameter=diameter,
+                channels=channels,
+                min_size=min_size,
+                do_3D=True,
+                normalize=True,
+                channel_axis=0,
+                z_axis=1,
+                anisotropy=anisotropy,
+            )
+        else:
+            # 2D experiment: segment the single Z plane, (C, Y, X).
+            mask_t, *_ = model.eval(
+                np.asarray(img_t)[:, 0],
+                diameter=diameter,
+                channels=channels,
+                min_size=min_size,
+                do_3D=False,
+                normalize=True,
+                channel_axis=0,
+                z_axis=None,
+            )
+            mask_t = np.asarray(mask_t)[None]
         mask_t=segment_2d_filter(mask_t)
 
         masks[t] = mask_t.astype(np.uint16)
@@ -451,8 +470,9 @@ def run_cellpose_segmentation(
                     f"Make sure this label is configured in the 'Configure Channel Labels' panel."
                 )
 
-        # Extract the anisotropy
-        anisotropy = sample['pixel_distance_z'] / sample['pixel_distance_xy']
+        # Extract the anisotropy (unused for 2D experiments)
+        sample_is_2d = is_2d(sample)
+        anisotropy = None if sample_is_2d else sample['pixel_distance_z'] / sample['pixel_distance_xy']
 
         # Run Cellpose with explicit output path for consistent naming
         masks, _ = run_cellpose_prediction(
@@ -467,6 +487,7 @@ def run_cellpose_segmentation(
             anisotropy=anisotropy,
             min_size=min_size,
             nchan=len(channels),
+            do_3D=not sample_is_2d,
             **cellpose_kwargs,
         )
         print(f"  [SAVED] Segments at {masks_outpath}")

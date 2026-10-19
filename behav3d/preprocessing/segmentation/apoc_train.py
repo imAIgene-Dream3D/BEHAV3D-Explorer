@@ -22,6 +22,7 @@ from behav3d.core.opencl_env import configure_pyopencl
 configure_pyopencl()
 
 import numpy as np
+from behav3d.core.dimensionality import is_2d
 import napari
 from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QComboBox,
@@ -553,6 +554,19 @@ def _extract_cell_type_config(initial_params, cell_type):
         if key.startswith(prefix):
             cfg[key[len(prefix):]] = value
     return cfg
+
+
+def _single_plane(volume):
+    from behav3d.preprocessing.segmentation import single_plane
+
+    return single_plane(volume)
+
+
+def _restore_plane(prediction, reference):
+    """Give a 2-D prediction of a ``(1, Y, X)`` frame its Z axis back."""
+    if getattr(reference, "ndim", 0) == 3 and reference.shape[0] == 1 and prediction.ndim == 2:
+        return prediction[None]
+    return prediction
 
 
 def _finalize_segments(segments, segment_size_min):
@@ -1421,6 +1435,7 @@ class CellTypeTab(QWidget):
             xy_um=self._pixel_sizes.get("xy_um"),
             z_um=self._pixel_sizes.get("z_um"),
             default_physical=self._units_physical,
+            is_2d=self._pixel_sizes.get("is_2d"),
         )
         self._unit_mgr.switch.toggled.connect(self._on_units_toggled)
         group_layout.addWidget(self._unit_mgr.header_row("Units:"))
@@ -2886,9 +2901,13 @@ class APOCTrainingWidget(QWidget):
         if not feature_tokens:
             raise RuntimeError("No APOC features selected. Choose at least one feature before training.")
 
+        from behav3d.preprocessing.segmentation import single_plane
+
         features = []
         for img in images:
             img_t = np.asarray(img[t_idx]) if getattr(img, "ndim", 0) == 4 else np.asarray(img)
+            # 2D experiment (Z=1): true 2-D features.
+            img_t = single_plane(img_t)
             generated = apoc.generate_feature_stack(img_t, feature_string)
             if push_to_device:
                 features.extend(generated)
@@ -2954,8 +2973,8 @@ class APOCTrainingWidget(QWidget):
                     t,
                     push_to_device=True,
                 )
-                results.append(np.asarray(clf.predict(features=feats_t)).astype(np.int16))
-                prob_results.append(np.asarray(prob_clf.predict(features=feats_t)).astype(np.float32))
+                results.append(_restore_plane(np.asarray(clf.predict(features=feats_t)).astype(np.int16), images[0][t]))
+                prob_results.append(_restore_plane(np.asarray(prob_clf.predict(features=feats_t)).astype(np.float32), images[0][t]))
             return np.stack(results, axis=0), np.stack(prob_results, axis=0)
 
         features = self._generate_feature_list_for_timepoint(
@@ -2965,8 +2984,8 @@ class APOCTrainingWidget(QWidget):
             push_to_device=True,
         )
         return (
-            np.asarray(clf.predict(features=features)).astype(np.int16),
-            np.asarray(prob_clf.predict(features=features)).astype(np.float32),
+            _restore_plane(np.asarray(clf.predict(features=features)).astype(np.int16), images[0]),
+            _restore_plane(np.asarray(prob_clf.predict(features=features)).astype(np.float32), images[0]),
         )
 
     def _update_prediction_layers(self, ct, segments_result, prob_result):
@@ -3269,7 +3288,7 @@ class APOCTrainingWidget(QWidget):
 
                 if annotation.ndim == 4:
                     for t in range(n_timepoints):
-                        ann_t = annotation[t]
+                        ann_t = _single_plane(np.asarray(annotation[t]))
                         if not np.any(ann_t):
                             continue
                         feats_t = self._generate_feature_list_for_timepoint(
@@ -3285,11 +3304,12 @@ class APOCTrainingWidget(QWidget):
                     feats_np = self._generate_feature_list_for_timepoint(
                         images_np, feature_string, 0
                     )
-                    X_t, y_t = clf._to_np(feats_np, annotation)
+                    ann_np = _single_plane(np.asarray(annotation))
+                    X_t, y_t = clf._to_np(feats_np, ann_np)
                     if X_t.size > 0 and y_t.size > 0:
                         X_parts.append(X_t)
                         y_parts.append(y_t)
-                        gt_ndim = annotation.ndim
+                        gt_ndim = ann_np.ndim
 
                 if not X_parts:
                     safe_log(f"  ⚠️ No labeled pixels for '{ct}' — skipping.")
@@ -3565,7 +3585,7 @@ class APOCTrainingWidget(QWidget):
 
                 if annotation.ndim == 4:
                     for t in range(n_timepoints):
-                        ann_t = np.asarray(annotation[t])
+                        ann_t = _single_plane(np.asarray(annotation[t]))
                         if not np.any(ann_t):
                             continue
                         feats_t = self._generate_feature_list_for_timepoint(images, feature_string, t)
@@ -3576,7 +3596,7 @@ class APOCTrainingWidget(QWidget):
                         y_parts.append(y_t)
                         gt_ndim = ann_t.ndim
                 else:
-                    ann_np = np.asarray(annotation)
+                    ann_np = _single_plane(np.asarray(annotation))
                     feats_np = self._generate_feature_list_for_timepoint(images, feature_string, 0)
                     X_t, y_t = clf._to_np(feats_np, ann_np)
                     if X_t.size > 0 and y_t.size > 0:
@@ -3809,6 +3829,7 @@ def train_pixel_classifier_apoc(
     pixel_sizes = {
         "xy_um": ip.get("pixel_size_xy") or ip.get("pixel_size_xy_um") or _xy_from_md,
         "z_um": ip.get("pixel_size_z") or ip.get("pixel_size_z_um") or _z_from_md,
+        "is_2d": is_2d(metadata) if metadata is not None else False,
     }
 
     organoid_types = organoid_types or []

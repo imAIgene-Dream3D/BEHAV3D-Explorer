@@ -53,6 +53,13 @@ from behav3d.napari._preview_dims import (
     stop_dim_playback,
 )
 from behav3d.napari._track_colors import sync_tracks_colors_to_labels
+from behav3d.napari._loaders import (
+    configure_viewer_for_dimensionality,
+    iter_raw_channels,
+    squeeze_label_z,
+    tracks_layer_data,
+)
+from behav3d.core.dimensionality import DIM_2D, get_dimensionality
 # Channel colormaps (cycled if there are many channels)
 _CHANNEL_COLORS = ["cyan", "yellow", "green", "red", "blue", "magenta"]
 # Label colormaps per cell-type category
@@ -218,6 +225,9 @@ class VisualizationTab(QWidget):
 
         # Wire up to the metadata_loaded signal
         self.data_prep.metadata_loaded.connect(self._on_metadata_loaded)
+        dim_signal = getattr(self.data_prep, "dimensionality_changed", None)
+        if dim_signal is not None:
+            dim_signal.connect(lambda _mode: self._refresh_dimensionality_badge())
 
         self._metadata: pd.DataFrame | None = None
 
@@ -269,6 +279,10 @@ class VisualizationTab(QWidget):
         self.info_label = QLabel("")
         self.info_label.setStyleSheet("color: #666; font-style: italic;")
         sel_lay.addWidget(self.info_label)
+
+        # Experiment mode (set in Data Preparation, section 0)
+        self.dim_badge = QLabel("")
+        sel_lay.addWidget(self.dim_badge)
 
         btn_load = QPushButton("Load Dataset into Napari")
         btn_load.setStyleSheet(
@@ -382,6 +396,16 @@ class VisualizationTab(QWidget):
         self.edition_grp.setVisible(False)
         layout.addWidget(self.edition_grp)
 
+        # Manual correction still assumes 3D labels; say so instead of
+        # offering it for 2D experiments.
+        self.edition_2d_note = QLabel(
+            "Manual segment correction is not available for 2D experiments yet."
+        )
+        self.edition_2d_note.setWordWrap(True)
+        self.edition_2d_note.setStyleSheet("color: #888; font-style: italic;")
+        self.edition_2d_note.setVisible(False)
+        layout.addWidget(self.edition_2d_note)
+
         # Log
         self.log = QTextEdit()
         self.log.setReadOnly(True)
@@ -415,7 +439,23 @@ class VisualizationTab(QWidget):
     # ------------------------------------------------------------------
     # Slot: metadata loaded
     # ------------------------------------------------------------------
+    def _is_2d(self) -> bool:
+        return get_dimensionality(self.data_prep) == DIM_2D
+
+    def _refresh_dimensionality_badge(self):
+        from behav3d.napari._data_preparation import DIMENSIONALITY_COLORS
+
+        mode = get_dimensionality(self.data_prep)
+        color = DIMENSIONALITY_COLORS.get(mode, "#888")
+        self.dim_badge.setText(f"Experiment: {mode}")
+        self.dim_badge.setStyleSheet(
+            f"QLabel {{ color: white; background-color: {color}; font-weight: bold; "
+            "border-radius: 3px; padding: 2px 6px; }"
+        )
+        self.dim_badge.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+
     def _on_metadata_loaded(self, metadata: pd.DataFrame):
+        self._refresh_dimensionality_badge()
         self._metadata = metadata
         samples = sorted(str(s) for s in metadata["sample_name"].unique())
         self.sample_combo.clear()
@@ -486,6 +526,9 @@ class VisualizationTab(QWidget):
 
         # ---- 4. Tracks ---------------------------------------------------
         self._load_tracks(sample_name, row)
+
+        # 2D experiments: images, labels and tracks are all T/Y/X.
+        configure_viewer_for_dimensionality(self.viewer, self._is_2d())
         self._log(f"✅ Dataset '{sample_name}' loaded into napari")
 
         # ---- 5. Refresh the Manual Edition selector ---------------------
@@ -539,19 +582,12 @@ class VisualizationTab(QWidget):
                 self._log(f"  ⚠️ Raw image not found: {raw_path}")
 
     def _add_channels(self, dask_img: da.Array, sample_name: str, row: pd.Series):
-        """Split a TCZYX array along C and add each channel as a napari Image layer."""
-        # Determine dim order
+        """Split a TCZYX array along C and add each channel as a napari Image layer.
+
+        Channels are TZYX, or TYX in 2D experiments (the singleton Z of the
+        converted zarr is dropped so there is no Z slider).
+        """
         dim_order = str(row.get("dimension_order", "TCZYX")).strip() or "TCZYX"
-
-        # Normalise to TCZYX for consistent indexing
-        if dim_order != "TCZYX" and len(dim_order) == 5:
-            try:
-                axes = [dim_order.index(d) for d in "TCZYX"]
-                dask_img = da.transpose(dask_img, axes)
-            except ValueError:
-                pass  # fallback: assume already TCZYX
-
-        n_channels = dask_img.shape[1] if dask_img.ndim >= 5 else 1
 
         saved_channels = (
             self.data_prep.behav3d_parameters
@@ -559,12 +595,7 @@ class VisualizationTab(QWidget):
             .get("channels", {})
         )
 
-        for c in range(n_channels):
-            if dask_img.ndim >= 5:
-                ch_data = dask_img[:, c, :, :, :]  # T Z Y X
-            else:
-                ch_data = dask_img
-
+        for c, ch_data in iter_raw_channels(dask_img, dim_order, squeeze_z=self._is_2d()):
             saved = saved_channels.get(c) or saved_channels.get(str(c))
             color = (saved["colormap"] if saved and "colormap" in saved
                      else _CHANNEL_COLORS[c % len(_CHANNEL_COLORS)])
@@ -670,6 +701,8 @@ class VisualizationTab(QWidget):
                     if not isinstance(seg_data, da.Array):
                         seg_data = da.from_array(seg_data, chunks=(1,) + seg_data.shape[1:])
 
+                if self._is_2d():
+                    seg_data = squeeze_label_z(seg_data)
                 layer_name = f"{sample_name} – {ct_name} segments"
                 if not _is_addable_layer_data(seg_data):
                     self._log(
@@ -702,6 +735,8 @@ class VisualizationTab(QWidget):
                         if not isinstance(dead_data, da.Array):
                             dead_data = da.from_array(dead_data, chunks=(1,) + dead_data.shape[1:])
 
+                    if self._is_2d():
+                        dead_data = squeeze_label_z(dead_data)
                     layer_name = f"{sample_name} – dead mask"
                     if not _is_addable_layer_data(dead_data):
                         self._log(
@@ -794,10 +829,7 @@ class VisualizationTab(QWidget):
                     self._log(f"    ⚠️ Tracks CSV for {name} missing columns {required - set(tracks_df.columns)}")
                     continue
 
-                if "pixel_position_z" in tracks_df.columns:
-                    track_data = tracks_df[["TrackID", "position_t", "pixel_position_z", "pixel_position_y", "pixel_position_x"]].values
-                else:
-                    track_data = tracks_df[["TrackID", "position_t", "pixel_position_y", "pixel_position_x"]].values
+                track_data = tracks_layer_data(tracks_df, is_2d=self._is_2d())
 
                 layer_name = f"{sample_name} – {name} tracks"
                 self.viewer.add_tracks(
@@ -856,6 +888,8 @@ class VisualizationTab(QWidget):
                     if not isinstance(seg_data, da.Array):
                         seg_data = da.from_array(seg_data, chunks=(1,) + seg_data.shape[1:])
 
+                if self._is_2d():
+                    seg_data = squeeze_label_z(seg_data)
                 layer_name = f"{sample_name} – {name} tracked segments"
                 if not _is_addable_layer_data(seg_data):
                     self._log(
@@ -1013,7 +1047,9 @@ class VisualizationTab(QWidget):
         if prev in names:
             self.edit_combo.setCurrentText(prev)
         self.edit_combo.blockSignals(False)
-        self.edition_grp.setVisible(bool(names))
+        is_2d = self._is_2d()
+        self.edition_grp.setVisible(bool(names) and not is_2d)
+        self.edition_2d_note.setVisible(bool(names) and is_2d)
 
     def _apply_edit_target_visibility(self) -> None:
         """Show the tracked-segments layers that match the current edit target.
