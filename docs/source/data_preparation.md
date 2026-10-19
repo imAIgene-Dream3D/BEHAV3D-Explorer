@@ -1,16 +1,36 @@
 # 📋 Data Preparation
 
-Tab 1 of the BEHAV3D EXPLORER dock widget. This is where every experiment starts. It owns four artefacts that the rest of the plugin reads:
+Tab 1 of the BEHAV3D EXPLORER dock widget. This is where every experiment starts. It owns five artefacts that the rest of the plugin reads:
 
-1. The **output directory**, everything BEHAV3D EXPLORER writes goes under it.
-2. The **metadata.csv**, the single source of truth for samples, channels, units and cell types.
-3. The **dimension order**, of each raw image (e.g. `TCZYX`).
-4. The **zarr-converted raw images**, that downstream tabs read for fast access.
+1. The **image dimensionality** of the experiment, **3D** (default) or **2D**.
+2. The **output directory**, everything BEHAV3D EXPLORER writes goes under it.
+3. The **metadata.csv**, the single source of truth for samples, channels, units and cell types.
+4. The **dimension order**, of each raw image (e.g. `TCZYX` in 3D, `TCYX` in 2D).
+5. The **zarr-converted raw images**, that downstream tabs read for fast access.
 
 ```{image} ../_static/screenshots/data_preparation_tab.png
 :alt: Data Preparation tab
 :align: center
 ```
+
+## 0 · Image Dimensionality (2D or 3D)
+
+Pick **3D** or **2D** once, at the top of the tab, before you build or load metadata. The choice applies to **every sample and every step** of the pipeline. 3D is the default.
+
+| Mode | Raw image layouts accepted | Notes |
+|---|---|---|
+| **3D** | `TZYX` (single channel, a channel axis is added) or `TCZYX` | Z-step size (`pixel_distance_z`) is required. |
+| **2D** | `TYX` (single channel, a channel axis is added) or `TCYX` | No Z-step size is needed: it is not asked for and is stored as `1.0`. Files whose reader always reports 5 dimensions (CZI, LIF, IMS) are accepted when the Z axis has size 1. |
+
+How it works:
+
+- **Storage.** The mode is saved twice: as the top-level `dimensionality` key in `behav3d_parameters.yml` and as a `dimensionality` column (the same value in every row) in `metadata.csv`. If the two disagree on load, the parameters file wins and the CSV is corrected, with a warning.
+- **Images on disk.** A 2D image is still converted to a 5D `TCZYX` zarr, with a single Z plane (`Z = 1`). Nothing changes in the folder layout; the mode switches the algorithms and the interface.
+- **No recorded mode.** If neither file records a mode (for example a hand-written `metadata.csv`), the experiment is treated as 3D and `metadata.csv` is **not** rewritten just by opening it. If every image also has a single Z plane, BEHAV3D EXPLORER asks "Is this a 2D experiment?" so a 2D project that lost its flag does not silently run as 3D.
+- **Locked after conversion.** Once any raw image has been converted to zarr the mode can no longer be changed. To process the same data in the other mode, start a new project in an empty output directory. Before conversion, switching modes asks for confirmation and updates `metadata.csv` and `behav3d_parameters.yml`.
+- **Validation.** The Dimension Order table checks every image against the mode (for example a stack with Z > 1 is rejected in 2D) and blocks conversion until each row is valid.
+
+What changes downstream in 2D: segmentation runs per plane, tracking links in Y/X only, morphology uses 2D descriptors (area, perimeter, circularity, …), sizes are in µm² / pixels instead of µm³ / voxels, and manual segment correction in the Visualization tab is not available yet. See the notes on each page.
 
 ## 1 · Output Directory
 
@@ -71,6 +91,15 @@ Click **Browse** and select a `.csv`: the one you have already created, or if yo
 
 After metadata loads, the tab populates a table with one row per sample showing the detected dimension and dimension order of the raw image (e.g. `TCZYX`). If a sample reads in the wrong order edit it inline; the corrected order is used by the zarr conversion.
 
+The orders offered depend on the experiment mode ([section 0](#0--image-dimensionality-2d-or-3d)) and on the number of dimensions of each image:
+
+| Mode | 5 dimensions | 4 dimensions | 3 dimensions |
+|---|---|---|---|
+| **3D** | `TCZYX`, `TZCYX`, `ZCTYX`, `ZTCYX`, `CZTYX`, `CTZYX` | `TZYX`, `ZTYX` | – |
+| **2D** | the 3D five-dimension orders, only when the Z axis has size 1 (CZI/LIF/IMS) | `TCYX`, `CTYX` | `TYX` |
+
+A **Check** column next to each row shows whether the image fits the mode. If the order cannot be detected from the file or the CSV, a 5D image in 3D mode defaults to `TCZYX`; in every other case the row shows `-- select --` and conversion is blocked until you choose an order.
+
 
 ## 5 · Convert to Zarr
 
@@ -104,7 +133,7 @@ Within a category you can have **multiple** researcher-defined processing popula
 
 ### Required columns (every row, every sample)
 
-These 9 columns must be present and non-empty for every sample. The Metadata Loader refuses to proceed otherwise.
+These 9 columns must be present and non-empty for every sample (8 in a 2D experiment, which has no `pixel_distance_z`). The Metadata Loader refuses to proceed otherwise.
 
 | Column | Description | Example |
 |---|---|---|
@@ -113,7 +142,7 @@ These 9 columns must be present and non-empty for every sample. The Metadata Loa
 | `well` | Plate well identifier. | `A1`, `well01` |
 | `raw_image_path` | Absolute path to the raw image file (`.czi`, `.lif` / `.liff`, `.tif` / `.tiff`, `.ims`, or already-converted `.zarr`). Forward slashes recommended even on Windows. | `D:/data/exp1/sample_A1.czi` |
 | `pixel_distance_xy` | Pixel size in the XY plane. | `0.5` |
-| `pixel_distance_z` | Z-step size, same unit as `pixel_distance_xy`. | `2.0` |
+| `pixel_distance_z` | Z-step size, same unit as `pixel_distance_xy`. **2D experiments:** not required; it is hidden in the Metadata Builder and written as `1.0`. | `2.0` |
 | `distance_unit` | Unit of the two above. | `μm` |
 | `time_interval` | Time between frames. | `1.0` |
 | `time_unit` | `s`, `m`, or `h`. | `m` |
@@ -122,7 +151,8 @@ These 9 columns must be present and non-empty for every sample. The Metadata Loa
 
 | Column | When you need it | Notes |
 |---|---|---|
-| `dimension_order` | Optional | Axis order of the raw image (e.g. `TCZYX`, `ZCTYX`). If absent or invalid, the converter auto-detects it from the file format. You normally don't fill it in the Builder, you edit it in Section 4 (Dimension Order) of this tab, only if the auto-detected order is wrong.
+| `dimensionality` | Written automatically | `2D` or `3D`, the same value in every row (see [section 0](#0--image-dimensionality-2d-or-3d)). Missing means `3D`. Mixed values are rejected. |
+| `dimension_order` | Optional | Axis order of the raw image (e.g. `TCZYX`, `ZCTYX` in 3D; `TCYX`, `TYX` in 2D). If absent or invalid, the converter auto-detects it from the file format. You normally don't fill it in the Builder, you edit it in Section 4 (Dimension Order) of this tab, only if the auto-detected order is wrong.
 | `dead_channel` | Only if you have a dead channel | If the **Include dead channel** option is ticked, this field is mandatory, fill in the channel index (starting from 0) and make sure it matches the correct channel in your raw image. |
 | `dead_mask_path` | Only if `dead_channel` is set | Path to a per-sample dead mask. Soft-required: the loader **warns** if missing (asking you to run the dead-mask step), but does not block. |
 

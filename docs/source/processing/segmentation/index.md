@@ -8,6 +8,16 @@ Tab 3 of the BEHAV3D EXPLORER dock widget. Segmentation turns each timepoint of 
 
 The zarr is a 4-D `(T, Z, Y, X)` `uint16` array; pixel value `0` is background; positive integers are individual cell IDs *within a timepoint* (track IDs are assigned later by the [Tracking](../tracking/index)).
 
+```{note}
+**2D experiments.** When the experiment is set to 2D in [Data Preparation](../../data_preparation), the layout above is unchanged, with a single Z plane (`Z = 1`). Every method then segments each frame as a true 2-D image:
+
+- **Cellpose** and **Cellpose-SAM** run per plane (no 3-D mode, no anisotropy, no stitching). The 3-D-only Cellpose-SAM controls are hidden.
+- **APOC**, **ConvPaint** and the **Pixel Classifier** compute 2-D features on the plane, both for training and prediction, so a classifier is trained and applied on the same kind of input.
+- Post-processing is 2-D: hole filling works in the plane, and the "flat segment" filter only removes objects that are one pixel thin in Y or X (the single Z plane is not counted as flat). Border objects are detected on the X/Y edges only.
+- Size fields and unit switches are areas (**µm² / px**) instead of volumes (**µm³ / voxels**). "Min size" therefore counts pixels.
+- You never enter a Z pixel size; it is stored as `1.0` and is not used.
+```
+
 ![Segmentation tab](../../_static/screenshots/segmentation_tab_overview.png)
 
 ```{tip}

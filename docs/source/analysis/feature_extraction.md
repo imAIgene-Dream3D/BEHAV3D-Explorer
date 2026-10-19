@@ -218,7 +218,7 @@ Only **mean** intensity is computed per channel.
 
 ### Morphology (when checked)
 
-When Morphology is on, the following are added. Units: volumes in µm³, lengths in µm, surface area in µm².
+When Morphology is on, the following are added. Units: volumes in µm³, lengths in µm, surface area in µm². (This table is the 3D set; [2D experiments](#morphology-in-2d-experiments) have their own.)
 
 | Column | Meaning |
 |---|---|
@@ -241,6 +241,29 @@ When Morphology is on, the following are added. Units: volumes in µm³, lengths
 | `border_touching_segment` | `True` when the mask touches the edge of the image volume (a QC flag — border objects are partially cropped, so their morphology is unreliable) |
 
 When Morphology is **unchecked**, only the cheap `nr_pixels` and `volume` columns are kept (the others are skipped to save time).
+
+#### Morphology in 2D experiments
+
+In a [2D experiment](../data_preparation.md) every mask lives on a single image plane, so the 3-D descriptors above do not apply (`volume`, `bbox_volume`, `surface_area`, `sphericity`, `surface_to_volume_ratio`, `convex_volume`, `axis1-3_length`, `oblateness`, `prolateness`, `orientation_vector` are **not computed**). Instead Morphology adds the 2D descriptors below. Areas are in µm², lengths in µm.
+
+| Column | Meaning |
+|---|---|
+| `nr_pixels` | Pixel count of the mask |
+| `area` | Physical area = pixel count × pixel area (µm²) |
+| `bbox_area` | Area of the axis-aligned bounding box |
+| `convex_area` | Area of the convex hull |
+| `solidity` | `area / convex_area` (1 = convex) |
+| `perimeter` | Length of the outline |
+| `circularity` | `4π · area / perimeter²` (1 = disk; capped at 1 because the pixel perimeter estimate overshoots for very small objects) |
+| `equivalent_diameter` | Diameter of the circle with the same area |
+| `eccentricity` | Eccentricity of the ellipse with the same second moments (0 = circle, →1 = line) |
+| `orientation` | Angle of that ellipse in radians (−π/2 … π/2, from the row axis) |
+| `major_axis_length`, `minor_axis_length` | Long and short side of the principal-axis box (same construction as in 3D, so shared names keep one meaning) |
+| `elongation` | `major_axis_length / minor_axis_length` |
+| `extent` | `area` divided by the principal-axis box area |
+| `border_touching_segment` | `True` when the mask touches the X/Y edge of the image (the single Z plane does not count as a border) |
+
+When Morphology is unchecked in 2D, only `nr_pixels` and `area` are kept. The 2D size is an **area**, so the size filter in [Filtering](filtering) and the unit switches show µm² / px instead of µm³ / voxels.
 
 #### How the morphology features are computed
 
@@ -307,6 +330,10 @@ $$
 $$
 
 where "surface voxels" are the immune cell's boundary shell (within ~2 µm of its edge).
+
+```{note}
+**2D experiments:** there is no 3-D shell. The "surface" is the ring of pixels within ~2 µm around the cell outline, so `invasiveness_perc` is the fraction of that outline ring in contact with the organoid.
+```
 
 ### Death (when a dead channel exists and the family is checked)
 

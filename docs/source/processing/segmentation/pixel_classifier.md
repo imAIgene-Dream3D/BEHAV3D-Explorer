@@ -8,6 +8,10 @@ The Pixel Classifier is **binary per cell type**: foreground vs. background. If 
 
 The Pixel Classifier runs entirely on the CPU. For method choice across all six segmentation options, see the [segmentation overview](./index.md#how-to-pick-a-method).
 
+```{note}
+**2D experiments.** In a [2D experiment](../../data_preparation) the features (sigmas and edge filters) are computed in 2-D on the single plane. Size fields use µm² / px.
+```
+
 ![Pixel Classifier tab](../../_static/screenshots/segmentation_tab_pixel_classifier.png)
 
 ## What runs under the hood

@@ -11,10 +11,11 @@ Method names and defaults here are **what the pipeline does**, not recommended v
 *Full detail: [Data Preparation](data_preparation).*
 
 1. **Set the Output Directory** — nothing else runs until this is set.
-2. **Build metadata:** number of samples (one per field of view) → population counts (+ dead channel) → **Configure Cell Types** → **Create Sample Forms** → fill sample 1 → **Fill All from Sample 1** → **Save CSV**.
-3. **Load the CSV** — must pass validation to unlock the other tabs.
-4. **Check the dimension order** (e.g. `TCZYX`); fix any wrong row inline.
-5. **Convert to Zarr** *(optional: trim dead start/end frames)*.
+2. **Pick 2D or 3D** (*0 · Image Dimensionality*, default 3D). It applies to the whole experiment and locks after Convert to Zarr.
+3. **Build metadata:** number of samples (one per field of view) → population counts (+ dead channel) → **Configure Cell Types** → **Create Sample Forms** → fill sample 1 → **Fill All from Sample 1** → **Save CSV**.
+4. **Load the CSV** — must pass validation to unlock the other tabs.
+5. **Check the dimension order** (e.g. `TCZYX`, or `TCYX` / `TYX` in 2D); fix any wrong row inline.
+6. **Convert to Zarr** *(optional: trim dead start/end frames)*.
 
 **Population vs Line/Condition:**
 
@@ -24,7 +25,7 @@ Method names and defaults here are **what the pipeline does**, not recommended v
 | Same biology, deliberately **split across colours** | **one** population, tick **Multicolor** |
 | **Identical on screen**, differs only by treatment / donor / subclone | **one** population; use **Line** / **Condition** |
 
-**Required per sample:** name · well · image path · XY & Z size + unit · time interval + unit *(dead-channel index only if ticked)*.
+**Required per sample:** name · well · image path · XY & Z size + unit *(no Z size in 2D)* · time interval + unit *(dead-channel index only if ticked)*.
 
 ## 🦠 Segmentation
 

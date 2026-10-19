@@ -1,6 +1,6 @@
 # BEHAV3D EXPLORER Wiki
 
-**BEHAV3 EXPLORER** is a Python toolkit for the behavioural analysis of cells in 3D fluorescent time-lapse microscopy. It takes you all the way from raw confocal stacks to behavioural phenotypes: segmentation → tracking → feature extraction → filtering → analysis.
+**BEHAV3 EXPLORER** is a Python toolkit for the behavioural analysis of cells in 3D fluorescent time-lapse microscopy. 2D time-lapses (`TYX` / `TCYX`) are supported too: choose the experiment mode in [Data Preparation](data_preparation). It takes you all the way from raw confocal stacks to behavioural phenotypes: segmentation → tracking → feature extraction → filtering → analysis.
 
 Although the pipeline can also be run from Python (see `notebooks/run_behav3d.ipynb` for advanced users who want to script steps or explore the code), **this wiki documents the napari GUI** — the graphical interface for day-to-day use in the lab.
 

@@ -45,7 +45,7 @@ File names use the cell type name from your metadata. If your metadata defines `
 
 | Writes | Path |
 |---|---|
-| Zarr-converted raw image | `images/{sample}/{sample}.zarr` |
+| Zarr-converted raw image | `images/{sample}/{sample}.zarr` (always 5-D `TCZYX`; `Z = 1` in a 2D experiment) |
 
 ### Segmentation
 

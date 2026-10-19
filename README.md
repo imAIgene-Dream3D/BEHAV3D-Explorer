@@ -2,7 +2,7 @@
 
 BEHAV3D Explorer is a tool for analyzing how cells behave in 3D microscopy images: no coding required, built for biologists.
 
-It works with pretty much any 3D microscopy data, for example 3D live co-cultures or intravital microscopy, and turns your raw movies into quantitative, cell-by-cell readouts. Here's the kind of analysis you can get out of it:
+It works with pretty much any 3D microscopy data, for example 3D live co-cultures or intravital microscopy (2D time-lapses are supported too: pick **2D** in Data Preparation), and turns your raw movies into quantitative, cell-by-cell readouts. Here's the kind of analysis you can get out of it:
 
 <p align="center">
   <img src="docs/source/_static/icons/death_dynamics.jpg" width="200" alt="Death dynamics"/>

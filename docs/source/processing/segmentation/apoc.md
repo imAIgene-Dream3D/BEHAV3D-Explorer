@@ -8,6 +8,10 @@ APOC trains a model for each defined cell type. If you set up N cell types in BE
 
 APOC's own documentation does not give a formal reference for the feature and classifier parameters; the definitions on this page are the standard image-processing meanings of each filter plus the values BEHAV3D exposes. For method choice across all six segmentation options, see the [segmentation overview](./index.md#how-to-pick-a-method).
 
+```{note}
+**2D experiments.** In a [2D experiment](../../data_preparation) the single Z plane is passed to APOC as a 2-D image, for training and prediction alike, so the filters (Gaussian, Sobel, Laplacian, …) are true 2-D filters rather than 3-D filters on a one-slice volume. Size and EDT fields use µm² / px.
+```
+
 ![APOC tab](../../_static/screenshots/segmentation_tab_apoc.png)
 
 ## Strategies

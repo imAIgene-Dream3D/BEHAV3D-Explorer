@@ -15,7 +15,7 @@ Before configuring either sub-tab, settle the question the feature selection ans
 |---|---|---|
 | **Motility** | speed, displacement, cumulative displacement, directional persistence, straightness | Cells move, and how they move is the readout |
 | **Interaction** | contact with another population, or with their own type; contact duration | Engagement is the readout, whether or not anything follows from it |
-| **Morphology** | volume, sphericity, elongation and related shape descriptors | Shape change carries the signal — spreading, polarising, rounding |
+| **Morphology** | volume, sphericity, elongation and related shape descriptors (in 2D experiments: area, perimeter, circularity, eccentricity, elongation and related 2D descriptors) | Shape change carries the signal — spreading, polarising, rounding |
 | **Channel intensity** | mean or quantile intensity of a given channel, and its fold change | A reporter's level is the readout, including fluctuating reporters such as calcium |
 
 These combine, but starting with a small, biologically interpretable set is better than selecting everything: states are easier to name and the model is easier to trust. Add families once you can explain the states you already have.

@@ -22,6 +22,14 @@ behav3d.core.anndata
    :undoc-members:
    :show-inheritance:
 
+behav3d.core.dimensionality
+---------------------------
+
+.. automodule:: behav3d.core.dimensionality
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 behav3d.core.utils
 ------------------
 

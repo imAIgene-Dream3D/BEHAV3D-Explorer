@@ -241,7 +241,7 @@ class _MetadataLoadWorker(QThread):
                 raw_params = _load_config(params_path)
 
             # Experiment dimensionality: the parameters file wins, then the
-            # CSV column; a project with neither predates the flag -> 3D.
+            # CSV column; a project with neither is 3D.
             yaml_dim = normalize_dimensionality(raw_params.get(DIMENSIONALITY_KEY))
             csv_dim = (
                 get_dimensionality(metadata, default=None)
@@ -266,8 +266,8 @@ class _MetadataLoadWorker(QThread):
             csv_changed = False
             if not csv_values or any(normalize_dimensionality(v) != dimensionality for v in csv_values):
                 metadata[DIMENSIONALITY_KEY] = dimensionality
-                # A project that predates the flag is 3D by default: keep
-                # the value in memory only and leave its CSV untouched.
+                # No mode recorded means 3D by default: keep the value in
+                # memory only and leave the CSV untouched.
                 if csv_values or dimensionality == DIM_2D:
                     csv_changed = True
                     self.progress.emit(
@@ -2159,7 +2159,7 @@ class DataPreparationTab(QWidget):
             if choice is None and len(options) == 1:
                 choice = options[0]
             if choice is None and mode == DIM_3D and "TCZYX" in options and (shape is None or len(shape) == 5):
-                choice = "TCZYX"  # long-standing 3D default for undetectable 5D images
+                choice = "TCZYX"  # 3D default for 5D images whose order cannot be detected
             combo.setCurrentText(choice or DIM_ORDER_PLACEHOLDER)
             combo.currentTextChanged.connect(self._on_dim_order_combo_changed)
             self.dim_table.setCellWidget(i, 2, combo)

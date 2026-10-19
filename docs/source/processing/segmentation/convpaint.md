@@ -8,6 +8,10 @@ ConvPaint is **multi-class single-model**: one classifier maps each pixel to eit
 
 ConvPaint runs on a PyTorch-compatible device (the widget exposes a CPU fallback and one entry per CUDA GPU). For method choice across all six segmentation options, see the [segmentation overview](./index.md#how-to-pick-a-method).
 
+```{note}
+**2D experiments.** In a [2D experiment](../../data_preparation) ConvPaint is trained and predicts on `(channels, Y, X)` planes, exactly like the per-Z-slice prediction used for 3D stacks. Size fields use µm² / px.
+```
+
 ![ConvPaint tab](../../_static/screenshots/segmentation_tab_convpaint.png)
 
 ## Strategies

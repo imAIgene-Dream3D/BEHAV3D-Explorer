@@ -28,6 +28,10 @@ The tab reads paths derived from the metadata + output directory, in this order:
 
 Anything that doesn't exist yet (e.g. you haven't tracked yet) is skipped.
 
+```{note}
+**2D experiments.** The tab shows an **Experiment: 2D / 3D** badge under the sample selector. In a [2D experiment](../data_preparation) the single Z plane of the zarr is dropped when loading, so raw channels, segments, tracked segments and tracks are all `T / Y / X` (axes labelled `t, y, x`), there is no Z slider, and the napari 2D/3D view button is disabled (a 3-D view would draw time as depth). The Tracks layer ignores the always-zero Z coordinate.
+```
+
 ## Layer naming and colours
 
 **Raw channels** cycle through the palette `cyan → yellow → green → red → blue → magenta` (the palette wraps around if you have more than six channels), and are named by channel index: `{sample} – Ch0`, `{sample} – Ch1`, …
@@ -60,6 +64,10 @@ The tab:
 | **Tracks** | The Tracks layer (lines through time) | Look at trajectories, especially with the time slider |
 
 ### 4. Manual Edition (optional)
+
+```{note}
+Manual segment correction is **not available for 2D experiments yet**: the Manual Edition group is replaced by a short notice, because the editor still assumes 3-D (`T, Z, Y, X`) labels.
+```
 
 When at least one `*_tracked.zarr` layer is present, the **Manual Edition** group becomes visible. Pick the cell type from the dropdown, click **✏️ Edit tracked segments**, and a Tracked Segment Editor appears (the same widget documented under [Manual Editing](../processing/tracking/manual_editing)).
 

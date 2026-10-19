@@ -22,7 +22,7 @@ On disk nothing changes shape: a 2D image is still written as a 5D TCZYX
 zarr with Z=1 (labels TZYX with Z=1, ``position_z == 0``).  The flag
 switches algorithms and the UI, not array layouts.
 
-Projects written before this flag existed carry no key and are 3D.
+A project that records no mode (for example a hand-written metadata CSV) is 3D.
 """
 from __future__ import annotations
 
@@ -111,8 +111,7 @@ def get_dimensionality(source=None, default: str = DEFAULT_DIMENSIONALITY) -> st
       its ``dimensionality`` attribute, then its parameters, then its
       metadata.
 
-    Anything without the flag falls back to ``default`` (3D), which is what
-    keeps projects from before the flag working unchanged.
+    Anything without the flag falls back to ``default`` (3D).
     """
     if source is None:
         return default
@@ -266,8 +265,8 @@ def is_dimensionality_locked(params=None, metadata=None) -> bool:
     """True once any raw image has been converted to zarr.
 
     The provenance block ``zarr_conversion.samples`` is the primary signal;
-    a ``raw_image_path`` already pointing to a ``.zarr`` covers projects
-    converted before that block existed.
+    a ``raw_image_path`` already pointing to a ``.zarr`` also counts (for
+    example images converted outside the app).
     """
     if isinstance(params, dict):
         block = params.get("zarr_conversion")

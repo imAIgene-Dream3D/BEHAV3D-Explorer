@@ -9,6 +9,10 @@ Tab 4 of the BEHAV3D EXPLORER dock widget. Tracking turns per-timepoint segmenta
 
 The tracked zarr is a 4-D `uint16` `(T, Z, Y, X)` array in which the pixel value is the **TrackID** (stable across timepoints). The CSV is one row per `(TrackID, timepoint)` with both physical-unit and pixel coordinates.
 
+```{note}
+**2D experiments.** In a [2D experiment](../../data_preparation) every centroid sits on the single Z plane (`position_z = 0`), so btrack, LAP (laptrack) and trackpy **link objects in Y/X only**; btrack switches to its 2-D mode. The Z column stays in the CSV (always `0`) so downstream readers keep working, and distances, speeds and search radii are in-plane. The tracked zarr keeps `Z = 1`.
+```
+
 ![Tracking tab](../../_static/screenshots/tracking_tab_methods.png)
 
 ## Per-cell-type sub-tabs

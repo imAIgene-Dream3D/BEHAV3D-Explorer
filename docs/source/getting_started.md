@@ -63,9 +63,10 @@ If the assistant service is briefly unreachable, QueenB falls back to a lighter 
 This is the happy path. Each step links to its full reference page.
 
 1. **Set up your samples in Data Preparation** ([details](data_preparation))
+   - Choose **3D** (default) or **2D** under *0 · Image Dimensionality*; the choice is locked once images are converted.
    - Pick an output directory (everything BEHAV3D EXPLORER writes goes under it).
    - Either build a new `metadata.csv` with the Metadata Builder or load an existing one with the Metadata Loader.
-   - Verify the Dimension Order table (default `TCZYX`).
+   - Verify the Dimension Order table (default `TCZYX` in 3D; `TCYX` or `TYX` in 2D).
    - Click **Convert to Zarr** to chunk the raw image into timepoint-sized blocks for fast access.
 2. **Look at the data in Visualization** ([details](plugin_essentials/visualization))
    - Pick a sample from the dropdown, click **Load Dataset**, toggle Raw / Segments / Tracked Segments / Tracks visibility on/off.

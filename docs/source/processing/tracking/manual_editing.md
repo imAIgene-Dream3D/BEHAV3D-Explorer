@@ -1,5 +1,9 @@
 # ✏️ Manual editing of tracked segments
 
+```{note}
+Manual editing is available for **3D experiments only** for now; in a 2D experiment the Manual Edition panel is replaced by a notice.
+```
+
 After automated segmentation + tracking has run, if you find mistakes — split labels, wrong merges, missed cells, junk objects. The Manual Edition workflow lets you fix these interactively inside napari, with undo / redo, time-range scoping and lazy disk persistence.
 
 ```{important}

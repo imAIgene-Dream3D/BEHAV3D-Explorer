@@ -56,7 +56,11 @@ A shared **px / µm unit toggle** at the top of this section governs every size-
 | **Remove flat (single-slice) segments** | ON | checkbox | Drops any output object that occupies only a single Z, Y or X slice. This is **BEHAV3D's own post-processing**, not a native Cellpose parameter: cellpose leaves flat fragments on the first/last slice (~100–350 voxels vs. ~2400–4000 for real objects on the reference dataset), most common in 2D+stitch mode. Turn off only if your objects genuinely occupy a single slice. |
 
 ```{tip}
-**Do you want 3D or 2D+stitch?** Keep **do_3D on** for the most accurate result. Switch it **off** for speed, or when the ZY/XZ views are unusable (very anisotropic data) — in that case tune the **Stitch threshold** instead. The two are deliberately kept together as an on/off workflow choice rather than a fine-tuning knob.
+```{note}
+**2D experiments.** In a [2D experiment](../../data_preparation) Cellpose-SAM always runs per plane. The **3D segmentation (do_3D)**, **Stitch threshold**, **Remove flat (single-slice) segments**, **norm3D**, **flow3D smooth** and **Tile norm smooth3D** controls are hidden, and the backend forces these to off, so a preview and a batch run behave the same. **Flow threshold** stays active. Size fields are in µm² / px.
+```
+
+**Do you want 3D or 2D+stitch?** (3D experiments only.) Keep **do_3D on** for the most accurate result. Switch it **off** for speed, or when the ZY/XZ views are unusable (very anisotropic data) — in that case tune the **Stitch threshold** instead. The two are deliberately kept together as an on/off workflow choice rather than a fine-tuning knob.
 ```
 
 ### Advanced (normalization, filters)

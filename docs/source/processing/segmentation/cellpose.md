@@ -84,11 +84,11 @@ For each timepoint the plugin loads the raw volume, hands it to the Cellpose mod
 
 | Setting | Value | Notes |
 |---|---|---|
-| 3-D mode | always on | All segmentation is performed in 3-D (`do_3D=True`). |
+| 3-D mode | on (off in 2D experiments) | All segmentation is performed in 3-D (`do_3D=True`). In a [2D experiment](../../data_preparation) each frame's single plane is segmented in 2-D (`do_3D=False`) and the anisotropy is not used. |
 | Per-image normalization | always on | `normalize=True`. |
 | Auto-diameter | yes | `diameter` is not set, so the model estimates the cell diameter from the image. |
 | Minimum object size | category-dependent | Set automatically from the cell type's category: **1000 voxels** for organoids, **10 voxels** for immune / other cells. Smaller objects are dropped. |
-| Anisotropy (Z : XY voxel ratio) | from metadata | Computed **per sample** as `pixel_distance_z / pixel_distance_xy` from your metadata and passed to Cellpose. It is **not** a fixed value. |
+| Anisotropy (Z : XY voxel ratio) | from metadata (3D only) | Computed **per sample** as `pixel_distance_z / pixel_distance_xy` from your metadata and passed to Cellpose. It is **not** a fixed value. |
 
 ```{important}
 None of these are exposed in the GUI. The anisotropy Cellpose uses is taken directly from your metadata (`pixel_distance_z / pixel_distance_xy`), so it adapts to your acquisition automatically — **provided those pixel-size values in the metadata are correct**. If they are wrong, the model's behaviour in Z will be off; fix the pixel sizes in the metadata first.

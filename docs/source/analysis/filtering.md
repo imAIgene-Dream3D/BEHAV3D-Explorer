@@ -116,7 +116,7 @@ This is needed for track-level analyses that require uniform-length inputs. The 
 
 > ☑ **Filter by minimal size at first timepoint** — *Min size:* `1000`
 
-Drops whole tracks whose voxel count (`nr_pixels`) at their first appearance (`relative_time = 1`) is smaller than the threshold. If the feature table doesn't have an `nr_pixels` column, the physical **volume** (µm³) is used instead — in that fallback case, toggle the units switch to µm³ so the threshold you enter matches what's being compared.
+Drops whole tracks whose voxel count (`nr_pixels`) at their first appearance (`relative_time = 1`) is smaller than the threshold. If the feature table doesn't have an `nr_pixels` column, the physical **volume** (µm³) is used instead — in that fallback case, toggle the units switch to µm³ so the threshold you enter matches what's being compared. In a [2D experiment](../data_preparation) the size is an area: the count is pixels, the fallback column is `area` (µm²), and the units switch shows µm² / px.
 
 Common use: removing dust, debris, or over-segmented fragments that briefly look like cells.
 
