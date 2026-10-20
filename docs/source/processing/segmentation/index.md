@@ -131,7 +131,7 @@ The three pixel-classifier methods (APOC, Pixel Classifier, ConvPaint) are train
 - Label examples from **different timepoints and Z-slices** (e.g. start / middle / end and a few Z levels) so the classifier sees the variability in your data.
 - **Balance examples across all classes** — don't only label the easiest cells.
 - **Avoid contradictory labels**; only label regions you are confident about.
-- **Save your labels often** (the *Save Labels* / *Save User Labels* button) — unsaved labels are lost when the viewer closes.
+- **Save your labels often** (the *Save Labels* / *Save User Labels* button) — unsaved labels are lost when the viewer closes. Saving runs in the background: the labels are copied at the moment you click, so you can keep painting while they are written (paint strokes made after the click go in the next save). The same applies to the automatic save when training starts and when you leave the tab.
 - Use the shown **probability map** after training to see where the model is struggling and label more data there
 
 ### Drawing technique
@@ -199,8 +199,8 @@ The pixel-classifier methods (APOC, ConvPaint, Pixel Classifier) share the same 
 | **Process ALL timepoints** | ON | Segment the full movie of every sample. Uncheck to enable the From–To range. |
 | **From t / to t** (range) | — | Inclusive timepoint range, active only when *Process ALL* is off. |
 | **Workers** | 1 | Parallel CPU workers for zarr I/O, capped at one less than your CPU core count. For the GPU methods (APOC/ConvPaint) the GPU is the actual segmenter, so 1–2 is usually optimal. |
-| **Overwrite existing results** | OFF | Re-segment samples that already have an output zarr. Otherwise they are skipped. |
-| **▶ Run …** | — | Runs immediately and blocks the GUI until done. |
+| **Existing results** | prompt | In the napari plugin there is no checkbox: when outputs already exist, **▶ Run …** asks per sample and cell type whether to skip (complete outputs), resume (interrupted ones) or overwrite. The notebook widget keeps an *Overwrite existing* checkbox. |
+| **▶ Run …** | — | Runs immediately **in the background**: napari stays responsive, a progress bar is shown, and other tabs are locked until it finishes. |
 | **+🛒** | — | Queues the step in the [Processing Queue](../../plugin_essentials/processing_queue) to run later, sequentially with the rest of the pipeline. |
 
 ```{note}

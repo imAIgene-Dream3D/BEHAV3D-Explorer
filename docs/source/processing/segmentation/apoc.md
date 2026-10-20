@@ -31,7 +31,7 @@ A full session usually goes like this:
 1. **Open the Segmentation tab** → pick **APOC (GPU)** from the method dropdown.
 2. **Pick the GPU** from the `GPU Device` dropdown.
 3. **Pick a strategy.** The default is **APOC Probability Map + Watershed** (good at splitting touching cells). Switch to **APOC (Direct Instance Segmentation)** if your cells never touch and you want the fastest end-to-end run.
-4. **Set `Examples / sample`** (default 3 is usually fine) and click **Generate Training Data**. The viewer loads timepoints from the start, middle and end of each sample as Image layers plus an empty Labels layer per cell type.
+4. **Set `Examples / sample`** (default 3 is usually fine) and click **Generate Training Data**. The images are read in the background (progress bar; the plugin stays responsive and the other tabs are locked until it finishes), then the viewer loads timepoints from the start, middle and end of each sample as Image layers plus an empty Labels layer per cell type. If loading fails, the viewer is left as it was.
 5. **Paint a few foreground and background pixels** on the Labels layer for each cell type — see [Labeling foreground and background](./index.md#labeling-foreground-and-background) for the painting convention and labeling tips.
 6. **Go to the per cell-type tab** (one tab per cell type at the top of the training area) and review the per-type controls: `Image Channel Inputs`, `Feature Preset` / `Tune Features`, and Random Forest parameters. Defaults are sensible; the most common manual change is unchecking irrelevant channels in `Image Channel Inputs`.
 7. **Click `▶ Train current tab`** to fit the classifier for the active cell type, or **`▶▶ Train ALL classifiers`** to train every cell type at once. Use **`⬇ Apply config to all tabs`** beforehand if you want one tab's feature/RF settings copied to the others, and **`Save User Labels`** to persist the labels you painted.
@@ -49,7 +49,7 @@ A full session usually goes like this:
 |---|---|---|
 | **Strategy** | APOC Probability Map + Watershed | One of the three strategies listed above (plus **Advanced (per cell type)** to set a different strategy per cell type). Changing it rebuilds the per-cell-type instance-preview controls. |
 | **Examples / sample** | 3 | Number of timepoints randomly sampled from each metadata row as training data (range 1–10). |
-| **Generate Training Data** | — | Clears the viewer and loads those timepoints as Image layers + empty Labels layers per cell type. |
+| **Generate Training Data** | — | Reads those timepoints in the background, then clears the viewer and loads them as Image layers + Labels layers per cell type (saved labels are restored). |
 
 APOC is a binary classifier with one Labels layer per cell type (`1` = background, `2` = foreground). See [Labeling foreground and background](./index.md#labeling-foreground-and-background) for the painting convention and labeling tips shared by all pixel-classifier methods.
 
@@ -202,6 +202,13 @@ Enable **Consider original image as well** only when raw intensity alone separat
 
 Standard batch controls — see [Batch segmentation controls](./index.md#batch-segmentation-controls). The run/queue buttons here are **▶ Run APOC Batch Segmentation** and **+🛒**.
 
+**Segmenting a single cell type.** The blue **▶ Run <CellType> Segmentation** button under the cell-type tabs runs the full batch (all samples, with the timepoint range of that button) for the **active tab only**:
+
+- Only that cell type's classifier is loaded and checked, and only its `…_segments.zarr` / `…_mask.zarr` are written. Other cell types' outputs and classifiers are not touched.
+- The **Dead** tab runs only the death mask; a cell-type tab never recomputes the death mask.
+- If the dataset has multicolor channels (`<name>_<n>_multicolor`), the overlap cleanup that follows still processes the whole family, because resolving overlaps needs every member.
+- The run happens in the background with a progress bar, like the full batch.
+
 ## Outputs
 
 | File | Path |
@@ -215,7 +222,8 @@ Standard batch controls — see [Batch segmentation controls](./index.md#batch-s
 - **Train before switching tabs.** The painted labels are saved when you train, and you are prompted to save on tab exit — but get into the habit of training (or clicking **Save User Labels**) after any change so you never lose your annotations.
 - **Keep RF trees fairly shallow (max depth ~5, the default).** Deep trees overfit on small label sets, which is the typical regime for interactive pixel classification.
 - **Use *Show classifier statistics* after training.** If a single feature dominates the importance distribution, you may be under-labelled or over-relying on one channel.
-- **Workers are not the bottleneck.** APOC inference is GPU-bound; setting workers > 1 mainly parallelises zarr I/O between samples. Leave at 1 unless you observe disk-bound behaviour.
+- **Workers do not speed up APOC.** APOC inference is GPU-bound and runs sample by sample; the *Workers* setting is not used by the APOC engine. Leave it at 1.
+- **Why "one cell type" is not always faster than "all".** Every timepoint of a sample is read from disk once per run no matter how many cell types are selected, and the journal is flushed per timepoint. The per-cell-type part (classifier prediction + post-processing) only shrinks with fewer types. After each sample the console prints a `phases:` line (frame read wait, seconds per cell type, dead) so you can see which part dominates.
 - **Several cell types (large and small)?** See [Advice: large vs small objects](./index.md#advice-large-vs-small-objects) on the overview; use **Advanced (per cell type)** when each type needs a different strategy.
 
 **Image Channel Inputs** — see the channel-selection steps under **Classifier — Feature Preset** above; use per-cell-type tabs in Advanced mode when organoids and immune cells need different channel sets.

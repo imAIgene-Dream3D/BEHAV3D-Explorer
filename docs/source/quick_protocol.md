@@ -41,7 +41,7 @@ Method names and defaults here are **what the pipeline does**, not recommended v
 | Otherwise: harder features / touching objects | **ConvPaint** |
 | No GPU available | **Pixel Classifier** |
 
-**Pixel-classifier flow (APOC / ConvPaint / Pixel Classifier):** Generate Training Data → paint a few foreground/background pixels → Train → **Run instance segmentation** (preview) → tune instance post-processing → Batch.
+**Pixel-classifier flow (APOC / ConvPaint / Pixel Classifier):** Generate Training Data (runs in the background — wait for the progress bar to finish) → paint a few foreground/background pixels → Train → **Run instance segmentation** (preview) → tune instance post-processing → Batch.
 
 **Cellpose / Cellpose-SAM:** set the channel mapping → *(v3)* load the model → Run.
 
