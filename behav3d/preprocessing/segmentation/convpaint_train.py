@@ -380,7 +380,12 @@ def _napari_label_color(layer, label_idx):
 
 def _load_training_images(metadata, output_dir, examples_per_sample,
                           organoid_types, immune_types, other_types,
-                          overwrite_images=False):
+                          overwrite_images=False, progress_cb=None):
+    """Load (or regenerate) the cached training frames. Qt-free.
+
+    ``progress_cb(current, total, label)`` is optional and only reports; the
+    napari plugin passes it so a background worker can drive a progress bar.
+    """
     from behav3d.core.metadata import has_dead_channel
     has_death = has_dead_channel(metadata)
     all_cell_types = organoid_types + immune_types + other_types
@@ -398,9 +403,12 @@ def _load_training_images(metadata, output_dir, examples_per_sample,
             return all_images, pixel_class_outdir, has_death, all_cell_types
 
     all_images, max_shape = [], None
-    for _, sample in metadata.iterrows():
+    n_rows = len(metadata)
+    for row_i, (_, sample) in enumerate(metadata.iterrows()):
         sample_name = sample.get("sample_name", "unknown")
         raw_path = sample.get("raw_image_path", "")
+        if progress_cb is not None:
+            progress_cb(row_i, n_rows, f"Reading {sample_name}…")
         if not raw_path or not Path(raw_path).exists():
             continue
         axis_order = sample.get("dimension_order", "TCZYX")
@@ -1840,7 +1848,7 @@ class ConvPaintTrainingWidget(QWidget):
         """
 
     def _on_save_labels(self):
-        self.save_user_labels()
+        self.save_user_labels_async()
 
     def _log(self, msg):
         if self._external_log is not None:
@@ -1973,8 +1981,9 @@ class ConvPaintTrainingWidget(QWidget):
         except Exception:
             pass
 
-        self._log("Auto-saving user labels before training…")
-        self.save_user_labels()
+        # Copy the label layers now (GUI thread); the worker writes them first
+        # thing, so the raw labels are on disk before any training starts.
+        label_snapshot = self.snapshot_user_labels()
 
         # Read unified annotation layer on the Qt thread.
         unified_annotations = None
@@ -2047,6 +2056,14 @@ class ConvPaintTrainingWidget(QWidget):
 
         # ── Phase 2 (worker thread) ───────────────────────────────────────
         def _do_train(progress_cb=None):
+            from behav3d.napari._training_data import write_label_snapshot
+
+            if label_snapshot:
+                if progress_cb:
+                    progress_cb(0, 0, "Saving user labels…")
+                safe_log("Auto-saving user labels before training…")
+                write_label_snapshot(label_snapshot, safe_log)
+
             n_steps = 2 if has_death else 1
             result = {}
 
@@ -2863,6 +2880,63 @@ class ConvPaintTrainingWidget(QWidget):
         self._log("\u2705 All user labels saved.")
         if self.legend_tab is not None:
             self.legend_tab.refresh()
+
+    def snapshot_user_labels(self):
+        """Copy the unified (+ death) label layers into a write snapshot (GUI thread).
+
+        See :func:`behav3d.napari._training_data.write_label_snapshot`; the copy
+        lets a worker write while the user keeps painting.
+        """
+        from behav3d.napari._training_data import label_item
+
+        items = []
+        for lyr in self.viewer.layers:
+            if lyr.name == UNIFIED_LABELS_LAYER_NAME:
+                items.append(label_item(
+                    "unified labels",
+                    unified_user_labels_path(self.pixel_class_outdir),
+                    lyr.data,
+                ))
+                # Persist the canonical label map alongside the labels (without
+                # requiring training) -- useful for users iterating on annotations.
+                map_path = unified_label_map_path(self.pixel_class_outdir)
+                label_map = dict(self.label_map)
+                items.append({
+                    "label": "label map",
+                    "fn": lambda p=map_path, m=label_map: save_label_map(p, m),
+                })
+                break
+        if self.has_death:
+            for lyr in self.viewer.layers:
+                if lyr.name == DEAD_LABELS_LAYER_NAME:
+                    items.append(label_item(
+                        "Dead labels",
+                        Path(self.pixel_class_outdir, "PixelClassifier_UserDeadLabels.zarr"),
+                        lyr.data,
+                    ))
+                    break
+        return items
+
+    def save_user_labels_async(self):
+        """Save user labels without blocking the GUI (the *Save labels* button).
+
+        Returns ``True`` if a background save started.
+        """
+        from behav3d.napari._training_data import start_label_save
+
+        log = ThreadSafeLogger(self._log)  # ``_log`` pumps Qt events: never call it from a worker
+        items = self.snapshot_user_labels()
+        if not items:
+            log("No user label layers found in viewer to save.")
+            return False
+
+        def _refresh_legend():
+            if self.legend_tab is not None:
+                self.legend_tab.refresh()
+
+        return start_label_save(
+            self._bg, items, log, viewer=self.viewer, on_done=_refresh_legend,
+        )
 
 
 # ---------------------------------------------------------------------------

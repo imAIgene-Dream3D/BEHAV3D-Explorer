@@ -662,12 +662,16 @@ def _mask_array_to_segments(
 # ---------------------------------------------------------------------------
 
 def _load_training_images(
-    metadata, output_dir, examples_per_sample, organoid_types, immune_types, other_types, overwrite_images=False
+    metadata, output_dir, examples_per_sample, organoid_types, immune_types, other_types,
+    overwrite_images=False, progress_cb=None,
 ):
     """
     Load training images from metadata.
     Returns a list of (C, Z, Y, X) arrays — one per selected timepoint — plus
     the pixel_class_outdir path, has_death flag, and all cell types list.
+
+    Qt-free. ``progress_cb(current, total, label)`` is optional and only reports;
+    the napari plugin passes it so a background worker can drive a progress bar.
     """
     from behav3d.core.metadata import has_dead_channel
 
@@ -704,9 +708,12 @@ def _load_training_images(
     max_shape = None
     n_samples = 0
 
-    for _, sample in metadata.iterrows():
+    n_rows = len(metadata)
+    for row_i, (_, sample) in enumerate(metadata.iterrows()):
         sample_name = sample.get("sample_name", "unknown")
         raw_image_path = sample.get("raw_image_path", "")
+        if progress_cb is not None:
+            progress_cb(row_i, n_rows, f"Reading {sample_name}…")
 
         if not raw_image_path or not Path(raw_image_path).exists():
             print(f"⚠️ Skipping {sample_name}: raw image not found")
@@ -2485,7 +2492,7 @@ class APOCTrainingWidget(QWidget):
             "background-color: #fd7e14; color: white; font-weight: bold; padding: 5px 10px;"
         )
         self.save_labels_btn.setToolTip("Save all user-provided label layers to disk")
-        self.save_labels_btn.clicked.connect(lambda: self.save_user_labels(log=self._log))
+        self.save_labels_btn.clicked.connect(lambda: self.save_user_labels_async(log=self._log))
         global_row1.addWidget(self.save_labels_btn)
         layout.addLayout(global_row1)
 
@@ -3121,6 +3128,48 @@ class APOCTrainingWidget(QWidget):
 
         log("✅ All user labels saved!")
 
+    def snapshot_user_labels(self):
+        """Copy every user-label layer into a write snapshot (GUI thread).
+
+        See :func:`behav3d.napari._training_data.write_label_snapshot`; the copy
+        lets a worker write while the user keeps painting.
+        """
+        from behav3d.napari._training_data import label_item
+
+        layer_names = {l.name for l in self.viewer.layers}
+        items = []
+        for cell_type in self.all_cell_types:
+            lname = f"User Provided Labels ({cell_type.capitalize()})"
+            if lname in layer_names:
+                items.append(label_item(
+                    f"{cell_type} labels",
+                    Path(self.pixel_class_outdir, f"PixelClassifier_User{cell_type.capitalize()}Labels.zarr"),
+                    self.viewer.layers[lname].data,
+                ))
+        if self.has_death and "User Provided Labels (Dead)" in layer_names:
+            items.append(label_item(
+                "Death labels",
+                Path(self.pixel_class_outdir, "PixelClassifier_UserDeadLabels.zarr"),
+                self.viewer.layers["User Provided Labels (Dead)"].data,
+            ))
+        return items
+
+    def save_user_labels_async(self, log=None):
+        """Save user labels without blocking the GUI (the *Save User Labels* button).
+
+        Returns ``True`` if a background save started.
+        """
+        from behav3d.napari._training_data import start_label_save
+
+        log = ThreadSafeLogger(log or self._log)
+        items = self.snapshot_user_labels()
+        if not items:
+            log("No user label layers found in viewer to save.")
+            return False
+        return start_label_save(
+            self._bg, items, log, buttons=[self.save_labels_btn], viewer=self.viewer,
+        )
+
     def _run_training_bg(self, cell_types_to_train):
         """Background-threaded version of :meth:`_run_training`.
 
@@ -3144,8 +3193,9 @@ class APOCTrainingWidget(QWidget):
         except Exception:
             pass
 
-        self._log("Auto-saving user labels before training…")
-        self.save_user_labels(log=self._log)
+        # Copy the label layers now (GUI thread); the worker writes them first
+        # thing, so the raw labels are on disk before any training starts.
+        label_snapshot = self.snapshot_user_labels()
 
         # Collect per-cell-type config, images, and annotation arrays.
         ct_inputs = {}
@@ -3214,6 +3264,8 @@ class APOCTrainingWidget(QWidget):
 
         if not ct_inputs:
             self._log("⚠️ No cell types with valid data to train.")
+            # Nothing will train, but the labels the user painted are still saved.
+            self.save_user_labels_async(log=self._log)
             try:
                 self.training_finished.emit(cell_types_to_train, [])
             except Exception:
@@ -3230,6 +3282,13 @@ class APOCTrainingWidget(QWidget):
         def _do_train(progress_cb=None):
             import apoc as _apoc
             from sklearn.ensemble import RandomForestClassifier
+            from behav3d.napari._training_data import write_label_snapshot
+
+            if label_snapshot:
+                if progress_cb:
+                    progress_cb(0, 0, "Saving user labels…")
+                safe_log("Auto-saving user labels before training…")
+                write_label_snapshot(label_snapshot, safe_log)
 
             cts = list(ct_inputs.keys())
             n = len(cts)

@@ -118,6 +118,30 @@ def _notify_metadata_refresh(metadata_loader, log_fn=None, context="segmentation
             log_fn(f"⚠️ Could not refresh metadata after {context}: {e}")
 
 
+def _finalize_segmentation_metadata(updated_metadata, output_dir, metadata_csv, log_fn,
+                                    skip_unified=False, touched_cell_types=None):
+    """Post-segmentation housekeeping that does file I/O: multicolor cleanup + CSV write.
+
+    Qt-free so it can run on the worker thread right after the backend returns
+    (``log_fn`` must be thread-safe; the widgets' ``self.log`` is). Returns the
+    cleaned metadata, or ``None`` when the backend returned nothing.
+    """
+    if updated_metadata is None:
+        return None
+    cleaned = run_multicolor_cleanup(
+        updated_metadata, output_dir, log_fn,
+        skip_unified=skip_unified, touched_cell_types=touched_cell_types,
+    )
+    if cleaned is None:
+        cleaned = updated_metadata
+    if metadata_csv:
+        try:
+            cleaned.to_csv(metadata_csv, index=False)
+        except Exception as e:
+            log_fn(f"Warning: Could not save metadata: {e}")
+    return cleaned
+
+
 class SegmentationTab(QWidget):
     def __init__(self, viewer: napari.Viewer, metadata_loader):
         super().__init__()
@@ -468,7 +492,8 @@ class SegmentationTab(QWidget):
                 QMessageBox.Yes | QMessageBox.No
             )
             if save_res == QMessageBox.Yes:
-                self.pixel_classifier_page._save_user_labels()
+                # Copied now, written in the background; the layers are removed next.
+                self.pixel_classifier_page._save_user_labels(allow_sync_fallback=True)
             self.cleanup_session()
             return True
 
@@ -488,7 +513,7 @@ class SegmentationTab(QWidget):
                 QMessageBox.Yes | QMessageBox.No
             )
             if save_res == QMessageBox.Yes:
-                self.apoc_page._save_apoc_user_labels()
+                self.apoc_page._save_apoc_user_labels(allow_sync_fallback=True)
             self.apoc_page.cleanup_session()
             return True
 
@@ -508,9 +533,7 @@ class SegmentationTab(QWidget):
                 QMessageBox.Yes | QMessageBox.No
             )
             if save_res == QMessageBox.Yes:
-                tw = getattr(self.convpaint_page, "_training_widget", None)
-                if tw is not None:
-                    tw.save_user_labels()
+                self.convpaint_page._save_convpaint_user_labels(allow_sync_fallback=True)
             self.convpaint_page.cleanup_session()
             return True
 
@@ -640,16 +663,39 @@ class PerClassLegendWidget(QWidget):
                 pass
 
 
-def _run_multicolor_cleanup_if_needed(metadata_loader, log_fn, skip_unified=False):
-    """Run multicolor redundancy cleanup after segmentation."""
+def _run_multicolor_cleanup_if_needed(metadata_loader, log_fn, skip_unified=False,
+                                      touched_cell_types=None):
+    """Run multicolor redundancy cleanup after segmentation (``metadata_loader`` form).
+
+    Thin wrapper over :func:`run_multicolor_cleanup` for callers that hold the
+    metadata loader. GUI thread or not, it only reads ``metadata`` / ``output_dir``.
+    """
+    return run_multicolor_cleanup(
+        metadata_loader.metadata, metadata_loader.output_dir, log_fn,
+        skip_unified=skip_unified, touched_cell_types=touched_cell_types,
+    )
+
+
+def run_multicolor_cleanup(metadata, output_dir, log_fn, skip_unified=False,
+                           touched_cell_types=None):
+    """Run multicolor redundancy cleanup after segmentation. Qt-free.
+
+    Safe to call from a worker thread: it touches no widgets and receives
+    ``metadata`` / ``output_dir`` explicitly (``log_fn`` must itself be
+    thread-safe, e.g. a :class:`ThreadSafeLogger`).
+
+    ``touched_cell_types`` limits the work to families containing at least one of
+    the cell types (re)segmented in this run; the whole family is still
+    corrected, because resolving overlaps needs every member. ``None`` means the
+    run covered everything.
+    """
     if skip_unified:
         log_fn(
             "Skipping multicolor cleanup: unified ConvPaint already "
             "produces mutually-exclusive per-cell-type masks."
         )
-        return metadata_loader.metadata
+        return metadata
 
-    metadata = metadata_loader.metadata
     if metadata is None or metadata.empty:
         return metadata
 
@@ -680,17 +726,21 @@ def _run_multicolor_cleanup_if_needed(metadata_loader, log_fn, skip_unified=Fals
         apply_multicolor_segment_correction_for_base,
     )
 
+    touched = None if touched_cell_types is None else {str(c) for c in touched_cell_types}
+
     cleaned_metadata = metadata
     for base_name, family_cell_types in sorted(families.items()):
         if len(family_cell_types) < 2:
             continue
+        if touched is not None and not touched.intersection(family_cell_types):
+            continue  # this run did not (re)segment any member of the family
         log_fn(
             f"Running multicolor cleanup for '{base_name}' after batch segmentation: "
             f"{sorted(family_cell_types)}"
         )
         cleaned_metadata = apply_multicolor_segment_correction_for_base(
             metadata=cleaned_metadata,
-            output_dir=str(metadata_loader.output_dir),
+            output_dir=str(output_dir),
             base_cell_type=base_name,
             n_channels=len(family_cell_types),
             overwrite=True,
@@ -1143,42 +1193,64 @@ class PixelClassifierWidget(QWidget):
             except Exception as e:
                 self.log(f"Warning: Could not save parameters: {e}")
 
-    def _save_user_labels(self):
-        """Save all user-provided label layers to zarr on disk."""
-        if not self.metadata_loader.output_dir:
-            self.log("Cannot save labels: no output directory set.")
-            return
+    def _snapshot_user_labels(self):
+        """GUI thread: copy every user-label layer into a write snapshot (see
+        :func:`behav3d.napari._training_data.write_label_snapshot`)."""
+        from behav3d.napari._training_data import label_item
 
-        output_dir = Path(self.metadata_loader.output_dir)
-        pixel_class_outdir = output_dir / "images" / "PixelClassification"
+        pixel_class_outdir = Path(self.metadata_loader.output_dir) / "images" / "PixelClassification"
         pixel_class_outdir.mkdir(parents=True, exist_ok=True)
 
-        saved_any = False
-
+        items = []
         if self.has_death:
             layer_name = 'User Provided Labels (Dead)'
             if layer_name in self.viewer.layers:
-                outpath = pixel_class_outdir / 'PixelClassifier_UserDeadLabels.zarr'
-                if outpath.exists():
-                    shutil.rmtree(outpath)
-                save_as_zarr(self.viewer.layers[layer_name].data, outpath)
-                self.log(f"Saved Dead labels to {outpath.name}")
-                saved_any = True
-
+                items.append(label_item(
+                    "Dead labels",
+                    pixel_class_outdir / 'PixelClassifier_UserDeadLabels.zarr',
+                    self.viewer.layers[layer_name].data,
+                ))
         for cell_type in self.all_cell_types:
             layer_name = f'User Provided Labels ({cell_type.capitalize()})'
             if layer_name in self.viewer.layers:
-                outpath = pixel_class_outdir / f'PixelClassifier_User{cell_type.capitalize()}Labels.zarr'
-                if outpath.exists():
-                    shutil.rmtree(outpath)
-                save_as_zarr(self.viewer.layers[layer_name].data, outpath)
-                self.log(f"Saved {cell_type} labels to {outpath.name}")
-                saved_any = True
+                items.append(label_item(
+                    f"{cell_type} labels",
+                    pixel_class_outdir / f'PixelClassifier_User{cell_type.capitalize()}Labels.zarr',
+                    self.viewer.layers[layer_name].data,
+                ))
+        return items
 
-        if not saved_any:
+    def _save_user_labels(self, *_clicked_args, on_done=None, allow_sync_fallback=False):
+        """Save all user-provided label layers to zarr, in the background.
+
+        The layers are copied here (GUI thread) and written by a worker, so the
+        viewer stays responsive. ``allow_sync_fallback`` makes the write
+        synchronous if no background job can start -- used when the layers are
+        about to be removed (tab exit), where skipping would lose the labels.
+        Returns ``True`` if the labels were saved or a background save started.
+        """
+        from behav3d.napari._training_data import start_label_save, write_label_snapshot
+
+        if not self.metadata_loader.output_dir:
+            self.log("Cannot save labels: no output directory set.")
+            return False
+
+        items = self._snapshot_user_labels()
+        if not items:
             self.log("No user label layers found in viewer to save.")
-        else:
-            self.log("All user labels saved.")
+            return False
+
+        if start_label_save(
+            self._bg, items, self.log, progress_row=self.tab_progress_row,
+            buttons=[self.btn_save_labels], viewer=self.viewer, on_done=on_done,
+        ):
+            return True
+        if allow_sync_fallback:
+            write_label_snapshot(items, self.log)
+            if on_done is not None:
+                on_done()
+            return True
+        return False
 
     def reset_ui(self):
         """Hide action buttons and clear session data."""
@@ -1417,6 +1489,7 @@ class PixelClassifierWidget(QWidget):
 
         n_workers_val = int(self.spin_workers.value())
         log_bridge = ThreadSafeLogger(self.log)
+        metadata_csv_path = self.metadata_loader.behav3d_parameters.get("paths", {}).get("metadata_csv")
 
         def _do_segmentation(progress_cb=None):
             updated_metadata = run_pixel_classifier_segmentation(
@@ -1446,20 +1519,16 @@ class PixelClassifierWidget(QWidget):
                 clf_death_path=clf_death_path,
                 progress_cb=progress_cb,
             )
-            return updated_metadata
+            # Multicolor cleanup + CSV write do file I/O over every sample:
+            # keep them on this (worker) thread.
+            return _finalize_segmentation_metadata(
+                updated_metadata, output_dir, metadata_csv_path, self.log,
+                skip_unified=False,
+            )
 
         def _apply_result(updated_metadata):
             if updated_metadata is not None:
                 self.metadata_loader.metadata = updated_metadata
-                updated_metadata = _run_multicolor_cleanup_if_needed(self.metadata_loader, self.log, skip_unified=False)
-                self.metadata_loader.metadata = updated_metadata
-            self.metadata_loader.metadata = updated_metadata
-            csv_path = self.metadata_loader.behav3d_parameters.get("paths", {}).get("metadata_csv")
-            if csv_path:
-                try:
-                    updated_metadata.to_csv(csv_path, index=False)
-                except Exception as e:
-                    self.log(f"  Warning: Could not save metadata CSV: {e}")
             self.log("Batch segmentation finished successfully!")
             _notify_metadata_refresh(self.metadata_loader, self.log, "segmentation")
 
@@ -1520,14 +1589,29 @@ class PixelClassifierWidget(QWidget):
                         if "Segments" in layer.name:
                             layer.visible = True
 
-    def _on_load_training_clicked(self, interactive=True):
+    def _on_load_training_clicked(self, interactive=True, block=False, extra_callbacks=None):
+        """Generate (or load cached) training images + features.
+
+        Prompt and snapshot on the GUI thread; the heavy part (raw-image reads,
+        feature extraction, zarr caching, label restore) on a worker
+        (:func:`build_rf_training_payload`); viewer updates back on the GUI
+        thread (:meth:`_apply_training_payload`). ``block=True`` runs both
+        phases inline; ``extra_callbacks`` is the queue / chaining hook.
+        """
         if interactive and refuse_if_busy(
-            self, "loading training data", bg=getattr(self, "_bg", None)
+            self, "loading training data", bg=getattr(self, "_bg", None),
+            extra_callbacks=extra_callbacks,
         ):
             return
         try:
             if self.metadata_loader.metadata is None:
                 self.log("⚠️ Cannot generate training data: No metadata loaded.")
+                fire_extra_callback(extra_callbacks, "on_failed", "no metadata loaded")
+                return
+
+            if not block and self._bg.is_running():
+                self.log("⚠️ Training data is already being generated.")
+                fire_extra_callback(extra_callbacks, "on_failed", "already running")
                 return
 
             self.log("Loading training data...")
@@ -1535,18 +1619,19 @@ class PixelClassifierWidget(QWidget):
 
             if not self.metadata_loader.metadata_loaded:
                 self.log("Metadata not loaded!")
+                fire_extra_callback(extra_callbacks, "on_failed", "metadata not loaded")
                 return
 
             output_dir = Path(self.metadata_loader.output_dir)
             pixel_class_outdir = output_dir / "images" / "PixelClassification"
             pixel_class_outdir.mkdir(parents=True, exist_ok=True)
-            
+
             features_outpath = pixel_class_outdir / 'PixelClassifier_Features.zarr'
             image_outpath = pixel_class_outdir / 'PixelClassifier_Images.zarr'
-            
+
             metadata = self.metadata_loader.metadata
             examples_per_sample = self.spin_examples.value()
-            
+
             # --- CACHING: Check if cached data exists ---
             pc = _cfg_get(self.metadata_loader.behav3d_parameters, "pixel_classifier", {})
             saved_examples = pc.get("examples_per_sample", None)
@@ -1603,6 +1688,7 @@ class PixelClassifierWidget(QWidget):
 
                     if box.clickedButton() == btn_cancel:
                         self.log("Action cancelled.")
+                        fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
                         return
                     elif box.clickedButton() == btn_load:
                         load_existing = True
@@ -1610,330 +1696,147 @@ class PixelClassifierWidget(QWidget):
                     # Non-interactive (Queue): default to loading existing data
                     load_existing = True
 
-            disconnect_all_preview_dims_listeners(self.viewer)
-            clear_viewer_layers(self.viewer) # Clear after prompting, to avoid removing if cancel
+            from behav3d.napari._training_data import (
+                build_rf_training_payload, run_training_data_job, training_data_key,
+            )
 
-            if load_existing:
-                # --- FAST PATH: load from cached zarr files ---
-                self.log(f"Loading cached images and features from disk ({saved_examples} examples/sample)...")
-                stacked_images = np.asarray(load_image(image_outpath))
-                stacked_features = np.asarray(load_image(features_outpath))
-                self.log(f"  Cached images shape: {stacked_images.shape}")
-                self.log(f"  Cached features shape: {stacked_features.shape}")
-            else:
-                # --- SLOW PATH: regenerate images and features ---
-                if exists and not load_existing:
-                     self.log("Generating new training data (overwriting)...")
-                elif saved_examples is not None and saved_examples != examples_per_sample:
-                    self.log(f"examples_per_sample changed ({saved_examples} → {examples_per_sample}), regenerating...")
-                else:
-                    self.log("No cached data found, generating images and features...")
-                
-                all_images = []
-                
-                self.log(f"Checking {len(metadata)} samples...")
-                
-                for idx, sample in metadata.iterrows():
-                    sample_name = sample['sample_name']
-                    raw_image_path = Path(sample['raw_image_path'])
-                    
-                    if not raw_image_path.exists():
-                        self.log(f"Error: Raw image path not found: {raw_image_path}")
-                        continue
-                    
-                    raw_image_zarr = output_dir / "images" / sample_name / f"{sample_name}.zarr"
-                    
-                    if not raw_image_zarr.exists():
-                        self.log(f"- Converting {sample_name} to .zarr...")
-                        try:
-                            images = load_image(raw_image_path)
-                            save_as_zarr(img=images, path=raw_image_zarr)
-                        except Exception as e:
-                            self.log(f"Error loading/converting {sample_name}: {e}")
-                            traceback.print_exc()
-                            continue
-                    
-                    try:
-                        images = load_image(raw_image_zarr)
-                        if len(images.shape) == 5:
-                             max_t = images.shape[0]-1
-                        elif len(images.shape) == 4:
-                            self.log(f"Warning: Image {sample_name} has shape {images.shape}. Assuming T,C,Z,Y,X logic might fail.")
-                            max_t = images.shape[0]-1
-                        else:
-                            self.log(f"Warning: unexpected shape {images.shape}")
-                            max_t = 0
-                            
-                        idc = np.linspace(0, max_t, examples_per_sample, dtype=int)
-                        idc = np.unique(idc)
-                        
-                        self.log(f"  {sample_name}: Taking timepoints {idc}")
-                        
-                        sample_images = [images[t] for t in idc]
-                        all_images += sample_images
-                        
-                    except Exception as e:
-                         self.log(f"Error reading {raw_image_zarr}: {e}")
-                         traceback.print_exc()
+            snap = {
+                "metadata": metadata.copy(),
+                "output_dir": output_dir,
+                "examples_per_sample": int(examples_per_sample),
+                "load_existing": load_existing,
+                "exists": exists,
+                "saved_examples": saved_examples,
+                "all_cell_types": list(self.all_cell_types),
+                "has_death": bool(self.has_death),
+            }
+            key_at_start = training_data_key(self.metadata_loader)
 
-                if not all_images:
-                    self.log("No images loaded.")
-                    return
+            run_training_data_job(
+                self,
+                desc="Loading training data…" if load_existing else "Generating training data…",
+                builder=build_rf_training_payload,
+                snap=snap,
+                apply=self._apply_training_payload,
+                extra_callbacks=extra_callbacks,
+                block=block,
+                buttons=[self.btn_load_training],
+                stale_check=lambda: training_data_key(self.metadata_loader) != key_at_start,
+                failure_prefix="Failed to load training data",
+            )
 
-                max_shape = [0] * all_images[0].ndim
-                for img in all_images:
-                    for i in range(img.ndim):
-                        max_shape[i] = max(max_shape[i], img.shape[i])
-                max_shape = tuple(max_shape)
-                
-                self.log(f"Max shape for padding: {max_shape}")
-                
-                # Remove old cached files, labels, and predictions before regenerating
-                self.log("Cleaning up old training files, labels and predictions...")
-                to_delete = [
-                    image_outpath, 
-                    features_outpath,
-                    pixel_class_outdir / 'PixelClassifier_UserDeadLabels.zarr',
-                    pixel_class_outdir / 'PixelClassifier_Death_PredictedLabels.zarr'
-                ]
-                for ct in self.all_cell_types:
-                    to_delete.append(pixel_class_outdir / f'PixelClassifier_User{ct.capitalize()}Labels.zarr')
-                    to_delete.append(pixel_class_outdir / f'PixelClassifier_{ct.capitalize()}_PredictedLabels.zarr')
-                
-                for p in to_delete:
-                    if p.exists():
-                        if p.is_dir(): shutil.rmtree(p)
-                        else: p.unlink()
-                
-                self.log("Calculating features (this may take a while)...")
-
-                # Build extractor from the first sample's pixel sizes so
-                # sigma values are in physical units — matching batch inference.
-                pixel_xy = float(metadata['pixel_distance_xy'].iloc[0])
-                pixel_z  = float(metadata['pixel_distance_z'].iloc[0])
-                extract_features = make_features(pixel_xy, pixel_z, verbose=True)
-                self.log(
-                    f"Feature extractor: make_features "
-                    f"(pixel_xy={pixel_xy:.4f} µm, pixel_z={pixel_z:.4f} µm)"
-                )
-
-                processed_images = []
-                processed_features = []
-                
-                for i, img in enumerate(all_images):
-                    self.log(f"Processing image {i+1}/{len(all_images)}")
-                    try:
-                        feats = extract_features(img)
-                        img_padded = zeropad_image_to_match_shape(img, max_shape)
-                        processed_images.append(img_padded)
-                        processed_features.append(feats)
-                    except Exception as e:
-                        self.log(f"Error calculating features: {e}")
-                        traceback.print_exc()
-
-                if not processed_images:
-                     return
-
-                stacked_images = np.stack(processed_images)
-                
-                feat_max_shape = [0] * processed_features[0].ndim
-                for f in processed_features:
-                    for i in range(f.ndim):
-                         feat_max_shape[i] = max(feat_max_shape[i], f.shape[i])
-                feat_max_shape = tuple(feat_max_shape)
-                
-                processed_features_padded = []
-                for f in processed_features:
-                    processed_features_padded.append(zeropad_image_to_match_shape(f, feat_max_shape))
-                
-                stacked_features = np.stack(processed_features_padded)
-                
-                save_as_zarr(stacked_images, image_outpath)
-                save_as_zarr(stacked_features, features_outpath)
-
-                # Persist version marker and pixel sizes used so cache
-                # invalidation and the pre-flight check work correctly.
-                pc_cfg = self.metadata_loader.behav3d_parameters.setdefault("pixel_classifier", {})
-                pc_cfg["features_extractor_version"] = "make_features_v1"
-                pc_cfg["pixel_size_xy"] = pixel_xy
-                pc_cfg["pixel_size_z"] = pixel_z
-
-                self.log("Images and features saved to disk.")
-            
-            # --- Common path: store in memory and update config ---
-            self.all_images = stacked_images
-            self.all_features = stacked_features
-            
-            # Save the current examples_per_sample to config so we can detect changes next time
-            self._persist_params()
-            
-            # --- Add Layers to Viewer ---
-            self.log("Adding layers to viewer...")
-            channel_colors = ['cyan', 'yellow', 'red', 'green', 'magenta', 'blue', 'gray']
-            
-            n_channels = stacked_images.shape[1]
-            for ch in range(n_channels):
-                channel_data = stacked_images[:, ch, :, :, :]
-                
-                layer = self.viewer.add_image(
-                    channel_data,
-                    name=f"Channel {ch+1}",
-                    colormap=channel_colors[ch % len(channel_colors)],
-                    blending='additive',
-                    visible=True,
-                )
-                try:
-                    flat = channel_data.flatten()
-                    flat = flat[flat > 0]
-                    if flat.size > 0:
-                        clim = np.percentile(flat, 99.8)
-                        layer.contrast_limits = (0, clim)
-                except:
-                    pass
-            
-            # Create label layer dimensions
-            dims = stacked_images.shape  # (T, C, Z, Y, X)
-            self.log(f"  Images shape: {dims}")
-            
-            # label_dims should be (T, Z, Y, X)
-            # If dims is 5D: (T, C, Z, Y, X)
-            if len(dims) == 5:
-                label_dims = (dims[0], dims[2], dims[3], dims[4])
-            elif len(dims) == 4:
-                # Assuming (T, C, Y, X)
-                label_dims = (dims[0], 1, dims[2], dims[3])
-                self.log("  Warning: 4D images detected, assuming (T, C, Y, X)")
-            else:
-                label_dims = dims # fallback
-            
-            self.log(f"  Labels shape: {label_dims}")
-            
-            # --- Reload existing user labels and predictions from disk ---
-            # 1. User Provided Labels
-            if self.has_death:
-                dead_labels_path = pixel_class_outdir / 'PixelClassifier_UserDeadLabels.zarr'
-                if dead_labels_path.exists():
-                    self.log("  Loading existing dead labels from disk...")
-                    dead_labels = np.asarray(load_zarr(dead_labels_path))
-                    if dead_labels.shape != label_dims:
-                        self.log(f"  Warning: Dead labels shape mismatch {dead_labels.shape} vs {label_dims}. Resizing...")
-                        # Simple zero-pad or crop could be here, but we'll just use zeros if wrong
-                        dead_labels = np.zeros(label_dims, dtype=np.uint16)
-                else:
-                    dead_labels = np.zeros(label_dims, dtype=np.uint16)
-                layer = self.viewer.add_labels(dead_labels, name='User Provided Labels (Dead)', opacity=0.3)
-                self._configure_user_label_layer(layer)
-
-            for cell_type in self.all_cell_types:
-                user_label_path = pixel_class_outdir / f'PixelClassifier_User{cell_type.capitalize()}Labels.zarr'
-                if user_label_path.exists():
-                    self.log(f"  Loading existing {cell_type} user labels from disk...")
-                    user_labels = np.asarray(load_zarr(user_label_path))
-                    if user_labels.shape != label_dims:
-                         self.log(f"  Warning: {cell_type} user labels shape mismatch {user_labels.shape} vs {label_dims}. Using zeros.")
-                         user_labels = np.zeros(label_dims, dtype=np.uint16)
-                else:
-                    user_labels = np.zeros(label_dims, dtype=np.uint16)
-                layer = self.viewer.add_labels(
-                    user_labels,
-                    name=f'User Provided Labels ({cell_type.capitalize()})',
-                    opacity=0.3
-                )
-                self._configure_user_label_layer(layer)
-
-            # 2. Pixel Classification predictions
-            if self.has_death:
-                pred_death_path = pixel_class_outdir / 'PixelClassifier_Death_PredictedLabels.zarr'
-                if pred_death_path.exists():
-                    self.log("  Loading existing dead predictions from disk...")
-                    pred_dead = np.asarray(load_zarr(pred_death_path))
-                    if pred_dead.shape != label_dims:
-                         self.log(f"  Warning: Dead prediction shape mismatch {pred_dead.shape} vs {label_dims}. Using zeros.")
-                         pred_dead = np.zeros(label_dims, dtype=np.uint16)
-                else:
-                    pred_dead = np.zeros(label_dims, dtype=np.uint16)
-                dead_pred_layer = self.viewer.add_labels(pred_dead, name='Pixel Classification (Dead)', opacity=0.3, visible=False)
-                _set_dead_mask_layer_color(dead_pred_layer)
-
-            for cell_type in self.all_cell_types:
-                pred_label_path = pixel_class_outdir / f'PixelClassifier_{cell_type.capitalize()}_PredictedLabels.zarr'
-                if pred_label_path.exists():
-                    self.log(f"  Loading existing {cell_type} predictions from disk...")
-                    pred_data = np.asarray(load_zarr(pred_label_path))
-                    if pred_data.shape != label_dims:
-                        self.log(f"  Warning: {cell_type} prediction shape mismatch {pred_data.shape} vs {label_dims}. Using zeros.")
-                        pred_data = np.zeros(label_dims, dtype=np.uint16)
-                else:
-                    pred_data = np.zeros(label_dims, dtype=np.uint16)
-                self.viewer.add_labels(
-                    pred_data,
-                    name=f'Pixel Classification ({cell_type.capitalize()})',
-                    opacity=0.3,
-                    visible=False
-                )
-
-            # 3. Segments
-            for cell_type in self.all_cell_types:
-                 self.viewer.add_labels(
-                    np.zeros(label_dims, dtype=np.uint16),
-                    name=f'{cell_type.capitalize()} Segments',
-                    opacity=0.7,
-                    visible=False
-                )
-
-            self.log("Training data loaded successfully!")
-
-            # Show action buttons now that data is loaded
-            self.btn_save_labels.setVisible(True)
-            self.btn_clear_layer.setVisible(True)
-            self.btn_clear_all.setVisible(True)
-            self.btn_train_update.setVisible(True)
-            
-            # Update and show legend
-            while self.legend_container.layout().count():
-                child = self.legend_container.layout().takeAt(0)
-                if child.widget():
-                    child.widget().deleteLater()
-            legend = PerClassLegendWidget(self.viewer, self.all_cell_types, self.has_death)
-            self.legend_container.layout().addWidget(legend)
-            self.legend_container.setVisible(True)
-            
-            self.instruction_label.setVisible(True)
-            self.btn_queue_train.setVisible(True)  # Show queue button now that training data is loaded
-            self.is_session_active = True
-            
         except Exception as e:
             traceback.print_exc()
             self.log(f"Failed to load training data: {e}")
+            fire_extra_callback(extra_callbacks, "on_failed", str(e))
+
+    def _apply_training_payload(self, payload):
+        """GUI-thread half of Generate Training Data: viewer layers + session state.
+
+        Returns ``False`` when nothing was applied.
+        """
+        from behav3d.napari._training_data import add_layer_specs
+
+        if payload.get("empty"):
+            self.log(payload["empty"])
+            return False
+
+        disconnect_all_preview_dims_listeners(self.viewer)
+        clear_viewer_layers(self.viewer)  # Clear only once the new data is ready
+
+        # Parameters learned while generating (extractor version, pixel sizes) so
+        # cache invalidation and the pre-flight check work correctly.
+        updates = payload.get("param_updates") or {}
+        if updates:
+            self.metadata_loader.behav3d_parameters.setdefault("pixel_classifier", {}).update(updates)
+
+        # --- Common path: store in memory and update config ---
+        self.all_images = payload["stacked_images"]
+        self.all_features = payload["stacked_features"]
+
+        # Save the current examples_per_sample to config so we can detect changes next time
+        self._persist_params()
+
+        add_layer_specs(
+            self.viewer, payload["layers"],
+            configure_user_labels=self._configure_user_label_layer,
+            style_dead_pred=_set_dead_mask_layer_color,
+        )
+
+        self.log("Training data loaded successfully!")
+
+        # Show action buttons now that data is loaded
+        self.btn_save_labels.setVisible(True)
+        self.btn_clear_layer.setVisible(True)
+        self.btn_clear_all.setVisible(True)
+        self.btn_train_update.setVisible(True)
+
+        # Update and show legend
+        while self.legend_container.layout().count():
+            child = self.legend_container.layout().takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        legend = PerClassLegendWidget(self.viewer, self.all_cell_types, self.has_death)
+        self.legend_container.layout().addWidget(legend)
+        self.legend_container.setVisible(True)
+
+        self.instruction_label.setVisible(True)
+        self.btn_queue_train.setVisible(True)  # Show queue button now that training data is loaded
+        self.is_session_active = True
+        return True
 
     def run_train(self, interactive=True, extra_callbacks=None):
         """Run classifier training. Called by queue (interactive=False) or button (interactive=True).
 
-        Training itself runs on a background thread (see
-        :meth:`_on_train_clicked`).  ``extra_callbacks`` is the queue's
-        chaining hook and fires only once training has *actually finished*
-        (results applied to the viewer) or failed -- not when this method
-        returns, which used to let the queue start the segmentation step while
-        the classifier was still being written to disk.
+        Loading the training data (when no session is active yet) and the training
+        itself both run on a background thread, one after the other.
+        ``extra_callbacks`` is the queue's chaining hook and fires only once
+        training has *actually finished* (results applied to the viewer) or
+        failed -- not when this method returns, which used to let the queue start
+        the segmentation step while the classifier was still being written to disk.
         """
-        if not self.is_session_active:
-            self.log("Session not active. Loading training data...")
-            self._on_load_training_clicked(interactive=interactive)
-
         if self.is_session_active:
-            try:
+            self._start_training_chained(interactive, extra_callbacks)
+            return
+
+        self.log("Session not active. Loading training data...")
+
+        def _after_load(_result):
+            # Runs on the GUI thread once the load's worker has fully stopped, so
+            # ``_bg`` is free again; the queue exempts this start from the busy guard.
+            if not self.is_session_active:
+                self._train_unavailable(interactive, extra_callbacks)
+                return
+            self._start_training_chained(interactive, extra_callbacks)
+
+        def _load_failed(err):
+            self._train_unavailable(interactive, extra_callbacks, err)
+
+        self._on_load_training_clicked(
+            interactive=interactive,
+            extra_callbacks={"on_done": _after_load, "on_failed": _load_failed},
+        )
+
+    def _train_unavailable(self, interactive, extra_callbacks, reason=None):
+        self.log("Error: Failed to load training data for classifier.")
+        if not interactive:
+            self.log("Training data not loaded. Please load training data manually first.")
+        fire_extra_callback(extra_callbacks, "on_failed", reason or "no training data")
+
+    def _start_training_chained(self, interactive, extra_callbacks):
+        from contextlib import nullcontext
+        from behav3d.napari._background_runner import queue_dispatch
+
+        try:
+            with (nullcontext() if interactive else queue_dispatch()):
                 self._on_train_clicked(
                     on_done=lambda _r: fire_extra_callback(extra_callbacks, "on_done", None),
                     on_failed=lambda err: fire_extra_callback(extra_callbacks, "on_failed", str(err)),
                 )
-            except Exception as e:
-                fire_extra_callback(extra_callbacks, "on_failed", str(e))
-                raise
-        else:
-            self.log("Error: Failed to load training data for classifier.")
-            fire_extra_callback(extra_callbacks, "on_failed", "no training data")
-            if not interactive:
-                raise RuntimeError("Training data not loaded. Please load training data manually first.")
+        except Exception as e:
+            fire_extra_callback(extra_callbacks, "on_failed", str(e))
+            raise
+
 
     def _on_train_clicked(self, *_clicked_args, on_done=None, on_failed=None):
         """Train classifiers, predict pixels, and segment — runs on a background thread.
@@ -1971,6 +1874,7 @@ class PixelClassifierWidget(QWidget):
         all_features       = ctx["all_features"]
         targets            = ctx["targets"]
         label_data         = ctx["label_data"]
+        label_snapshot     = ctx["label_snapshot"]
         params_by_target   = ctx["params_by_target"]
         seg_params         = ctx["seg_params"]
         all_cell_types     = ctx["all_cell_types"]
@@ -1981,6 +1885,13 @@ class PixelClassifierWidget(QWidget):
 
         # ── Phase 2 (worker thread) ──────────────────────────────────────
         def _do_train(progress_cb=None):
+            from behav3d.napari._training_data import write_label_snapshot
+
+            if label_snapshot:
+                if progress_cb:
+                    progress_cb(0, 0, "Saving user labels…")
+                write_label_snapshot(label_snapshot, safe_log)
+
             classifiers = {}
             valid_targets = [t for t in targets if t in label_data]
             n_valid = len(valid_targets)
@@ -2169,7 +2080,9 @@ class PixelClassifierWidget(QWidget):
         Returns a context dict on success, or ``None`` when validation fails.
         """
         self._persist_params()
-        self._save_user_labels()
+        # Copy the label layers now (GUI thread); the worker writes them at the
+        # start of training, so the raw labels are on disk before anything else.
+        label_snapshot = self._snapshot_user_labels() if self.metadata_loader.output_dir else []
 
         # Load features
         if self.all_features is None:
@@ -2247,6 +2160,7 @@ class PixelClassifierWidget(QWidget):
             "all_features": all_features,
             "targets": targets,
             "label_data": label_data,
+            "label_snapshot": label_snapshot,
             "params_by_target": params_by_target,
             "seg_params": seg_params,
             "all_cell_types": list(self.all_cell_types),
@@ -6119,14 +6033,35 @@ class APOCWidget(QWidget):
             self.log("  Visualization tab callback unavailable.")
 
     # ── Load Training Data ──────────────────────────────────────
-    def _on_load_training_clicked(self, interactive=True):
+    def _on_load_training_clicked(self, interactive=True, block=False, extra_callbacks=None):
+        """Generate (or load cached) APOC training data.
+
+        Three phases so the GUI never blocks:
+
+        1. GUI thread: validation, parameter persistence, GPU selection and the
+           "Generate New / Load Existing" prompt, then a plain-data snapshot.
+        2. Worker (:func:`build_apoc_training_payload`): image I/O, padding,
+           stacking, contrast limits, label / prediction restore.
+        3. GUI thread (:meth:`_apply_training_payload`): clear the viewer and add
+           the layers, then mark the session active.
+
+        ``block=True`` runs both phases inline; ``extra_callbacks`` is the queue /
+        chaining hook (``on_done`` / ``on_failed``).
+        """
         if interactive and refuse_if_busy(
-            self, "loading training data", bg=getattr(self, "_bg", None)
+            self, "loading training data", bg=getattr(self, "_bg", None),
+            extra_callbacks=extra_callbacks,
         ):
             return
         try:
             if self.metadata_loader.metadata is None:
                 self.log("⚠️ Cannot generate training data: No metadata loaded.")
+                fire_extra_callback(extra_callbacks, "on_failed", "no metadata loaded")
+                return
+
+            if not block and self._bg.is_running():
+                self.log("⚠️ Training data is already being generated.")
+                fire_extra_callback(extra_callbacks, "on_failed", "already running")
                 return
 
             self._apply_apoc_gpu_selection(log_message=False)
@@ -6134,11 +6069,11 @@ class APOCWidget(QWidget):
             self.log(f"APOC training pipeline using GPU device: {gpu_name}")
 
             self.log("Loading training data...")
-            
+
             # --- Save params if needed ---
             pc = self.metadata_loader.behav3d_parameters.setdefault("pixel_classifier", {})
             pc["examples_per_sample"] = int(self.spin_examples.value())
-            
+
             output_dir = Path(self.metadata_loader.output_dir)
             if output_dir:
                 params_path = Path(output_dir) / "behav3d_parameters.yml"
@@ -6158,17 +6093,10 @@ class APOCWidget(QWidget):
             organoid_types = [ct for ct in detect_organoid_types_from_metadata(md) if not is_combined_multicolor_celltype(ct)]
             immune_types = [ct for ct in detect_immune_cell_types_from_metadata(md) if not is_combined_multicolor_celltype(ct)]
             other_types = [ct for ct in detect_other_cell_types_from_metadata(md) if not is_combined_multicolor_celltype(ct)]
-            
-            # Use apoc_train helper to fetch and process images
-            from behav3d.preprocessing.segmentation.apoc_train import (
-                _load_training_images, _predicted_labels_path, _probability_map_path,
-            )
-            from behav3d.preprocessing import zeropad_image_to_match_shape
-            
+
             # Determine the cached data path and whether it already exists
             pixel_class_outdir = output_dir / "images" / "PixelClassification"
             image_outpath = pixel_class_outdir / 'PixelClassifier_Images.zarr'
-            saved_examples = pc.get("examples_per_sample", None)
 
             # Default: generate if no data exists; prompt only if data already exists
             load_existing = False
@@ -6212,6 +6140,7 @@ class APOCWidget(QWidget):
                     box.exec_()
                     if box.clickedButton() == btn_cancel:
                         self.log("Action cancelled.")
+                        fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
                         return
                     elif box.clickedButton() == btn_load:
                         load_existing = True
@@ -6221,195 +6150,113 @@ class APOCWidget(QWidget):
                     load_existing = True
             # else: no data exists → generate immediately without any dialog
 
-            # Flush the current tab config to YAML before clearing layers.
+            # Flush the current tab config to YAML before the viewer is rebuilt.
             # The tabs own their channel selection across the rebuild, so
             # nothing needs restoring afterwards.
             self._save_apoc_params_to_yaml(
                 updated_apoc_params=self._collect_apoc_tab_config()
             )
 
-            # Clear all viewer layers entirely
-            disconnect_all_preview_dims_listeners(self.viewer)
-            clear_viewer_layers(self.viewer)
-
-            # Load images
-            self.log("Running _load_training_images...")
-            image_list, pixel_class_outdir, has_death, all_cell_types = _load_training_images(
-                metadata=md,
-                output_dir=str(output_dir),
-                examples_per_sample=self.spin_examples.value(),
-                organoid_types=organoid_types,
-                immune_types=immune_types,
-                other_types=other_types,
-                overwrite_images=not load_existing,
+            from behav3d.napari._training_data import (
+                build_apoc_training_payload, run_training_data_job, training_data_key,
             )
-            
-            if not image_list:
-                self.log("⚠️ No training images found!")
-                return
 
-            self.log("Padding and stacking images...")
-            max_shape = list(image_list[0].shape)
-            for img in image_list[1:]:
-                for i in range(len(max_shape)):
-                    max_shape[i] = max(max_shape[i], img.shape[i])
-            image_list = [zeropad_image_to_match_shape(img, max_shape) for img in image_list]
-            stacked = np.stack(image_list, axis=0) # (T_total, C, Z, Y, X)
+            snap = {
+                "metadata": md.copy(),
+                "output_dir": output_dir,
+                "examples_per_sample": int(self.spin_examples.value()),
+                "organoid_types": organoid_types,
+                "immune_types": immune_types,
+                "other_types": other_types,
+                "load_existing": load_existing,
+            }
+            # The training widget is rebuilt whenever metadata changes; a payload
+            # read for an earlier one must not be applied to its replacement.
+            widget_at_start = self._training_widget
+            key_at_start = training_data_key(self.metadata_loader)
 
-            T_total = stacked.shape[0]
-            n_channels = stacked.shape[1]
-            channel_colors = [
-                "cyan", "yellow", "red", "green", "magenta", "blue",
-                "gray", "turbo", "viridis", "plasma", "inferno", "twilight",
-            ]
-
-            # Add Image layers. Channels are added one at a time, and each
-            # `add_image` call fires its own `layers.events.inserted` event —
-            # pause the training widget's own listener for the duration of
-            # the loop and refresh the training tabs' channel checkboxes
-            # once afterwards, so per-tab channel selections aren't rebuilt
-            # against a still-partial set of channel layers (which would
-            # look like no channels matching a tab's saved selection).
-            # Note: this must only block the training widget's own callback
-            # (via `pause_channel_refresh`), not the whole event — napari's
-            # internal layer-controls widget registration listens on the
-            # same event, and blocking it desyncs the viewer UI.
-            def _add_channel_layers():
-                for ch in range(n_channels):
-                    channel_data = stacked[:, ch, :, :, :]
-                    nonzero = channel_data[channel_data > 0]
-                    clim = (0, float(np.percentile(nonzero, 99.8))) if nonzero.size > 0 else (0, 1e-3)
-                    img_layer = self.viewer.add_image(
-                        channel_data,
-                        name=f"Channel {ch}",
-                        contrast_limits=clim,
-                        colormap=channel_colors[ch % len(channel_colors)],
-                        blending="additive",
-                        opacity=0.8,
-                    )
-                    img_layer.contrast_limits_range = (0, max(float(channel_data.max()), 1e-3))
-
-            if self._training_widget is not None:
-                with self._training_widget.pause_channel_refresh():
-                    _add_channel_layers()
-                self._training_widget._refresh_all_channels()
-            else:
-                _add_channel_layers()
-
-            # Add Label layers
-            label_shape = (T_total,) + stacked.shape[2:] 
-
-            for cell_type in all_cell_types:
-                saved_path = Path(pixel_class_outdir, f"PixelClassifier_User{cell_type.capitalize()}Labels.zarr")
-                if saved_path.exists():
-                    existing = np.asarray(load_zarr(saved_path))
-                    if existing.shape == label_shape:
-                        user_labels = existing
-                        self.log(f"  ↩ Restored saved labels for '{cell_type}'")
-                    else:
-                        self.log(f"  ⚠️ Saved labels shape {existing.shape} ≠ expected {label_shape} — starting fresh")
-                        user_labels = np.zeros(label_shape, dtype=np.int16)
-                else:
-                    user_labels = np.zeros(label_shape, dtype=np.int16)
-
-                # Use original pixel classifier setup function for consistency
-                new_layer = self.viewer.add_labels(
-                    user_labels,
-                    name=f"User Provided Labels ({cell_type.capitalize()})",
-                    opacity=0.5,
+            def _stale():
+                return (
+                    self._training_widget is not widget_at_start
+                    or training_data_key(self.metadata_loader) != key_at_start
                 )
-                self._configure_user_label_layer(new_layer)
 
-            if has_death:
-                dead_path = Path(pixel_class_outdir, "PixelClassifier_UserDeadLabels.zarr")
-                if dead_path.exists():
-                    dead_labels = np.asarray(load_zarr(dead_path))
-                    if dead_labels.shape == label_shape:
-                        self.log(f"  ↩ Restored saved labels for 'dead'")
-                    else:
-                        dead_labels = np.zeros(label_shape, dtype=np.int16)
-                else:
-                    dead_labels = np.zeros(label_shape, dtype=np.int16)
-                    
-                dead_layer = self.viewer.add_labels(dead_labels, name="User Provided Labels (Dead)", opacity=0.5)
-                self._configure_user_label_layer(dead_layer)
-
-            # Restore previously generated probability maps and segmentations
-            for cell_type in all_cell_types:
-                seg_p = _predicted_labels_path(pixel_class_outdir, cell_type)
-                if seg_p and seg_p.exists():
-                    try:
-                        pred = np.asarray(load_zarr(seg_p))
-                        if pred.shape == label_shape:
-                            self.viewer.add_labels(
-                                pred,
-                                name=f"{cell_type.capitalize()} Segments",
-                                opacity=0.8, visible=False,
-                            )
-                            self.log(f"  ↩ Restored predicted labels for '{cell_type}'")
-                    except Exception:
-                        pass
-                prob_p = _probability_map_path(pixel_class_outdir, cell_type)
-                if prob_p and prob_p.exists():
-                    try:
-                        prob = np.asarray(load_zarr(prob_p))
-                        if prob.shape == label_shape:
-                            self.viewer.add_image(
-                                prob,
-                                name=f"Probability Map ({cell_type.capitalize()})",
-                                opacity=0.6, blending="additive", colormap="magma",
-                                contrast_limits=(0.0, 1.0), visible=False,
-                            )
-                            self.log(f"  ↩ Restored probability map for '{cell_type}'")
-                    except Exception:
-                        pass
-
-            if has_death:
-                seg_p = _predicted_labels_path(pixel_class_outdir, "dead")
-                if seg_p and seg_p.exists():
-                    try:
-                        pred = np.asarray(load_zarr(seg_p))
-                        if pred.shape == label_shape:
-                            dead_pred_layer = self.viewer.add_labels(
-                                pred, name="Pixel Classification (Dead)",
-                                opacity=0.8, visible=False,
-                            )
-                            _set_dead_mask_layer_color(dead_pred_layer)
-                            self.log("  ↩ Restored predicted labels for 'dead'")
-                    except Exception:
-                        pass
-                prob_p = _probability_map_path(pixel_class_outdir, "dead")
-                if prob_p and prob_p.exists():
-                    try:
-                        prob = np.asarray(load_zarr(prob_p))
-                        if prob.shape == label_shape:
-                            self.viewer.add_image(
-                                prob, name="Probability Map (Dead)",
-                                opacity=0.6, blending="additive", colormap="magma",
-                                contrast_limits=(0.0, 1.0), visible=False,
-                            )
-                            self.log("  ↩ Restored probability map for 'dead'")
-                    except Exception:
-                        pass
-
-            self._reorder_apoc_training_layers()
-
-            self.log("✅ Training data generated/loaded in viewer!")
-            self._is_session_active = True
-            self._update_training_controls_state()
-            
-            # Update and show legend
-            while self.legend_container.layout().count():
-                child = self.legend_container.layout().takeAt(0)
-                if child.widget():
-                    child.widget().deleteLater()
-            legend = PerClassLegendWidget(self.viewer, all_cell_types, has_death)
-            self.legend_container.layout().addWidget(legend)
-            self.legend_container.setVisible(True)
+            run_training_data_job(
+                self,
+                desc="Generating APOC training data…" if not load_existing else "Loading APOC training data…",
+                builder=build_apoc_training_payload,
+                snap=snap,
+                apply=self._apply_training_payload,
+                extra_callbacks=extra_callbacks,
+                block=block,
+                buttons=[self.btn_load_training],
+                stale_check=_stale,
+            )
 
         except Exception as e:
             traceback.print_exc()
             self.log(f"❌ Error during training data generation: {e}")
+            fire_extra_callback(extra_callbacks, "on_failed", str(e))
+
+    def _apply_training_payload(self, payload):
+        """GUI-thread half of Generate Training Data: put the prepared layers in the viewer.
+
+        Only here does the viewer change, so a failed or abandoned load leaves
+        the previous session untouched. Returns ``False`` when nothing was applied.
+        """
+        from behav3d.napari._training_data import add_layer_specs
+
+        if payload.get("empty"):
+            self.log(payload["empty"])
+            return False
+
+        layers = payload["layers"]
+        has_death = payload["has_death"]
+        all_cell_types = payload["all_cell_types"]
+        channel_specs = [s for s in layers if s["tag"] == "channel"]
+        other_specs = [s for s in layers if s["tag"] != "channel"]
+
+        disconnect_all_preview_dims_listeners(self.viewer)
+        clear_viewer_layers(self.viewer)
+
+        # Channels are added one at a time and each `add_image` fires its own
+        # `layers.events.inserted` event — pause the training widget's own
+        # listener for the loop and refresh the training tabs' channel
+        # checkboxes once afterwards, so per-tab channel selections aren't
+        # rebuilt against a still-partial set of channel layers (which would
+        # look like no channels matching a tab's saved selection).
+        # Note: this must only block the training widget's own callback
+        # (via `pause_channel_refresh`), not the whole event — napari's
+        # internal layer-controls widget registration listens on the
+        # same event, and blocking it desyncs the viewer UI.
+        if self._training_widget is not None:
+            with self._training_widget.pause_channel_refresh():
+                add_layer_specs(self.viewer, channel_specs)
+            self._training_widget._refresh_all_channels()
+        else:
+            add_layer_specs(self.viewer, channel_specs)
+
+        add_layer_specs(
+            self.viewer, other_specs,
+            configure_user_labels=self._configure_user_label_layer,
+            style_dead_pred=_set_dead_mask_layer_color,
+        )
+
+        self._reorder_apoc_training_layers()
+
+        self.log("✅ Training data generated/loaded in viewer!")
+        self._is_session_active = True
+        self._update_training_controls_state()
+
+        # Update and show legend
+        while self.legend_container.layout().count():
+            child = self.legend_container.layout().takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        legend = PerClassLegendWidget(self.viewer, all_cell_types, has_death)
+        self.legend_container.layout().addWidget(legend)
+        self.legend_container.setVisible(True)
+        return True
 
     def _configure_user_label_layer(self, layer):
         """Configure a user label layer for simplified APOC usage."""
@@ -6443,10 +6290,30 @@ class APOCWidget(QWidget):
                 child.widget().deleteLater()
         self.legend_container.setVisible(False)
 
-    def _save_apoc_user_labels(self):
-        """Save APOC user labels to disk via the training widget."""
-        if self._training_widget is not None:
-            self._training_widget.save_user_labels(log=self.log)
+    def _save_apoc_user_labels(self, allow_sync_fallback=False):
+        """Save APOC user labels to disk in the background.
+
+        The training widget copies its label layers; the write runs on this
+        page's ``_bg`` (not the widget's own), because the widget is rebuilt on
+        metadata changes and must not be destroyed under a running worker.
+        """
+        from behav3d.napari._training_data import start_label_save, write_label_snapshot
+
+        tw = self._training_widget
+        if tw is None:
+            return False
+        items = tw.snapshot_user_labels()
+        if not items:
+            self.log("No user label layers found in viewer to save.")
+            return False
+        if start_label_save(
+            self._bg, items, self.log, progress_row=self.tab_progress_row, viewer=self.viewer,
+        ):
+            return True
+        if allow_sync_fallback:
+            write_label_snapshot(items, self.log)
+            return True
+        return False
 
     # ── Strategy changed ───────────────────────────────────────────
     def _on_training_widget_strategy_changed(self, strategy):
@@ -6723,7 +6590,9 @@ class APOCWidget(QWidget):
             "background-color:#1976D2; color:white; font-weight:bold; padding:6px 12px;"
         )
         self._global_run_instance_btn.setToolTip(
-            "Run instance segmentation preview for the currently active cell-type tab.\n"
+            "Run the full batch segmentation (all samples, using the timepoint range\n"
+            "below) for the currently active cell-type tab only. Other cell types are\n"
+            "not loaded or modified; the Dead tab runs only the death mask.\n"
             "Uses the strategy and parameters configured in that tab."
         )
         self._global_run_instance_btn.clicked.connect(self._on_global_run_instance)
@@ -6751,15 +6620,15 @@ class APOCWidget(QWidget):
     # ── Import training data ────────────────────────────────────
 
     def _on_import_training_data_clicked(self):
-        """Open file dialog, validate and apply imported training data."""
-        from behav3d.preprocessing.segmentation.apoc_train import (
-            _load_training_metadata,
-            _load_training_data_for_celltype,
-            _load_training_bundle,
-        )
+        """Pick a training bundle / metadata file, read it off the GUI thread, then
+        validate and apply it (:meth:`_finish_training_import`)."""
+        from behav3d.napari._background_runner import refuse_if_busy
 
         if self._training_widget is None:
             QMessageBox.warning(self, "No Metadata", "Load metadata first before importing training data.")
+            return
+
+        if refuse_if_busy(self, "importing training data", bg=self._bg):
             return
 
         path, _ = QFileDialog.getOpenFileName(
@@ -6771,36 +6640,45 @@ class APOCWidget(QWidget):
         if not path:
             return
 
-        if path.endswith(".zip"):
+        widget = self._training_widget
+
+        def _on_read(payload):
+            # The training widget is rebuilt on every metadata load; an import read
+            # for an earlier one must not be applied to its replacement.
+            if self._training_widget is not widget:
+                self.log("⚠️ Training data import discarded: the dataset changed while it was loading.")
+                return
             try:
-                meta, data_by_celltype = _load_training_bundle(path)
+                self._finish_training_import(path, payload)
             except Exception as exc:
-                QMessageBox.critical(self, "Import Error", f"Could not read training bundle from:\n{path}\n\n{exc}")
-                return
-            if meta is None:
-                QMessageBox.critical(self, "Import Error", f"Could not read training metadata from:\n{path}")
-                return
-            imported_cts = list(meta.get("cell_types", []))
-            if meta.get("has_death"):
-                imported_cts.append("dead")
-            missing = [ct for ct in imported_cts if ct not in data_by_celltype]
-        else:
-            meta = _load_training_metadata(path)
-            if meta is None:
-                QMessageBox.critical(self, "Import Error", f"Could not read training metadata from:\n{path}")
-                return
-            source_td = Path(path).parent
-            imported_cts = list(meta.get("cell_types", []))
-            if meta.get("has_death"):
-                imported_cts.append("dead")
-            data_by_celltype = {}
-            missing = []
-            for ct in imported_cts:
-                X, y = _load_training_data_for_celltype(source_td, ct)
-                if X is None:
-                    missing.append(ct)
-                else:
-                    data_by_celltype[ct] = (X, y)
+                traceback.print_exc()
+                QMessageBox.critical(self, "Import Error", f"Could not import training data:\n{exc}")
+
+        def _on_read_failed(err):
+            QMessageBox.critical(
+                self, "Import Error", f"Could not read training bundle from:\n{path}\n\n{err}"
+            )
+
+        self.log(f"Reading training data from {path}…")
+        self._bg.run(
+            fn=self._read_import_files,
+            args=(path,),
+            desc="Reading imported training data…",
+            progress_row=self.tab_progress_row,
+            buttons=[self.btn_import_training],
+            viewer=self.viewer,
+            inject_progress=False,
+            on_done=_on_read,
+            on_failed=_on_read_failed,
+        )
+
+    def _finish_training_import(self, path, payload):
+        """GUI-thread half of the import: dialogs, then apply to the training widget."""
+        meta, data_by_celltype, imported_cts = payload
+        if meta is None:
+            QMessageBox.critical(self, "Import Error", f"Could not read training metadata from:\n{path}")
+            return
+        missing = [ct for ct in imported_cts if ct not in data_by_celltype]
 
         if not data_by_celltype:
             QMessageBox.critical(
@@ -7068,11 +6946,13 @@ class APOCWidget(QWidget):
         self._flush_params_to_yaml()
 
     @staticmethod
-    def _read_import_payload(saved_path):
-        """Read a persisted training import from disk (``.zip`` bundle or
-        training-data folder). Pure file I/O, no Qt: runs on a worker thread
-        because the arrays can be large. Returns ``(meta, data_by_celltype,
-        imported_cts)`` or ``None``."""
+    def _read_import_files(saved_path):
+        """Read a training import from disk (``.zip`` bundle or training-data
+        folder). Pure file I/O, no Qt: runs on a worker thread because the
+        arrays can be large. Returns ``(meta, data_by_celltype, imported_cts)``
+        with ``meta`` ``None`` when the metadata is unreadable and
+        ``data_by_celltype`` possibly empty/partial, so the caller can tell the
+        user exactly what is missing. Read errors propagate."""
         from behav3d.preprocessing.segmentation.apoc_train import (
             _load_training_metadata,
             _load_training_data_for_celltype,
@@ -7080,15 +6960,15 @@ class APOCWidget(QWidget):
         )
         if saved_path.endswith(".zip"):
             meta, data_by_celltype = _load_training_bundle(saved_path)
-            if meta is None or not data_by_celltype:
-                return None
+            if meta is None:
+                return None, {}, []
             imported_cts = list(meta.get("cell_types", []))
             if meta.get("has_death"):
                 imported_cts.append("dead")
         else:
             meta = _load_training_metadata(saved_path)
             if meta is None:
-                return None
+                return None, {}, []
             source_td = Path(saved_path).parent
             imported_cts = list(meta.get("cell_types", []))
             if meta.get("has_death"):
@@ -7098,7 +6978,14 @@ class APOCWidget(QWidget):
                 X, y = _load_training_data_for_celltype(source_td, ct)
                 if X is not None:
                     data_by_celltype[ct] = (X, y)
-        if not data_by_celltype:
+        return meta, data_by_celltype, imported_cts
+
+    @staticmethod
+    def _read_import_payload(saved_path):
+        """Persisted-import variant of :meth:`_read_import_files`: ``None`` unless
+        both the metadata and at least one array were read."""
+        meta, data_by_celltype, imported_cts = APOCWidget._read_import_files(saved_path)
+        if meta is None or not data_by_celltype:
             return None
         return meta, data_by_celltype, imported_cts
 
@@ -7497,11 +7384,21 @@ class APOCWidget(QWidget):
             self.log(f"  🔧 {ct}: updated classifier header feature_specification from GUI tab config")
         return ok, msg
 
-    def _apoc_preflight_classifier_headers(self, output_dir, metadata):
+    def _apoc_preflight_classifier_headers(self, output_dir, metadata, only_cell_types=None):
+        """Validate (and migrate) classifier headers for the cell types about to run.
+
+        ``only_cell_types`` restricts the check, and the header migration it may
+        trigger, to the selected types; ``None`` checks every type plus ``dead``.
+        """
         pixel_class_outdir = Path(output_dir) / "images" / "PixelClassification"
         incompatible = []
 
-        for ct in self._apoc_expected_cell_types(metadata):
+        expected = self._apoc_expected_cell_types(metadata)
+        if only_cell_types is not None:
+            wanted = {"dead" if str(c).lower() == "death" else str(c) for c in only_cell_types}
+            expected = [ct for ct in expected if ct in wanted]
+
+        for ct in expected:
             clf_path = self._apoc_classifier_path(pixel_class_outdir, ct)
             if not clf_path.exists():
                 continue
@@ -7668,8 +7565,13 @@ class APOCWidget(QWidget):
 
     # ── Run batch segmentation ──────────────────────────────────
     def _on_run_segmentation(self, interactive=True, only_cell_types=None,
-                             block=True, extra_callbacks=None, plan=None):
+                             block=True, extra_callbacks=None, plan=None,
+                             overwrite_existing=False):
         """Run APOC batch segmentation.
+
+        ``overwrite_existing`` is a per-call value (the processing queue passes
+        its own); it is deliberately not read from widget state, which used to
+        leak a queue run's setting into later single-cell-type runs.
 
         ``block=True`` (default) keeps the call synchronous so the
         processing queue and other internal callers see the original
@@ -7744,13 +7646,18 @@ class APOCWidget(QWidget):
             self._save_apoc_params_to_yaml(updated_apoc_params=apoc_config)
 
             # GUI-side compatibility preflight: ensure classifier headers can drive predict(image=...).
-            incompatible = self._apoc_preflight_classifier_headers(output_dir, md)
+            incompatible = self._apoc_preflight_classifier_headers(
+                output_dir, md, only_cell_types=only_cell_types,
+            )
             if incompatible:
                 self.log("❌ APOC classifier preflight failed. Incompatible classifier header(s):")
                 for ct, fname, reason, header_spec in incompatible:
                     shown = header_spec if header_spec else "<empty>"
                     self.log(f"   - {ct} ({fname}): {reason}. header feature_specification='{shown}'")
                 self.log("Please retrain the listed classifier(s) from the GUI and run batch segmentation again.")
+                fire_extra_callback(
+                    extra_callbacks, "on_failed", "incompatible APOC classifier header(s)",
+                )
                 return
 
             self.log(f"Starting APOC batch segmentation ({strategy})...")
@@ -7775,12 +7682,12 @@ class APOCWidget(QWidget):
                 strat_summary = ", ".join(f"{k}:{v[:4]}" for k, v in per_ct_strategies.items())
                 self.log(f"  Advanced strategies: {strat_summary}")
 
-            overwrite_val = self._overwrite_existing
+            overwrite_val = bool(overwrite_existing)
             n_workers_val = self.spin_workers.value()
             gpu_device_val = self._selected_gpu_device_name()
 
             def _do_apoc(progress_cb=None):
-                return run_apoc_segmentation(
+                updated = run_apoc_segmentation(
                     output_dir=str(output_dir),
                     metadata=md,
                     metadata_csv_path=metadata_csv,
@@ -7794,17 +7701,16 @@ class APOCWidget(QWidget):
                     per_ct_strategies=per_ct_strategies,
                     only_cell_types=only_cell_types,
                 )
+                # Multicolor overlap cleanup and the metadata CSV write are file
+                # I/O over every sample: keep them on this (worker) thread.
+                return _finalize_segmentation_metadata(
+                    updated, output_dir, metadata_csv, self.log,
+                    skip_unified=False, touched_cell_types=only_cell_types,
+                )
 
             def _apply_apoc_result(updated_metadata):
                 if updated_metadata is not None:
                     self.metadata_loader.metadata = updated_metadata
-                    updated_metadata = _run_multicolor_cleanup_if_needed(self.metadata_loader, self.log, skip_unified=False)
-                    self.metadata_loader.metadata = updated_metadata
-                    if metadata_csv:
-                        try:
-                            updated_metadata.to_csv(metadata_csv, index=False)
-                        except Exception as e:
-                            self.log(f"Warning: Could not save metadata: {e}")
                 self.log("✅ APOC batch segmentation finished!")
                 _notify_metadata_refresh(self.metadata_loader, self.log, "segmentation")
                 if interactive:
@@ -8283,9 +8189,17 @@ class ConvPaintWidget(QWidget):
         self.training_layout.addWidget(self._training_widget)
 
     # ── Generate Training Data ───────────────────────────────────
-    def _on_load_training_clicked(self, interactive=True):
+    def _on_load_training_clicked(self, interactive=True, block=False, extra_callbacks=None):
+        """Generate (or load cached) ConvPaint training data.
+
+        Same three phases as :meth:`APOCWidget._on_load_training_clicked`: prompt
+        and snapshot on the GUI thread, image I/O and label restore on a worker
+        (:func:`build_convpaint_training_payload`), viewer / widget updates back
+        on the GUI thread (:meth:`_apply_training_payload`).
+        """
         if interactive and refuse_if_busy(
-            self, "loading training data", bg=getattr(self, "_bg", None)
+            self, "loading training data", bg=getattr(self, "_bg", None),
+            extra_callbacks=extra_callbacks,
         ):
             return
         self._ensure_torch_devices()
@@ -8293,6 +8207,12 @@ class ConvPaintWidget(QWidget):
             md = self.metadata_loader.metadata
             if md is None:
                 self.log("⚠️ Cannot generate training data: No metadata loaded.")
+                fire_extra_callback(extra_callbacks, "on_failed", "no metadata loaded")
+                return
+
+            if not block and self._bg.is_running():
+                self.log("⚠️ Training data is already being generated.")
+                fire_extra_callback(extra_callbacks, "on_failed", "already running")
                 return
 
             self.log("Loading ConvPaint training data...")
@@ -8301,31 +8221,8 @@ class ConvPaintWidget(QWidget):
                 detect_organoid_types_from_metadata,
                 detect_immune_cell_types_from_metadata,
                 detect_other_cell_types_from_metadata,
-                has_dead_channel,
             )
-            from behav3d.preprocessing.segmentation.convpaint_train import (
-                _load_training_images,
-                _filter_merge_types,
-                _derive_convpaint_input_channels,
-                _reorder_convpaint_layers,
-                UNIFIED_LABELS_LAYER_NAME,
-                DEAD_LABELS_LAYER_NAME,
-                UNIFIED_PREDICTED_LAYER_NAME,
-                DEAD_PREDICTED_LAYER_NAME,
-                _predicted_labels_path,
-                _probability_map_path,
-                _segments_layer_name,
-                _probability_layer_name,
-                CHANNEL_COLORS,
-                ConvPaintTrainingWidget,
-                DEFAULT_STRATEGY,
-                _normalize_strategy,
-            )
-            from behav3d.preprocessing.segmentation.convpaint_label_map import (
-                build_label_map, label_map_matches, load_label_map,
-                unified_label_map_path, unified_user_labels_path,
-                unified_predicted_labels_path,
-            )
+            from behav3d.preprocessing.segmentation.convpaint_train import _filter_merge_types
 
             output_dir = Path(self.metadata_loader.output_dir)
 
@@ -8387,253 +8284,181 @@ class ConvPaintWidget(QWidget):
                     clicked = box.clickedButton()
                     if clicked is btn_cancel:
                         self.log("Action cancelled.")
+                        fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
                         return
                     overwrite_images = (clicked is btn_generate)
                 else:
                     overwrite_images = False
 
-            disconnect_all_preview_dims_listeners(self.viewer)
-            clear_viewer_layers(self.viewer)
-
-            all_images, pixel_class_outdir, has_death, all_cell_types = _load_training_images(
-                metadata=md,
-                output_dir=str(output_dir),
-                examples_per_sample=int(self.spin_examples.value()),
-                organoid_types=organoid_types,
-                immune_types=immune_types,
-                other_types=other_types,
-                overwrite_images=overwrite_images,
-            )
-            all_cell_types = _filter_merge_types(all_cell_types)
-            self.all_cell_types = list(all_cell_types)
-
-            if not all_images:
-                self.log("⚠️ No training images loaded.")
-                return
-            if not all_cell_types:
-                self.log("⚠️ No cell types detected — nothing to train.")
-                return
-
-            n_channels = all_images[0].shape[0]
-            unified_input_channels, death_input_channels = _derive_convpaint_input_channels(
-                md, n_channels
-            )
-            self.log(
-                f"Loaded {len(all_images)} training images with {n_channels} channels."
-            )
-            self.log(f"  Unified input channels: {unified_input_channels}")
-            if has_death:
-                self.log(f"  Death input channels: {death_input_channels}")
-
-            stacked = np.stack(all_images, axis=0)  # (T_total, C, Z, Y, X)
-            T_total = stacked.shape[0]
-            label_shape = (T_total,) + stacked.shape[2:]
-
-            for ch in range(n_channels):
-                ch_data = stacked[:, ch, :, :, :]
-                nonzero = ch_data[ch_data > 0]
-                clim = (
-                    (0, float(np.percentile(nonzero, 99.8)))
-                    if nonzero.size > 0 else (0, 1e-3)
-                )
-                img_layer = self.viewer.add_image(
-                    ch_data,
-                    name=f"Channel {ch}",
-                    contrast_limits=clim,
-                    colormap=CHANNEL_COLORS[ch % len(CHANNEL_COLORS)],
-                    blending="additive",
-                    opacity=0.8,
-                )
-                img_layer.contrast_limits_range = (0, float(ch_data.max()))
-
-            # Build (or rebuild) the active label map.
-            label_map = build_label_map(all_cell_types)
-
-            # Restore/create unified User Provided Labels.
-            unified_path = unified_user_labels_path(pixel_class_outdir)
-            saved_map_path = unified_label_map_path(pixel_class_outdir)
-            unified_data = np.zeros(label_shape, dtype=np.int16)
-            if unified_path.exists():
-                try:
-                    existing = np.asarray(load_zarr(unified_path))
-                    if existing.shape == label_shape:
-                        if saved_map_path.exists():
-                            saved_map = load_label_map(saved_map_path)
-                            if label_map_matches(saved_map, all_cell_types):
-                                unified_data = existing
-                                self.log(
-                                    f"  ↩ Restored unified labels ({unified_path.name})"
-                                )
-                            else:
-                                self.log(
-                                    "  ⚠️ Cached unified labels were trained with a "
-                                    "different cell-type set — starting fresh."
-                                )
-                        else:
-                            unified_data = existing
-                            self.log(
-                                f"  ↩ Restored unified labels (no map sidecar)."
-                            )
-                    else:
-                        self.log(
-                            f"  ⚠️ Unified labels shape mismatch ({existing.shape} vs "
-                            f"{label_shape}); starting fresh."
-                        )
-                except Exception as exc:
-                    self.log(f"  ⚠️ Could not restore unified labels: {exc}")
-
-            self.viewer.add_labels(
-                unified_data, name=UNIFIED_LABELS_LAYER_NAME, opacity=0.5,
+            from behav3d.napari._training_data import (
+                build_convpaint_training_payload, run_training_data_job, training_data_key,
             )
 
-            if has_death:
-                dead_path = Path(pixel_class_outdir, "PixelClassifier_UserDeadLabels.zarr")
-                dead_data = np.zeros(label_shape, dtype=np.int16)
-                if dead_path.exists():
-                    try:
-                        existing = np.asarray(load_zarr(dead_path))
-                        if existing.shape == label_shape:
-                            dead_data = existing
-                            self.log(f"  ↩ Restored death labels ({dead_path.name})")
-                    except Exception as exc:
-                        self.log(f"  ⚠️ Could not restore death labels: {exc}")
-                self.viewer.add_labels(dead_data, name=DEAD_LABELS_LAYER_NAME, opacity=0.5)
-
-            # Restore cached previews (unified predicted + per-cell-type seg/prob).
-            pred_path = unified_predicted_labels_path(pixel_class_outdir)
-            if pred_path.exists():
-                try:
-                    pred = np.asarray(load_zarr(pred_path))
-                    if pred.shape == label_shape:
-                        self.viewer.add_labels(
-                            pred, name=UNIFIED_PREDICTED_LAYER_NAME, opacity=0.6, visible=False,
-                        )
-                except Exception as exc:
-                    self.log(f"  ⚠️ Could not restore unified predicted labels: {exc}")
-
-            for ct in all_cell_types:
-                seg_p = _predicted_labels_path(pixel_class_outdir, ct)
-                if seg_p and seg_p.exists():
-                    try:
-                        pred = np.asarray(load_zarr(seg_p))
-                        if pred.shape == label_shape:
-                            self.viewer.add_labels(
-                                pred, name=_segments_layer_name(ct),
-                                opacity=0.8, visible=False,
-                            )
-                    except Exception:
-                        pass
-                prob_p = _probability_map_path(pixel_class_outdir, ct)
-                if prob_p and prob_p.exists():
-                    try:
-                        prob = np.asarray(load_zarr(prob_p))
-                        if prob.shape == label_shape:
-                            self.viewer.add_image(
-                                prob, name=_probability_layer_name(ct),
-                                opacity=0.6, blending="additive", colormap="magma",
-                                contrast_limits=(0.0, 1.0), visible=False,
-                            )
-                    except Exception:
-                        pass
-
-            if has_death:
-                seg_p = _predicted_labels_path(pixel_class_outdir, "dead")
-                if seg_p and seg_p.exists():
-                    try:
-                        pred = np.asarray(load_zarr(seg_p))
-                        if pred.shape == label_shape:
-                            dead_pred_layer = self.viewer.add_labels(
-                                pred, name=DEAD_PREDICTED_LAYER_NAME,
-                                opacity=0.8, visible=False,
-                            )
-                            _set_dead_mask_layer_color(dead_pred_layer)
-                    except Exception:
-                        pass
-
-            # Build (or rebuild) the training widget itself.
-            if self._training_widget is not None:
-                try:
-                    self._training_widget.cleanup()
-                except Exception:
-                    pass
-                self.training_layout.removeWidget(self._training_widget)
-                self._training_widget.hide()
-                self._training_widget.deleteLater()
-                self._training_widget = None
-
-            if self.training_placeholder.parent() is not None:
-                self.training_layout.removeWidget(self.training_placeholder)
-                self.training_placeholder.hide()
-
-            params = self.metadata_loader.behav3d_parameters
-            ip = dict(params.get("pixel_classifier", {}) or {})
-            # Keep the user-selected device in the initial params so the
-            # training widget picks the same one.
-            ip["convpaint_device"] = self._selected_device()
-            cp_strategy = _normalize_strategy(
-                ip.get("convpaint_strategy", DEFAULT_STRATEGY)
-            )
-
-            if md is not None and "pixel_distance_xy" in md.columns and "distance_unit" in md.columns:
-                _unit = str(md["distance_unit"].iloc[0])
-                _xy_from_md = convert_distance(float(md["pixel_distance_xy"].iloc[0]), _unit)
-                _z_from_md  = convert_distance(float(md["pixel_distance_z"].iloc[0]),  _unit)
-            else:
-                _xy_from_md = None
-                _z_from_md  = None
-            _pixel_sizes = {
-                "xy_um": ip.get("pixel_size_xy") or ip.get("pixel_size_xy_um") or _xy_from_md,
-                "z_um":  ip.get("pixel_size_z")  or ip.get("pixel_size_z_um")  or _z_from_md,
+            snap = {
+                "metadata": md.copy(),
+                "output_dir": output_dir,
+                "examples_per_sample": int(self.spin_examples.value()),
+                "organoid_types": organoid_types,
+                "immune_types": immune_types,
+                "other_types": other_types,
+                "overwrite_images": overwrite_images,
             }
+            key_at_start = training_data_key(self.metadata_loader)
 
-            self._training_widget = ConvPaintTrainingWidget(
-                viewer=self.viewer,
-                all_images=all_images,
-                pixel_class_outdir=str(pixel_class_outdir),
-                all_cell_types=all_cell_types,
-                has_death=has_death,
-                initial_params=ip,
-                on_params_changed=self._save_params_to_yaml,
-                convpaint_strategy=cp_strategy,
-                unified_input_channels=unified_input_channels,
-                death_input_channels=death_input_channels,
-                pixel_sizes=_pixel_sizes,
-                per_cell_type_strategy=True,
-                show_device=False,
-                external_log=self.log,
+            run_training_data_job(
+                self,
+                desc=("Generating ConvPaint training data…" if overwrite_images
+                      else "Loading ConvPaint training data…"),
+                builder=build_convpaint_training_payload,
+                snap=snap,
+                apply=self._apply_training_payload,
+                extra_callbacks=extra_callbacks,
+                block=block,
+                buttons=[self.btn_load_training],
+                stale_check=lambda: training_data_key(self.metadata_loader) != key_at_start,
+                failure_prefix="❌ Error during ConvPaint training data generation",
             )
-            if self._training_widget.strategy_combo is not None:
-                self._training_widget.strategy_combo.setCurrentText(cp_strategy)
-
-            # Wire signals.
-            tw = self._training_widget
-            tw.training_started.connect(self._on_training_started)
-            tw.training_finished.connect(self._on_training_finished)
-            tw.instance_preview_started.connect(self._on_instance_preview_started)
-            tw.instance_preview_finished.connect(self._on_instance_preview_finished)
-            tw.strategy_changed.connect(self._on_training_widget_strategy_changed)
-
-            self.training_layout.addWidget(self._training_widget)
-
-            self._all_images_cache = all_images
-            self._is_session_active = True
-
-            _reorder_convpaint_layers(self.viewer, all_cell_types, has_death=has_death)
-            
-            # Show AnnotationLegendTab
-            while self.legend_container.layout().count():
-                child = self.legend_container.layout().takeAt(0)
-                if child.widget():
-                    child.widget().deleteLater()
-            legend = AnnotationLegendTab(self.viewer, label_map, has_death=has_death)
-            self.legend_container.layout().addWidget(legend)
-            self.legend_container.setVisible(True)
-            
-            self.log("✅ ConvPaint training data generated/loaded in viewer!")
 
         except Exception as e:
             traceback.print_exc()
             self.log(f"❌ Error during ConvPaint training data generation: {e}")
+            fire_extra_callback(extra_callbacks, "on_failed", str(e))
+
+    def _apply_training_payload(self, payload):
+        """GUI-thread half of Generate Training Data: viewer layers + training widget.
+
+        Returns ``False`` when nothing was applied (no images / no cell types).
+        """
+        from behav3d.napari._training_data import add_layer_specs
+        from behav3d.preprocessing.segmentation.convpaint_train import (
+            _reorder_convpaint_layers,
+            ConvPaintTrainingWidget,
+            DEFAULT_STRATEGY,
+            _normalize_strategy,
+        )
+
+        all_cell_types = payload["all_cell_types"]
+        self.all_cell_types = list(all_cell_types)
+        if payload.get("empty"):
+            self.log(payload["empty"])
+            return False
+
+        md = self.metadata_loader.metadata
+        all_images = payload["all_images"]
+        has_death = payload["has_death"]
+        pixel_class_outdir = payload["pixel_class_outdir"]
+        label_map = payload["label_map"]
+
+        disconnect_all_preview_dims_listeners(self.viewer)
+        clear_viewer_layers(self.viewer)
+
+        add_layer_specs(self.viewer, payload["layers"], style_dead_pred=_set_dead_mask_layer_color)
+
+        # Build (or rebuild) the training widget itself.
+        if self._training_widget is not None:
+            try:
+                self._training_widget.cleanup()
+            except Exception:
+                pass
+            self.training_layout.removeWidget(self._training_widget)
+            self._training_widget.hide()
+            self._training_widget.deleteLater()
+            self._training_widget = None
+
+        if self.training_placeholder.parent() is not None:
+            self.training_layout.removeWidget(self.training_placeholder)
+            self.training_placeholder.hide()
+
+        params = self.metadata_loader.behav3d_parameters
+        ip = dict(params.get("pixel_classifier", {}) or {})
+        # Keep the user-selected device in the initial params so the
+        # training widget picks the same one.
+        ip["convpaint_device"] = self._selected_device()
+        cp_strategy = _normalize_strategy(
+            ip.get("convpaint_strategy", DEFAULT_STRATEGY)
+        )
+
+        if md is not None and "pixel_distance_xy" in md.columns and "distance_unit" in md.columns:
+            _unit = str(md["distance_unit"].iloc[0])
+            _xy_from_md = convert_distance(float(md["pixel_distance_xy"].iloc[0]), _unit)
+            _z_from_md  = convert_distance(float(md["pixel_distance_z"].iloc[0]),  _unit)
+        else:
+            _xy_from_md = None
+            _z_from_md  = None
+        _pixel_sizes = {
+            "xy_um": ip.get("pixel_size_xy") or ip.get("pixel_size_xy_um") or _xy_from_md,
+            "z_um":  ip.get("pixel_size_z")  or ip.get("pixel_size_z_um")  or _z_from_md,
+        }
+
+        self._training_widget = ConvPaintTrainingWidget(
+            viewer=self.viewer,
+            all_images=all_images,
+            pixel_class_outdir=str(pixel_class_outdir),
+            all_cell_types=all_cell_types,
+            has_death=has_death,
+            initial_params=ip,
+            on_params_changed=self._save_params_to_yaml,
+            convpaint_strategy=cp_strategy,
+            unified_input_channels=payload["unified_input_channels"],
+            death_input_channels=payload["death_input_channels"],
+            pixel_sizes=_pixel_sizes,
+            per_cell_type_strategy=True,
+            show_device=False,
+            external_log=self.log,
+        )
+        if self._training_widget.strategy_combo is not None:
+            self._training_widget.strategy_combo.setCurrentText(cp_strategy)
+
+        # Wire signals.
+        tw = self._training_widget
+        tw.training_started.connect(self._on_training_started)
+        tw.training_finished.connect(self._on_training_finished)
+        tw.instance_preview_started.connect(self._on_instance_preview_started)
+        tw.instance_preview_finished.connect(self._on_instance_preview_finished)
+        tw.strategy_changed.connect(self._on_training_widget_strategy_changed)
+
+        self.training_layout.addWidget(self._training_widget)
+
+        self._all_images_cache = all_images
+        self._is_session_active = True
+
+        _reorder_convpaint_layers(self.viewer, all_cell_types, has_death=has_death)
+
+        # Show AnnotationLegendTab
+        while self.legend_container.layout().count():
+            child = self.legend_container.layout().takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        legend = AnnotationLegendTab(self.viewer, label_map, has_death=has_death)
+        self.legend_container.layout().addWidget(legend)
+        self.legend_container.setVisible(True)
+
+        self.log("✅ ConvPaint training data generated/loaded in viewer!")
+        return True
+
+    def _save_convpaint_user_labels(self, allow_sync_fallback=False):
+        """Save ConvPaint user labels to disk in the background.
+
+        Written on this page's ``_bg``: ``cleanup_session`` rebuilds the training
+        widget right after a tab exit, which must not destroy a running worker.
+        """
+        from behav3d.napari._training_data import start_label_save, write_label_snapshot
+
+        tw = self._training_widget
+        if tw is None:
+            return False
+        items = tw.snapshot_user_labels()
+        if not items:
+            self.log("No user label layers found in viewer to save.")
+            return False
+        if start_label_save(
+            self._bg, items, self.log, progress_row=self.tab_progress_row, viewer=self.viewer,
+        ):
+            return True
+        if allow_sync_fallback:
+            write_label_snapshot(items, self.log)
+            return True
+        return False
 
     def cleanup_session(self):
         """Remove ConvPaint training layers and tear down the training widget.
@@ -8772,8 +8597,11 @@ class ConvPaintWidget(QWidget):
 
     # ── Run batch segmentation ───────────────────────────────────
     def _on_run_segmentation(self, interactive=True, only_cell_types=None,
-                             block=True, extra_callbacks=None, plan=None):
+                             block=True, extra_callbacks=None, plan=None,
+                             overwrite_existing=False):
         """Run ConvPaint batch segmentation.
+
+        ``overwrite_existing`` is a per-call value (see the APOC counterpart).
 
         ``block=True`` (default) is synchronous so the processing queue
         sees unchanged behaviour.  ``block=False`` (GUI button) routes
@@ -8886,11 +8714,11 @@ class ConvPaintWidget(QWidget):
 
             convpaint_config["convpaint_device"] = self._selected_device()
 
-            overwrite_val = self._overwrite_existing
+            overwrite_val = bool(overwrite_existing)
             n_workers_val = self.spin_workers.value()
 
             def _do_convpaint(progress_cb=None):
-                return run_convpaint_segmentation(
+                updated = run_convpaint_segmentation(
                     output_dir=str(output_dir),
                     metadata=md,
                     metadata_csv_path=metadata_csv,
@@ -8903,17 +8731,14 @@ class ConvPaintWidget(QWidget):
                     per_ct_convpaint_strategies=per_ct_convpaint_strategies,
                     only_cell_types=only_cell_types,
                 )
+                return _finalize_segmentation_metadata(
+                    updated, output_dir, metadata_csv, self.log,
+                    skip_unified=True, touched_cell_types=only_cell_types,
+                )
 
             def _apply_result(updated_metadata):
                 if updated_metadata is not None:
                     self.metadata_loader.metadata = updated_metadata
-                    updated_metadata = _run_multicolor_cleanup_if_needed(self.metadata_loader, self.log, skip_unified=True)
-                    self.metadata_loader.metadata = updated_metadata
-                    if metadata_csv:
-                        try:
-                            updated_metadata.to_csv(metadata_csv, index=False)
-                        except Exception as e:
-                            self.log(f"Warning: Could not save metadata: {e}")
                 self.log("✅ ConvPaint batch segmentation finished!")
                 _notify_metadata_refresh(self.metadata_loader, self.log, "segmentation")
                 if interactive:

@@ -2047,11 +2047,12 @@ class ProcessingQueuePanel(QWidget):
                     apoc_widget.spin_t_start.setValue(int(p.get("t_start", 0)))
                 if hasattr(apoc_widget, "spin_t_end"):
                     apoc_widget.spin_t_end.setValue(int(p.get("t_end", 100)))
-        # skip_existing overrides any stored overwrite flag.
-        apoc_widget._overwrite_existing = not skip_existing
-
+        # skip_existing is passed per call: writing it onto the widget used to
+        # leak into later GUI runs (e.g. a single-cell-type run recomputing
+        # outputs it had no reason to touch).
         apoc_widget._on_run_segmentation(
             interactive=False, block=False, extra_callbacks=extra_callbacks, plan=plan,
+            overwrite_existing=not skip_existing,
         )
         return apoc_widget
 
@@ -2154,10 +2155,10 @@ class ProcessingQueuePanel(QWidget):
                     convpaint_widget.spin_t_start.setValue(int(p.get("t_start", 0)))
                 if hasattr(convpaint_widget, "spin_t_end"):
                     convpaint_widget.spin_t_end.setValue(int(p.get("t_end", 100)))
-        convpaint_widget._overwrite_existing = not skip_existing
 
         convpaint_widget._on_run_segmentation(
             interactive=False, block=False, extra_callbacks=extra_callbacks, plan=plan,
+            overwrite_existing=not skip_existing,
         )
         return convpaint_widget
 

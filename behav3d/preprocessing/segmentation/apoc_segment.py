@@ -297,6 +297,28 @@ def _cfg_val(cfg, ct, key, default):
     return default if val is None else val
 
 
+_DEATH_KEYS = frozenset({"dead", "death"})
+
+
+def _death_selected(only_cell_types):
+    """Whether a run restricted to ``only_cell_types`` includes the death mask.
+
+    ``None`` (no restriction) includes it; an explicit list includes it only when
+    it names ``"dead"`` (``"death"`` is accepted as an alias).
+    """
+    if only_cell_types is None:
+        return True
+    return any(str(c).lower() in _DEATH_KEYS for c in only_cell_types)
+
+
+def _select_cell_types(all_cell_types, only_cell_types):
+    """Cell types a run will process, in metadata order. ``None`` = all of them."""
+    if only_cell_types is None:
+        return list(all_cell_types)
+    wanted = {str(c) for c in only_cell_types}
+    return [ct for ct in all_cell_types if ct in wanted]
+
+
 def _requested_timepoints(n_timepoints, timepoint_range):
     """Explicit list of global T indices a run will touch.
 
@@ -409,30 +431,37 @@ def run_apoc_segmentation(
     other_types = detect_other_cell_types_from_metadata(metadata)
     all_cell_types = organoid_types + immune_types + other_types
 
-    has_death = has_dead_channel(metadata)
+    # Death is part of the selection only when the caller did not restrict the run
+    # or explicitly asked for it; a "Run <cell type>" must not drag the death mask along.
+    has_death = has_dead_channel(metadata) and _death_selected(only_cell_types)
 
-    # --- Load classifiers ---
+    # --- Load classifiers (only for the cell types this run will process) ---
+    selected_cell_types = _select_cell_types(all_cell_types, only_cell_types)
     classifiers = {}
     clf_organoid_paths = clf_organoid_paths or {}
-    for ct in organoid_types:
-        clf = _load_classifier(pixelclass_dir, ct, clf_organoid_paths.get(ct))
-        if clf: classifiers[ct] = clf
-
     clf_immune_paths = clf_immune_paths or {}
-    for ct in immune_types:
-        clf = _load_classifier(pixelclass_dir, ct, clf_immune_paths.get(ct))
-        if clf: classifiers[ct] = clf
-
     clf_other_paths = clf_other_paths or {}
-    for ct in other_types:
-        clf = _load_classifier(pixelclass_dir, ct, clf_other_paths.get(ct))
+    for ct in selected_cell_types:
+        if ct in organoid_types:
+            provided = clf_organoid_paths.get(ct)
+        elif ct in immune_types:
+            provided = clf_immune_paths.get(ct)
+        else:
+            provided = clf_other_paths.get(ct)
+        clf = _load_classifier(pixelclass_dir, ct, provided)
         if clf: classifiers[ct] = clf
 
-    active_cell_types = [ct for ct in all_cell_types if ct in classifiers]
-
-    # Optional cell-type filter (used by per-cell-type Run button in the GUI)
+    # An explicit selection must not silently succeed without its classifier;
+    # a whole-dataset run keeps skipping types that were never trained.
     if only_cell_types is not None:
-        active_cell_types = [ct for ct in active_cell_types if ct in only_cell_types]
+        missing = [ct for ct in selected_cell_types if ct not in classifiers]
+        if missing:
+            raise FileNotFoundError(
+                f"No APOC classifier found for {missing} in {pixelclass_dir}. "
+                f"Train the classifier(s) first."
+            )
+
+    active_cell_types = [ct for ct in selected_cell_types if ct in classifiers]
 
     clf_death = None
     if has_death:
@@ -452,6 +481,11 @@ def run_apoc_segmentation(
                     break
         if death_default.exists():
             clf_death = apoc.ObjectSegmenter(opencl_filename=str(death_default))
+        elif only_cell_types is not None:
+            raise FileNotFoundError(
+                f"No APOC death classifier found in {pixelclass_dir}. "
+                f"Train the death classifier first."
+            )
 
     print(f"  Loaded classifiers for: {list(classifiers.keys())}"
           + (f" + Death" if clf_death else ""))
@@ -463,7 +497,7 @@ def run_apoc_segmentation(
             return _channel_indices_from_config(apoc_config, ct) or [0]
         return _resolve_classifier_channel_indices(opencl_path, ct, apoc_config=apoc_config)
 
-    clf_channels = {ct: get_indices(ct, classifiers.get(ct)) for ct in all_cell_types}
+    clf_channels = {ct: get_indices(ct, classifiers.get(ct)) for ct in selected_cell_types}
     death_channels = get_indices("dead", clf_death) if clf_death else []
 
     # --- Process each sample ---
@@ -679,14 +713,20 @@ def run_apoc_segmentation(
         
         # Prefetch pipeline via ThreadPoolExecutor
         # Overlaps disk I/O (loading next TP) with GPU work (predicting current TP)
+        # Wall-clock per phase, summarised after the sample: tells fixed per-frame
+        # cost (reading the frame) apart from per-cell-type cost (predict + post-process).
+        phase_s = {"read_wait": 0.0, "death": 0.0}
+        ct_s = {ct: 0.0 for ct in active_cts_for_sample}
         with ThreadPoolExecutor(max_workers=1) as executor:
             # Prefetch the first timepoint
             future = executor.submit(_load_tp, img, t_range[0])
-            
+
             for i, t in enumerate(pbar):
                 # 1. Get current timepoint (blocks if disk I/O not finished)
-                t_img = future.result() 
-                
+                _t_read = time.time()
+                t_img = future.result()
+                phase_s["read_wait"] += time.time() - _t_read
+
                 # 2. Prefetch the NEXT timepoint immediately
                 if i + 1 < len(t_range):
                     future = executor.submit(_load_tp, img, t_range[i + 1])
@@ -699,6 +739,7 @@ def run_apoc_segmentation(
                     need_mask = (not only_segment) and t not in mask_journals[ct]["done"]
                     if not need_seg and not need_mask:
                         continue
+                    _t_ct = time.time()
                     # Instances are derived from the probability map, which is never
                     # persisted, so segments cannot be produced without re-running the
                     # mask prediction. When either is missing, both get rewritten.
@@ -836,7 +877,7 @@ def run_apoc_segmentation(
                             n_workers=1,
                             marker_strategy=(
                                 "peak"
-                                if apoc_strategy == "APOC Mask + Peak EDT/Watershed Resegmentation"
+                                if effective_strategy == "APOC Mask + Peak EDT/Watershed Resegmentation"
                                 else "threshold"
                             ),
                             peak_min_distance=peak_min_distance,
@@ -864,11 +905,13 @@ def run_apoc_segmentation(
                     if not only_segment:
                         mark_done(mask_journals[ct], journal_path(mask_path_of(ct)), t)
                     mark_done(seg_journals[ct], journal_path(seg_path_of(ct)), t)
+                    ct_s[ct] += time.time() - _t_ct
 
                 if zarr_death is not None:
                     if t in death_journal["done"]:
                         pass  # Skip timepoint for death mask if already computed
                     else:
+                        _t_death = time.time()
                         n_death_ch_raw = _read_classifier_header_value(clf_death.opencl_file, "n_image_channels")
                         if n_death_ch_raw is not None:
                             try:
@@ -888,6 +931,14 @@ def run_apoc_segmentation(
                         death_mask = (np.asarray(clf_death.predict(image=imgs_to_pass)) > 0).astype(np.uint16)
                         zarr_death[t] = death_mask
                         mark_done(death_journal, journal_path(death_path), t)
+                        phase_s["death"] += time.time() - _t_death
+
+        per_ct = ", ".join(f"{ct} {s:.1f}s" for ct, s in ct_s.items())
+        print(
+            f"  ⏱ {sample_name} phases: frame read wait {phase_s['read_wait']:.1f}s"
+            + (f", {per_ct}" if per_ct else "")
+            + (f", dead {phase_s['death']:.1f}s" if zarr_death is not None else "")
+        )
 
         # Update metadata with output paths
         row_idx = metadata.index[metadata['sample_name'] == sample_name].tolist()[0]

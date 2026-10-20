@@ -24,7 +24,7 @@ The widget is organised in three numbered group-boxes. A full session usually go
 
 1. **Open the Segmentation tab** → pick **Pixel Classifier (Random Forest)** from the method dropdown.
 2. **Set `Examples / sample`** (default 3 is usually fine).
-3. **Click `Generate Training Data`.** The viewer clears and loads a handful of random timepoints per sample as Image layers plus one empty Labels layer per cell type (named `User Provided Labels …`).
+3. **Click `Generate Training Data`.** Images and features are prepared in the background (progress bar; napari stays responsive and the other tabs are locked meanwhile), then the viewer clears and loads a handful of random timepoints per sample as Image layers plus one empty Labels layer per cell type (named `User Provided Labels …`).
 4. **Paint a few foreground (`2`) and background (`1`) pixels** on the Labels layer of the cell type you want to train. See [Labeling foreground and background](./index.md#labeling-foreground-and-background) for the painting convention and tips (where and how much to paint) shared by all pixel-classifier methods.
 5. **Click `Save Labels`** to persist your work to disk (do this often).
 6. **Click `Train Classifier`.** Training takes a few seconds. A small bar chart of feature importances is displayed.
@@ -42,7 +42,7 @@ Iteration is cheap: re-training takes seconds and `Test Segmentation Parameters`
 | Control | Default | Effect |
 |---|---|---|
 | **Examples / sample** | 3 | Number of timepoints loaded per sample as training data (range 1–10). More timepoints = more variability for the classifier to learn from, at the cost of a longer labeling session. |
-| **Generate Training Data** | — | Clears the viewer and loads `examples_per_sample × N_samples` timepoints as Image layers, plus an empty "User Provided Labels …" Labels layer per cell type. |
+| **Generate Training Data** | — | Prepares (in the background) and then loads `examples_per_sample × N_samples` timepoints as Image layers, plus an empty "User Provided Labels …" Labels layer per cell type. |
 | **Save Labels** | — | Persists every "User Provided Labels …" layer to disk as zarr, so they survive plugin restarts. Stored under `<output_dir>/images/PixelClassification/`. |
 | **Clear Layer / Clear All** | — | Erase painted labels in the currently-selected layer / all layers. |
 | **Train Classifier** | — | Fits one Random Forest per cell type. Models are saved as `<output_dir>/images/PixelClassification/PixelClassifier_<CellType>.joblib`. When a dead channel is present, an extra `PixelClassifier_Death.joblib` is trained from the dead-channel labels. |

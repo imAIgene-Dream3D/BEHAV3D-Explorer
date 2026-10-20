@@ -397,7 +397,13 @@ def run_convpaint_segmentation(
     immune_types = detect_immune_cell_types_from_metadata(metadata)
     other_types = detect_other_cell_types_from_metadata(metadata)
     all_cell_types = organoid_types + immune_types + other_types
-    _has_death = has_dead_channel(metadata)
+    # A restricted run ("Run <cell type>") loads only the model it needs: the
+    # unified model for cell-type entries, the death model for "dead".
+    _restricted = bool(only_cell_types)
+    _only_names = {str(c) for c in (only_cell_types or [])}
+    _want_death = (not _restricted) or bool({"dead", "death"} & {n.lower() for n in _only_names})
+    _want_unified = (not _restricted) or any(n.lower() not in ("dead", "death") for n in _only_names)
+    _has_death = has_dead_channel(metadata) and _want_death
 
     # Resolve the unified model path (with a friendly fallback that warns on
     # legacy per-cell-type clf path dicts).
@@ -409,19 +415,23 @@ def run_convpaint_segmentation(
     # Load unified model + label map up-front.
     unified_model = None
     label_map = None
-    if not only_segment:
+    if not only_segment and _want_unified:
         unified_model = _load_unified_model(pixelclass_dir, resolved_unified)
-    try:
-        label_map = _load_unified_label_map(pixelclass_dir)
-    except FileNotFoundError as exc:
-        if not only_segment:
-            print(f"  \u274c {exc}")
-            return metadata
-        else:
-            label_map = None  # only_segment mode tolerates a missing map
+    if _want_unified:
+        try:
+            label_map = _load_unified_label_map(pixelclass_dir)
+        except FileNotFoundError as exc:
+            if not only_segment:
+                print(f"  \u274c {exc}")
+                return metadata
+            else:
+                label_map = None  # only_segment mode tolerates a missing map
 
     # Determine which cell types to process: must be in metadata AND in label map.
-    if label_map is not None:
+    if not _want_unified:
+        # Death-only run: no cell type goes through the unified model.
+        active_cell_types = []
+    elif label_map is not None:
         active_cell_types = [
             ct for ct in all_cell_types
             if ct in label_map.get("celltype_to_label", {})
