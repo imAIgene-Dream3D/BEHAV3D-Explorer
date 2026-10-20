@@ -18,6 +18,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.colors import to_rgb
+from matplotlib.patches import FancyBboxPatch
 
 from behav3d.analysis.behavior.state.utils import (
     _apply_state_order,
@@ -253,6 +254,82 @@ def _cluster_order_and_colors(track_adata, cluster_key, labels):
     return order, colors
 
 
+def _compact_heatmap_figure(order, colors, color_vals, features, cmap, vmin, vmax, scale_title):
+    """Second, publication-style page: groups as colour-badged rows, features as
+    columns, no cell annotations -- mirrors the cluster x feature panel layout."""
+    n_grp = len(order)
+    n_feat = len(features)
+    mat = color_vals.to_numpy(dtype=float)
+
+    max_label_len = max((len(str(c)) for c in order), default=1)
+    label_w_in = 0.085 * max_label_len + 0.3
+    badge_w_in = 0.5
+    left_w_in = label_w_in + badge_w_in + 0.15
+    heat_w_in = max(1.8, 0.55 * n_feat)
+    fig_w = left_w_in + heat_w_in + 0.3
+
+    row_h_in = 0.46
+    heat_h_in = max(1.2, row_h_in * n_grp)
+    max_feat_len = max((len(str(f)) for f in features), default=1)
+    bottom_in = min(max(0.25 + 0.07 * max_feat_len, 0.6), 3.0)
+    top_in = 1.0
+    fig_h = heat_h_in + bottom_in + top_in
+
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    left_frac = left_w_in / fig_w
+    heat_w_frac = heat_w_in / fig_w
+    bottom_frac = bottom_in / fig_h
+    heat_h_frac = heat_h_in / fig_h
+    cbar_bottom_frac = (bottom_in + heat_h_in + 0.35) / fig_h
+    cbar_h_frac = 0.16 / fig_h
+
+    heat_ax = fig.add_axes([left_frac, bottom_frac, heat_w_frac, heat_h_frac])
+    cbar_ax = fig.add_axes([left_frac, cbar_bottom_frac, heat_w_frac, cbar_h_frac])
+
+    im = heat_ax.imshow(np.ma.masked_invalid(mat), aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+    heat_ax.set_xticks(range(n_feat))
+    heat_ax.set_xticklabels(features, fontsize=9, rotation=45, ha="right", rotation_mode="anchor")
+    heat_ax.set_yticks([])
+    for spine in heat_ax.spines.values():
+        spine.set_visible(False)
+    heat_ax.set_xticks(np.arange(-0.5, n_feat, 1), minor=True)
+    heat_ax.set_yticks(np.arange(-0.5, n_grp, 1), minor=True)
+    heat_ax.grid(which="minor", color="white", linewidth=1.5)
+    heat_ax.tick_params(which="minor", bottom=False, left=False)
+    heat_ax.tick_params(which="major", bottom=False, left=False)
+
+    cbar = fig.colorbar(im, cax=cbar_ax, orientation="horizontal")
+    cbar.set_ticks([])
+    cbar_ax.set_title(scale_title, fontsize=11, pad=8)
+    cbar_pos = cbar_ax.get_position()
+    label_y = cbar_pos.y0 - 0.02
+    fig.text(cbar_pos.x0, label_y, "Min.", ha="left", va="top", fontsize=10)
+    fig.text(cbar_pos.x1, label_y, "Max.", ha="right", va="top", fontsize=10)
+
+    label_ax = fig.add_axes([0.0, bottom_frac, left_frac, heat_h_frac])
+    label_ax.set_xlim(0, 1)
+    label_ax.set_ylim(0, n_grp)
+    label_ax.invert_yaxis()
+    label_ax.axis("off")
+
+    badge_w_frac = badge_w_in / left_w_in if left_w_in else 0.3
+    badge_x0 = max(0.0, 1 - badge_w_frac - 0.03)
+    for i, c in enumerate(order):
+        y_center = i + 0.5
+        label_ax.text(0.0, y_center, str(c), fontsize=10, va="center", ha="left")
+        box = FancyBboxPatch(
+            (badge_x0, i + 0.08), badge_w_frac, 0.84,
+            boxstyle="round,pad=0,rounding_size=0.04",
+            linewidth=0, facecolor=colors.get(c, "#888888"), transform=label_ax.transData,
+        )
+        label_ax.add_patch(box)
+        label_ax.text(
+            badge_x0 + badge_w_frac / 2, y_center, str(i + 1),
+            fontsize=10, fontweight="bold", color="white", ha="center", va="center",
+        )
+    return fig
+
+
 def _summarize_and_plot(
     per_unit,
     features,
@@ -343,6 +420,11 @@ def _summarize_and_plot(
         cbar.set_label(cbar_label, fontsize=8)
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
+
+        scale_title = "Min-max" if scaling == "minmax" else "Z-score"
+        fig2 = _compact_heatmap_figure(order, colors, color_vals, features, cmap, vmin, vmax, scale_title)
+        pdf.savefig(fig2, bbox_inches="tight")
+        plt.close(fig2)
     return pdf_path, csv_path
 
 

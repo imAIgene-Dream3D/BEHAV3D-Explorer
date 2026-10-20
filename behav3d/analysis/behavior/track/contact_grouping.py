@@ -8,6 +8,7 @@ from behav3d.features.state_descriptive_features import rle_encode
 _CONTACT_COL_SUFFIXES = ("_contact_on_distance", "_contact")
 _MULTIPLE_CLASSES_LABEL = "Multiple classes"
 _NO_CONTACT_LABEL = "no_contact"
+_OUTSIDE_TARGET_PERIOD_LABEL = "outside_target_period"
 
 
 def list_available_contact_columns(df_timepoints):
@@ -346,26 +347,45 @@ def build_target_class_lookup_from_track_adata(
     *,
     class_col="ClusterID",
     groupby_cols=("sample_name", "TrackID"),
+    time_col="position_t",
 ):
-    """Build a time-invariant "touched target TrackID -> class" lookup from a target cell type's
-    whole-track classification adata (one row per ``(sample_name, TrackID)``).
+    """Build a "touched target TrackID -> class" lookup from a target cell type's track
+    classification adata.
 
-    Returns a DataFrame with columns ``groupby_cols + ["target_class"]``, normalized the same way
-    as ``build_target_class_lookup_from_state_adata``.
+    When ``adata_tracks_target.obs`` has ``position_t_min``/``position_t_max`` (trajectory
+    windows, possibly several per track), every window is expanded to one row per covered
+    timepoint, giving a time-varying lookup (columns ``groupby_cols + [time_col, "target_class"]``,
+    same shape as ``build_target_class_lookup_from_state_adata``). A contact is then attributed
+    to the class of the window covering that timepoint, and timepoints outside any classified
+    window have no class. Without window columns, falls back to a time-invariant lookup (columns
+    ``groupby_cols + ["target_class"]``, one row per track).
     """
     groupby_cols = [str(c) for c in list(groupby_cols)]
     class_col = str(class_col)
+    time_col = str(time_col)
     required = groupby_cols + [class_col]
     missing = [c for c in required if c not in adata_tracks_target.obs.columns]
     if missing:
         raise KeyError(f"Missing required columns in target track-classification adata.obs: {missing}")
 
-    df = adata_tracks_target.obs[required].copy()
+    has_windows = {"position_t_min", "position_t_max"}.issubset(adata_tracks_target.obs.columns)
+    cols = required + (["position_t_min", "position_t_max"] if has_windows else [])
+    df = adata_tracks_target.obs[cols].copy()
     for col in groupby_cols:
         df[col] = _normalize_id_column(df[col])
     df = df.rename(columns={class_col: "target_class"})
     df["target_class"] = df["target_class"].astype(str)
-    return df.drop_duplicates(subset=groupby_cols)[groupby_cols + ["target_class"]]
+    if not has_windows:
+        return df.drop_duplicates(subset=groupby_cols)[groupby_cols + ["target_class"]]
+
+    t_min = pd.to_numeric(df["position_t_min"], errors="coerce")
+    t_max = pd.to_numeric(df["position_t_max"], errors="coerce")
+    df = df[t_min.notna() & t_max.notna()]
+    t_min, t_max = t_min[df.index].astype(int), t_max[df.index].astype(int)
+    df[time_col] = [list(range(lo, hi + 1)) for lo, hi in zip(t_min, t_max)]
+    df = df.explode(time_col)
+    df[time_col] = df[time_col].astype(int)
+    return df.drop_duplicates(subset=groupby_cols + [time_col])[groupby_cols + [time_col, "target_class"]]
 
 
 def _explode_touching_column(df, touching_col, *, id_col_name):
@@ -391,6 +411,7 @@ def compute_track_contact_target_class_features(
     contact_group_col=None,
     time_col="position_t",
     groupby_cols=("sample_name", "TrackID"),
+    restrict_to_target_period=True,
     verbose=False,
 ):
     """Attribute each track's contact timepoints to the class (from ``target_class_lookup``) of
@@ -399,8 +420,16 @@ def compute_track_contact_target_class_features(
 
     ``target_class_lookup`` is either a time-varying lookup (columns ``groupby_cols + [time_col,
     "target_class"]``, from ``build_target_class_lookup_from_state_adata``) or a time-invariant one
-    (columns ``groupby_cols + ["target_class"]``, from ``build_target_class_lookup_from_track_adata``)
-    — set ``time_varying`` accordingly.
+    (columns ``groupby_cols + ["target_class"]``, from ``build_target_class_lookup_from_track_adata``
+    on adata without trajectory windows). A lookup that has ``time_col`` is always joined per
+    timepoint, whatever ``time_varying`` says.
+
+    With a time-varying lookup and ``restrict_to_target_period`` (default), only windows lying
+    fully inside the target classification's time range ``[min t, max t]`` of their sample are
+    analyzed (samples absent from the lookup use the range over all samples). A window extending
+    past it would count the unclassified timepoints as "not in contact with class X". Excluded
+    windows get no ``long_df`` rows and are labeled ``"outside_target_period"`` in ``group_df``
+    (see ``subset_to_target_period``).
 
     Requires ``adata_tracks.obs`` to already have ``contact_group_col`` (the overall
     ``"contact"``/``"no_contact"`` label from ``compute_track_contact_features`` /
@@ -458,6 +487,29 @@ def compute_track_contact_target_class_features(
         windows[_WINDOW_COL] = windows[_WINDOW_COL].astype(str)
     key_tuples = list(map(tuple, windows[key_cols].astype(str).to_numpy()))
     contact_group_by_key = dict(zip(key_tuples, windows[contact_group_col].astype(str)))
+    all_keys = windows.set_index(key_cols).index
+
+    time_varying = bool(time_varying) or time_col in target_class_lookup.columns
+    outside_keys = pd.Index([])
+    if time_varying and bool(restrict_to_target_period):
+        lookup_t = pd.to_numeric(target_class_lookup[time_col], errors="coerce")
+        lookup_samples = _normalize_id_column(target_class_lookup["sample_name"])
+        ranges = lookup_t.groupby(lookup_samples).agg(["min", "max"])
+        sample_key = windows["sample_name"]
+        lo = sample_key.map(ranges["min"]).fillna(lookup_t.min())
+        hi = sample_key.map(ranges["max"]).fillna(lookup_t.max())
+        inside = (
+            (pd.to_numeric(windows["position_t_min"], errors="coerce") >= lo)
+            & (pd.to_numeric(windows["position_t_max"], errors="coerce") <= hi)
+        )
+        outside_keys = windows.loc[~inside].set_index(key_cols).index
+        if bool(verbose) and len(outside_keys):
+            per_sample = windows.loc[~inside, "sample_name"].value_counts().to_dict()
+            print(
+                f"Restricting to the target classification period: excluded {len(outside_keys)}/"
+                f"{len(windows)} window(s) not fully inside it, per sample: {per_sample}"
+            )
+        windows = windows.loc[inside]
 
     df = df_timepoints[groupby_cols + [time_col, contact_col, touching_col]].copy()
     for col in groupby_cols:
@@ -542,10 +594,165 @@ def compute_track_contact_target_class_features(
     group_df = pd.DataFrame(group_rows, columns=key_cols + [group_out_col]).set_index(key_cols)
     # Every classified window must get a group bucket, even if it had zero rows in `matched` after
     # the touching-column filter (i.e. no contact at all) — those simply default to "no_contact".
-    all_keys = windows.set_index(key_cols).index
+    # Windows outside the target classification period are labeled as such, never "no_contact".
     group_df = group_df.reindex(all_keys, fill_value=_NO_CONTACT_LABEL)
+    if len(outside_keys):
+        group_df.loc[outside_keys, group_out_col] = _OUTSIDE_TARGET_PERIOD_LABEL
     group_df[group_out_col] = pd.Categorical(group_df[group_out_col])
     return long_df, group_df
+
+
+_TARGET_WINDOW_COLS = ["sample_name", "TrackID", "window_id", "position_t_min", "position_t_max", "target_class"]
+
+
+def build_target_windows_from_track_adata(
+    adata_tracks_target,
+    *,
+    class_col="ClusterID",
+    groupby_cols=("sample_name", "TrackID"),
+):
+    """One row per classified trajectory window of a target cell type (columns
+    ``sample_name, TrackID, window_id, position_t_min, position_t_max, target_class``), for
+    ``compute_target_window_contact``. ``window_id`` is ``trajectory_window_id`` (0 when tracks
+    were not split into windows)."""
+    groupby_cols = [str(c) for c in list(groupby_cols)]
+    required = groupby_cols + [str(class_col), "position_t_min", "position_t_max"]
+    missing = [c for c in required if c not in adata_tracks_target.obs.columns]
+    if missing:
+        raise KeyError(f"Missing required columns in target track-classification adata.obs: {missing}")
+
+    obs = adata_tracks_target.obs
+    df = obs[required].copy()
+    df["window_id"] = obs[_WINDOW_COL].astype(str).to_numpy() if _WINDOW_COL in obs.columns else "0"
+    for col in groupby_cols:
+        df[col] = _normalize_id_column(df[col])
+    df = df.rename(columns={str(class_col): "target_class"})
+    df["target_class"] = df["target_class"].astype(str)
+    df["position_t_min"] = pd.to_numeric(df["position_t_min"], errors="coerce")
+    df["position_t_max"] = pd.to_numeric(df["position_t_max"], errors="coerce")
+    df = df.dropna(subset=["position_t_min", "position_t_max"])
+    return df.drop_duplicates(subset=groupby_cols + ["window_id"])[_TARGET_WINDOW_COLS].reset_index(drop=True)
+
+
+def build_target_windows_from_state_adata(
+    adata_states_target,
+    *,
+    state_col,
+    groupby_cols=("sample_name", "TrackID"),
+    time_col="position_t",
+):
+    """One row per contiguous same-state segment of each target track (a new segment starts when
+    the state changes or a timepoint is skipped), in the same layout as
+    ``build_target_windows_from_track_adata``. ``window_id`` is the segment index within the track."""
+    groupby_cols = [str(c) for c in list(groupby_cols)]
+    lookup = build_target_class_lookup_from_state_adata(
+        adata_states_target, state_col=state_col, groupby_cols=groupby_cols, time_col=time_col,
+    )
+    lookup = lookup.sort_values(groupby_cols + [time_col]).reset_index(drop=True)
+    same_track = (lookup[groupby_cols] == lookup[groupby_cols].shift()).all(axis=1)
+    continues = (
+        same_track
+        & (lookup["target_class"] == lookup["target_class"].shift())
+        & (lookup[time_col].diff() == 1)
+    )
+    lookup["_segment"] = (~continues).cumsum()
+    segments = (
+        lookup.groupby("_segment", sort=False)
+        .agg(**{c: (c, "first") for c in groupby_cols},
+             target_class=("target_class", "first"),
+             position_t_min=(time_col, "min"),
+             position_t_max=(time_col, "max"))
+        .reset_index(drop=True)
+    )
+    segments["window_id"] = segments.groupby(groupby_cols).cumcount().astype(str)
+    return segments[_TARGET_WINDOW_COLS]
+
+
+def compute_target_window_contact(
+    df_timepoints,
+    target_windows,
+    *,
+    touching_col,
+    time_col="position_t",
+):
+    """Per behavioral window of a target cell (``target_windows``, from
+    ``build_target_windows_from_track_adata`` / ``build_target_windows_from_state_adata``), how
+    much of it the target spent touched by *any* source cell — independent of how the source
+    tracks were cut into trajectory windows.
+
+    ``df_timepoints`` holds the source cells' per-timepoint data with ``touching_col``
+    (comma-separated touched target TrackIDs). A frame counts as touched when at least one source
+    cell touches the target then, so overlapping contacts by several source cells count once.
+
+    Windows not lying fully inside their sample's source time range (min/max ``time_col`` in
+    ``df_timepoints``) are dropped — frames without source data would otherwise read as "not
+    touched". Returns one row per remaining window with ``window_n_timepoints``,
+    ``n_touched_timepoints``, ``duration_fraction`` (touched / window length),
+    ``duration_timepoints`` (longest run of consecutive touched frames) and ``touched``.
+    """
+    time_col = str(time_col)
+    touching_col = str(touching_col)
+    missing = [c for c in ["sample_name", time_col, touching_col] if c not in df_timepoints.columns]
+    if missing:
+        raise KeyError(
+            f"Missing required columns in df_timepoints: {missing}. Per-cell contact attribution "
+            f"(via '{touching_col}') is only available for the pixel/mask-based contact path."
+        )
+
+    src = df_timepoints[["sample_name", time_col, touching_col]].copy()
+    src["sample_name"] = _normalize_id_column(src["sample_name"])
+    src[time_col] = pd.to_numeric(src[time_col], errors="coerce")
+    src = src.dropna(subset=[time_col])
+    source_range = src.groupby("sample_name")[time_col].agg(["min", "max"])
+
+    windows = target_windows.copy()
+    windows["sample_name"] = _normalize_id_column(windows["sample_name"])
+    windows["TrackID"] = _normalize_id_column(windows["TrackID"])
+    lo = windows["sample_name"].map(source_range["min"])
+    hi = windows["sample_name"].map(source_range["max"])
+    windows = windows[(windows["position_t_min"] >= lo) & (windows["position_t_max"] <= hi)].copy()
+    windows["window_n_timepoints"] = (windows["position_t_max"] - windows["position_t_min"] + 1).astype(int)
+
+    touched_rows = src[src[touching_col].notna() & (src[touching_col].astype(str).str.strip() != "")]
+    touched = _explode_touching_column(touched_rows, touching_col, id_col_name="TrackID")
+    touched = touched[["sample_name", "TrackID", time_col]].drop_duplicates()
+
+    in_window = windows.reset_index(drop=True).reset_index(names="_window_row").merge(
+        touched, on=["sample_name", "TrackID"], how="inner",
+    )
+    in_window = in_window[
+        (in_window[time_col] >= in_window["position_t_min"]) & (in_window[time_col] <= in_window["position_t_max"])
+    ]
+    n_touched = {}
+    longest_run = {}
+    for row_id, times in in_window.groupby("_window_row")[time_col]:
+        times = np.sort(times.to_numpy())
+        n_touched[row_id] = len(times)
+        breaks = np.flatnonzero(np.diff(times) != 1)
+        run_lengths = np.diff(np.concatenate(([0], breaks + 1, [len(times)])))
+        longest_run[row_id] = int(run_lengths.max())
+
+    out = windows.reset_index(drop=True)
+    out["n_touched_timepoints"] = pd.Series(n_touched, dtype=float).reindex(out.index).fillna(0).astype(int)
+    out["duration_timepoints"] = pd.Series(longest_run, dtype=float).reindex(out.index).fillna(0).astype(int)
+    out["duration_fraction"] = out["n_touched_timepoints"] / out["window_n_timepoints"]
+    out["touched"] = out["n_touched_timepoints"] > 0
+    return out
+
+
+def subset_to_target_period(adata_tracks, *, contact_col):
+    """Return ``adata_tracks`` without the windows that ``compute_track_contact_target_class_features``
+    labeled ``"outside_target_period"`` (after ``merge_track_target_class_group_into_obs``), so
+    class-based group comparisons/compositions only use windows with target classification.
+    Returns ``adata_tracks`` itself when nothing is excluded."""
+    group_col = _contact_target_class_group_col_name(contact_col)
+    keep = (adata_tracks.obs[group_col].astype(str) != _OUTSIDE_TARGET_PERIOD_LABEL).to_numpy()
+    if keep.all():
+        return adata_tracks
+    subset = adata_tracks[keep].copy()
+    if isinstance(subset.obs[group_col].dtype, pd.CategoricalDtype):
+        subset.obs[group_col] = subset.obs[group_col].cat.remove_unused_categories()
+    return subset
 
 
 def merge_track_target_class_group_into_obs(

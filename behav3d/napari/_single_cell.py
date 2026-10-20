@@ -10468,7 +10468,7 @@ class TrackClassificationSubTab(QWidget):
                     target_class_lookup = build_target_class_lookup_from_track_adata(
                         adata_target, class_col="ClusterID",
                     )
-                    time_varying = False
+                    time_varying = "position_t" in target_class_lookup.columns
                 else:
                     adata_target = _read_h5ad_shared(str(self._state_adata_path(target_ct)))
                     state_col = _resolve_ui_state_col(adata_target, target_state_choice)
@@ -10619,7 +10619,7 @@ class TrackClassificationSubTab(QWidget):
                     target_class_lookup = build_target_class_lookup_from_track_adata(
                         adata_target, class_col="ClusterID",
                     )
-                    time_varying = False
+                    time_varying = "position_t" in target_class_lookup.columns
                 else:
                     adata_target = _read_h5ad_shared(str(self._state_adata_path(target_ct)))
                     state_col = _resolve_ui_state_col(adata_target, target_state_choice)
@@ -10749,6 +10749,7 @@ class TrackClassificationSubTab(QWidget):
                 merge_track_contact_features_into_obs,
                 compute_track_contact_target_class_features,
                 merge_track_target_class_group_into_obs,
+                subset_to_target_period,
                 _contact_group_col_name,
                 _contact_target_class_group_col_name,
             )
@@ -10797,7 +10798,7 @@ class TrackClassificationSubTab(QWidget):
                     target_class_lookup = build_target_class_lookup_from_track_adata(
                         adata_target, class_col="ClusterID",
                     )
-                    time_varying = False
+                    time_varying = "position_t" in target_class_lookup.columns
                 else:
                     adata_target = _read_h5ad_shared(str(self._state_adata_path(target_ct)))
                     state_col = _resolve_ui_state_col(adata_target, target_state_choice)
@@ -10813,7 +10814,7 @@ class TrackClassificationSubTab(QWidget):
                 merge_track_target_class_group_into_obs(track_adata, target_group_df, contact_col=contact_col)
                 target_group_col = _contact_target_class_group_col_name(contact_col)
                 result["by_target_class"] = save_track_condition_comparison_report(
-                    track_adata, contact_dir, condition_col=target_group_col, **comparison_kwargs,
+                    subset_to_target_period(track_adata, contact_col=contact_col), contact_dir, condition_col=target_group_col, **comparison_kwargs,
                 )
 
             return result
@@ -10984,6 +10985,8 @@ class TrackClassificationSubTab(QWidget):
                 touching_column_name,
                 build_target_class_lookup_from_state_adata,
                 build_target_class_lookup_from_track_adata,
+                build_target_windows_from_state_adata,
+                build_target_windows_from_track_adata,
             )
             from behav3d.analysis.behavior.track.utils import _resolve_track_paths
             from behav3d.analysis.behavior.track.visualization.plots.contact_duration_report import (
@@ -11007,7 +11010,12 @@ class TrackClassificationSubTab(QWidget):
                 target_class_lookup = build_target_class_lookup_from_track_adata(
                     adata_target, class_col="ClusterID",
                 )
-                time_varying = False
+                time_varying = "position_t" in target_class_lookup.columns
+                has_window_bounds = {"position_t_min", "position_t_max"}.issubset(adata_target.obs.columns)
+                target_windows = (
+                    build_target_windows_from_track_adata(adata_target, class_col="ClusterID")
+                    if has_window_bounds else None
+                )
             else:
                 adata_target = _read_h5ad_shared(str(self._state_adata_path(target_ct)))
                 state_col = _resolve_ui_state_col(adata_target, target_state_choice)
@@ -11015,6 +11023,7 @@ class TrackClassificationSubTab(QWidget):
                     adata_target, state_col=state_col,
                 )
                 time_varying = True
+                target_windows = build_target_windows_from_state_adata(adata_target, state_col=state_col)
 
             minutes_per_frame, minutes_valid = minutes_per_frame_from_metadata(md)
 
@@ -11028,6 +11037,8 @@ class TrackClassificationSubTab(QWidget):
                 touching_col=touching_col,
                 time_varying=time_varying,
                 target_cell_type_label=target_ct,
+                target_windows=target_windows,
+                source_cell_type_label=ct,
                 test_mode=test_mode,
                 pairing_col=pairing_cols or None,
                 minutes_per_frame=minutes_per_frame if minutes_valid else None,

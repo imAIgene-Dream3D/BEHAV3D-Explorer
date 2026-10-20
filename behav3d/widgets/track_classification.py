@@ -2485,7 +2485,7 @@ class TrackClassificationPanel:
                         target_class_lookup = build_target_class_lookup_from_track_adata(
                             adata_target, class_col="ClusterID",
                         )
-                        time_varying = False
+                        time_varying = "position_t" in target_class_lookup.columns
                     else:
                         adata_target = ad.read_h5ad(str(self._state_adata_path(target_ct)))
                         state_choice = self.target_state_col_dd.value

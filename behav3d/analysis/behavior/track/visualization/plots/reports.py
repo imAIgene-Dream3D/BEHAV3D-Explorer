@@ -106,6 +106,7 @@ from behav3d.analysis.behavior.track.contact_grouping import (
     merge_track_contact_features_into_obs,
     compute_track_contact_target_class_features,
     merge_track_target_class_group_into_obs,
+    subset_to_target_period,
     contact_col_target_cell_type,
     _contact_group_col_name,
     _contact_mean_col_name,
@@ -1536,6 +1537,7 @@ def save_track_contact_group_analysis(
             verbose=verbose,
         )
         merge_track_target_class_group_into_obs(adata_tracks, target_group_df, contact_col=contact_col)
+        adata_target_period = subset_to_target_period(adata_tracks, contact_col=contact_col)
         target_group_col = _contact_target_class_group_col_name(contact_col)
         target_class_mean_col = _contact_class_mean_col_name(contact_col)
         target_class_max_bout_col = _contact_class_max_bout_col_name(contact_col)
@@ -1665,7 +1667,7 @@ def save_track_contact_group_analysis(
 
             target_class_composition_grid = _save_contact_cluster_stack_grid_page(
                 pdf,
-                adata_tracks,
+                adata_target_period,
                 class_col=class_col,
                 group_col=target_group_col,
                 extra_group_cols=extra_group_cols,
@@ -1682,7 +1684,7 @@ def save_track_contact_group_analysis(
             )
 
             target_class_comparison = save_track_condition_comparison_report(
-                adata_tracks,
+                adata_target_period,
                 out_dir,
                 sample_col=sample_col,
                 class_col=class_col,
@@ -1932,6 +1934,7 @@ def save_track_contact_composition_report(
             verbose=verbose,
         )
         merge_track_target_class_group_into_obs(adata_tracks, target_group_df, contact_col=contact_col)
+        adata_target_period = subset_to_target_period(adata_tracks, contact_col=contact_col)
         target_group_col = _contact_target_class_group_col_name(contact_col)
         target_cell_type_label = target_cell_type_label or contact_col_target_cell_type(contact_col)
         touched_classes = sorted(
@@ -1983,7 +1986,7 @@ def save_track_contact_composition_report(
 
             target_class_composition_grid = _save_contact_cluster_stack_grid_page(
                 pdf,
-                adata_tracks,
+                adata_target_period,
                 class_col=class_col,
                 group_col=target_group_col,
                 extra_group_cols=extra_group_cols,

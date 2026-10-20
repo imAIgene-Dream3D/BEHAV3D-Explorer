@@ -13,6 +13,8 @@ matplotlib.use("Agg", force=True)
 
 from behav3d.analysis.behavior.track.contact_grouping import (
     build_target_class_lookup_from_track_adata,
+    build_target_windows_from_state_adata,
+    build_target_windows_from_track_adata,
     touching_column_name,
 )
 from behav3d.analysis.behavior.track.visualization.plots.contact_duration_report import (
@@ -488,6 +490,10 @@ def test_long_contact_percentage_pages_and_per_sample_csv(tmp_path):
     assert Path(result["long_contact_per_sample_csv_path"]).exists()
     per_sample = pd.read_csv(result["long_contact_per_sample_csv_path"])
     assert set(per_sample["page_group"]) == {"(all)"}
+
+    units = pd.read_csv(result["units_csv_path"])
+    assert len(units) == sum(len(b) for *_x, b in _TOUCH_SPEC)
+    assert {"sample_name", "TrackID", "target_class", "duration_fraction", "long_contact_bucket"} <= set(units.columns)
     assert set(per_sample.columns) == {"page_group", "sample_name", "target_class", "pct_long_contact"}
 
     # matches the direct _compute_per_sample_long_contact_pct check in
@@ -500,6 +506,62 @@ def test_long_contact_percentage_pages_and_per_sample_csv(tmp_path):
     # duration-comparison section's own 2 pages (1 box + 1 connected, since all 6 comparisons fit
     # on the default comparisons_per_page).
     assert result["n_pages"] == 4
+
+
+def _build_target_windows(source):
+    """Every macrophage classified over the whole timelapse: one trajectory window (track source)
+    or one constant-state segment (state source)."""
+    target = _build_target_track_adata()
+    if source == "track":
+        target.obs["position_t_min"] = 0
+        target.obs["position_t_max"] = _N_TIMEPOINTS - 1
+        return build_target_windows_from_track_adata(target, class_col="ClusterID")
+    obs = target.obs.loc[target.obs.index.repeat(_N_TIMEPOINTS)].reset_index(drop=True)
+    obs["position_t"] = list(range(_N_TIMEPOINTS)) * len(target.obs)
+    obs.index = obs.index.astype(str)
+    return build_target_windows_from_state_adata(
+        ad.AnnData(X=np.zeros((len(obs), 1)), obs=obs), state_col="ClusterID",
+    )
+
+
+@pytest.mark.parametrize("source", ["track", "state"])
+def test_long_contact_per_behavioral_window(tmp_path, source):
+    adata_tracks = _build_adata_tracks()
+    df_timepoints = _build_df_timepoints()
+
+    # Both T-cell tracks touching a macrophage start at t = 0, so the macrophage is touched by any
+    # T cell for max(bout lengths) frames of its 30-frame window.
+    long_contact_threshold = 100.0 * 7.0 / _N_TIMEPOINTS
+    result = save_track_contact_duration_comparison(
+        adata_tracks, df_timepoints, tmp_path,
+        test_mode="welch", long_contact_threshold=long_contact_threshold, long_contact_unit="percent",
+        target_windows=_build_target_windows(source), source_cell_type_label="tcell",
+        verbose=False, **_common_kwargs(),
+    )
+
+    windows = pd.read_csv(result["behavioral_window_contact_csv_path"])
+    s1_round = windows[(windows["sample_name"] == "s1") & (windows["target_class"] == "round")].iloc[0]
+    assert s1_round["n_touched_timepoints"] == 7
+    assert s1_round["duration_fraction"] == pytest.approx(7 / _N_TIMEPOINTS)
+
+    per_sample = pd.read_csv(result["behavioral_window_long_contact_per_sample_csv_path"])
+    round_pct = per_sample[per_sample["target_class"] == "round"].set_index("sample_name")["pct_long_contact"]
+    assert round_pct.to_dict() == {"s1": 100.0, "s2": 100.0, "s3": 0.0, "s4": 100.0}
+
+    summary = pd.read_csv(result["behavioral_window_long_contact_csv_path"])
+    assert set(summary["target_class"]) == {"round", "elongated", "plastic"}
+    assert (summary["n_untouched"] == 0).all()
+
+    # The per-T-cell-window long-contact pages (2) plus the per-behavioral-window ones (2).
+    assert result["n_pages"] == 6
+
+
+def test_long_contact_per_behavioral_window_needs_threshold(tmp_path):
+    result = save_track_contact_duration_comparison(
+        _build_adata_tracks(), _build_df_timepoints(), tmp_path, test_mode="welch",
+        target_windows=_build_target_windows("track"), verbose=False, **_common_kwargs(),
+    )
+    assert result["behavioral_window_contact_csv_path"] is None
 
 
 def test_fewer_than_two_classes_writes_placeholder(tmp_path):

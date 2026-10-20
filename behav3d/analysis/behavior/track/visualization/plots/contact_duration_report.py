@@ -40,6 +40,7 @@ from behav3d.analysis.behavior.track.contact_grouping import (
     compute_track_contact_features,
     merge_track_contact_features_into_obs,
     compute_track_contact_target_class_features,
+    compute_target_window_contact,
     _contact_group_col_name,
     _contact_class_mean_col_name,
     _contact_class_max_bout_col_name,
@@ -791,7 +792,7 @@ def _draw_long_contact_connected_lines(ax, per_sample_df, class_order, colors, s
 
 def _plot_long_contact_percentage_page(
     counts, per_sample_df, *, class_order, target_cell_type_label, long_contact_threshold,
-    long_contact_unit, colors, section_label=None,
+    long_contact_unit, colors, section_label=None, unit_label="tracks",
 ):
     """Two panels: the pooled long-vs-short stacked bar (all touching tracks), and a boxplot of
     each sample's % long contact per class — for tracks (already restricted to tracks that
@@ -803,7 +804,7 @@ def _plot_long_contact_percentage_page(
     draw_stacked_proportion_barv(
         ax_bar, props, class_order, _LONG_CONTACT_STACK_ORDER, _LONG_CONTACT_STACK_COLORS, ymax=1.0, xtick_fontsize=8,
     )
-    ax_bar.set_ylabel("Fraction of tracks in contact", fontsize=8)
+    ax_bar.set_ylabel(f"Fraction of {unit_label} in contact", fontsize=8)
     for i, cls in enumerate(class_order):
         n_total = int(counts.loc[cls].sum()) if cls in counts.index else 0
         ax_bar.text(i, 1.02, f"n={n_total}", ha="center", va="bottom", fontsize=6.5, clip_on=False)
@@ -821,7 +822,7 @@ def _plot_long_contact_percentage_page(
     ]
     fig.legend(handles=handles, loc="lower center", ncol=2, frameon=False, fontsize=8)
 
-    title = f"Long vs. short contact — % of tracks in contact with each {target_cell_type_label} class"
+    title = f"Long vs. short contact — % of {unit_label} in contact with each {target_cell_type_label} class"
     if section_label is not None:
         title += f"\ngroup: {section_label}"
     fig.suptitle(title, fontsize=10, fontweight="bold")
@@ -832,6 +833,7 @@ def _plot_long_contact_percentage_page(
 def _plot_long_contact_percentage_connected_page(
     counts, per_sample_df, *, class_order, target_cell_type_label, long_contact_threshold,
     long_contact_unit, colors, sample_colors, sample_markers, sample_col, section_label=None,
+    unit_label="tracks",
 ):
     """Companion to ``_plot_long_contact_percentage_page`` — same pooled stacked bar and a box
     whose dots are colored/shaped by sample (``_draw_long_contact_connected_box``, no connecting
@@ -853,7 +855,7 @@ def _plot_long_contact_percentage_connected_page(
     draw_stacked_proportion_barv(
         ax_bar, props, class_order, _LONG_CONTACT_STACK_ORDER, _LONG_CONTACT_STACK_COLORS, ymax=1.0, xtick_fontsize=8,
     )
-    ax_bar.set_ylabel("Fraction of tracks in contact", fontsize=8)
+    ax_bar.set_ylabel(f"Fraction of {unit_label} in contact", fontsize=8)
     for i, cls in enumerate(class_order):
         n_total = int(counts.loc[cls].sum()) if cls in counts.index else 0
         ax_bar.text(i, 1.02, f"n={n_total}", ha="center", va="bottom", fontsize=6.5, clip_on=False)
@@ -895,7 +897,7 @@ def _plot_long_contact_percentage_connected_page(
 
     title = (
         f"Long vs. short contact — connected by {sample_col} "
-        f"(% of tracks in contact with each {target_cell_type_label} class)"
+        f"(% of {unit_label} in contact with each {target_cell_type_label} class)"
     )
     if section_label is not None:
         title += f"\ngroup: {section_label}"
@@ -907,6 +909,7 @@ def _plot_long_contact_percentage_connected_page(
 def _render_long_contact_percentage_section(
     pdf, sub_duration_df, *, class_order, target_cell_type_label, long_contact_threshold,
     long_contact_unit, sample_col, sample_colors, sample_markers, class_colors=None, section_label=None,
+    unit_label="tracks",
 ):
     """Build + render the long-vs-short contact percentage page for one data subset (mirrors
     ``_render_duration_comparison_section``'s pooled/group-split convention). Restricted, per
@@ -948,7 +951,7 @@ def _render_long_contact_percentage_section(
     fig = _plot_long_contact_percentage_page(
         counts, per_sample_df, class_order=local_class_order, target_cell_type_label=target_cell_type_label,
         long_contact_threshold=long_contact_threshold, long_contact_unit=long_contact_unit,
-        colors=colors, section_label=section_label,
+        colors=colors, section_label=section_label, unit_label=unit_label,
     )
     pdf.savefig(fig)
     plt.close(fig)
@@ -957,7 +960,7 @@ def _render_long_contact_percentage_section(
         counts, per_sample_df, class_order=local_class_order, target_cell_type_label=target_cell_type_label,
         long_contact_threshold=long_contact_threshold, long_contact_unit=long_contact_unit,
         colors=colors, sample_colors=sample_colors, sample_markers=sample_markers,
-        sample_col=sample_col, section_label=section_label,
+        sample_col=sample_col, section_label=section_label, unit_label=unit_label,
     )
     pdf.savefig(connected_fig)
     plt.close(connected_fig)
@@ -1007,6 +1010,8 @@ def save_track_contact_duration_comparison(
     groupby_cols=("sample_name", "TrackID"),
     comparisons_per_page=12,
     group_cols=None,
+    target_windows=None,
+    source_cell_type_label=None,
     verbose=False,
 ):
     """For every class of ``target_cell_type_label`` actually touched, compare how long tracks
@@ -1066,7 +1071,23 @@ def save_track_contact_duration_comparison(
     ``contact_duration_comparison_paired_samples.csv`` and, when ``long_contact_threshold`` is
     set, ``contact_long_contact_percentage_per_sample.csv``.
 
-    Returns a dict of artifact paths (including ``paired_csv_path`` and, when applicable,
+    ``target_windows`` (with ``long_contact_threshold``), from
+    ``contact_grouping.build_target_windows_from_track_adata`` /
+    ``build_target_windows_from_state_adata``, adds a target-centric long-contact section that
+    does not depend on how the source tracks were cut into windows: per behavioral window of a
+    target cell (a trajectory window, or a same-state segment), the frames it was touched by *any*
+    source cell (``compute_target_window_contact``). Windows touched at least once are bucketed
+    with the same threshold — ``"percent"`` against the touched fraction of the window, time
+    units against its longest touched run — and rendered with the same pages, labeled with
+    ``source_cell_type_label``. Writes ``behavioral_window_contact.csv`` (every window in the
+    source time range, touched or not), ``contact_long_contact_percentage_behavioral_window.csv``
+    (with ``n_untouched`` per class) and ``..._behavioral_window_per_sample.csv``.
+
+    The per-unit table behind all comparisons (one row per source track/window and touched class,
+    with ``duration_timepoints``, ``duration_fraction`` and, when thresholded,
+    ``long_contact_bucket``) is written to ``contact_duration_units.csv``.
+
+    Returns a dict of artifact paths (including ``paired_csv_path``, ``units_csv_path`` and, when applicable,
     ``long_contact_per_sample_csv_path``) plus ``n_comparisons``/``n_pages``/``class_order``/
     ``sample_col``/``group_cols``/``page_groups``.
     """
@@ -1175,8 +1196,38 @@ def save_track_contact_duration_comparison(
     resolved_class_order = [str(c) for c in class_order] if class_order is not None else touched_classes
     resolved_class_order = [c for c in resolved_class_order if c in touched_classes]
 
+    window_all_df = None
+    window_df = None
+    window_class_order = []
+    if target_windows is not None and long_contact_threshold is not None:
+        window_all_df = compute_target_window_contact(df_timepoints, target_windows, touching_col=touching_col)
+        window_all_df["target_class"] = window_all_df["target_class"].astype(str)
+        # Windows belong to target cells, so sample-level columns (sample_col, group_cols) are
+        # carried over per sample from the source tracks' obs.
+        per_sample_cols = list(dict.fromkeys([sample_col] + group_cols))
+        per_sample_cols = [c for c in per_sample_cols if c != "sample_name"]
+        if per_sample_cols:
+            sample_lookup = (
+                adata_tracks.obs[["sample_name"] + per_sample_cols].astype(str).drop_duplicates(subset=["sample_name"])
+            )
+            window_all_df = window_all_df.merge(sample_lookup, on="sample_name", how="left")
+        window_df = window_all_df[window_all_df["touched"]].copy()
+        if long_contact_unit == "percent":
+            window_value = window_df["duration_fraction"] * 100.0
+        else:
+            minutes_per_unit = _LONG_CONTACT_MINUTES_PER_UNIT[long_contact_unit]
+            window_value = window_df["duration_timepoints"] * minutes_per_frame / minutes_per_unit
+        window_df[_LONG_CONTACT_BUCKET_COL] = np.where(
+            window_value >= long_contact_threshold, "long_contact", "short_contact",
+        )
+        window_classes = sorted(window_df["target_class"].dropna().unique().tolist(), key=_mixed_label_sort_key)
+        window_class_order = [str(c) for c in class_order] if class_order is not None else window_classes
+        window_class_order = [c for c in window_class_order if c in window_classes]
+
     all_sample_names = sorted(
-        duration_df[sample_col].dropna().astype(str).unique().tolist(), key=_mixed_label_sort_key,
+        set(duration_df[sample_col].dropna().astype(str))
+        | (set(window_df[sample_col].dropna().astype(str)) if window_df is not None else set()),
+        key=_mixed_label_sort_key,
     )
     sample_colors = hash_stable_label_color_map(all_sample_names)
     sample_markers = _sample_marker_map(all_sample_names)
@@ -1187,8 +1238,14 @@ def save_track_contact_duration_comparison(
     pdf_path = out_dir / "contact_duration_comparison.pdf"
     csv_path = csv_dir / "contact_duration_comparison.csv"
     paired_csv_path = csv_dir / "contact_duration_comparison_paired_samples.csv"
+    units_csv_path = csv_dir / "contact_duration_units.csv"
     long_contact_csv_path = csv_dir / "contact_long_contact_percentage.csv"
     long_contact_per_sample_csv_path = csv_dir / "contact_long_contact_percentage_per_sample.csv"
+    window_contact_csv_path = csv_dir / "behavioral_window_contact.csv"
+    window_long_contact_csv_path = csv_dir / "contact_long_contact_percentage_behavioral_window.csv"
+    window_long_contact_per_sample_csv_path = (
+        csv_dir / "contact_long_contact_percentage_behavioral_window_per_sample.csv"
+    )
 
     csv_columns = [
         "page_group", "group_a", "group_b", "n_a", "n_b", "mean_a_timepoints", "mean_b_timepoints",
@@ -1222,6 +1279,8 @@ def save_track_contact_duration_comparison(
     paired_csv_rows = []
     long_csv_rows = []
     long_per_sample_csv_rows = []
+    window_long_csv_rows = []
+    window_long_per_sample_csv_rows = []
     total_pages = 0
     with PdfPages(pdf_path) as pdf:
         if len(resolved_class_order) < 2:
@@ -1297,12 +1356,52 @@ def save_track_contact_duration_comparison(
                 long_per_sample_csv_rows.extend(long_per_sample_rows)
                 total_pages += long_pages
 
+        if window_df is not None:
+            source_label = source_cell_type_label or "source"
+            window_unit_label = f"{target_cell_type_label} behavioral windows (touched by any {source_label} cell)"
+            window_group_series = _make_group_label(window_df, group_cols) if group_cols else None
+            window_sections = [(None, window_df)] + [
+                (page_group, window_df[window_group_series == page_group]) for page_group in page_groups
+            ]
+            for section_label, sub_df in window_sections:
+                if section_label is not None and len(sub_df) == 0:
+                    continue
+                rows, per_sample_rows, n_pages = _render_long_contact_percentage_section(
+                    pdf, sub_df, class_order=window_class_order,
+                    target_cell_type_label=target_cell_type_label,
+                    long_contact_threshold=long_contact_threshold, long_contact_unit=long_contact_unit,
+                    sample_col=sample_col, sample_colors=sample_colors, sample_markers=sample_markers,
+                    class_colors=class_colors, section_label=section_label, unit_label=window_unit_label,
+                )
+                all_sub = window_all_df if section_label is None else window_all_df[
+                    _make_group_label(window_all_df, group_cols) == section_label
+                ]
+                n_untouched = (~all_sub["touched"]).groupby(all_sub["target_class"]).sum()
+                for row in rows:
+                    row["n_untouched"] = int(n_untouched.get(row["target_class"], 0))
+                window_long_csv_rows.extend(rows)
+                window_long_per_sample_csv_rows.extend(per_sample_rows)
+                total_pages += n_pages
+
     pd.DataFrame(csv_rows, columns=csv_columns).to_csv(csv_path, index=False)
     pd.DataFrame(paired_csv_rows, columns=paired_csv_columns).to_csv(paired_csv_path, index=False)
+    # One row per (source track/window, touched class): the units behind every comparison, e.g.
+    # for mixed models with sample/track random effects.
+    duration_df.drop(columns=["_pairing_composite"], errors="ignore").rename(
+        columns={_LONG_CONTACT_BUCKET_COL: "long_contact_bucket"}
+    ).to_csv(units_csv_path, index=False)
     if long_contact_threshold is not None:
         pd.DataFrame(long_csv_rows, columns=long_csv_columns).to_csv(long_contact_csv_path, index=False)
         pd.DataFrame(long_per_sample_csv_rows, columns=long_per_sample_csv_columns).to_csv(
             long_contact_per_sample_csv_path, index=False,
+        )
+    if window_df is not None:
+        window_all_df.to_csv(window_contact_csv_path, index=False)
+        pd.DataFrame(window_long_csv_rows, columns=long_csv_columns + ["n_untouched"]).to_csv(
+            window_long_contact_csv_path, index=False,
+        )
+        pd.DataFrame(window_long_per_sample_csv_rows, columns=long_per_sample_csv_columns).to_csv(
+            window_long_contact_per_sample_csv_path, index=False,
         )
 
     if verbose:
@@ -1323,6 +1422,7 @@ def save_track_contact_duration_comparison(
         "pdf_path": str(pdf_path),
         "csv_path": str(csv_path),
         "paired_csv_path": str(paired_csv_path),
+        "units_csv_path": str(units_csv_path),
         "csv_dir": str(csv_dir),
         "n_comparisons": len(csv_rows),
         "n_pages": total_pages,
@@ -1339,4 +1439,11 @@ def save_track_contact_duration_comparison(
         ),
         "group_cols": group_cols,
         "page_groups": [str(g) for g in page_groups],
+        "behavioral_window_contact_csv_path": str(window_contact_csv_path) if window_df is not None else None,
+        "behavioral_window_long_contact_csv_path": (
+            str(window_long_contact_csv_path) if window_df is not None else None
+        ),
+        "behavioral_window_long_contact_per_sample_csv_path": (
+            str(window_long_contact_per_sample_csv_path) if window_df is not None else None
+        ),
     }
