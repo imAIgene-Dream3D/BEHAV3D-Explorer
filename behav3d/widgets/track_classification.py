@@ -11,11 +11,12 @@ import yaml
 from matplotlib.backends.backend_pdf import PdfPages
 import matplotlib.pyplot as plt
 
-from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+from behav3d.core.state_columns import FULL_STATE_COL, INTRINSIC_STATE_COL
 from behav3d.analysis.behavior.state.utils import (
     _apply_state_order,
     _get_classification_state_colors,
     _get_classification_state_order,
+    _resolve_state_paths,
     _set_classification_state_colors,
     _set_classification_state_order,
     _normalize_label_color_map,
@@ -62,8 +63,10 @@ from behav3d.analysis.behavior.track.visualization.plots.reports import (
     save_track_condition_comparison_report,
     save_track_contact_group_analysis,
 )
-from behav3d.analysis.behavior.track.visualization.plots.contact_state_shift_report import (
-    save_track_contact_state_shift_report,
+from behav3d.analysis.behavior.state.visualization.plots.contact_state_shift_report import (
+    save_state_contact_shift_report,
+)
+from behav3d.analysis.behavior.track.visualization.plots.track_contact_overview_report import (
     save_track_contact_overview_report,
 )
 from behav3d.analysis.behavior.track.contact_grouping import (
@@ -78,8 +81,9 @@ from behav3d.analysis.behavior.track.utils import (
     _default_behavioral_states_path,
     _filter_tracks_for_dtaidistance,
     _ordered_unique,
-    _resolve_dtaidistance_paths,
+    _peek_track_outfolder,
     _resolve_optional_int,
+    _resolve_track_paths,
     _winfo,
     get_dtaidistance_track_trajectories_filename,
 )
@@ -92,6 +96,7 @@ from behav3d.core.metadata import (
     list_grouping_candidate_columns,
     merge_condition_columns_into_obs,
 )
+from behav3d.core.h5_access import prepare_adata_for_write
 from behav3d.core.utils import rmtree_ignore_missing
 from behav3d.widgets.utils import build_plot_box, build_row_move_buttons, spinning_loader
 
@@ -284,6 +289,10 @@ class TrackClassificationPanel:
             description="Also generate exemplar PDFs", value=True, indent=False,
             layout=widgets.Layout(width="220px"),
         )
+        self.dtw_plot_exemplars = widgets.Checkbox(
+            description="Also generate exemplar PDFs", value=True, indent=False,
+            layout=widgets.Layout(width="220px"),
+        )
         self.missing_policy = widgets.Dropdown(
             description="Missing",
             options=[("Keep as category", "keep"), ("Drop missing timepoints", "drop")],
@@ -422,6 +431,7 @@ class TrackClassificationPanel:
                 self.parallel,
                 self.save_distance_matrix,
                 self.use_original_behav3d,
+                self.dtw_plot_exemplars,
             ],
             layout=widgets.Layout(flex_flow="row wrap", gap="8px"),
         )
@@ -514,8 +524,8 @@ class TrackClassificationPanel:
             style={"description_width": "140px"}, layout=widgets.Layout(width="360px"),
         )
         self.target_state_col_dd = widgets.Dropdown(
-            options=["full_behavioral_cluster", "intrinsic_behavioral_cluster", "raw_hmm_state"],
-            value="full_behavioral_cluster",
+            options=[FULL_STATE_COL, INTRINSIC_STATE_COL, "raw_hmm_state"],
+            value=FULL_STATE_COL,
             description="Target state column:",
             style={"description_width": "140px"}, layout=widgets.Layout(width="360px"),
         )
@@ -538,9 +548,12 @@ class TrackClassificationPanel:
         )
         self.contact_group_cols_html = widgets.HTML(
             "<b>Also split by condition:</b><br>"
-            "<span style='color:#555;'>\"Group in X\"/\"Group in Y\" pick a single condition each to "
-            "arrange the grid. \"Group per page\" pools additional metadata columns into it instead — "
-            "hold Ctrl/Cmd to select multiple.</span>"
+            "<span style='color:#555;'>For \"Run contact-vs-no-contact analysis\": \"Group in X\"/"
+            "\"Group in Y\" pick a single condition each to arrange the grid, and \"Group per page\" "
+            "pools additional metadata columns into it instead. For \"Run contact state-shift analysis\" "
+            "and \"Create track contact overview\" (no grid to arrange), \"Group in X\"/\"Group in Y\" are "
+            "ignored — \"Group per page\" alone splits their output into one page (set) per unique "
+            "combination of the selected columns. Hold Ctrl/Cmd to select multiple.</span>"
         )
         self.btn_contact_analysis = widgets.Button(
             description="Run contact-vs-no-contact analysis",
@@ -560,8 +573,8 @@ class TrackClassificationPanel:
             style={"description_width": "260px"}, layout=widgets.Layout(width="360px"),
         )
         self.contact_shift_state_col_dd = widgets.Dropdown(
-            options=["full_behavioral_cluster", "intrinsic_behavioral_cluster", "raw_hmm_state"],
-            value="full_behavioral_cluster", description="State column:",
+            options=[FULL_STATE_COL, INTRINSIC_STATE_COL, "raw_hmm_state"],
+            value=FULL_STATE_COL, description="State column:",
             style={"description_width": "130px"}, layout=widgets.Layout(width="360px"),
         )
         self.btn_contact_state_shift = widgets.Button(
@@ -669,7 +682,9 @@ class TrackClassificationPanel:
                 "before vs. after its first sufficiently long contact bout (contact tracks), against a "
                 "timing-matched null before/after split for no-contact tracks. 'Create track contact "
                 "overview' plots each contact track's full, untrimmed state trajectory with a grey/green "
-                "bar marking every qualifying contact bout, grouped into pages by sample."
+                "bar marking every qualifying contact bout, grouped into pages by sample. "
+                "'Group per page' applies to all three buttons: it splits each one's output into a "
+                "separate page (or grid page) per unique combination of the selected metadata columns."
             ),
             run_row=widgets.VBox(
                 [
@@ -1120,6 +1135,7 @@ class TrackClassificationPanel:
         self.bouts_block_scaling.value = bool(cfg.get("bouts_block_scaling", self.bouts_block_scaling.value))
         self.bouts_drop_redundant.value = bool(cfg.get("bouts_drop_redundant", self.bouts_drop_redundant.value))
         self.bouts_plot_exemplars.value = bool(cfg.get("bouts_plot_exemplars", self.bouts_plot_exemplars.value))
+        self.dtw_plot_exemplars.value = bool(cfg.get("dtw_plot_exemplars", self.dtw_plot_exemplars.value))
         self.missing_policy.value = str(cfg.get("missing_policy", self.missing_policy.value))
         self.parallel.value = bool(cfg.get("parallel", self.parallel.value))
         self.save_distance_matrix.value = bool(cfg.get("save_distance_matrix", self.save_distance_matrix.value))
@@ -1172,6 +1188,7 @@ class TrackClassificationPanel:
             "bouts_block_scaling": bool(self.bouts_block_scaling.value),
             "bouts_drop_redundant": bool(self.bouts_drop_redundant.value),
             "bouts_plot_exemplars": bool(self.bouts_plot_exemplars.value),
+            "dtw_plot_exemplars": bool(self.dtw_plot_exemplars.value),
             "missing_policy": str(self.missing_policy.value),
             "parallel": bool(self.parallel.value),
             "save_distance_matrix": bool(self.save_distance_matrix.value),
@@ -1217,13 +1234,7 @@ class TrackClassificationPanel:
 
     def _model_adata_path(self, cell_type=None):
         ct = self._current_cell_type() if cell_type is None else str(cell_type)
-        return (
-            Path(self.output_dir)
-            / "analysis"
-            / ct
-            / "behavorial_trajectories"
-            / get_dtaidistance_track_trajectories_filename(ct)
-        )
+        return _peek_track_outfolder(self.output_dir, ct) / get_dtaidistance_track_trajectories_filename(ct)
 
     def _original_track_features_path(self, cell_type=None):
         ct = self._current_cell_type() if cell_type is None else str(cell_type)
@@ -1391,6 +1402,7 @@ class TrackClassificationPanel:
             self.parallel,
             self.save_distance_matrix,
             self.use_original_behav3d,
+            self.dtw_plot_exemplars,
         ):
             widget.layout.display = "none" if is_bouts else None
         self._sync_trim_mode_visibility()
@@ -1417,7 +1429,9 @@ class TrackClassificationPanel:
             "clustering (use the Diagnostics/Exemplar PDF buttons below only for the DTW basis)."
             if is_bouts else
             "<b>dtaidistance backend:</b> one-hot vectors with <code>inner_dist='squared euclidean'</code>; "
-            "the DTW window is the main speed constraint."
+            "the DTW window is the main speed constraint. Exemplar PDFs for this basis are written "
+            "automatically when you run clustering (untick 'Also generate exemplar PDFs' to skip, or "
+            "use the Exemplar PDF button below to regenerate with different options)."
         )
         self.btn_run.description = (
             "Run bout/proportion clustering" if is_bouts else "Run one-hot dtaidistance clustering"
@@ -1510,6 +1524,7 @@ class TrackClassificationPanel:
                 self.parallel,
                 self.save_distance_matrix,
                 self.use_original_behav3d,
+                self.dtw_plot_exemplars,
             ]
             self.original_run_section.children = [
                 self.original_description_html,
@@ -1835,10 +1850,8 @@ class TrackClassificationPanel:
         )
         _set_classification_state_colors(adata_tracks, "ClusterID", new_colors)
         _set_classification_state_order(adata_tracks, "ClusterID", new_order)
-        adata_tracks.write(self._model_adata_path(), compression="lzf")
-        qc_dir = _resolve_dtaidistance_paths(self.output_dir, self._current_cell_type())[
-            "quality_control_outfolder"
-        ] / "after_renaming"
+        prepare_adata_for_write(adata_tracks).write(self._model_adata_path(), compression="lzf")
+        qc_dir = _resolve_track_paths(self.output_dir, self._current_cell_type()).clustering_outfolder / "after_renaming"
         plot_paths = save_dtaidistance_diagnostics(
             adata_tracks,
             output_dir=self.output_dir,
@@ -1896,7 +1909,7 @@ class TrackClassificationPanel:
             self.output_dir,
             ct,
             cluster_percentage_group_by=list(self.apply_group_cols_select.value) or None,
-            proportions_outfolder=_resolve_dtaidistance_paths(self.output_dir, ct)["behavior_proportions_outfolder"],
+            proportions_outfolder=_resolve_track_paths(self.output_dir, ct).behavior_proportions_outfolder,
         )
         self.plot_status_html.value = "<b>Renamed QC ready:</b> original BEHAV3D diagnostics were written after renaming."
         _winfo("trajectory-dtai-widget", f"Saved original BEHAV3D cluster names: {mapping_path}")
@@ -2090,7 +2103,7 @@ class TrackClassificationPanel:
         with self.out_run:
             try:
                 import shutil
-                _traj_dir = Path(self.output_dir) / "analysis" / self._current_cell_type() / "behavorial_trajectories"
+                _traj_dir = _peek_track_outfolder(self.output_dir, self._current_cell_type())
                 if _traj_dir.exists():
                     rmtree_ignore_missing(_traj_dir)
                 trajectory_size = _resolve_optional_int(self.behavioral_trajectory_size.value)
@@ -2137,7 +2150,7 @@ class TrackClassificationPanel:
             missing_policy="keep",
             save_distance_matrix=bool(self.save_distance_matrix.value),
             plot_results=True,
-            plot_exemplars=False,
+            plot_exemplars=bool(self.dtw_plot_exemplars.value),
             n_per_cluster=int(self.n_per_cluster.value),
             random_state=int(self.random_state.value),
             verbose=True,
@@ -2152,7 +2165,10 @@ class TrackClassificationPanel:
                 f"<b style='color:#a60;'>⚠ UMAP was skipped in diagnostics:</b> {umap_error}"
             )
         else:
-            self.plot_status_html.value = "<b>Ready for plots:</b> clustering finished."
+            self.plot_status_html.value = (
+                "<b>Ready for plots:</b> clustering finished."
+                + (" Exemplar PDFs were written." if bool(self.dtw_plot_exemplars.value) else "")
+            )
 
     def _run_bouts_clustering(self, trajectory_size):
         # run_state_based_analysis truncates/filters tracks to an exact length, so it needs a
@@ -2190,9 +2206,6 @@ class TrackClassificationPanel:
             plot_exemplars=bool(self.bouts_plot_exemplars.value),
             n_per_cluster=int(self.n_per_cluster.value),
             random_state=int(self.random_state.value),
-            # Share the DTW basis's output folder so both bases' diagnostics/exemplar PDFs
-            # and the canonical model .h5ad land in the same place on disk.
-            output_subdir_name="behavorial_trajectories",
             verbose=True,
         )
         # Write to the same canonical path the DTW branch uses so every generic downstream
@@ -2200,7 +2213,7 @@ class TrackClassificationPanel:
         # classifier training) keeps working unchanged regardless of which basis produced it.
         model_path = self._model_adata_path()
         model_path.parent.mkdir(parents=True, exist_ok=True)
-        self.model_adata.write(model_path, compression="gzip")
+        prepare_adata_for_write(self.model_adata).write(model_path, compression="gzip")
         self.status_html.value = (
             f"<b style='color:#080;'>Saved bout/proportion model:</b> {model_path.name} "
             f"({self.model_adata.n_obs} tracks)"
@@ -2209,7 +2222,7 @@ class TrackClassificationPanel:
             "<b>Ready for plots:</b> clustering finished. Diagnostics"
             + (" and exemplar" if bool(self.bouts_plot_exemplars.value) else "")
             + " PDFs for this basis were written under "
-            "<code>analysis/&lt;cell_type&gt;/behavorial_trajectories/</code>."
+            "<code>analysis/&lt;cell_type&gt;/behavioral_trajectories/</code>."
         )
 
     def _on_run_original_clicked(self, _):
@@ -2219,9 +2232,18 @@ class TrackClassificationPanel:
             try:
                 ct = self._current_cell_type()
                 import shutil
-                _traj_dir = Path(self.output_dir) / "analysis" / ct / "behavorial_trajectories"
+                _traj_dir = _peek_track_outfolder(self.output_dir, ct)
                 if _traj_dir.exists():
                     rmtree_ignore_missing(_traj_dir)
+                # Resolve the legacy method's raw-output staging dir (relative to
+                # analysis/<cell_type>/) through the shared resolver, so it lands
+                # under the canonical "behavioral_trajectories" folder — or its
+                # legacy "behavorial_trajectories" spelling if this is an older
+                # project that still uses it.
+                _paths = _resolve_track_paths(self.output_dir, ct)
+                _original_subdir_name = str(
+                    (_paths.original_behav3d_outfolder / "raw").relative_to(_paths.analysis_outdir)
+                )
                 csv_path = self._original_track_features_path(ct)
                 if not csv_path.exists():
                     raise FileNotFoundError(f"Original BEHAV3D track-features CSV not found: {csv_path}")
@@ -2250,7 +2272,7 @@ class TrackClassificationPanel:
                     nr_of_clusters=int(self.original_n_clusters.value),
                     plot_results=False,
                     seed=int(self.random_state.value),
-                    output_subdir_name="behavorial_trajectories/original_behav3d/raw",
+                    output_subdir_name=_original_subdir_name,
                     feature_scaling_preset="original_behav3d",
                     min_track_length=int(self.original_trajectory_size.value),
                     max_track_length=int(self.original_trajectory_size.value),
@@ -2282,9 +2304,9 @@ class TrackClassificationPanel:
                         self.output_dir,
                         self._current_cell_type(),
                         cluster_percentage_group_by=list(self.apply_group_cols_select.value) or None,
-                        proportions_outfolder=_resolve_dtaidistance_paths(
+                        proportions_outfolder=_resolve_track_paths(
                             self.output_dir, self._current_cell_type()
-                        )["behavior_proportions_outfolder"],
+                        ).behavior_proportions_outfolder,
                     )
                     self.plot_status_html.value = "<b>Diagnostics ready:</b> original BEHAV3D QC was written."
                     for path in plot_paths.values():
@@ -2330,9 +2352,9 @@ class TrackClassificationPanel:
                         self.output_dir,
                         self._current_cell_type(),
                         cluster_percentage_group_by=group_cols,
-                        proportions_outfolder=_resolve_dtaidistance_paths(
+                        proportions_outfolder=_resolve_track_paths(
                             self.output_dir, self._current_cell_type()
-                        )["behavior_proportions_outfolder"],
+                        ).behavior_proportions_outfolder,
                     )
                     self.plot_status_html.value = (
                         "<b>Track proportions ready:</b> original BEHAV3D per-sample proportions were written."
@@ -2346,10 +2368,10 @@ class TrackClassificationPanel:
                     cols_to_merge = [c for c in all_cols if c not in adata_tracks.obs.columns]
                     if cols_to_merge and md is not None:
                         merge_condition_columns_into_obs(adata_tracks, md, cols_to_merge)
-                    paths = _resolve_dtaidistance_paths(self.output_dir, self._current_cell_type())
+                    paths = _resolve_track_paths(self.output_dir, self._current_cell_type())
                     plot_paths = save_track_class_proportions_by_sample_plot(
                         adata_tracks,
-                        paths["behavior_proportions_outfolder"],
+                        paths.behavior_proportions_outfolder,
                         sample_col="sample_name",
                         class_col="ClusterID",
                         group_cols=group_cols,
@@ -2399,10 +2421,10 @@ class TrackClassificationPanel:
                 cols_to_merge = [c for c in all_cols if c not in adata_tracks.obs.columns]
                 if cols_to_merge and md is not None:
                     merge_condition_columns_into_obs(adata_tracks, md, cols_to_merge)
-                paths = _resolve_dtaidistance_paths(self.output_dir, self._current_cell_type())
+                paths = _resolve_track_paths(self.output_dir, self._current_cell_type())
                 result = save_track_condition_comparison_report(
                     adata_tracks,
-                    paths["behavior_comparisons_outfolder"],
+                    paths.behavior_comparisons_outfolder,
                     sample_col="sample_name",
                     class_col="ClusterID",
                     condition_col=condition_col,
@@ -2448,7 +2470,7 @@ class TrackClassificationPanel:
                 cols_to_merge = [c for c in all_extra_cols if c not in adata_tracks.obs.columns]
                 if cols_to_merge and md is not None:
                     merge_condition_columns_into_obs(adata_tracks, md, cols_to_merge)
-                paths = _resolve_dtaidistance_paths(self.output_dir, self._current_cell_type())
+                paths = _resolve_track_paths(self.output_dir, self._current_cell_type())
 
                 target_class_kwargs = {}
                 use_target_class = bool(self.use_target_class_checkbox.value)
@@ -2467,7 +2489,7 @@ class TrackClassificationPanel:
                     else:
                         adata_target = ad.read_h5ad(str(self._state_adata_path(target_ct)))
                         state_choice = self.target_state_col_dd.value
-                        state_col = FULL_STATE_COL if state_choice == "full_behavioral_cluster" else state_choice
+                        state_col = state_choice
                         target_class_lookup = build_target_class_lookup_from_state_adata(
                             adata_target, state_col=state_col,
                         )
@@ -2482,7 +2504,7 @@ class TrackClassificationPanel:
                 result = save_track_contact_group_analysis(
                     adata_tracks,
                     df_timepoints,
-                    paths["outfolder"],
+                    paths.outfolder,
                     contact_col=contact_col,
                     min_bout_length=min_bout_length,
                     sample_col="sample_name",
@@ -2527,24 +2549,26 @@ class TrackClassificationPanel:
                         "Behavioral states h5ad not found. Run State Classification first."
                     )
 
-                state_col_choice = self.contact_shift_state_col_dd.value
-                state_col = (
-                    FULL_STATE_COL if state_col_choice == "full_behavioral_cluster" else state_col_choice
-                )
-                adata_tracks = self._load_model_adata()
+                state_col = self.contact_shift_state_col_dd.value
                 df_timepoints = pd.read_csv(self._original_track_features_path())
                 full_adata = ad.read_h5ad(str(self._state_adata_path()))
-                paths = _resolve_dtaidistance_paths(self.output_dir, self._current_cell_type())
-                result = save_track_contact_state_shift_report(
-                    adata_tracks,
+                extra_group_cols = list(self.contact_group_cols_select.value) or None
+                md = getattr(self.metadata_loader, "metadata", None)
+                if extra_group_cols and md is not None:
+                    cols_to_merge = [c for c in extra_group_cols if c not in full_adata.obs.columns]
+                    if cols_to_merge:
+                        merge_condition_columns_into_obs(full_adata, md, cols_to_merge)
+                state_paths = _resolve_state_paths(self.output_dir, self._current_cell_type())
+                result = save_state_contact_shift_report(
                     df_timepoints,
                     full_adata,
-                    paths["outfolder"],
+                    state_paths.state_outdir,
                     contact_col=contact_col,
                     min_bout_length=min_bout_length,
                     state_col=state_col,
                     window_mode=self.contact_shift_window_mode_dd.value.lower(),
                     fixed_window_length=int(self.contact_shift_window_length.value),
+                    extra_group_cols=extra_group_cols,
                     verbose=True,
                 )
                 self.plot_status_html.value = (
@@ -2582,23 +2606,27 @@ class TrackClassificationPanel:
                 if rows_per_page < 1:
                     raise ValueError("Tracks per page must be at least 1.")
 
-                state_col_choice = self.contact_shift_state_col_dd.value
-                state_col = (
-                    FULL_STATE_COL if state_col_choice == "full_behavioral_cluster" else state_col_choice
-                )
+                state_col = self.contact_shift_state_col_dd.value
                 adata_tracks = self._load_model_adata()
                 df_timepoints = pd.read_csv(self._original_track_features_path())
                 full_adata = ad.read_h5ad(str(self._state_adata_path()))
-                paths = _resolve_dtaidistance_paths(self.output_dir, self._current_cell_type())
+                extra_group_cols = list(self.contact_group_cols_select.value) or None
+                md = getattr(self.metadata_loader, "metadata", None)
+                if extra_group_cols and md is not None:
+                    cols_to_merge = [c for c in extra_group_cols if c not in adata_tracks.obs.columns]
+                    if cols_to_merge:
+                        merge_condition_columns_into_obs(adata_tracks, md, cols_to_merge)
+                paths = _resolve_track_paths(self.output_dir, self._current_cell_type())
                 result = save_track_contact_overview_report(
                     adata_tracks,
                     df_timepoints,
                     full_adata,
-                    paths["outfolder"],
+                    paths.outfolder,
                     contact_col=contact_col,
                     min_bout_length=min_bout_length,
                     state_col=state_col,
                     rows_per_page=rows_per_page,
+                    extra_group_cols=extra_group_cols,
                     verbose=True,
                 )
                 self.plot_status_html.value = (
@@ -2714,7 +2742,6 @@ class TrackClassificationPanel:
         return _resolve_track_classifier_path(
             self.output_dir,
             self._current_cell_type(),
-            output_subdir_name="behavorial_trajectories",
         )
 
     def _on_train_classifier_clicked(self, _):
@@ -2791,7 +2818,6 @@ class TrackClassificationPanel:
                     cell_type=ct,
                     classifier_artifact_or_path=clf_path,
                     adata_full_path=states_path,
-                    output_subdir_name="behavorial_trajectories",
                     group_cols=list(self.apply_group_cols_select.value) or None,
                     metadata=getattr(self.metadata_loader, "metadata", None),
                     verbose=True,

@@ -237,7 +237,7 @@ def _build_target_states_adata():
             for t in range(_N_TIMEPOINTS):
                 rows.append({
                     "sample_name": sample_name, "TrackID": track_id, "position_t": t,
-                    "behavioral_state": state,
+                    "full_behavioral_state": state,
                 })
     obs = pd.DataFrame(rows)
     return ad.AnnData(X=np.zeros((len(obs), 1)), obs=obs)
@@ -247,7 +247,7 @@ def test_contact_group_analysis_with_target_class(tmp_path):
     adata_tracks = _build_adata_tracks()
     df_timepoints = _build_df_timepoints_with_touching()
     adata_states = _build_target_states_adata()
-    lookup = build_target_class_lookup_from_state_adata(adata_states, state_col="behavioral_state")
+    lookup = build_target_class_lookup_from_state_adata(adata_states, state_col="full_behavioral_state")
 
     result = save_track_contact_group_analysis(
         adata_tracks,

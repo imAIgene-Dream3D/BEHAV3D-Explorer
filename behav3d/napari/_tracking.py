@@ -1,7 +1,8 @@
 """
 BEHAV3D napari plugin – Tracking Tab.
 
-Provides per-cell-type sub-tabs with method selection (LAP / TrackPy / Propagation),
+Provides per-cell-type sub-tabs with method selection
+(LapTrack / TrackPy / Fragmentation Propagation),
 method-specific parameters, and batch-tracking options.
 
 Run buttons execute backend tracking in a background ``QThread`` (via
@@ -28,9 +29,18 @@ from qtpy.QtWidgets import (
 )
 from qtpy.QtCore import Qt, Signal
 
+from behav3d.core.run_plan import (
+    ALL_ORGANOIDS,
+    RunPlan,
+    merge_plan_for_multicolor,
+    scan_all_organoids_items,
+    scan_tracking_items,
+)
 from behav3d.napari._widgets import (
     make_help_row,
     HelpButton,
+    HelpSection,
+    IllustratedHelpButton,
     browse_file_or_zarr,
     prompt_axis_order,
     resolve_external_path,
@@ -42,7 +52,28 @@ from behav3d.napari._background_runner import (
     ProgressBarRow,
     ThreadSafeLogger,
     fire_extra_callback,
+    refuse_if_busy,
 )
+
+
+# Canonical order + display labels for the tracking-method selector. The
+# internal keys (left column) are load-bearing — they are what gets persisted
+# to behav3d_parameters.yml and dispatched to the backend — while the labels
+# and their order here are purely presentational.
+_METHOD_ORDER = [
+    "btrack", "propagation", "bounded_propagation",
+    "reporter_propagation", "trackpy", "lap", "import",
+]
+_METHOD_LABELS = {
+    "btrack": "btrack (Bayesian)",
+    "propagation": "Fragmentation Propagation",
+    "bounded_propagation": "Bounded Propagation",
+    "reporter_propagation": "Reporter Propagation",
+    "trackpy": "TrackPy",
+    "lap": "LapTrack",
+    "import": "Import tracking",
+}
+_METHOD_IDX = {k: i for i, k in enumerate(_METHOD_ORDER)}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -70,11 +101,16 @@ class _ImportTrackingPage(QWidget):
         self._switch_to_data_prep_edit = switch_to_data_prep_edit_callback
         # sample_name -> {"path_edit", "browse_btn", "status_layout", "last_value", "row_idx"}
         self._rows = {}
+        # The per-sample rows (each one stats its source and destination paths) are
+        # only built while this page is on screen: every metadata (re)load used to
+        # rebuild the page of *every* cell type's panel, shown or not -- including
+        # panels of earlier generations that Qt's QTabWidget.clear() keeps alive.
+        self._stale = False
         self._init_ui()
         if hasattr(metadata_loader, "metadata_loaded"):
             metadata_loader.metadata_loaded.connect(self._on_metadata_updated)
         if getattr(metadata_loader, "metadata", None) is not None:
-            self._rebuild()
+            self._on_metadata_updated()
 
     # ── column helpers ──────────────────────────────────────────────────
     def _tracks_img_col(self):
@@ -156,7 +192,17 @@ class _ImportTrackingPage(QWidget):
         layout.addWidget(self._scroll)
 
     def _on_metadata_updated(self, _=None):
-        self._rebuild()
+        if self.isVisible():
+            self._stale = False
+            self._rebuild()
+        else:
+            self._stale = True
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._stale:
+            self._stale = False
+            self._rebuild()
 
     def _rebuild(self):
         # Detach the old content widget without destroying it — this prevents
@@ -401,7 +447,7 @@ class _ImportTrackingPage(QWidget):
     # ── processing ──────────────────────────────────────────────────────
     def _process_single(self, sample_name: str, row_idx: int, _=None, save: bool = True):
         import shutil
-        from behav3d.io.images import load_image, save_as_zarr, convert_label_file_to_zarr
+        from behav3d.io.images import load_image, save_as_zarr, convert_label_file_to_zarr, normalize_label_zarr
         from behav3d.preprocessing.tracking import convert_tracked_image_to_csv
 
         info = self._rows.get(sample_name)
@@ -458,6 +504,11 @@ class _ImportTrackingPage(QWidget):
                     shutil.copytree(str(src), str(dest_z))
 
             zarr_path = dest_z
+
+            # Step 1b — bring the labels to the pipeline dtype (uint16) so
+            # later edits don't overflow; negative labels are remapped.  Keep a
+            # backup when the zarr is the user's own file rather than a copy.
+            normalize_label_zarr(zarr_path, keep_backup=src.resolve() == dest_z.resolve())
 
             # Step 2 — generate tracks CSV (unchanged: already-correct logic)
             md_row = self.metadata_loader.metadata.iloc[row_idx]
@@ -596,55 +647,70 @@ class CellTypeTrackingPanel(QWidget):
         method_layout = QHBoxLayout()
         method_layout.setContentsMargins(6, 4, 6, 4)
         self.combo_method = QComboBox()
-        self.combo_method.addItems([
-            "LAP (laptrack)", "TrackPy", "Fragmentation Tracking",
-            "Bounded Propagation",
-            "Reporter Propagation",
-            "btrack (Bayesian)", "Import tracking",
-        ])
+        self.combo_method.addItems([_METHOD_LABELS[k] for k in _METHOD_ORDER])
         saved_method = tcfg.get("method", def_method)
-        idx_map = {
-            "lap": 0, "trackpy": 1, "propagation": 2, "bounded_propagation": 3,
-            "reporter_propagation": 4, "btrack": 5, "import": 6,
-        }
-        self.combo_method.setCurrentIndex(idx_map.get(saved_method, 0))
+        self.combo_method.setCurrentIndex(_METHOD_IDX.get(saved_method, 0))
         method_layout.addWidget(QLabel("Method:"))
         method_layout.addWidget(self.combo_method)
-        method_layout.addWidget(HelpButton(
+        # The three propagation variants differ in ways a paragraph describes
+        # poorly, so each carries a schematic instead (behav3d/resources/tracking/).
+        method_layout.addWidget(IllustratedHelpButton(
             "Tracking Method",
-            "LAP (laptrack) — links detections frame-to-frame by solving "
-            "a Linear Assignment Problem on distance costs. Supports gap "
-            "closing, merging and splitting.\n\n"
-            "TrackPy — Crocker-Grier style nearest-neighbour linker with "
-            "an adaptive search range; simple and fast, no merge/split "
-            "support.\n\n"
-            "Fragmentation Tracking — no tunable parameters; identifies objects by "
-            "spatial overlap/propagation instead of frame-to-frame "
-            "linking cost.\n\n"
-            "Bounded Propagation — the same watershed propagation "
-            "as Fragmentation Tracking, but a track ID can never span more than one "
-            "physically disconnected region. Before watershed runs, the "
-            "current frame's mask is split into its own connected regions "
-            "and every existing track picks whichever region its previous "
-            "footprint overlaps most (more than one track can pick the same "
-            "region). A track's seed is discarded outside its chosen region, "
-            "so an uncontested region is simply inherited whole, a region "
-            "multiple tracks chose is still split between them, and any "
-            "region no track chose becomes a new track.\n\n"
-            "Reporter Propagation — for near-static objects whose "
-            "segmentation is unreliable/intermittent over time (flickers "
-            "on and off): pools every segment detected at every timepoint, "
-            "groups together any that spatially overlap each other "
-            "(regardless of how far apart in time), and for each group uses "
-            "the single LARGEST detected instance as that object's mask — "
-            "stamped onto every timepoint of the video unchanged. No frame-"
-            "to-frame linking or gap parameter needed, since grouping is "
-            "purely spatial.\n\n"
-            "btrack (Bayesian) — Kalman-filter based tracker with an "
-            "optional global hypothesis optimizer for resolving merges, "
-            "splits and false positives.\n\n"
-            "Import tracking — load pre-computed track IDs from an "
-            "existing tracks file instead of running a tracker."
+            [
+                HelpSection(
+                    "btrack (Bayesian)",
+                    "Kalman-filter based tracker with an optional global "
+                    "hypothesis optimizer for resolving merges, splits and "
+                    "false positives.",
+                ),
+                HelpSection(
+                    "Fragmentation Propagation",
+                    "No tunable parameters. Objects are identified by spatial "
+                    "overlap between frames rather than a linking cost, so one "
+                    "identity survives fragmentation and fusion — which is what "
+                    "lets death-dye signal be quantified while an organoid "
+                    "breaks apart or merges.",
+                    "tracking/fragmentation_tracking.png",
+                ),
+                HelpSection(
+                    "Bounded Propagation",
+                    "The same overlap propagation, but a track ID can never span "
+                    "more than one physically disconnected region: each frame's "
+                    "mask is split into its connected regions first and every "
+                    "existing track claims whichever region its previous footprint "
+                    "overlaps most. Identities that start out merged are recovered "
+                    "as distinct tracks once the objects separate.",
+                    "tracking/bounded_propagation.png",
+                ),
+                HelpSection(
+                    "Reporter Propagation",
+                    "For near-static objects whose segmentation flickers on and "
+                    "off with a fluctuating reporter. Every segment detected at "
+                    "any timepoint is pooled, spatially overlapping ones are "
+                    "grouped regardless of how far apart in time they are, and "
+                    "the largest instance of each group is stamped onto every "
+                    "timepoint. No linking or gap parameters, since grouping is "
+                    "purely spatial.",
+                    "tracking/reporter_propagation.png",
+                ),
+                HelpSection(
+                    "TrackPy",
+                    "Crocker-Grier style nearest-neighbour linker with an "
+                    "adaptive search range; simple and fast, no merge/split "
+                    "support.",
+                ),
+                HelpSection(
+                    "LapTrack",
+                    "Links detections frame-to-frame by solving a Linear "
+                    "Assignment Problem on distance costs. Supports gap "
+                    "closing, merging and splitting.",
+                ),
+                HelpSection(
+                    "Import tracking",
+                    "Load pre-computed track IDs from an existing tracks file "
+                    "instead of running a tracker.",
+                ),
+            ],
         ))
         method_layout.addStretch()
         method_group.setLayout(method_layout)
@@ -653,7 +719,16 @@ class CellTypeTrackingPanel(QWidget):
 
         # ── Stacked method params ────────────────────────────────────
         self.param_stack = QStackedWidget()
-        self.combo_method.currentIndexChanged.connect(self.param_stack.setCurrentIndex)
+        # Param pages are built below in their own (historical) source order and
+        # registered by method key; the combo order is independent of it.
+        self._method_pages = {}
+
+        def _show_params_for_combo_idx(idx):
+            key = _METHOD_ORDER[idx] if 0 <= idx < len(_METHOD_ORDER) else None
+            page = self._method_pages.get(key)
+            if page is not None:
+                self.param_stack.setCurrentIndex(page)
+        self.combo_method.currentIndexChanged.connect(_show_params_for_combo_idx)
 
         # Page 0 — LAP params
         lap_cfg = tcfg.get("lap", {})
@@ -680,7 +755,7 @@ class CellTypeTrackingPanel(QWidget):
             "Track Cost",
             "Maximum distance a cell can travel between two consecutive "
             "frames to be linked as the same track.\n\n"
-            "Entered in the unit selected above (µm by default; LAP links "
+            "Entered in the unit selected above (µm by default; LapTrack links "
             "in µm natively).\n\n"
             "Increase if cells move fast; decrease to avoid false links."
         ))
@@ -756,7 +831,7 @@ class CellTypeTrackingPanel(QWidget):
             int(lap_cfg.get("splitting_cost_px", 0)), native_unit="physical",
         )
 
-        self.param_stack.addWidget(lap_page)
+        self._method_pages["lap"] = self.param_stack.addWidget(lap_page)
 
         # Page 1 — TrackPy params
         tp_cfg = tcfg.get("trackpy", {})
@@ -799,7 +874,7 @@ class CellTypeTrackingPanel(QWidget):
             "Memory (frames)",
             "Number of frames a cell can disappear and still be "
             "reconnected to its previous track.\n\n"
-            "Similar to 'gap closing' in LAP."
+            "Similar to 'gap closing' in LapTrack."
         ))
 
         self.tp_adaptive_stop = QDoubleSpinBox()
@@ -837,7 +912,7 @@ class CellTypeTrackingPanel(QWidget):
             "Default 0.95 works well in most cases."
         ))
 
-        self.param_stack.addWidget(tp_page)
+        self._method_pages["trackpy"] = self.param_stack.addWidget(tp_page)
 
         # Page 2 — Propagation params
         prop_page = QWidget()
@@ -852,7 +927,7 @@ class CellTypeTrackingPanel(QWidget):
             self.check_all_together_prop.setChecked(False)  # False: we are in individual mode
             self.check_all_together_prop.setToolTip(
                 "When checked, all organoid types are tracked simultaneously\n"
-                "using Fragmentation Tracking, collapsing all organoid tabs into one.\n"
+                "using Fragmentation Propagation, collapsing all organoid tabs into one.\n"
                 "This is the default behaviour when multiple organoid types exist."
             )
             def _on_check_all(checked, _self=self):
@@ -861,14 +936,14 @@ class CellTypeTrackingPanel(QWidget):
             self.check_all_together_prop.toggled.connect(_on_check_all)
             prop_lay.addWidget(self.check_all_together_prop)
 
-        prop_notice = QLabel("No tunable parameters for\nFragmentation Tracking.")
+        prop_notice = QLabel("No tunable parameters for\nFragmentation Propagation.")
         prop_notice.setWordWrap(True)
         prop_notice.setAlignment(Qt.AlignCenter)
         prop_notice.setStyleSheet("color: #666; font-style: italic; padding: 10px;")
         prop_lay.addWidget(prop_notice)
         prop_lay.addStretch()
 
-        self.param_stack.addWidget(prop_page)
+        self._method_pages["propagation"] = self.param_stack.addWidget(prop_page)
 
         # Page 3 — Bounded Propagation params
         bp_cfg = tcfg.get("bounded_propagation", {})
@@ -879,7 +954,7 @@ class CellTypeTrackingPanel(QWidget):
         bp_form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
 
         bp_info = QLabel(
-            "Same as Fragmentation Tracking, but a track ID can never span more than "
+            "Same as Fragmentation Propagation, but a track ID can never span more than "
             "one disconnected region. Each region of the current frame's "
             "mask is claimed by whichever existing track overlaps it most, "
             "before watershed runs; a region no track claims becomes a new "
@@ -924,7 +999,7 @@ class CellTypeTrackingPanel(QWidget):
             "are always removed as well, regardless of this value."
         ))
 
-        self.param_stack.addWidget(bp_page)
+        self._method_pages["bounded_propagation"] = self.param_stack.addWidget(bp_page)
 
         # Page 4 — Reporter Propagation params
         rp_cfg = tcfg.get("reporter_propagation", {})
@@ -973,7 +1048,7 @@ class CellTypeTrackingPanel(QWidget):
             "for the 'largest instance' and when grouping."
         ))
 
-        self.param_stack.addWidget(rp_page)
+        self._method_pages["reporter_propagation"] = self.param_stack.addWidget(rp_page)
 
         # Page 5 — btrack (Bayesian tracking)
         bt_cfg = tcfg.get("btrack", {})
@@ -1255,7 +1330,7 @@ class CellTypeTrackingPanel(QWidget):
         _on_optimize_toggled(self.bt_use_optimize.isChecked())
 
         btrack_lay.addStretch()
-        self.param_stack.addWidget(btrack_page)
+        self._method_pages["btrack"] = self.param_stack.addWidget(btrack_page)
 
         # Page 6 — Import tracking
         import_page = _ImportTrackingPage(
@@ -1264,11 +1339,11 @@ class CellTypeTrackingPanel(QWidget):
             metadata_loader=self.metadata_loader,
             switch_to_data_prep_edit_callback=self._switch_to_data_prep_edit,
         )
-        self.param_stack.addWidget(import_page)
+        self._method_pages["import"] = self.param_stack.addWidget(import_page)
         reset_scroll_on_page_change(self.param_stack)
 
         # Set active page
-        self.param_stack.setCurrentIndex(self.combo_method.currentIndex())
+        _show_params_for_combo_idx(self.combo_method.currentIndex())
         layout.addWidget(self.param_stack)
 
         # ── Apply settings buttons ──────────────────────────────────
@@ -1292,9 +1367,10 @@ class CellTypeTrackingPanel(QWidget):
         self.btn_run.clicked.connect(self._on_run_clicked)
         layout.addWidget(self.btn_run)
 
-        # Disable run button for coming-soon methods (only Import at index 6)
+        # Disable run button for coming-soon methods (only Import tracking)
         def _on_method_idx_changed(idx):
-            is_coming_soon = idx >= 6
+            key = _METHOD_ORDER[idx] if 0 <= idx < len(_METHOD_ORDER) else None
+            is_coming_soon = key == "import"
             self.btn_run.setEnabled(not is_coming_soon)
             if is_coming_soon:
                 self.btn_run.setToolTip("This tracking method is not yet available.")
@@ -1309,10 +1385,8 @@ class CellTypeTrackingPanel(QWidget):
     # Persistence
     # ------------------------------------------------------------------
     def _get_method_key(self):
-        return [
-            "lap", "trackpy", "propagation", "bounded_propagation",
-            "reporter_propagation", "btrack", "import",
-        ][self.combo_method.currentIndex()]
+        idx = self.combo_method.currentIndex()
+        return _METHOD_ORDER[idx] if 0 <= idx < len(_METHOD_ORDER) else _METHOD_ORDER[0]
 
     def _bt_browse_config(self):
         """Open file dialog for custom btrack JSON config."""
@@ -1399,11 +1473,7 @@ class CellTypeTrackingPanel(QWidget):
             if ct in parent_tab.panels:
                 panel = parent_tab.panels[ct]
                 # Apply settings
-                idx_map = {
-                    "lap": 0, "trackpy": 1, "propagation": 2, "bounded_propagation": 3,
-                    "reporter_propagation": 4, "btrack": 5,
-                }
-                panel.combo_method.setCurrentIndex(idx_map.get(settings["method"], 0))
+                panel.combo_method.setCurrentIndex(_METHOD_IDX.get(settings["method"], 0))
 
                 # LAP
                 panel._lap_unit_mgr.set_native(panel.lap_track_cost, settings["lap"]["track_cost_px"])
@@ -1520,7 +1590,7 @@ class CellTypeTrackingPanel(QWidget):
         }
 
     def _run_tracking_for(self, cell_type: str, overwrite: bool = False,
-                          params: dict = None, progress_cb=None):
+                          params: dict = None, progress_cb=None, plan=None):
         """Run tracking for a single cell type.
 
         Parameters
@@ -1538,6 +1608,9 @@ class CellTypeTrackingPanel(QWidget):
         progress_cb:
             Optional ``progress_cb(current, total, label)`` forwarded
             to the backend so a GUI can drive a progress bar.
+        plan:
+            Optional :class:`~behav3d.core.run_plan.RunPlan` with per-sample
+            skip / run / overwrite choices; supersedes ``overwrite``.
 
         Returns
         -------
@@ -1570,7 +1643,7 @@ class CellTypeTrackingPanel(QWidget):
                 gap_closing_max_frame_count=int(lap["gap_frames"]),
                 merging_cost_cutoff=(mc ** 2 if mc > 0 else False),
                 splitting_cost_cutoff=(sc ** 2 if sc > 0 else False),
-                overwrite=overwrite,
+                overwrite=overwrite, plan=plan,
                 progress_cb=progress_cb,
             )
 
@@ -1579,7 +1652,7 @@ class CellTypeTrackingPanel(QWidget):
             tp = params["trackpy"]
             new_md = run_trackpy_tracking_generic(
                 metadata=metadata, output_dir=out_dir, cell_type=cell_type,
-                overwrite=overwrite,
+                overwrite=overwrite, plan=plan,
                 search_range=int(tp["search_range"]),
                 memory=int(tp["memory"]),
                 adaptive_stop=float(tp["adaptive_stop"]),
@@ -1595,7 +1668,7 @@ class CellTypeTrackingPanel(QWidget):
             use_opt = bool(bt["use_optimize"])
             new_md = run_btracking(
                 metadata=metadata, output_dir=out_dir, cell_type=cell_type,
-                overwrite=overwrite,
+                overwrite=overwrite, plan=plan,
                 config_preset=bt["config_preset"],
                 use_visual_features=bool(bt["use_visual_features"]),
                 max_search_radius=int(bt["max_search_radius"]),
@@ -1615,7 +1688,7 @@ class CellTypeTrackingPanel(QWidget):
             bp = params["bounded_propagation"]
             new_md = run_bounded_propagation_tracking(
                 metadata=metadata, output_dir=out_dir, cell_type=cell_type,
-                overwrite=overwrite,
+                overwrite=overwrite, plan=plan,
                 min_overlap_fraction=float(bp["min_overlap_fraction"]),
                 segment_size_min=int(bp.get("segment_size_min", 20)),
                 progress_cb=progress_cb,
@@ -1626,7 +1699,7 @@ class CellTypeTrackingPanel(QWidget):
             rp = params["reporter_propagation"]
             new_md = run_reporter_propagation_tracking(
                 metadata=metadata, output_dir=out_dir, cell_type=cell_type,
-                overwrite=overwrite,
+                overwrite=overwrite, plan=plan,
                 min_overlap_fraction=float(rp["min_overlap_fraction"]),
                 segment_size_min=int(rp["segment_size_min"]),
                 progress_cb=progress_cb,
@@ -1636,7 +1709,7 @@ class CellTypeTrackingPanel(QWidget):
             from behav3d.preprocessing.tracking.propagation_tracking import run_propagation_tracking
             new_md = run_propagation_tracking(
                 metadata=metadata, output_dir=out_dir, cell_type=cell_type,
-                overwrite=overwrite,
+                overwrite=overwrite, plan=plan,
                 progress_cb=progress_cb,
             )
 
@@ -1654,21 +1727,26 @@ class CellTypeTrackingPanel(QWidget):
             new_md.to_csv(csv_path, sep=",", index=False)
         return new_md
 
-    def _check_existing_tracking(self, cell_types: list) -> list:
-        """Return descriptions of existing tracking data that would be overwritten."""
-        warnings = []
+    def _plan_tracking_run(self):
+        """Ask what to do about existing tracking and return the run plan.
+
+        Returns ``None`` when the user cancels.  Without any existing output the
+        prompt is skipped and every sample is simply run.
+        """
+        from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
+
         md = self.metadata_loader.metadata
-        if md is None:
-            return warnings
-        out_dir = Path(self.metadata_loader.output_dir)
-        for ct in cell_types:
-            for _, sample in md.iterrows():
-                sn = sample.get("sample_name", "unknown")
-                zarr_path = out_dir / "images" / sn / f"{sn}_{ct}_tracked.zarr"
-                csv_dir = out_dir / "trackdata" / sn / ct
-                if zarr_path.exists() or (csv_dir.exists() and list(csv_dir.glob("*.csv"))):
-                    warnings.append(f"{ct} tracking data for {sn}")
-        return warnings
+        out_dir = self.metadata_loader.output_dir
+        items = (
+            scan_tracking_items(md, Path(out_dir), [self.cell_type])
+            if md is not None and out_dir else []
+        )
+        plan = RunPlan.skip_existing(items)
+        if plan_needs_prompt(items):
+            choice, plan = prompt_run_plan(self, "Existing Tracking Data", items)
+            if choice == "cancel":
+                return None
+        return plan
 
     def _on_run_clicked(self):
         """Run tracking for this cell type in the background.
@@ -1681,25 +1759,22 @@ class CellTypeTrackingPanel(QWidget):
         if self._bg.is_running():
             self.log("⚠️ A tracking run is already in progress for this panel.")
             return
+        if refuse_if_busy(self, "starting tracking", bg=self._bg):
+            return
 
         self._persist()
         method = self._get_method_key()
         self.log(f"Running {method.upper()} tracking for: {self.cell_type}")
 
-        # Check for existing data across all samples
-        existing = self._check_existing_tracking([self.cell_type])
-
-        if existing:
-            from behav3d.napari._overwrite_prompt import prompt_overwrite_single
-            choice = prompt_overwrite_single(
-                self,
-                "Overwrite Existing Tracking?",
-                existing,
-            )
-            if choice != "overwrite":
-                self.log(f"Tracking for {self.cell_type} cancelled.")
-                return
-        overwrite = True
+        # Per-sample status: complete samples can be kept, incomplete ones are
+        # resumed, missing ones are tracked.
+        plan = self._plan_tracking_run()
+        if plan is None:
+            self.log(f"Tracking for {self.cell_type} cancelled.")
+            return
+        if not plan.any_work():
+            self.log(f"Tracking for {self.cell_type}: everything is already complete — nothing to do.")
+            return
 
         # Snapshot all Qt widget values now — the worker must not touch them.
         params = self.collect_runtime_params()
@@ -1707,7 +1782,7 @@ class CellTypeTrackingPanel(QWidget):
 
         def _do_tracking(progress_cb=None):
             return self._run_tracking_for(
-                cell_type, overwrite=overwrite,
+                cell_type, overwrite=False, plan=plan,
                 params=params, progress_cb=progress_cb,
             )
 
@@ -1723,7 +1798,8 @@ class CellTypeTrackingPanel(QWidget):
             )
             if res == QMessageBox.Yes:
                 self._switch_to_viz_and_show_tracks()
-            # Emit tracking completion signal for metadata refresh
+            # Refresh metadata last: this rebuilds the tracking tabs and
+            # discards this panel, so nothing may touch ``self`` after it.
             if self.on_tracking_complete is not None:
                 self.on_tracking_complete()
 
@@ -1780,7 +1856,8 @@ class AllOrganoidsPropagationPanel(QWidget):
     """
 
     def __init__(self, organoid_types, metadata_loader, log_callback,
-                 viewer, toggle_callback, parent=None, tab_progress_row=None):
+                 viewer, toggle_callback, parent=None, tab_progress_row=None,
+                 on_tracking_complete_callback=None):
         super().__init__(parent)
         self.organoid_types = list(organoid_types)
         self.metadata_loader = metadata_loader
@@ -1788,6 +1865,7 @@ class AllOrganoidsPropagationPanel(QWidget):
         self.viewer = viewer
         self._toggle_callback = toggle_callback
         self.tab_progress_row = tab_progress_row
+        self.on_tracking_complete = on_tracking_complete_callback
         self._bg = BackgroundOperation(self)
         self._build_ui()
 
@@ -1801,7 +1879,7 @@ class AllOrganoidsPropagationPanel(QWidget):
         method_layout = QHBoxLayout()
         method_layout.setContentsMargins(6, 4, 6, 4)
         method_layout.addWidget(QLabel("Method:"))
-        method_label = QLabel("Fragmentation Tracking")
+        method_label = QLabel("Fragmentation Propagation")
         method_label.setStyleSheet("font-weight: bold;")
         method_layout.addWidget(method_label)
         method_layout.addStretch()
@@ -1810,7 +1888,7 @@ class AllOrganoidsPropagationPanel(QWidget):
 
         # ── Warning banner ────────────────────────────────────────────
         warning = QLabel(
-            "⚠️  Fragmentation Tracking will be applied to ALL organoid types simultaneously. "
+            "⚠️  Fragmentation Propagation will be applied to ALL organoid types simultaneously. "
             "To run individual tracking, uncheck 'Track all organoids together'"
         )
         warning.setWordWrap(True)
@@ -1821,20 +1899,20 @@ class AllOrganoidsPropagationPanel(QWidget):
         layout.addWidget(warning)
 
         # ── Propagation parameters group ──────────────────────────────
-        prop_group = QGroupBox("Fragmentation Tracking")
+        prop_group = QGroupBox("Fragmentation Propagation")
         prop_lay = QVBoxLayout(prop_group)
         prop_lay.setSpacing(6)
 
         self.check_all_together = QCheckBox("Track all organoids together")
         self.check_all_together.setChecked(True)
         self.check_all_together.setToolTip(
-            "When checked, all organoid types are tracked simultaneously using Fragmentation Tracking.\n"
+            "When checked, all organoid types are tracked simultaneously using Fragmentation Propagation.\n"
             "Uncheck to configure and run tracking independently per organoid type."
         )
         self.check_all_together.toggled.connect(self._on_toggled)
         prop_lay.addWidget(self.check_all_together)
 
-        notice = QLabel("No additional tunable parameters for Fragmentation Tracking.")
+        notice = QLabel("No additional tunable parameters for Fragmentation Propagation.")
         notice.setWordWrap(True)
         notice.setStyleSheet("color: #666; font-style: italic; padding: 2px 0;")
         prop_lay.addWidget(notice)
@@ -1862,6 +1940,8 @@ class AllOrganoidsPropagationPanel(QWidget):
         if self._bg.is_running():
             self.log("⚠️ All-organoids tracking is already in progress.")
             return
+        if refuse_if_busy(self, "starting tracking", bg=self._bg):
+            return
 
         md = self.metadata_loader.metadata
         out_dir = self.metadata_loader.output_dir
@@ -1870,31 +1950,22 @@ class AllOrganoidsPropagationPanel(QWidget):
             return
 
         out_path = Path(out_dir)
-        existing = []
-        for ct in self.organoid_types:
-            for _, sample in md.iterrows():
-                sn = sample.get("sample_name", "unknown")
-                zarr_path = out_path / "images" / sn / f"{sn}_{ct}_tracked.zarr"
-                csv_dir = out_path / "trackdata" / sn / ct
-                if zarr_path.exists() or (csv_dir.exists() and list(csv_dir.glob("*.csv"))):
-                    existing.append(f"{ct} tracking data for {sn}")
+        from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
 
-        overwrite = True
-        if existing:
-            from behav3d.napari._overwrite_prompt import prompt_overwrite_batch
-            choice = prompt_overwrite_batch(
-                self,
-                "Overwrite Existing Tracking?",
-                existing,
-            )
+        items = scan_all_organoids_items(md, out_path, self.organoid_types)
+        plan = RunPlan.skip_existing(items)
+        if plan_needs_prompt(items):
+            choice, plan = prompt_run_plan(self, "Existing Tracking Data", items)
             if choice == "cancel":
                 self.log("All-organoids tracking cancelled.")
                 return
-            overwrite = (choice == "overwrite")
+        if not plan.any_work():
+            self.log("All-organoids tracking: everything is already complete — nothing to do.")
+            return
 
         types_str = ", ".join(self.organoid_types)
         self.btn_run.setText("\u23f3 Running\u2026")
-        self.log(f"\u25b6 Fragmentation Tracking \u2014 all organoids: {types_str}\u2026")
+        self.log(f"\u25b6 Fragmentation Propagation \u2014 all organoids: {types_str}\u2026")
 
         out_dir_str = str(out_path.expanduser())
         first_ct = self.organoid_types[0]
@@ -1905,7 +1976,8 @@ class AllOrganoidsPropagationPanel(QWidget):
                 metadata=md,
                 output_dir=out_dir_str,
                 cell_type=first_ct,
-                overwrite=overwrite,
+                overwrite=False,
+                plan=plan,
                 all_organoids=True,
                 progress_cb=progress_cb,
             )
@@ -1929,6 +2001,10 @@ class AllOrganoidsPropagationPanel(QWidget):
             )
             if res == QMessageBox.Yes:
                 self._switch_to_viz()
+            # Refresh metadata last: this rebuilds the tracking tabs and
+            # discards this panel, so nothing may touch ``self`` after it.
+            if self.on_tracking_complete is not None:
+                self.on_tracking_complete()
 
         def _on_failed(err: str):
             self.log(f"\u274c Error during all-organoids tracking: {err}")
@@ -1972,7 +2048,8 @@ class MulticolorTrackingPanel(QWidget):
 
     def __init__(self, base_name: str, channel_types: list, category: str,
                  metadata_loader, log_callback=None, viewer=None, parent=None,
-                 tab_progress_row=None, switch_to_data_prep_edit_callback=None):
+                 tab_progress_row=None, on_tracking_complete_callback=None,
+                 switch_to_data_prep_edit_callback=None):
         super().__init__(parent)
         self.base_name = base_name
         self.channel_types = sorted(channel_types)
@@ -1981,6 +2058,7 @@ class MulticolorTrackingPanel(QWidget):
         self.log = log_callback or print
         self.viewer = viewer
         self.tab_progress_row = tab_progress_row
+        self.on_tracking_complete = on_tracking_complete_callback
 
         # Inner panel drives the shared parameter UI; keyed to first channel
         # so saved config is stored/loaded under that channel name.
@@ -1996,6 +2074,10 @@ class MulticolorTrackingPanel(QWidget):
             tab_progress_row=tab_progress_row,
             switch_to_data_prep_edit_callback=switch_to_data_prep_edit_callback,
         )
+        # A multicolor run executes on the inner panel's runner; alias it here
+        # so TrackingTab.request_tab_exit — which looks for ``_bg`` on each
+        # panel it holds — can see the run and block the tab switch.
+        self._bg = self._inner_panel._bg
 
         self._build_ui()
 
@@ -2036,6 +2118,35 @@ class MulticolorTrackingPanel(QWidget):
         # ── Shared parameters (inner CellTypeTrackingPanel) ───────────
         layout.addWidget(self._inner_panel)
 
+        # The inner panel ships its own single-channel Run button.  Running
+        # only the first channel would leave the remaining channels untracked
+        # and never produce the merged output, so the button is retargeted at
+        # the whole group (all channels + merge).
+        btn = self._inner_panel.btn_run
+        btn.setText(
+            f"▶  Run {self.base_name.capitalize()} Multicolor Tracking  "
+            f"({len(self.channel_types)} channels + merge)"
+        )
+        group_tip = (
+            "Tracks " + ", ".join(self.channel_types)
+            + f" with the shared parameters above, then merges them into {merged_name}."
+        )
+        btn.setToolTip(group_tip)
+        try:
+            btn.clicked.disconnect(self._inner_panel._on_run_clicked)
+        except (TypeError, RuntimeError):
+            pass
+        btn.clicked.connect(self._on_run_clicked)
+
+        # The inner panel resets the tooltip whenever the method changes;
+        # restore the group wording afterwards (it stays cleared for the
+        # not-yet-available methods, which disable the button).
+        def _restore_group_tooltip(_idx=None):
+            if btn.isEnabled():
+                btn.setToolTip(group_tip)
+        self._restore_group_tooltip = _restore_group_tooltip
+        self._inner_panel.combo_method.currentIndexChanged.connect(_restore_group_tooltip)
+
     # ------------------------------------------------------------------
     def _persist(self):
         """Persist shared parameters for all channels."""
@@ -2054,8 +2165,98 @@ class MulticolorTrackingPanel(QWidget):
             except Exception as e:
                 self.log(f"Warning: Could not save parameters: {e}")
 
+    def _on_run_clicked(self):
+        """Run tracking for every channel of this multicolor group + merge.
+
+        Mirrors :meth:`CellTypeTrackingPanel._on_run_clicked` but operates on
+        the whole channel family: the shared parameters are persisted for all
+        channels, existing outputs for every channel *and* the merged type are
+        checked in a single overwrite prompt, and the background worker runs
+        :meth:`run_tracking` (per-channel tracking followed by the merge).
+        """
+        inner = self._inner_panel
+        if inner._bg.is_running():
+            self.log("⚠️ A tracking run is already in progress for this panel.")
+            return
+        if refuse_if_busy(self, "starting tracking", bg=inner._bg):
+            return
+
+        self._persist()
+        merged_name = f"{self.base_name}_merged"
+        method = inner._get_method_key()
+        self.log(
+            f"Running {method.upper()} tracking for multicolor group "
+            f"{self.base_name}: {', '.join(self.channel_types)} → {merged_name}"
+        )
+
+        # One prompt covering every channel plus the merged output.
+        from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
+
+        md = self.metadata_loader.metadata
+        out_dir = self.metadata_loader.output_dir
+        items = (
+            scan_tracking_items(
+                md, Path(out_dir), list(self.channel_types) + [merged_name]
+            )
+            if md is not None and out_dir else []
+        )
+        plan = RunPlan.skip_existing(items)
+        if plan_needs_prompt(items):
+            choice, plan = prompt_run_plan(self, "Existing Tracking Data", items)
+            if choice == "cancel":
+                self.log(f"Multicolor tracking for {self.base_name} cancelled.")
+                return
+        if not plan.any_work():
+            self.log(
+                f"Multicolor tracking for {self.base_name}: everything is already "
+                "complete — nothing to do."
+            )
+            return
+
+        # Snapshot Qt widget values now — the worker must not touch them.
+        params = inner.collect_runtime_params()
+
+        def _do_tracking(progress_cb=None):
+            return self.run_tracking(
+                overwrite=False, plan=plan, params=params, progress_cb=progress_cb,
+            )
+
+        def _on_done(_new_md):
+            self.log(
+                f"✅ {self.base_name} multicolor tracking finished "
+                f"({len(self.channel_types)} channels merged → {merged_name})."
+            )
+            res = QMessageBox.question(
+                self, "Tracking Finished",
+                f"Multicolor tracking for {self.base_name} finished!\n\n"
+                f"Channels tracked: {', '.join(self.channel_types)}\n"
+                f"Merged output: {merged_name}\n\n"
+                "Do you want to switch to the Visualization Tab and see the tracks?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if res == QMessageBox.Yes:
+                inner._switch_to_viz_and_show_tracks()
+            # Refresh metadata last: this rebuilds the tracking tabs and
+            # discards this panel, so nothing may touch ``self`` after it.
+            if self.on_tracking_complete is not None:
+                self.on_tracking_complete()
+
+        def _on_failed(err: str):
+            self.log(f"Error during multicolor tracking: {err}")
+
+        inner._bg.run(
+            fn=_do_tracking,
+            desc=f"Tracking {self.base_name} (multicolor)…",
+            progress_row=self.tab_progress_row,
+            buttons=[inner.btn_run],
+            viewer=self.viewer,
+            on_done=_on_done,
+            on_failed=_on_failed,
+        )
+
+    # ------------------------------------------------------------------
     def run_tracking(self, overwrite: bool = False, params: dict = None,
-                     progress_cb=None):
+                     progress_cb=None, plan=None):
         """Track each channel then merge into ``<base_name>_merged``.
 
         ``params`` is an optional Qt-thread-safe snapshot from
@@ -2097,6 +2298,7 @@ class MulticolorTrackingPanel(QWidget):
             self._inner_panel._run_tracking_for(
                 ch,
                 overwrite=overwrite,
+                plan=plan,
                 params=params,
                 progress_cb=_make_channel_cb(i, ch),
             )
@@ -2115,6 +2317,12 @@ class MulticolorTrackingPanel(QWidget):
                 source_cell_types=self.channel_types,
                 combined_cell_type=merged_name,
                 overwrite=overwrite,
+                # The merged output depends on every channel, so it is rebuilt
+                # for any sample where a channel was (re)tracked.
+                plan=(
+                    merge_plan_for_multicolor(plan, self.channel_types, merged_name)
+                    if plan is not None else None
+                ),
             )
             self.metadata_loader.metadata = new_md
             csv_path = self.metadata_loader.behav3d_parameters.get("paths", {}).get("metadata_csv")
@@ -2225,6 +2433,10 @@ class TrackingTab(QWidget):
         self.cell_tabs.addTab(self._placeholder, "—")
 
     def _log(self, msg):
+        from behav3d.napari._background_runner import redispatch_to_gui_thread
+
+        if redispatch_to_gui_thread(self._log, msg):
+            return
         import datetime
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         self.log_box.append(f"[{ts}] {msg}")
@@ -2362,6 +2574,7 @@ class TrackingTab(QWidget):
                 viewer=self.viewer,
                 toggle_callback=self._on_all_organoids_toggled,
                 tab_progress_row=self.progress_row,
+                on_tracking_complete_callback=self.tracking_completed.emit,
             )
             self.cell_tabs.addTab(self._all_organoids_panel, "🟣 All Organoids")
         else:
@@ -2387,6 +2600,7 @@ class TrackingTab(QWidget):
                 metadata_loader=self.metadata_loader,
                 log_callback=self._log, viewer=self.viewer,
                 tab_progress_row=self.progress_row,
+                on_tracking_complete_callback=self.tracking_completed.emit,
                 switch_to_data_prep_edit_callback=self._switch_to_data_prep_edit,
             )
             self._multicolor_panels[base] = panel
@@ -2414,6 +2628,7 @@ class TrackingTab(QWidget):
                 metadata_loader=self.metadata_loader,
                 log_callback=self._log, viewer=self.viewer,
                 tab_progress_row=self.progress_row,
+                on_tracking_complete_callback=self.tracking_completed.emit,
                 switch_to_data_prep_edit_callback=self._switch_to_data_prep_edit,
             )
             self._multicolor_panels[base] = panel
@@ -2441,6 +2656,7 @@ class TrackingTab(QWidget):
                 metadata_loader=self.metadata_loader,
                 log_callback=self._log, viewer=self.viewer,
                 tab_progress_row=self.progress_row,
+                on_tracking_complete_callback=self.tracking_completed.emit,
                 switch_to_data_prep_edit_callback=self._switch_to_data_prep_edit,
             )
             self._multicolor_panels[base] = panel
@@ -2466,8 +2682,38 @@ class TrackingTab(QWidget):
         """User-triggered batch run — runs asynchronously."""
         self.run_batch_tracking(interactive=True, block=False)
 
+    def scan_plan_items(self):
+        """Per-(sample × cell type) status of everything a batch run produces.
+
+        Covers standalone cell types, the joint all-organoids groups and the
+        multicolor groups (channels plus merged output).
+        """
+        md = self.metadata_loader.metadata
+        out_dir = self.metadata_loader.output_dir
+        if md is None or not out_dir:
+            return []
+        out_dir = Path(out_dir)
+        items = scan_tracking_items(md, out_dir, list(self.panels.keys()))
+        if self._all_organoids_panel is not None and self._organoid_types:
+            items += scan_all_organoids_items(md, out_dir, self._organoid_types)
+        for base, mc_panel in self._multicolor_panels.items():
+            items += scan_tracking_items(
+                md, out_dir, list(mc_panel.channel_types) + [f"{base}_merged"]
+            )
+        return items
+
+    def plan_members(self):
+        """Group key -> member cell types (used to propagate changes through groups)."""
+        members = {
+            f"{base}_merged": list(mc_panel.channel_types)
+            for base, mc_panel in self._multicolor_panels.items()
+        }
+        if self._all_organoids_panel is not None and self._organoid_types:
+            members[ALL_ORGANOIDS] = list(self._organoid_types)
+        return members
+
     def run_batch_tracking(self, interactive=True, skip_existing=False, block=True,
-                           extra_callbacks=None):
+                           extra_callbacks=None, plan=None):
         """Sequential run for all configured cell type panels.
 
         When ``interactive=False``, skips overwrite and visualization
@@ -2492,6 +2738,12 @@ class TrackingTab(QWidget):
             fire_extra_callback(extra_callbacks, "on_failed", "already running")
             return
 
+        if interactive and refuse_if_busy(
+            self, "starting batch tracking", bg=self._bg,
+            extra_callbacks=extra_callbacks,
+        ):
+            return
+
         all_organoids_mode = self._all_organoids_panel is not None
         total = (
             len(self.panels)
@@ -2512,36 +2764,26 @@ class TrackingTab(QWidget):
         print(f"  Running batch tracking for {total} cell types", file=sys.stderr)
         print(f"{'='*60}", file=sys.stderr)
 
-        # Check for existing tracking data across all standalone cell types
-        all_cts = list(self.panels.keys())
-        existing = []
-        existing_cts = set()
+        # Per-(sample × cell type) status of every output this batch can produce:
+        # standalone cell types, the joint all-organoids groups and multicolor
+        # groups (channels + merged).
         out_dir = Path(self.metadata_loader.output_dir)
         md = self.metadata_loader.metadata
-        for ct in all_cts:
-            for _, sample in md.iterrows():
-                sn = sample.get("sample_name", "unknown")
-                zarr_path = out_dir / "images" / sn / f"{sn}_{ct}_tracked.zarr"
-                csv_dir = out_dir / "trackdata" / sn / ct
-                if zarr_path.exists() or (csv_dir.exists() and list(csv_dir.glob("*.csv"))):
-                    existing.append(f"{ct} tracking data for {sn}")
-                    existing_cts.add(ct)
+        items = self.scan_plan_items()
 
-        skip_existing_flag = skip_existing
-        overwrite = not skip_existing
-        if existing and interactive:
-            from behav3d.napari._overwrite_prompt import prompt_overwrite_batch
-            choice = prompt_overwrite_batch(
-                self,
-                "Overwrite Existing Tracking?",
-                existing,
+        if plan is None:
+            plan = (
+                RunPlan.skip_existing(items) if skip_existing
+                else RunPlan.overwrite_all(items)
             )
-            if choice == "cancel":
-                self._log("Batch tracking cancelled by user.")
-                fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
-                return
-            skip_existing_flag = (choice == "skip")
-            overwrite = not skip_existing_flag
+            if interactive:
+                from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
+                if plan_needs_prompt(items):
+                    choice, plan = prompt_run_plan(self, "Existing Tracking Data", items)
+                    if choice == "cancel":
+                        self._log("Batch tracking cancelled by user.")
+                        fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
+                        return
 
         # Persist all panel params before starting so config is saved even if an error occurs
         for ct, panel in self.panels.items():
@@ -2596,11 +2838,7 @@ class TrackingTab(QWidget):
             # ── All-organoids propagation (single step) ─────────────
             organoids_done = set()
             if all_organoids_mode and self._organoid_types:
-                org_cts_to_run = [
-                    ct for ct in self._organoid_types
-                    if not (skip_existing_flag and ct in existing_cts)
-                ]
-                if org_cts_to_run:
+                if plan.for_cell_type(ALL_ORGANOIDS).any_work():
                     self._log(f"--- Tracking ALL organoids together ({', '.join(self._organoid_types)}) ---")
                     print(f"\n▶ Tracking ALL organoids together...", file=sys.stderr)
 
@@ -2610,7 +2848,8 @@ class TrackingTab(QWidget):
                         metadata=self.metadata_loader.metadata,
                         output_dir=str(Path(self.metadata_loader.output_dir).expanduser()),
                         cell_type=first_org_ct,
-                        overwrite=overwrite,
+                        overwrite=False,
+                        plan=plan,
                         all_organoids=True,
                         progress_cb=_step_progress(
                             steps_done[0], "all organoids"
@@ -2625,7 +2864,7 @@ class TrackingTab(QWidget):
                     organoids_done = set(self._organoid_types)
                     steps_done[0] += len(self._organoid_types)
                 else:
-                    self._log("All organoid tracking data already exists — skipping.")
+                    self._log("All organoid tracking is already complete — skipping.")
                     organoids_done = set(self._organoid_types)
                     steps_done[0] += len(self._organoid_types)
 
@@ -2633,14 +2872,14 @@ class TrackingTab(QWidget):
             for i, (ct, panel) in enumerate(self.panels.items(), 1):
                 if ct in organoids_done:
                     continue
-                if skip_existing_flag and ct in existing_cts:
-                    self._log(f"--- Skipping {ct} (existing data) ---")
+                if not plan.for_cell_type(ct).any_work():
+                    self._log(f"--- Skipping {ct} (already complete) ---")
                     steps_done[0] += 1
                     continue
                 print(f"\n▶ [{steps_done[0] + 1}/{total}] Tracking {ct}...", file=sys.stderr)
                 self._log(f"--- [{steps_done[0] + 1}/{total}] Tracking {ct} ---")
                 panel._run_tracking_for(
-                    ct, overwrite=overwrite,
+                    ct, overwrite=False, plan=plan,
                     params=panel_params.get(ct),
                     progress_cb=_step_progress(steps_done[0], ct)
                     if progress_cb is not None else None,
@@ -2671,8 +2910,15 @@ class TrackingTab(QWidget):
                       file=sys.stderr)
                 self._log(f"--- [{steps_done[0] + 1}/{total}] Multicolor tracking: {base} "
                           f"({', '.join(mc_panel.channel_types)}) → {merged_name} ---")
+                if not any(
+                    plan.for_cell_type(c).any_work()
+                    for c in list(mc_panel.channel_types) + [merged_name]
+                ):
+                    self._log(f"--- Skipping multicolor {base} (already complete) ---")
+                    steps_done[0] += 1
+                    continue
                 mc_panel.run_tracking(
-                    overwrite=overwrite,
+                    overwrite=False, plan=plan,
                     params=mc_params.get(base),
                     progress_cb=_step_progress(steps_done[0], f"multicolor {base}")
                     if progress_cb is not None else None,
@@ -2699,11 +2945,13 @@ class TrackingTab(QWidget):
         if block:
             try:
                 result = _do_batch(progress_cb=None)
+                # Emit tracking completion signal for metadata refresh — must
+                # happen before the Visualization-tab prompt so that tab loads
+                # the refreshed metadata rather than its stale copy.
+                self.tracking_completed.emit()
                 if interactive:
                     self._prompt_switch_to_viz_after_batch()
                 fire_extra_callback(extra_callbacks, "on_done", result)
-                # Emit tracking completion signal for metadata refresh
-                self.tracking_completed.emit()
             except Exception as e:
                 traceback.print_exc()
                 self._log(f"\u274c Batch tracking error: {e}")
@@ -2711,11 +2959,12 @@ class TrackingTab(QWidget):
             return
 
         def _on_done(result):
+            # Emit tracking completion signal for metadata refresh before the
+            # Visualization-tab prompt (see the blocking branch above).
+            self.tracking_completed.emit()
             if interactive:
                 self._prompt_switch_to_viz_after_batch()
             fire_extra_callback(extra_callbacks, "on_done", result)
-            # Emit tracking completion signal for metadata refresh
-            self.tracking_completed.emit()
 
         def _on_failed(err: str):
             self._log(f"\u274c Batch tracking error: {err}")

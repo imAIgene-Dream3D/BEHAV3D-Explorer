@@ -10,7 +10,6 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.colors import to_hex
 import seaborn as sns
-import umap
 import scanpy as sc
 
 from sklearn.cluster import KMeans, HDBSCAN, AgglomerativeClustering
@@ -36,7 +35,7 @@ try:
 except Exception:
     dtw_ndim = None
 from sklearn.metrics import silhouette_score
-from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+from behav3d.core.state_columns import FULL_STATE_COL
 from behav3d.analysis.behavior.track.feature_dtw import run_tcell_analysis
 from behav3d.analysis.behavior.track.visualization.plots.feature_dtw import (
     plot_cluster_percentage_bars,
@@ -90,53 +89,6 @@ from behav3d.analysis.behavior.utils import (
 )
 
 
-def assign_track_clusters_to_full_dataset(
-    adata_full,
-    adata_tracks,
-    cluster_col="ClusterID",
-    output_col="track_behavioral_cluster",
-    id_cols=("sample_name", "TrackID"),
-    unassigned_label="unassigned",
-    inplace=False,
-):
-    """
-    Broadcast track-level cluster labels to all rows in the full per-timepoint dataset.
-    """
-    if adata_full is None or not hasattr(adata_full, "obs"):
-        raise ValueError("adata_full with .obs is required.")
-    if adata_tracks is None or not hasattr(adata_tracks, "obs"):
-        raise ValueError("adata_tracks with .obs is required.")
-
-    required_full = [str(c) for c in id_cols]
-    missing_full = [c for c in required_full if c not in adata_full.obs.columns]
-    if len(missing_full) > 0:
-        raise ValueError(f"adata_full.obs missing required id columns: {missing_full}")
-
-    required_tracks = [str(c) for c in id_cols] + [str(cluster_col)]
-    missing_tracks = [c for c in required_tracks if c not in adata_tracks.obs.columns]
-    if len(missing_tracks) > 0:
-        raise ValueError(
-            "adata_tracks.obs missing required columns for track-label assignment: "
-            f"{missing_tracks}"
-        )
-
-    adata_out = adata_full if bool(inplace) else adata_full.copy()
-    id_cols = [str(c) for c in id_cols]
-
-    track_labels = (
-        adata_tracks.obs[id_cols + [cluster_col]]
-        .copy()
-        .dropna(subset=[cluster_col])
-        .groupby(id_cols, observed=True, as_index=False)[cluster_col]
-        .first()
-    )
-
-    full_obs = adata_out.obs[id_cols].copy()
-    merged = full_obs.merge(track_labels, on=id_cols, how="left")
-    labels = pd.Series(merged[cluster_col], index=adata_out.obs.index).astype("string")
-    labels = labels.fillna(str(unassigned_label)).astype(str)
-    adata_out.obs[output_col] = pd.Categorical(labels)
-    return adata_out
 
 
 def build_track_cluster_frame_assignments(
@@ -341,6 +293,7 @@ def export_track_cluster_backprojection(
         enforce_time_coverage=False,
         n_workers=n_workers,
         verbose=verbose,
+        filename_suffix="track_clusters",
     )
     manifest["window_backprojection_rows"] = int(len(backproj_obs))
     manifest["window_backprojection_missing_tracks"] = int(missing_windows)
@@ -437,14 +390,27 @@ def prepare_track_cluster_trajectory_data(
     ``scale=`` transform, so they live in pixel/array-index space and any
     trajectory overlay must match that.
 
+    A TrackID does not always carry one label: with 'Divide long tracks' each
+    window of a track is clustered on its own, so a cell can go A -> B -> A.
+    napari's Tracks layer joins every row sharing an id, so grouping naively by
+    label and using the TrackID as id would draw a straight line from the end of
+    the first A window to the start of the second one, cutting across wherever
+    the cell really went. Each track is therefore split into runs that are
+    contiguous in the track's own timeline and share one label; each run gets a
+    synthetic id (``__run_id``). Where the label changes between adjacent
+    timepoints, the run is extended by the next run's first point, so the path
+    stays continuous and only changes colour. A missing frame (an unclustered
+    window, or a timepoint without a state / position) ends the run instead of
+    bridging it (see ``_build_label_run_trajectories``).
+
     Returns
     -------
     dict[str, np.ndarray]
         Cluster label -> array of shape ``[N, 4]`` or ``[N, 5]`` with columns
-        ``[TrackID, position_t, (position_z), position_y, position_x]``,
+        ``[__run_id, position_t, (position_z), position_y, position_x]``,
         ready for one ``viewer.add_tracks(...)`` call per class (see
         ``add_track_cluster_trajectory_layers``). Rows are sorted by
-        ``(TrackID, position_t)`` within each label.
+        ``(__run_id, position_t)`` within each label.
     """
     pos_triplet = None
     for candidate in _PIXEL_POSITION_TRIPLETS:
@@ -470,29 +436,49 @@ def prepare_track_cluster_trajectory_data(
     obs["__track"] = pd.to_numeric(obs[str(track_col)], errors="coerce")
     obs["__time"] = pd.to_numeric(obs[str(time_col)], errors="coerce")
     obs = obs.dropna(subset=["__track", "__time"] + list(pos_triplet)).copy()
+    obs["__track"] = obs["__track"].astype(np.int64)
+    obs["__time"] = obs["__time"].astype(np.int64)
+    from behav3d.analysis.behavior.state.visualization.backprojection import (
+        _build_label_run_trajectories,
+    )
 
     labels = backproj_obs[[track_col, time_col, output_col]].copy()
     labels["__track"] = pd.to_numeric(labels[track_col], errors="coerce")
     labels["__time"] = pd.to_numeric(labels[time_col], errors="coerce")
     labels = labels.dropna(subset=["__track", "__time"]).copy()
+    labels["__track"] = labels["__track"].astype(np.int64)
+    labels["__time"] = labels["__time"].astype(np.int64)
+    labels["__label"] = labels[output_col].astype(str)
 
-    merged = labels.merge(
+    merged = labels[["__track", "__time", "__label"]].merge(
         obs[["__track", "__time"] + list(pos_triplet)],
         on=["__track", "__time"],
         how="inner",
     )
-    if len(merged) == 0:
-        return {}
+    return _build_label_run_trajectories(merged, pos_triplet)
 
-    merged["__track"] = merged["__track"].astype(np.int64)
-    merged["__time"] = merged["__time"].astype(np.int64)
-    merged = merged.sort_values([output_col, "__track", "__time"], kind="mergesort")
 
-    trajectory_data = {}
-    cols = ["__track", "__time"] + list(pos_triplet)
-    for label, group in merged.groupby(output_col, observed=True, sort=False):
-        trajectory_data[str(label)] = group[cols].to_numpy(dtype=np.float64, copy=True)
-    return trajectory_data
+def _install_tracks_layer_colormaps_dict(layer, colormaps_dict):
+    """Set a napari ``Tracks`` layer's ``colormaps_dict``, working around a
+    napari 0.5.x bug where the ``@colormaps_dict.setter``-decorated method in
+    napari's own source is itself named ``colomaps_dict`` (typo, missing an
+    "r"), which makes the real property setter unreachable via the public
+    name on some installs. Mirrors ``behav3d.napari._track_colors.
+    _install_track_colormap`` (duplicated rather than imported: this module
+    is in ``analysis/`` and shouldn't depend on a napari-UI-layer module)."""
+    for attr in ("colormaps_dict", "colomaps_dict"):
+        try:
+            setattr(layer, attr, colormaps_dict)
+            return True
+        except AttributeError:
+            continue
+        except Exception:
+            return False
+    try:
+        layer._colormaps_dict = colormaps_dict
+        return True
+    except Exception:
+        return False
 
 
 def add_track_cluster_trajectory_layers(
@@ -503,17 +489,35 @@ def add_track_cluster_trajectory_layers(
     output_col="track_behavioral_cluster",
     tail_length=None,
     visible=True,
+    blending="additive",
+    single_layer=False,
 ):
     """
-    Add one napari ``Tracks`` layer per class in ``trajectory_data``, each
-    colored to exactly match that class's color in the accompanying
+    Add napari ``Tracks`` layer(s) for every class in ``trajectory_data``,
+    each colored to exactly match that class's color in the accompanying
     ``behavioral_state_class``/``state_class`` Labels layer.
 
-    Each layer uses a flat, 2-stop ``Colormap([hex, hex])`` rather than a
-    continuous colormap keyed by cluster code: with both stops the same
-    color, the rendered color is guaranteed correct regardless of how napari
-    normalizes the (otherwise unused) per-vertex feature value, including
-    when only a subset of classes is present in the current sample.
+    By default (``single_layer=False``), adds one layer per class, as
+    before: each uses a flat, 2-stop ``Colormap([hex, hex])`` rather than a
+    continuous colormap keyed by cluster code, so the rendered color is
+    guaranteed correct regardless of how napari normalizes the (otherwise
+    unused) per-vertex feature value, including when only a subset of
+    classes is present in the current sample.
+
+    With ``single_layer=True``, all classes are combined into **one** layer
+    instead, discretely colored via a per-vertex ``state_code`` feature and a
+    ``DirectLabelColormap`` installed into ``colormaps_dict`` (the same
+    mechanism ``behav3d.napari._track_colors.sync_tracks_colors_to_labels``
+    already uses to color a Tracks layer from a Labels layer's colormap, and
+    the same discrete-code pattern already used for the Labels layer itself
+    in ``_apply_state_code_colors_to_layer``). Each label's rows already
+    carry a globally unique ``__run_id`` (assigned once over the whole
+    source dataframe by ``_build_label_run_trajectories``, *before* it was
+    split into the per-label ``trajectory_data`` dict), so concatenating
+    labels together is safe and never bridges different labels' runs.
+    Trades away napari's per-class layer-visibility toggle for one layer
+    that's far less tedious to manage (one tail length, one blending mode,
+    one entry in the layer list) when there are many classes.
 
     Parameters
     ----------
@@ -524,21 +528,103 @@ def add_track_cluster_trajectory_layers(
     label_map : dict[str, str]
         ``{code: label}``, as built alongside ``code_colors``.
     tail_length : int, optional
-        Passed through to ``viewer.add_tracks``. Defaults to that class's own
-        time span (so the full window trajectory never fades out early).
+        Passed through to ``viewer.add_tracks``. Defaults to the relevant
+        time span (per class when ``single_layer=False``, combined when
+        ``single_layer=True``) so the full window trajectory never fades out
+        early.
+    blending : str
+        Passed through to ``viewer.add_tracks`` for every layer added.
+        Default ``"additive"`` matches napari's own ``Tracks`` layer default
+        (unchanged from before this parameter existed).
 
     Returns
     -------
     list
-        The added napari ``Tracks`` layers.
+        The added napari ``Tracks`` layer(s) — one per class, or a single
+        combined layer when ``single_layer=True``.
     """
-    from napari.utils.colormaps import AVAILABLE_COLORMAPS, Colormap
+    from napari.utils.colormaps import AVAILABLE_COLORMAPS, Colormap, DirectLabelColormap
 
     label_to_code = {str(v): str(k) for k, v in (label_map or {}).items()}
     code_colors = code_colors or {}
 
+    # Add/combine in the user's saved state/label order (mirrored by
+    # label_map's insertion order, see `_build_code_map`/`_apply_state_order`),
+    # not trajectory_data's incidental groupby(sort=False) order. Any label
+    # missing from label_map (e.g. not yet classified) is appended after.
+    ordered_labels = [label for label in label_to_code if label in trajectory_data]
+    ordered_labels += [label for label in trajectory_data if label not in label_to_code]
+
+    if single_layer:
+        data_parts = []
+        code_parts = []
+        for label in ordered_labels:
+            data = trajectory_data[label]
+            if data is None or data.shape[0] == 0:
+                continue
+            code = label_to_code.get(str(label))
+            try:
+                code_int = int(float(code)) if code is not None else -1
+            except (TypeError, ValueError):
+                code_int = -1
+            data_parts.append(data)
+            code_parts.append(np.full(data.shape[0], code_int, dtype=np.int32))
+
+        if len(data_parts) == 0:
+            return []
+
+        combined_data = np.concatenate(data_parts, axis=0)
+        combined_codes = np.concatenate(code_parts, axis=0)
+
+        # napari's Tracks layer indexes per-vertex arrays by row and does numpy
+        # arithmetic on the coordinates on every opacity / tail / head change
+        # (thumbnail + recolour). A NaN/inf coordinate row poisons those, so drop
+        # such rows -- and the matching codes -- up front.
+        finite_rows = np.isfinite(combined_data).all(axis=1)
+        if not bool(finite_rows.all()):
+            combined_data = combined_data[finite_rows]
+            combined_codes = combined_codes[finite_rows]
+        if combined_data.shape[0] == 0:
+            return []
+
+        layer_tail_length = tail_length
+        if layer_tail_length is None:
+            time_col_values = combined_data[:, 1]
+            layer_tail_length = int(time_col_values.max() - time_col_values.min()) + 1
+        layer_tail_length = max(1, int(layer_tail_length))
+
+        color_dict = {None: "transparent", 0: "transparent"}
+        for code_str, color in code_colors.items():
+            try:
+                code_int = int(float(code_str))
+            except (TypeError, ValueError):
+                continue
+            if code_int != 0:
+                color_dict[code_int] = str(color)
+        direct_colormap = DirectLabelColormap(color_dict=color_dict)
+
+        # ``color_by`` is deliberately NOT passed to the constructor: Tracks
+        # assigns it before ``self.data`` (which resets ``features`` to {}), so
+        # napari warns "Previous color_by key ... not present in features" -- a
+        # notification bubble on every creation. Set it afterwards, once the
+        # feature exists and its colormap is installed.
+        layer = viewer.add_tracks(
+            combined_data,
+            name=f"{output_col} trajectory",
+            tail_length=layer_tail_length,
+            features={"state_code": combined_codes},
+            blending=blending,
+            visible=bool(visible),
+        )
+        _install_tracks_layer_colormaps_dict(
+            layer, {**getattr(layer, "colormaps_dict", {}), "state_code": direct_colormap}
+        )
+        layer.color_by = "state_code"  # triggers _recolor_tracks() with the new colormap
+        return [layer]
+
     added_layers = []
-    for label, data in trajectory_data.items():
+    for label in ordered_labels:
+        data = trajectory_data[label]
         if data is None or data.shape[0] == 0:
             continue
         code = label_to_code.get(str(label))
@@ -564,6 +650,7 @@ def add_track_cluster_trajectory_layers(
             name=f"{output_col} trajectory: {label}",
             tail_length=layer_tail_length,
             colormap=cmap_name,
+            blending=blending,
             visible=bool(visible),
         )
         added_layers.append(layer)
@@ -573,7 +660,7 @@ def add_track_cluster_trajectory_layers(
 def build_track_state_sequence_lookup(
     adata_full,
     sample_name=None,
-    state_col="behavioral_state",
+    state_col="full_behavioral_state",
     sample_col="sample_name",
     track_col="TrackID",
     time_col="position_t",
@@ -609,7 +696,7 @@ def build_track_state_sequence_lookup(
 def render_track_statebar_image(
     track_df,
     state_color_map,
-    state_col="behavioral_state",
+    state_col="full_behavioral_state",
     time_col="position_t",
     cursor_time=None,
     title=None,
@@ -753,7 +840,7 @@ def _add_track_statebar_click_dock(
     adata_tracks=None,
     track_layer_name="filtered TrackID",
     clickable_layer_name="behavioral_state_class",
-    state_col="behavioral_state",
+    state_col="full_behavioral_state",
     sample_col="sample_name",
     track_col="TrackID",
     time_col="position_t",
@@ -863,6 +950,7 @@ def _add_track_statebar_click_dock(
         "info_label": info_label,
         "image_label": image_label,
         "callback": _on_click,
+        "clickable_layer": clickable_layer,
         "state_values": state_values,
     }
     return widget
@@ -876,7 +964,7 @@ def show_track_cluster_backprojection(
     adata_full,
     adata_tracks=None,
     cluster_col="ClusterID",
-    state_col="behavioral_state",
+    state_col="full_behavioral_state",
     state_img_path=None,
     output_col="track_behavioral_cluster",
     show_trajectories=False,
@@ -903,6 +991,7 @@ def show_track_cluster_backprojection(
         refresh_if_stale=False,
         run=False,
         verbose=verbose,
+        filename_suffix="track_clusters",
     )
     if bool(show_trajectories) and adata_tracks is not None:
         from behav3d.analysis.behavior.state.visualization.backprojection import (

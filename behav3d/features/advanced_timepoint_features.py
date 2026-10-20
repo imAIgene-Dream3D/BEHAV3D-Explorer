@@ -20,6 +20,10 @@ Key concepts:
 - Observation window: N timepoints after EACH contact timepoint to measure death signal change
 - Active killing: Death signal increase (t -> t + window) exceeds either a multiplier of the
   organoid's own signal at t, or a fixed absolute increase, depending on the selected mode
+- Persistent death signal: by default, each target's death signal is read as a running
+  maximum over its own track (segmentation dropout can otherwise make the raw signal dip
+  before recovering, instead of monotonically rising as the cell actually dies); can be
+  disabled via persistent_death_signal=False
 
 -------------------------------------
 --------------- OUTPUT --------------
@@ -58,18 +62,22 @@ from behav3d.io.images import load_image
 ZERO_BASELINE_EPSILON = 0.1
 
 
+_CONTACT_COLUMN_CHOICES = ("contact", "contact_on_distance")
+
+
 def identify_contact_events_global(
     df_immune_tracks: pd.DataFrame,
     target_cell_types: List[str],
-    min_contact_duration: int = 1
+    min_contact_duration: int = 1,
+    contact_column: str = "contact"
 ) -> pd.DataFrame:
     """
     Identify distinct contact events between immune cells and ANY target cell.
-    
+
     A contact event is defined as a continuous period where an immune cell
     is in contact with ANY target cell type. The total duration is measured
     across the entire continuous contact period.
-    
+
     Parameters
     ----------
     df_immune_tracks : pd.DataFrame
@@ -78,26 +86,41 @@ def identify_contact_events_global(
         List of target cell types to check for contact (e.g., ['organoid', 'organoid2'])
     min_contact_duration : int
         Minimum number of timepoints for a valid contact event
-        
+    contact_column : str
+        Which per-target contact flag gates a contact event: ``"contact"`` (default) uses
+        ``{target_type}_contact``, the pixel/mask-adjacency flag (segments within ~1.73 px),
+        computed independently of any distance setting. ``"contact_on_distance"`` uses
+        ``{target_type}_contact_on_distance``, which respects the real (µm) Contact Threshold
+        configured in Feature Extraction. Either way, target attribution
+        (``touching_{target_type}s``, used to fill ``target_track_ids`` below) is always
+        distance-based, so choosing ``"contact_on_distance"`` makes the event gate consistent
+        with which targets get attributed to it; choosing ``"contact"`` reproduces this
+        function's original, pixel-gated behavior.
+
     Returns
     -------
     df_contact_events : pd.DataFrame
         DataFrame with one row per contact event (contact with any target)
     """
+    if contact_column not in _CONTACT_COLUMN_CHOICES:
+        raise ValueError(
+            f"contact_column must be one of {_CONTACT_COLUMN_CHOICES}, got {contact_column!r}"
+        )
+
     df = df_immune_tracks.copy()
     df = df.sort_values(by=["sample_name", "TrackID", "position_t"])
-    
+
     # Create a global contact column (True if contacting ANY target type)
-    contact_columns = [f"{target_type}_contact" for target_type in target_cell_types]
+    contact_columns = [f"{target_type}_{contact_column}" for target_type in target_cell_types]
     existing_contact_cols = [c for c in contact_columns if c in df.columns]
-    
+
     if not existing_contact_cols:
-        print(f"  Warning: No contact columns found for target types: {target_cell_types}")
+        print(f"  Warning: No '{contact_column}' columns found for target types: {target_cell_types}")
         return pd.DataFrame()
-    
+
     # Combine all contact columns
     df["_any_contact"] = df[existing_contact_cols].any(axis=1)
-    
+
     # Combine all touching columns
     touching_columns = [f"touching_{target_type}s" for target_type in target_cell_types]
     existing_touching_cols = [c for c in touching_columns if c in df.columns]
@@ -199,6 +222,7 @@ def analyze_active_killing_per_timepoint(
     death_signal_column: str = "mean_dead_dye",
     killing_threshold_multiplier: float = 1.5,
     absolute_killing_threshold: Optional[float] = None,
+    persistent_death_signal: bool = True,
 ) -> pd.DataFrame:
     """
     Calculate active killing status for each contact timepoint using a
@@ -244,6 +268,16 @@ def analyze_active_killing_per_timepoint(
     absolute_killing_threshold : float, optional
         If provided, use this flat value as the killing threshold instead of the
         multiplier-based threshold. Useful when organoids start with near-zero signal.
+    persistent_death_signal : bool
+        If True (default), each target's death_signal_column values are first
+        converted to a running (cumulative) maximum over its own timeline,
+        sorted by position_t, before death_at_start/death_at_end are read from
+        them. This absorbs segmentation instability (a dead-mask segment
+        flickering in/out of frame) that would otherwise make the raw signal
+        dip and rise instead of monotonically increasing as a cell dies, e.g.
+        raw values 0, 10, 20, 200, 150, 100, 200, 200, 250 are read as
+        0, 10, 20, 200, 200, 200, 200, 200, 250. Set False to use the raw,
+        possibly non-monotonic signal as-is.
 
     Returns
     -------
@@ -287,9 +321,17 @@ def analyze_active_killing_per_timepoint(
             if target_rows.empty:
                 continue
 
+            death_arr = target_rows[death_signal_column].to_numpy(dtype=float)
+            if persistent_death_signal:
+                # Running max, NaN-safe: a segmentation dropout that transiently
+                # lowers the raw signal (e.g. 0,10,20,200,150,100,200,200,250)
+                # can't be misread as the target "un-dying"
+                # (0,10,20,200,200,200,200,200,250).
+                death_arr = np.fmax.accumulate(death_arr)
+
             target_lookups[target_id_int] = (
                 target_rows["position_t"].to_numpy(),
-                target_rows[death_signal_column].to_numpy(),
+                death_arr,
             )
 
         for t in contact_timepoints:
@@ -450,6 +492,8 @@ def run_active_killing_analysis(
     min_contact_duration: int = 1,
     killing_threshold_multiplier: float = 1.5,
     absolute_killing_threshold: Optional[float] = None,
+    contact_column: str = "contact",
+    persistent_death_signal: bool = True,
     save_results: bool = True,
     output_subfolder: str = ""
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict]:
@@ -494,6 +538,17 @@ def run_active_killing_analysis(
         If provided, use this flat value as the killing threshold instead of the
         multiplier-based threshold. Useful when organoids start with near-zero signal.
         Default is None (uses killing_threshold_multiplier instead).
+    contact_column : str
+        Which per-target contact flag gates a contact event -- ``"contact"`` (default,
+        pixel/mask adjacency) or ``"contact_on_distance"`` (respects the µm Contact Threshold
+        configured in Feature Extraction). See ``identify_contact_events_global`` for details.
+    persistent_death_signal : bool
+        If True (default), read each target's death_signal_column as a running
+        (cumulative) maximum over its own track timeline before computing the
+        death-signal increase, so a segmentation dropout that transiently lowers
+        the raw signal (e.g. 0,10,20,200,150,100,200,200,250 read as
+        0,10,20,200,200,200,200,200,250) cannot be misread as the target
+        "un-dying". Set False to use the raw signal.
     save_results : bool
         Whether to save results to CSV files
         
@@ -520,13 +575,15 @@ def run_active_killing_analysis(
             raise ValueError("No organoid types detected in metadata. Please specify target_cell_types.")
     
     print(f"Target cell types: {target_cell_types}")
+    print(f"Contact column: {contact_column}")
     print(f"Observation window: {observation_window} timepoints")
     print(f"Min contact duration: {min_contact_duration} timepoints")
     if absolute_killing_threshold is not None:
         print(f"Killing threshold mode: ABSOLUTE ({absolute_killing_threshold})")
     else:
         print(f"Killing threshold mode: MULTIPLIER ({killing_threshold_multiplier}x organoid's own signal at each timepoint)")
-    
+    print(f"Persistent death signal (running max): {'ON' if persistent_death_signal else 'OFF'}")
+
     # Load immune cell tracks. Active Killing always reads the RAW (unfiltered)
     # combined_track_features.csv, never the filtered one -- Filtering, in turn,
     # reads Active Killing's advanced-features CSV as its own input (see
@@ -587,7 +644,8 @@ def run_active_killing_analysis(
     df_contact_events = identify_contact_events_global(
         df_immune_tracks=df_immune_tracks,
         target_cell_types=target_cell_types,
-        min_contact_duration=min_contact_duration
+        min_contact_duration=min_contact_duration,
+        contact_column=contact_column
     )
     
     if df_contact_events.empty:
@@ -613,6 +671,7 @@ def run_active_killing_analysis(
         return pd.DataFrame(), pd.DataFrame(), {
             "total_contacts": 0,
             "total_active_killing": 0,
+            "persistent_death_signal": persistent_death_signal,
             "filtering_needs_rerun_for": sorted(stale_filtered_cell_types),
         }
     
@@ -630,8 +689,9 @@ def run_active_killing_analysis(
         death_signal_column=death_signal_column,
         killing_threshold_multiplier=killing_threshold_multiplier,
         absolute_killing_threshold=absolute_killing_threshold,
+        persistent_death_signal=persistent_death_signal,
     )
-    
+
     # Calculate summary statistics
     print(f"{get_current_time()} - Calculating summary statistics...")
     
@@ -659,9 +719,11 @@ def run_active_killing_analysis(
         "overall_killing_rate": df_killing_per_tp["is_active_killing"].mean() if not df_killing_per_tp.empty else 0.0,
         "observation_window": observation_window,
         "min_contact_duration": min_contact_duration,
+        "contact_column": contact_column,
         "killing_threshold_multiplier": killing_threshold_multiplier,
         "absolute_killing_threshold": absolute_killing_threshold,
         "threshold_mode": "absolute" if absolute_killing_threshold is not None else "multiplier",
+        "persistent_death_signal": persistent_death_signal,
         "targeted_organoids_tracked": True,
         "filtering_needs_rerun_for": sorted(stale_filtered_cell_types),
     }
@@ -834,8 +896,20 @@ def calculate_killing_dynamics_over_time(
         return pd.DataFrame()
     
     if time_bins is None:
-        max_t = df_immune_tracks["position_t"].max()
-        time_bins = [0, max_t // 4, max_t // 2, 3 * max_t // 4, max_t + 1]
+        # Quartiles of the OBSERVED span, not of [0, max]: the analysis may be
+        # restricted to a timepoint window that does not start at 0, in which
+        # case fixed 0-based edges leave the leading bins empty (and pd.cut is
+        # left-open, so the very first timepoint would fall outside them).
+        min_t = int(df_immune_tracks["position_t"].min())
+        max_t = int(df_immune_tracks["position_t"].max())
+        span = max(max_t - min_t, 1)
+        time_bins = [
+            min_t - 1,
+            min_t + span // 4,
+            min_t + span // 2,
+            min_t + 3 * span // 4,
+            max_t + 1,
+        ]
     
     df = df_killing_per_timepoint.copy()
     df["time_bin"] = pd.cut(

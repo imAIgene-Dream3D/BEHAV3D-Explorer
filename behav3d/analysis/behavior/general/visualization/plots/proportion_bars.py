@@ -35,7 +35,8 @@ def _make_group_label(df, group_cols):
     parts = []
     for col in group_cols:
         if col in df.columns:
-            parts.append(df[col].fillna("(unknown)").astype(str))
+            # astype(object) first: fillna on a Categorical raises for a value outside its categories.
+            parts.append(df[col].astype(object).fillna("(unknown)").astype(str))
         else:
             parts.append(pd.Series(["(unknown)"] * len(df), index=df.index))
     if len(parts) == 0:
@@ -74,6 +75,31 @@ def legend_layout(n_labels, *, max_ncol=8, row_height_in=0.22, base_margin_in):
     nrows = max(1, int(np.ceil(n_labels / ncol))) if n_labels > 0 else 1
     margin_in = float(base_margin_in) + float(row_height_in) * (nrows - 1)
     return ncol, nrows, margin_in
+
+
+def legend_max_ncol_for_width(labels, fig_w_in, *, fontsize=7, handle_in=0.45, max_ncol=8):
+    """Largest legend column count whose widest row still fits inside `fig_w_in` — pass as
+    `legend_layout(..., max_ncol=...)` so long labels (e.g. sample names) wrap into more rows
+    instead of running off both sides of the page."""
+    labels = [str(x) for x in list(labels or [])]
+    if not labels:
+        return 1
+    # ~0.6 em per character is a conservative average for the default sans-serif font.
+    longest_in = max(len(s) for s in labels) * float(fontsize) * 0.6 / 72.0
+    usable_in = max(float(fig_w_in) - 0.4, 1.0)
+    return max(1, min(int(max_ncol), int(usable_in // (longest_in + handle_in))))
+
+
+def wrap_title_to_width(text, fig_w_in, *, fontsize=10):
+    """Wrap each line of a (suptitle) string so it fits inside `fig_w_in` at `fontsize` (bold).
+    Returns ``(wrapped_text, n_lines)``."""
+    import textwrap
+
+    max_chars = max(20, int((float(fig_w_in) - 0.3) * 72.0 / (float(fontsize) * 0.62)))
+    lines = []
+    for line in str(text).split("\n"):
+        lines.extend(textwrap.wrap(line, width=max_chars, break_long_words=False) or [""])
+    return "\n".join(lines), len(lines)
 
 
 def draw_thin_stacked_proportion_barh(
@@ -150,6 +176,17 @@ def compute_class_by_stack_proportions(df, *, class_col, stack_col, class_order,
     """Crosstab of `class_col` x `stack_col`, normalized so each class's row sums to 1."""
     props = pd.crosstab(df[class_col], df[stack_col], normalize="index")
     return props.reindex(index=list(class_order), columns=list(stack_order), fill_value=0.0)
+
+
+def compute_class_by_group_mean_sem(df, *, class_col, group_col, value_col, class_order, group_order):
+    """Pivot per-(class, group) mean/SEM/n of `value_col` — purely descriptive aggregation (no
+    significance test), feeding `draw_grouped_value_barh`. Returns `(mean_df, sem_df, n_df)`,
+    each indexed by `class_order` with `group_order` columns."""
+    grouped = df.groupby([class_col, group_col], observed=True)[value_col]
+    mean_df = grouped.mean().unstack(group_col).reindex(index=list(class_order), columns=list(group_order))
+    sem_df = grouped.apply(_sem).unstack(group_col).reindex(index=list(class_order), columns=list(group_order))
+    n_df = grouped.count().unstack(group_col).reindex(index=list(class_order), columns=list(group_order)).fillna(0).astype(int)
+    return mean_df, sem_df, n_df
 
 
 def _chunk_list(lst, n):
@@ -247,11 +284,56 @@ def welch_ttest_stars(p_value):
     return "n.s."
 
 
-def add_significance_legend(fig, *, y=0.005, fontsize=7):
+DIFF_BAR_LEGEND_TEXT = (
+    "Bar = difference in mean cluster share (right level − left level)\n"
+    "whisker = 95% CI of the difference; Welch's t-test"
+)
+# Inches reserved below a diff-bar grid for the last row's tick labels + x-axis label plus the
+# three footnote lines.
+_DIFF_GRID_BOTTOM_IN = 1.05
+
+
+def add_significance_legend(fig, *, y=0.005, fontsize=7, extra_text=None):
     """Draw the shared star-notation legend ('n.s.'/'*'/'**'/'***'/'****' thresholds) centered
     near the bottom of `fig`, so every panel using `welch_ttest_stars` stays self-explanatory
-    even when nothing is significant."""
-    fig.text(0.5, y, SIGNIFICANCE_LEGEND_TEXT, ha="center", va="bottom", fontsize=fontsize)
+    even when nothing is significant. ``extra_text`` is added as a second line (e.g. what the
+    bars/whiskers mean)."""
+    text = SIGNIFICANCE_LEGEND_TEXT if not extra_text else f"{SIGNIFICANCE_LEGEND_TEXT}\n{extra_text}"
+    fig.text(0.5, y, text, ha="center", va="bottom", fontsize=fontsize, linespacing=1.4)
+
+
+def _diff_grid_title_margin_in(title, fig_w_in):
+    """``(wrapped_title, top_margin_in)`` for a diff-bar grid page's suptitle."""
+    wrapped, n_lines = wrap_title_to_width(title, fig_w_in, fontsize=11)
+    # + room for the first row's two-line "<a> vs <b> / n=..." panel title.
+    return wrapped, 0.65 + 0.22 * n_lines
+
+
+# Vertical gap between grid rows: the x-axis label below one panel plus the two-line
+# "<a> vs <b> / n=..." title above the next.
+_DIFF_GRID_ROW_GAP_IN = 0.95
+
+
+def _diff_panel_h(n_classes):
+    return max(0.8 + 0.35 * n_classes, 2.2)
+
+
+def _diff_grid_figure(fig_w, heights_in, top_in, *, ncols, width_ratios=None):
+    """Figure + GridSpec with every margin and row gap fixed in inches. ``tight_layout`` can't be
+    used here (the axis-off header cells make it bail out silently, leaving matplotlib's
+    fractional defaults — which on a tall page become several inches of blank space)."""
+    gaps_in = _DIFF_GRID_ROW_GAP_IN * (len(heights_in) - 1)
+    fig_h = top_in + sum(heights_in) + gaps_in + _DIFF_GRID_BOTTOM_IN
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    avg_h = sum(heights_in) / len(heights_in)
+    outer = GridSpec(
+        nrows=len(heights_in), ncols=ncols, figure=fig,
+        width_ratios=width_ratios, height_ratios=heights_in,
+        hspace=_DIFF_GRID_ROW_GAP_IN / avg_h, wspace=0.25,
+        top=1.0 - top_in / fig_h, bottom=_DIFF_GRID_BOTTOM_IN / fig_h,
+        left=min(0.6 / fig_w, 0.2), right=1.0 - min(0.2 / fig_w, 0.1),
+    )
+    return fig, outer, fig_h
 
 
 def _welch_diff_rows(class_order, vals_a_panel, vals_b_panel):
@@ -457,6 +539,67 @@ def draw_diff_barh(
     ax.set_xlabel("Cluster size difference (%)", fontsize=8)
 
 
+def draw_grouped_value_barh(
+    ax,
+    class_order,
+    mean_df,
+    sem_df,
+    group_order,
+    colors,
+    *,
+    xlabel="Mean value",
+    bar_height_frac=0.8,
+    label_fontsize=8,
+):
+    """Horizontal grouped bar chart: one row per class (cluster/state), one bar per
+    `group_order` entry (e.g. a selected contact column) within that row, bar length = mean,
+    error whisker = SEM. Purely descriptive — no significance test, no stars, no p-values
+    (same "descriptive only" convention as `plot_condition_time_series_grid`).
+
+    `mean_df`/`sem_df` : DataFrames indexed by `class_order`, columns `group_order` (as
+    returned by `compute_class_by_group_mean_sem`). class_order[0] is drawn at the top.
+    """
+    class_order = [str(c) for c in list(class_order)]
+    group_order = [str(g) for g in list(group_order)]
+    n_groups = max(1, len(group_order))
+    rows = list(reversed(class_order))
+    y_base = np.arange(len(rows), dtype=float)
+    bar_h = float(bar_height_frac) / n_groups
+
+    xmax = 0.0
+    for group_name in group_order:
+        means = mean_df[group_name].reindex(rows).to_numpy(dtype=float) if group_name in mean_df.columns else np.full(len(rows), np.nan)
+        sems = sem_df[group_name].reindex(rows).to_numpy(dtype=float) if group_name in sem_df.columns else np.full(len(rows), np.nan)
+        combined = means + np.nan_to_num(sems, nan=0.0)
+        if np.isfinite(combined).any():
+            xmax = max(xmax, float(np.nanmax(combined)))
+
+    for i, group_name in enumerate(group_order):
+        means = mean_df[group_name].reindex(rows).to_numpy(dtype=float) if group_name in mean_df.columns else np.full(len(rows), np.nan)
+        sems = sem_df[group_name].reindex(rows).to_numpy(dtype=float) if group_name in sem_df.columns else np.full(len(rows), np.nan)
+        offset = (i - (n_groups - 1) / 2.0) * bar_h
+        y = y_base + offset
+        color = colors.get(group_name, "#808080")
+        means_plot = np.nan_to_num(means, nan=0.0)
+        ax.barh(y, means_plot, height=bar_h * 0.92, color=color, edgecolor="none", linewidth=0.0, label=group_name)
+        valid = np.isfinite(means) & np.isfinite(sems)
+        if valid.any():
+            ax.errorbar(
+                means_plot[valid], y[valid], xerr=sems[valid], fmt="none",
+                ecolor="black", elinewidth=1.0, capsize=2, zorder=3,
+            )
+
+    ax.set_yticks(y_base)
+    ax.set_yticklabels(rows, fontsize=label_fontsize)
+    ax.set_ylim(-0.6, len(rows) - 0.4)
+    ax.set_xlim(0.0, xmax * 1.15 if xmax > 0 else 1.0)
+    ax.set_xlabel(xlabel, fontsize=8)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_visible(False)
+    ax.tick_params(axis="y", length=0)
+
+
 def _diff_df_has_data(diff_df):
     """True if at least one class has a finite diff (i.e. both condition sides had samples)."""
     return diff_df is not None and bool(np.isfinite(diff_df["diff"].to_numpy(dtype=float)).any())
@@ -512,8 +655,10 @@ def plot_condition_diff_grid(
     pair_keys = list(next(iter(diff_stats_by_group.values()), {}).keys())
     n_pairs = max(len(pair_keys), 1)
     panel_w = float(figsize_per_panel[0])
-    panel_h = figsize_per_panel[1] if figsize_per_panel[1] is not None else max(1.2 + 0.45 * len(class_order), 3.0)
+    panel_h = figsize_per_panel[1] if figsize_per_panel[1] is not None else _diff_panel_h(len(class_order))
     header_h = 0.35
+    # A lone "(all)" group has no column header to show — don't reserve an empty row for it.
+    n_header = 0 if group_labels == ["(all)"] else 1
 
     global_xmax = 0.0
     for pairs in diff_stats_by_group.values():
@@ -528,27 +673,25 @@ def plot_condition_diff_grid(
     with (nullcontext(pdf_pages) if pdf_pages is not None else PdfPages(out_pdf)) as pdf:
         for page_groups in _chunk_list(group_labels, max(1, int(max_cols_per_page))):
             n_cols = len(page_groups)
-            fig = plt.figure(figsize=(panel_w * n_cols, header_h + panel_h * n_pairs))
-            outer = GridSpec(
-                nrows=1 + n_pairs, ncols=n_cols, figure=fig,
-                width_ratios=[panel_w] * n_cols,
-                height_ratios=[header_h] + [1.0] * n_pairs,
-                hspace=0.75, wspace=0.25,
+            fig_w = max(panel_w * n_cols, 4.0)
+            page_title, top_in = _diff_grid_title_margin_in(title, fig_w)
+            fig, outer, fig_h = _diff_grid_figure(
+                fig_w, [header_h] * n_header + [panel_h] * n_pairs, top_in,
+                ncols=n_cols, width_ratios=[panel_w] * n_cols,
             )
 
-            for c, group_label in enumerate(page_groups):
+            for c, group_label in enumerate(page_groups if n_header else []):
                 ax_ch = fig.add_subplot(outer[0, c])
                 ax_ch.axis("off")
-                if group_label != "(all)":
-                    ax_ch.text(
-                        0.5, 0.5, str(group_label),
-                        ha="center", va="center", fontsize=label_fontsize,
-                        fontweight="bold", transform=ax_ch.transAxes,
-                    )
+                ax_ch.text(
+                    0.5, 0.5, str(group_label),
+                    ha="center", va="center", fontsize=label_fontsize,
+                    fontweight="bold", transform=ax_ch.transAxes,
+                )
 
             for r, (level_a, level_b) in enumerate(pair_keys):
                 for c, group_label in enumerate(page_groups):
-                    ax = fig.add_subplot(outer[r + 1, c])
+                    ax = fig.add_subplot(outer[r + n_header, c])
                     diff_df = diff_stats_by_group[group_label].get((level_a, level_b))
                     header = _wrap_row_label(f"{level_a}  vs  {level_b}")
                     n_label = _panel_n_label(diff_df)
@@ -572,9 +715,8 @@ def plot_condition_diff_grid(
                     df_long["level_b"] = level_b
                     long_rows.append(df_long)
 
-            fig.suptitle(title, fontsize=11, fontweight="bold", y=0.99)
-            add_significance_legend(fig)
-            fig.tight_layout(rect=(0.0, 0.02, 1.0, 0.95))
+            fig.suptitle(page_title, fontsize=11, fontweight="bold", y=1.0 - 0.12 / fig_h, va="top")
+            add_significance_legend(fig, y=0.06 / fig_h, extra_text=DIFF_BAR_LEGEND_TEXT)
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
@@ -669,12 +811,14 @@ def plot_condition_diff_grid_2d(
                         global_xmax = max(global_xmax, _diff_plus_se_max(d))
             global_xmax = max(global_xmax * 1.35, 5.0)
 
-            fig = plt.figure(figsize=(header_w + panel_w * ncols_data, header_h + panel_h * nrows_data))
-            outer = GridSpec(
-                nrows=1 + nrows_data, ncols=1 + ncols_data, figure=fig,
-                width_ratios=[header_w] + [panel_w] * ncols_data,
-                height_ratios=[header_h] + [panel_h] * nrows_data,
-                hspace=0.75, wspace=0.25,
+            page_title = title if level_a is not None else f"{title} — no {condition_col} comparison available"
+            if page_key != "(all)":
+                page_title += f" ({', '.join(extra_group_cols)}: {page_key})"
+            fig_w = header_w + panel_w * ncols_data
+            page_title, top_in = _diff_grid_title_margin_in(page_title, fig_w)
+            fig, outer, fig_h = _diff_grid_figure(
+                fig_w, [header_h] + [panel_h] * nrows_data, top_in,
+                ncols=1 + ncols_data, width_ratios=[header_w] + [panel_w] * ncols_data,
             )
             fig.add_subplot(outer[0, 0]).axis("off")
 
@@ -728,12 +872,8 @@ def plot_condition_diff_grid_2d(
                     df_long["level_b"] = level_b
                     long_rows.append(df_long)
 
-            page_title = title if level_a is not None else f"{title} — no {condition_col} comparison available"
-            if page_key != "(all)":
-                page_title += f" ({', '.join(extra_group_cols)}: {page_key})"
-            fig.suptitle(page_title, fontsize=11, fontweight="bold", y=0.99)
-            add_significance_legend(fig)
-            fig.tight_layout(rect=(0.0, 0.02, 1.0, 0.95))
+            fig.suptitle(page_title, fontsize=11, fontweight="bold", y=1.0 - 0.12 / fig_h, va="top")
+            add_significance_legend(fig, y=0.06 / fig_h, extra_text=DIFF_BAR_LEGEND_TEXT)
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
@@ -743,4 +883,193 @@ def plot_condition_diff_grid_2d(
         csv_path = str(out_csv)
         merged.to_csv(csv_path, index=False)
 
+    return {"pdf_path": out_pdf, "csv_path": csv_path}
+
+
+def _sem(x):
+    """Standard error of the mean; 0.0 (not NaN) when n <= 1, so a condition backed by a
+    single unit at a timepoint still draws a visible mean line with a zero-width ribbon."""
+    x = pd.to_numeric(pd.Series(x), errors="coerce").dropna()
+    n = len(x)
+    return float(x.std(ddof=1) / np.sqrt(n)) if n > 1 else 0.0
+
+
+def build_condition_time_series_raw_table(
+    long_by_unit_df,
+    unit_metadata,
+    *,
+    condition_col,
+    group_cols=None,
+    condition_groups=None,
+    unit_col_name="comparison_unit",
+    time_col="time",
+    minutes_per_frame=None,
+):
+    """Join a per-unit long-form time-series table (as built by
+    ``state_composition._build_relative_plot_data_table(relative_by_unit,
+    label_col_name=unit_col_name)`` — columns ``[unit_col_name, time_col, "state_id",
+    "relative_proportion"]``) with per-unit metadata (indexed by the same unit key,
+    columns including ``condition_col`` + ``group_cols``) into the raw, per-unit,
+    per-timepoint, per-class table exported for the user's own external statistics —
+    no significance test is computed for this view by design.
+
+    If ``condition_groups`` is given, raw ``condition_col`` levels are relabeled to
+    their merged group first (same semantics as ``compute_condition_diff_stats_pairwise``),
+    dropping rows whose level isn't in the mapping — so a user who pools levels for the
+    pairwise diff-bar section sees the same pooled grouping here too.
+
+    Adds a ``time_minutes`` column (``time_col`` * ``minutes_per_frame``) only when
+    ``minutes_per_frame`` is given — its absence signals no time metadata was available.
+    """
+    meta_cols = [condition_col] + [c for c in (group_cols or []) if c in unit_metadata.columns]
+    out = long_by_unit_df.merge(
+        unit_metadata[meta_cols], left_on=unit_col_name, right_index=True, how="left",
+    )
+    if condition_groups:
+        out[condition_col] = out[condition_col].astype(str).map(condition_groups)
+        out = out.dropna(subset=[condition_col])
+    if minutes_per_frame is not None:
+        out["time_minutes"] = out[time_col] * float(minutes_per_frame)
+    return out
+
+
+def compute_condition_time_series_stats(
+    raw_long_df,
+    *,
+    class_order,
+    condition_col,
+    group_cols=None,
+    time_col="time",
+    class_col="state_id",
+    value_col="relative_proportion",
+):
+    """Aggregate raw per-unit rows (from ``build_condition_time_series_raw_table``) to
+    mean/SEM/n per (group label, condition_col level, time_col value, class_col level) —
+    purely descriptive, no significance test (see module design note on
+    ``plot_condition_time_series_grid``).
+
+    Returns columns: group, condition, class, time, time_unit, mean, sem, n. ``mean``/
+    ``sem`` stay in [0, 1] fraction units (same scale as ``relative_proportion``) — a
+    percent conversion is display-only, done by ``plot_condition_time_series_grid``.
+    """
+    class_order = [str(c) for c in list(class_order)]
+    df = raw_long_df.copy()
+    df[class_col] = df[class_col].astype(str)
+    df = df[df[class_col].isin(class_order)]
+    valid_group_cols = [c for c in (group_cols or []) if c in df.columns]
+    df["group"] = _make_group_label(df, valid_group_cols)
+    df["condition"] = df[condition_col].astype(str)
+
+    if len(df) == 0:
+        return pd.DataFrame(columns=["group", "condition", "class", "time", "time_unit", "mean", "sem", "n"])
+
+    g = (
+        df.groupby(["group", "condition", class_col, time_col], observed=True)[value_col]
+        .agg(mean="mean", sem=_sem, n="count")
+        .reset_index()
+        .rename(columns={class_col: "class", time_col: "time"})
+    )
+    g["time_unit"] = "minutes" if time_col == "time_minutes" else "frame"
+    return g.sort_values(["group", "class", "condition", "time"]).reset_index(drop=True)
+
+
+def plot_condition_time_series_grid(
+    stats_df,
+    *,
+    class_order,
+    condition_levels,
+    colors,
+    title,
+    out_pdf,
+    out_csv=None,
+    time_label="Time (frame)",
+    ncols=2,
+    max_rows_per_page=3,
+    figsize_per_panel=(3.6, 2.6),
+    pdf_pages=None,
+    suppress_single_unit_sem=True,
+):
+    """Multi-page PDF: one page (or page-set) per ``stats_df['group']`` section, each a
+    facet grid — one panel per ``class_order`` entry, ``ncols`` columns x up to
+    ``max_rows_per_page`` rows per page (paginated via ``_chunk_list`` when
+    ``class_order`` doesn't fit) — with one mean-%-of-cells line + shaded SE ribbon per
+    ``condition_levels`` entry (any count >= 1, not just 2). Purely descriptive: no
+    significance test is computed here — the caller is expected to have written the
+    underlying per-unit values to a CSV so a significance test can be run externally.
+
+    ``colors`` maps ``condition_levels`` -> color (a distinct palette from cluster/class
+    colors, since those are used elsewhere for bars/stacks).
+    ``suppress_single_unit_sem=True`` hides a condition's ribbon at a timepoint backed by
+    n<=1 units (its SEM is legitimately 0.0 there, not informative) while still drawing
+    its mean line.
+
+    If ``pdf_pages`` (an open ``PdfPages``) is given, pages are appended to it instead of
+    a standalone ``out_pdf`` file being created — same passthrough as
+    ``plot_condition_diff_grid``.
+    """
+    class_order = [str(c) for c in list(class_order)]
+    condition_levels = [str(c) for c in list(condition_levels)]
+    out_pdf = str(out_pdf)
+    panels_per_page = max(1, int(ncols) * int(max_rows_per_page))
+
+    with (nullcontext(pdf_pages) if pdf_pages is not None else PdfPages(out_pdf)) as pdf:
+        if len(class_order) == 0:
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.text(
+                0.5, 0.5, "No classes available for over-time dynamics.",
+                ha="center", va="center", wrap=True,
+            )
+            ax.axis("off")
+            pdf.savefig(fig)
+            plt.close(fig)
+        else:
+            groups = sorted(stats_df["group"].dropna().unique().tolist()) or ["(all)"]
+            for group_label in groups:
+                group_df = stats_df[stats_df["group"] == group_label]
+                for page_classes in _chunk_list(class_order, panels_per_page):
+                    n_panels = len(page_classes)
+                    n_rows = max(1, int(np.ceil(n_panels / ncols)))
+                    fig, axes = plt.subplots(
+                        n_rows, ncols,
+                        figsize=(figsize_per_panel[0] * ncols, figsize_per_panel[1] * n_rows),
+                        squeeze=False,
+                    )
+                    axes_flat = axes.flatten()
+                    for ax, class_name in zip(axes_flat, page_classes):
+                        panel_df = group_df[group_df["class"] == class_name]
+                        for level in condition_levels:
+                            s = panel_df[panel_df["condition"] == level].sort_values("time")
+                            if len(s) == 0:
+                                continue
+                            color = colors.get(level, "#808080")
+                            ax.plot(s["time"], s["mean"] * 100.0, label=level, color=color, linewidth=1.8)
+                            has_ribbon = (not suppress_single_unit_sem) or bool((s["n"] > 1).any())
+                            if has_ribbon:
+                                ax.fill_between(
+                                    s["time"], (s["mean"] - s["sem"]) * 100.0, (s["mean"] + s["sem"]) * 100.0,
+                                    color=color, alpha=0.2, linewidth=0,
+                                )
+                        ax.set_title(class_name, fontsize=9, fontweight="bold")
+                        ax.set_xlabel(time_label, fontsize=8)
+                        ax.set_ylabel("% of cells", fontsize=8)
+                        ax.tick_params(labelsize=7)
+                        ax.spines["top"].set_visible(False)
+                        ax.spines["right"].set_visible(False)
+                    for ax in axes_flat[n_panels:]:
+                        ax.axis("off")
+
+                    handles = [Patch(facecolor=colors.get(lvl, "#808080"), label=lvl) for lvl in condition_levels]
+                    legend_ncol, _, legend_margin_in = legend_layout(len(handles), base_margin_in=0.6)
+                    fig.legend(handles=handles, loc="lower center", ncol=legend_ncol, frameon=False, fontsize=8)
+                    page_title = title if group_label == "(all)" else f"{title} — {group_label}"
+                    fig.suptitle(page_title, fontsize=11, fontweight="bold", y=0.99)
+                    fig_h = figsize_per_panel[1] * n_rows
+                    fig.tight_layout(rect=(0.02, legend_margin_in / fig_h, 0.98, 0.93))
+                    pdf.savefig(fig, bbox_inches="tight")
+                    plt.close(fig)
+
+    csv_path = None
+    if out_csv is not None:
+        csv_path = str(out_csv)
+        stats_df.to_csv(csv_path, index=False)
     return {"pdf_path": out_pdf, "csv_path": csv_path}

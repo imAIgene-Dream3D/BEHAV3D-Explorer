@@ -10,7 +10,6 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.colors import to_hex
 import seaborn as sns
-import umap
 import scanpy as sc
 
 from sklearn.cluster import KMeans, HDBSCAN, AgglomerativeClustering
@@ -36,7 +35,8 @@ try:
 except Exception:
     dtw_ndim = None
 from sklearn.metrics import silhouette_score
-from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+from behav3d.core.h5_access import write_adata
+from behav3d.core.state_columns import FULL_STATE_COL, resolve_full_state_col
 from behav3d.analysis.behavior.track.feature_dtw import run_tcell_analysis
 from behav3d.analysis.behavior.track.visualization.plots.feature_dtw import (
     plot_cluster_percentage_bars,
@@ -60,7 +60,13 @@ from behav3d.features.state_descriptive_features import (
     log1p_transform_columns,
 )
 from behav3d.analysis.filtering import filter_and_truncate_tracks_anndata
-from behav3d.analysis.behavior.track.utils import _filter_tracks_for_dtaidistance
+from behav3d.analysis.behavior.track.utils import (
+    get_track_classifier_filename,
+    _filter_tracks_for_dtaidistance,
+    _peek_track_outfolder,
+    _resolve_track_paths,
+)
+from behav3d.core.utils import rmtree_ignore_missing
 from behav3d.analysis.behavior.general.leiden import (
     run_pca, 
     run_leiden_clustering
@@ -90,8 +96,8 @@ from behav3d.analysis.behavior.track.visualization.plots.reports import (
     _apply_best_pdf_orientation,
 )
 from behav3d.analysis.behavior.utils import (
+    _categorical_natural_sorted,
     _mixed_label_sort_key,
-    _resolve_output_dir,
     _save_adata_obs_csv,
     _sanitize_filename_token,
     _to_numpy_2d,
@@ -100,48 +106,19 @@ from behav3d.analysis.behavior.utils import (
     _vsave,
     _vstart,
 )
-def _resolve_track_paths(output_dir, cell_type, output_subdir_name="behavioral_state_trajectories"):
-    """Resolve canonical track-classification paths under analysis/<cell_type>/."""
-    if cell_type is None or len(str(cell_type).strip()) == 0:
-        raise ValueError("cell_type is required.")
-
-    root = _resolve_output_dir(output_dir)
-    analysis_outdir = root / "analysis" / str(cell_type)
-    analysis_outdir.mkdir(parents=True, exist_ok=True)
-
-    state_outdir = analysis_outdir / "behavioral_states"
-    state_outdir.mkdir(parents=True, exist_ok=True)
-
-    outfolder = analysis_outdir / str(output_subdir_name)
-    outfolder.mkdir(parents=True, exist_ok=True)
-
-    return {
-        "output_dir": root,
-        "analysis_outdir": analysis_outdir,
-        "state_outdir": state_outdir,
-        "outfolder": outfolder,
-    }
-
-
 def get_track_trajectories_filename(cell_type):
     cell_token = _sanitize_filename_token(cell_type, fallback="cell")
     return f"BEHAV3D_{cell_token}_behavioral_trajectories.h5ad"
 
 
-def get_track_classifier_filename(cell_type):
-    cell_token = _sanitize_filename_token(cell_type, fallback="cell")
-    return f"track_classification_random_forest_{cell_token}.pkl"
-
-
-def _resolve_track_classifier_path(output_dir, cell_type, output_subdir_name="behavioral_state_trajectories"):
+def _resolve_track_classifier_path(output_dir, cell_type, output_subdir_name=None):
     paths = _resolve_track_paths(
         output_dir=output_dir,
         cell_type=cell_type,
         output_subdir_name=output_subdir_name,
     )
-    classifier_dir = paths["outfolder"] / "classification"
-    classifier_dir.mkdir(parents=True, exist_ok=True)
-    return classifier_dir / get_track_classifier_filename(cell_type)
+    paths.classification_outfolder.mkdir(parents=True, exist_ok=True)
+    return paths.classification_outfolder / get_track_classifier_filename(cell_type)
 
 
 def train_random_forest_classifier(
@@ -498,7 +475,7 @@ def _drop_disabled_bout_features(
 def _build_track_feature_adata(
     adata_full,
     *,
-    state_col="full_behavioral_cluster",
+    state_col="full_behavioral_state",
     groupby_cols=("sample_name", "TrackID"),
     time_col="position_t",
     behavioral_trajectory_size=100,
@@ -634,7 +611,7 @@ def train_track_classifier(
     classifier_min_samples_split=2,
     classifier_max_features="sqrt",
     classifier_class_weight=None,
-    output_subdir_name="behavioral_state_trajectories",
+    output_subdir_name=None,
     save_classifier=True,
     classifier_path=None,
     random_state=123,
@@ -650,7 +627,7 @@ def train_track_classifier(
         cell_type=cell_type,
         output_subdir_name=output_subdir_name,
     )
-    outfolder = resolved_paths["outfolder"]
+    outfolder = resolved_paths.outfolder
     model_adata_path = outfolder / get_track_trajectories_filename(cell_type)
     if model_adata is None:
         if not model_adata_path.exists():
@@ -837,7 +814,7 @@ def train_track_classifier(
     training_state_col = str(
         feat_cfg.get(
             "state_col",
-            filter_cfg.get("state_col", "full_behavioral_cluster"),
+            filter_cfg.get("state_col", "full_behavioral_state"),
         )
     )
     preprocessing_spec = _build_track_preprocessing_spec(
@@ -927,7 +904,7 @@ def apply_track_classifier_to_subtracks(
     state_col=None,
     output_col="ClusterID",
     confidence_col=None,
-    output_subdir_name="behavioral_state_trajectories",
+    output_subdir_name=None,
     plot_exemplars=False,
     plot_exemplar_backprojection_videos=False,
     plot_exemplar_backprojection_pdfs=False,
@@ -971,8 +948,8 @@ def apply_track_classifier_to_subtracks(
         cell_type=cell_type,
         output_subdir_name=output_subdir_name,
     )
-    outfolder = resolved_paths["outfolder"]
-    state_folder = resolved_paths["state_outdir"]
+    outfolder = resolved_paths.outfolder
+    state_folder = resolved_paths.state_outdir
 
     if classifier_artifact_or_path is None:
         classifier_artifact_or_path = _resolve_track_classifier_path(
@@ -1196,7 +1173,7 @@ def apply_track_classifier_to_subtracks(
             f"backprojection_videos={bool(plot_exemplar_backprojection_videos)} | "
             f"backprojection_pdfs={bool(plot_exemplar_backprojection_pdfs)}",
         )
-        exemplar_root = outfolder / "example_tracks"
+        exemplar_root = resolved_paths.example_tracks_outfolder
         exemplar_root.mkdir(parents=True, exist_ok=True)
 
         adata_plot = filter_and_truncate_tracks_anndata(
@@ -1268,7 +1245,7 @@ def apply_track_classifier_to_subtracks(
                 require_pixel_for_video=True,
             )
             exemplar_render_config["coordinate_enrichment_video"] = dict(coord_enrichment_video)
-            exemplar_backprojection_outdir = exemplar_root
+            exemplar_backprojection_outdir = exemplar_root / "backprojection"
             exemplar_backprojection_outdir.mkdir(parents=True, exist_ok=True)
             prep_t0 = time.perf_counter()
             exemplar_backprojection_prepared = _prepare_exemplar_backprojection_data(
@@ -1470,7 +1447,7 @@ def apply_track_classifier_to_subtracks(
     )
     if bool(save_outputs) and output_path is not None:
         save_started = time.perf_counter()
-        adata_tracks.write(output_path, compression="gzip")
+        write_adata(adata_tracks, output_path, compression="gzip")
         _save_adata_obs_csv(adata_tracks, output_path)
         _vsave(verbose, "trajectory-apply", "classifier-applied trajectory model", output_path)
         _vdone(verbose, "trajectory-apply", "save classifier outputs", save_started)
@@ -1527,13 +1504,106 @@ def rename_track_clusters(
     return adata
 
 
+def _save_bouts_exemplar_overview_pdf(
+    adata_filt,
+    adata_tracks,
+    *,
+    out_dir,
+    n_per_cluster,
+    state_col,
+    cluster_key,
+    seed=0,
+    plot_dpi=300,
+):
+    """Build and save the exemplar-overview grid PDF (one panel per cluster).
+
+    This is the exact plotting/saving logic `run_state_based_analysis` runs
+    right after clustering. Factored out so later regenerate flows (e.g. after
+    renaming clusters in the napari UI) can reuse it instead of a separate,
+    reload-based path that has previously drifted from this one.
+
+    `out_dir` is the `clustering/` outfolder, not `example_tracks/` - the
+    overview grid is a clustering-diagnostic artifact (like the diagnostics
+    PDF and medoid overview), not one of the per-track exemplar outputs.
+    """
+    fig_exemplar, _, chosen_exemplars = plot_exemplar_tracks_by_cluster(
+        adata_filt,
+        adata_tracks,
+        n_per_cluster=n_per_cluster,
+        state_key=state_col,
+        cluster_key=cluster_key,
+        seed=seed,
+    )
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    exemplar_path = out_dir / "example_tracks_overview.pdf"
+    with PdfPages(exemplar_path) as pdf:
+        _apply_best_pdf_orientation(fig_exemplar, default_orientation="landscape")
+        pdf.savefig(fig_exemplar, dpi=int(plot_dpi), bbox_inches="tight")
+    return fig_exemplar, chosen_exemplars, exemplar_path
+
+
+def save_bouts_exemplar_overview(
+    adata_tracks,
+    output_dir,
+    cell_type,
+    *,
+    outfolder=None,
+    n_per_cluster=None,
+    seed=0,
+    verbose=True,
+):
+    """Regenerate just the exemplar-overview grid PDF for a saved bouts model.
+
+    Reloads and re-filters the source behavioral-states h5ad from the
+    filtering/splitting metadata `run_state_based_analysis` stamped onto
+    `adata_tracks.uns["dtai_trajectory_clustering"]`, then renders through the
+    same `_save_bouts_exemplar_overview_pdf` helper used right after
+    clustering - so a regenerate (e.g. after renaming clusters) looks the same
+    as the original, just with whatever cluster labels are currently on
+    `adata_tracks.obs`. The selected tracks are not guaranteed to match the
+    original run's random sample.
+    """
+    # Deferred import: state_dtw.py imports from this module at load time, so
+    # importing it back at module level here would create a circular import.
+    from behav3d.analysis.behavior.track.state_dtw import (
+        _dtai_meta,
+        _load_filtered_state_adata_for_model,
+    )
+
+    paths = _resolve_track_paths(output_dir, cell_type)
+    meta = _dtai_meta(adata_tracks)
+    cluster_key = str(meta.get("cluster_key", "ClusterID"))
+    state_col = str(meta.get("state_col", FULL_STATE_COL))
+    if n_per_cluster is None:
+        n_per_cluster = int(meta.get("n_per_cluster", 10))
+
+    adata_filt = _load_filtered_state_adata_for_model(
+        adata_tracks, output_dir, cell_type, verbose=verbose,
+    )
+
+    dest = Path(outfolder) if outfolder is not None else paths.clustering_outfolder
+    _, _, exemplar_path = _save_bouts_exemplar_overview_pdf(
+        adata_filt,
+        adata_tracks,
+        out_dir=dest,
+        n_per_cluster=int(n_per_cluster),
+        state_col=state_col,
+        cluster_key=cluster_key,
+        seed=seed,
+        plot_dpi=300,
+    )
+    _vsave(verbose, "trajectory-clustering", "exemplar overview", exemplar_path)
+    return str(exemplar_path)
+
+
 def run_state_based_analysis(
     output_dir,
     cell_type="tcell",
     
     # Input
     adata_full_path=None,  # if None, will look under output_dir/analysis/<cell_type>/behavioral_states/BEHAV3D_<cell_type>_behavioral_states.h5ad
-    state_col="full_behavioral_cluster",
+    state_col="full_behavioral_state",
     groupby_cols=("sample_name", "TrackID"),
     time_col="position_t",
 
@@ -1600,7 +1670,7 @@ def run_state_based_analysis(
     # Exemplar track plotting
     plot_exemplars=False,
     n_per_cluster=10,
-    exemplar_state_keys=("full_behavioral_cluster",),
+    exemplar_state_keys=("full_behavioral_state",),
     plot_exemplar_backprojection_videos=False,
     plot_exemplar_backprojection_pdfs=False,
     exemplar_video_fps=6,
@@ -1621,7 +1691,8 @@ def run_state_based_analysis(
 
     # Saving
     save_outputs=True,
-    output_subdir_name="behavioral_state_trajectories",
+    output_subdir_name=None,
+    clear_outputs=True,
     relabel_mapping=None,
     relabel_keep_unmapped=True,
 
@@ -1631,15 +1702,23 @@ def run_state_based_analysis(
     run_started = _vstart(verbose, "trajectory-clustering", "run trajectory clustering")
     start_time = time.time()
 
+    if bool(clear_outputs):
+        existing_outfolder = _peek_track_outfolder(
+            output_dir, cell_type, output_subdir_name=output_subdir_name
+        )
+        if existing_outfolder.exists():
+            rmtree_ignore_missing(existing_outfolder)
+            _vinfo(verbose, "trajectory-clustering", f"cleared previous outputs: {existing_outfolder}")
+
     resolved_paths = _resolve_track_paths(
         output_dir=output_dir,
         cell_type=cell_type,
         output_subdir_name=output_subdir_name,
     )
-    outfolder = resolved_paths["outfolder"]
-    clustering_outfolder = outfolder / "clustering"
-    exemplar_root = outfolder / "example_tracks"
-    state_folder = resolved_paths["state_outdir"]
+    outfolder = resolved_paths.outfolder
+    clustering_outfolder = resolved_paths.clustering_outfolder
+    exemplar_root = resolved_paths.example_tracks_outfolder
+    state_folder = resolved_paths.state_outdir
     
     if adata_full_path is None:
         adata_full_path = Path(state_folder, f"BEHAV3D_{cell_type}_behavioral_states.h5ad")
@@ -1677,6 +1756,10 @@ def run_state_based_analysis(
         window_col=str(trajectory_window_col),
     )
     _vdone(verbose, "trajectory-clustering", "filter + truncate trajectories", filter_started)
+    if str(state_col) == FULL_STATE_COL and FULL_STATE_COL not in adata_filt.obs.columns:
+        legacy_state_col = resolve_full_state_col(adata_filt)
+        if legacy_state_col is not None:
+            state_col = legacy_state_col
     if str(state_col) not in adata_filt.obs.columns:
         raise ValueError(
             f"State-feature clustering requires state_col='{state_col}' in adata.obs, "
@@ -1901,7 +1984,7 @@ def run_state_based_analysis(
             raw_labels = AgglomerativeClustering(**kwargs).fit_predict(X_cluster)
         ranked = pd.Series(raw_labels).astype(str).value_counts().sort_values(ascending=False)
         label_map = {old: str(i + 1) for i, old in enumerate(ranked.index.tolist())}
-        adata_state_features.obs[cluster_key] = pd.Categorical(
+        adata_state_features.obs[cluster_key] = _categorical_natural_sorted(
             pd.Series(raw_labels, index=adata_state_features.obs.index).astype(str).map(label_map).astype(str)
         )
         _vdone(verbose, "trajectory-clustering", "Agglomerative clustering", clustering_started)
@@ -1936,13 +2019,19 @@ def run_state_based_analysis(
     )
     _vdone(verbose, "trajectory-clustering", "UMAP embedding", umap_started)
 
+    # Hoisted above both blocks below so it's available to the exemplar-overview
+    # block too, not just diagnostics - both are clustering-diagnostic artifacts
+    # from this run and belong together in clustering/raw.
+    raw_clustering_outfolder = clustering_outfolder / "raw"
+    if bool(autosave_plots) and (bool(plot_results) or bool(plot_exemplars)):
+        raw_clustering_outfolder.mkdir(parents=True, exist_ok=True)
+
     if plot_results:
         if bool(autosave_plots):
             diagnostics_started = time.perf_counter()
-            clustering_outfolder.mkdir(parents=True, exist_ok=True)
             report_paths = generate_track_clustering_report_pdfs(
                 adata_tracks=adata_state_features,
-                outfolder=clustering_outfolder,
+                outfolder=raw_clustering_outfolder,
                 cluster_key=cluster_key,
                 heatmap_figsize=heatmap_figsize,
                 matrixplot_figsize=matrixplot_figsize,
@@ -1971,10 +2060,25 @@ def run_state_based_analysis(
     # generic downstream consumers (rename dialog, diagnostics refresh, cluster
     # key resolution) can recognize this model type without bouts-specific
     # branching, the same way "original_behav3d_feature_dtw" already does
-    # (see feature_dtw.py).
+    # (see feature_dtw.py). Also stamp the same filtering/splitting metadata the
+    # DTW pipeline stamps (state_dtw.py) so _load_filtered_state_adata_for_model
+    # can reconstruct the exact same filtered + windowed tracks on a later
+    # diagnostics-only regenerate, instead of silently reverting to defaults
+    # (unsplit tracks, size=100) that don't match what was actually clustered.
     adata_state_features.uns["dtai_trajectory_clustering"] = {
         "method": "bouts_feature_clustering",
         "cluster_key": str(cluster_key),
+        "groupby_cols": [str(c) for c in list(groupby_cols)],
+        "time_col": str(time_col),
+        "state_col": str(state_col),
+        "behavioral_trajectory_size": int(behavioral_trajectory_size),
+        "min_track_length": int(behavioral_trajectory_size),
+        "trajectory_trim_mode": trim_mode,
+        "split_long_tracks": bool(split_long_tracks),
+        "trajectory_window_col": str(trajectory_window_col),
+        "n_per_cluster": int(n_per_cluster),
+        "random_state": int(random_state),
+        "source_adata_full_path": str(adata_full_path),
     }
 
     exemplar_statebar_track_pdf_by_cluster = {}
@@ -2014,28 +2118,22 @@ def run_state_based_analysis(
     }
 
     # --------- Exemplar tracks by cluster ----------
+    fig_exemplar = None
     if plot_exemplars:
+        exemplar_root.mkdir(parents=True, exist_ok=True)
         exemplar_started = time.perf_counter()
-        # This assumes plot_exemplar_tracks_by_cluster signature: (adata_tracks, adata_clusters, n_per_cluster, state_key)
-        # where `adata_clusters` contains the clustering in .obs[cluster_key].
-        fig_exemplar, _, chosen_exemplars = plot_exemplar_tracks_by_cluster(
-            adata_filt,
-            adata_state_features,
-            n_per_cluster=n_per_cluster,
-            state_key=state_col,
-            cluster_key=cluster_key,
-        )
-        if bool(autosave_plots) and fig_exemplar is not None:
-            exemplar_root.mkdir(parents=True, exist_ok=True)
-            exemplar_path = Path(
-                exemplar_root,
-                "example_tracks_overview.pdf",
+        if bool(autosave_plots):
+            fig_exemplar, chosen_exemplars, _exemplar_overview_path = _save_bouts_exemplar_overview_pdf(
+                adata_filt,
+                adata_state_features,
+                out_dir=raw_clustering_outfolder,
+                n_per_cluster=n_per_cluster,
+                state_col=state_col,
+                cluster_key=cluster_key,
+                seed=0,
+                plot_dpi=plot_dpi,
             )
-            exemplar_path.parent.mkdir(parents=True, exist_ok=True)
-            with PdfPages(exemplar_path) as pdf:
-                _apply_best_pdf_orientation(fig_exemplar, default_orientation="landscape")
-                pdf.savefig(fig_exemplar, dpi=int(plot_dpi), bbox_inches="tight")
-
+        if bool(autosave_plots) and fig_exemplar is not None:
             coord_enrichment_pdf = _shared_ensure_exemplar_coordinate_columns(
                 adata=adata_filt,
                 output_dir=output_dir,
@@ -2085,7 +2183,7 @@ def run_state_based_analysis(
                     require_pixel_for_video=True,
                 )
                 exemplar_render_config["coordinate_enrichment_video"] = dict(coord_enrichment_video)
-                exemplar_backprojection_outdir = exemplar_root
+                exemplar_backprojection_outdir = exemplar_root / "backprojection"
                 exemplar_backprojection_outdir.mkdir(parents=True, exist_ok=True)
                 prep_t0 = time.perf_counter()
                 exemplar_backprojection_prepared = _prepare_exemplar_backprojection_data(
@@ -2214,7 +2312,8 @@ def run_state_based_analysis(
                         )
                     )
         _vdone(verbose, "trajectory-clustering", "render exemplar outputs", exemplar_started)
-        plt.close(fig_exemplar)
+        if fig_exemplar is not None:
+            plt.close(fig_exemplar)
 
     adata_state_features.uns.setdefault("visualization", {})
     adata_state_features.uns["visualization"].update(
@@ -2255,7 +2354,7 @@ def run_state_based_analysis(
     adata_feat_out = Path(outfolder, get_track_trajectories_filename(cell_type))
     if save_outputs:
         save_started = time.perf_counter()
-        adata_state_features.write(adata_feat_out, compression="gzip")
+        write_adata(adata_state_features, adata_feat_out, compression="gzip")
         _save_adata_obs_csv(adata_state_features, adata_feat_out)
         _vsave(verbose, "trajectory-clustering", "clustered trajectory model", adata_feat_out)
         _vdone(verbose, "trajectory-clustering", "save clustered model", save_started)

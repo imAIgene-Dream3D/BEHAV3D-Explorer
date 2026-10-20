@@ -131,7 +131,7 @@ The three pixel-classifier methods (APOC, Pixel Classifier, ConvPaint) are train
 - Label examples from **different timepoints and Z-slices** (e.g. start / middle / end and a few Z levels) so the classifier sees the variability in your data.
 - **Balance examples across all classes** — don't only label the easiest cells.
 - **Avoid contradictory labels**; only label regions you are confident about.
-- **Save your labels often** (the *Save Labels* / *Save User Labels* button) — unsaved labels are lost when the viewer closes.
+- **Save your labels often** (the *Save Labels* / *Save User Labels* button) — unsaved labels are lost when the viewer closes. Saving runs in the background: the labels are copied at the moment you click, so you can keep painting while they are written (paint strokes made after the click go in the next save). The same applies to the automatic save when training starts and when you leave the tab.
 - Use the shown **probability map** after training to see where the model is struggling and label more data there
 
 ### Drawing technique
@@ -139,7 +139,7 @@ The three pixel-classifier methods (APOC, Pixel Classifier, ConvPaint) are train
 These practical conventions come from the training sessions and give noticeably cleaner segmentations:
 
 - **Draw background first, then overlay foreground.** Lay down the background class along and just over the object edge, then paint the foreground over the part that sits on the object. Layering it this way produces a very clean border.
-- **Split touching objects with a thin background line.** Where two objects touch, draw a thin background line between them, bordered by foreground, so the classifier learns to separate them. For objects tracked by **fragmentation tracking**, you only need to get this right on **timepoint 1** of each sample — the method copies the segmentation forward.
+- **Split touching objects with a thin background line.** Where two objects touch, draw a thin background line between them, bordered by foreground, so the classifier learns to separate them. For objects tracked by **fragmentation propagation**, you only need to get this right on **timepoint 1** of each sample — the method copies the segmentation forward.
 - **Draw thin / elongated cells thicker than the signal (~3 px).** Segmentation connects adjacent pixels, so a one-pixel-wide stroke on an elongated T cell leaves gaps; a slightly over-thick line yields one clean segment.
 - **Paint channel bleed-through as background.** Where another channel's signal bleeds into the one you are training (e.g. organoid signal appearing in the T-cell channel at higher Z), explicitly paint it as background — even when it is much brighter — so the model learns to ignore it.
 - **For the dead mask, label the bright dead blobs.** Concentrate on the clear high-intensity dead signal; including very dim red is optional and tends to be noisier.
@@ -199,8 +199,8 @@ The pixel-classifier methods (APOC, ConvPaint, Pixel Classifier) share the same 
 | **Process ALL timepoints** | ON | Segment the full movie of every sample. Uncheck to enable the From–To range. |
 | **From t / to t** (range) | — | Inclusive timepoint range, active only when *Process ALL* is off. |
 | **Workers** | 1 | Parallel CPU workers for zarr I/O, capped at one less than your CPU core count. For the GPU methods (APOC/ConvPaint) the GPU is the actual segmenter, so 1–2 is usually optimal. |
-| **Overwrite existing results** | OFF | Re-segment samples that already have an output zarr. Otherwise they are skipped. |
-| **▶ Run …** | — | Runs immediately and blocks the GUI until done. |
+| **Existing results** | prompt | In the napari plugin there is no checkbox: when outputs already exist, **▶ Run …** asks per sample and cell type whether to skip (complete outputs), resume (interrupted ones) or overwrite. The notebook widget keeps an *Overwrite existing* checkbox. |
+| **▶ Run …** | — | Runs immediately **in the background**: napari stays responsive, a progress bar is shown, and other tabs are locked until it finishes. |
 | **+🛒** | — | Queues the step in the [Processing Queue](../../plugin_essentials/processing_queue) to run later, sequentially with the rest of the pipeline. |
 
 ```{note}

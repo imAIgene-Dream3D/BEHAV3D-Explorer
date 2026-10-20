@@ -127,6 +127,43 @@ def expand_multicolor_celltype_names(base_name, n_channels):
         raise ValueError("n_channels must be at least 1")
     return [f"{base_name}_{idx}_multicolor" for idx in range(1, n_channels + 1)]
 
+
+def multicolor_sources_for_base(metadata_or_row, base_name):
+    """List the per-channel multicolor source cell types for ``base_name``.
+
+    Scans column/index names for ``{prefix}_{base}_{idx}_multicolor_tracks_image_path``
+    (prefix optional / one of ``or_``, ``im_``, ``ot_``) and returns the channel
+    cell-type names sorted by channel index, e.g.
+    ``["tcells_1_multicolor", "tcells_2_multicolor", "tcells_3_multicolor"]``.
+
+    Accepts either a metadata DataFrame or a single metadata row (Series); only
+    the set of column/index names is used, so channels are detected from what
+    actually exists rather than an assumed count.  Returns ``[]`` when none are
+    found.
+    """
+    base_name = str(base_name).strip()
+    if not base_name:
+        return []
+
+    if hasattr(metadata_or_row, "columns"):
+        names = list(metadata_or_row.columns)
+    else:
+        names = list(getattr(metadata_or_row, "index", []))
+
+    pattern = re.compile(
+        r'^(?:or_|im_|ot_)?'
+        + re.escape(base_name)
+        + r'_([0-9]+)_multicolor_tracks_image_path$'
+    )
+    found = {}
+    for name in names:
+        m = pattern.match(str(name))
+        if m:
+            idx = int(m.group(1))
+            found[idx] = f"{base_name}_{idx}_multicolor"
+    return [found[idx] for idx in sorted(found)]
+
+
 def detect_organoid_types_from_metadata(metadata):
     """
     Detect organoid types from metadata column names.
@@ -244,8 +281,10 @@ def has_dead_channel(metadata):
     if 'dead_channel' not in metadata.columns:
         return False
     
-    # Check if any row has a non-null dead_channel value
-    return metadata['dead_channel'].notna().any()
+    # Check if any row has a non-null dead_channel value.
+    # bool(...) normalizes numpy.bool_ -> Python bool: some callers hand this
+    # straight to Qt setters (e.g. QWidget.setVisible), which reject numpy.bool_.
+    return bool(metadata['dead_channel'].notna().any())
 
 def has_dead_mask(metadata):
     """
@@ -261,7 +300,7 @@ def has_dead_mask(metadata):
     # Check if any row has a non-null AND non-empty dead_mask_path value
     # (empty strings '' are not NaN but should be treated as missing)
     mask_values = metadata['dead_mask_path'].fillna('')
-    return (mask_values.str.strip() != '').any()
+    return bool((mask_values.str.strip() != '').any())
 
 def load_behav3d_metadata(
     metadata_path
@@ -300,7 +339,123 @@ def load_behav3d_metadata(
                 pass  # Skip if conversion fails
 
     metadata = metadata.dropna(how="all").reset_index(drop=True)
-    return metadata 
+    return metadata
+
+
+def _clean_path_value(value):
+    """Return the stripped path string of a metadata cell, or None when empty."""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip().strip('"').strip("'")
+    if not text or text.lower() == "nan":
+        return None
+    return text
+
+
+def rebase_metadata_paths(metadata, output_dir, old_output_dir=None):
+    """Re-link ``*_path`` columns that point into a moved copy of *output_dir*.
+
+    A path is rewritten to ``output_dir/<anchor>/<rest>`` when that file
+    exists in the current output directory (anchors: ``images``,
+    ``trackdata``, ``analysis``) - also when the old location still exists,
+    so a copied project never keeps reading or writing the original. Once
+    an old root is known (passed in, e.g. from a transfer bundle, or found
+    via an anchor) every other path below it is mapped too, unless the old
+    file still exists and the new one does not.
+
+    Paths outside any old root (raw images elsewhere, sources of combined
+    experiments) are left untouched.
+
+    Returns ``(metadata_copy, report)`` where report is a dict with
+    ``changed`` [(row, column, old, new)], ``old_roots`` [str] and
+    ``unresolved`` [(row, column, path)] for paths that exist nowhere.
+    """
+    from behav3d.core.portable_paths import (
+        find_anchor_tail,
+        is_under,
+        join_parts_for_display,
+        rebase_onto,
+        split_path_parts,
+    )
+
+    report = {"changed": [], "old_roots": [], "unresolved": []}
+    if metadata is None or not output_dir or not Path(output_dir).is_dir():
+        return metadata, report
+
+    new_root = Path(output_dir)
+    path_cols = [c for c in metadata.columns if str(c).endswith("_path")]
+    known_roots = [split_path_parts(old_output_dir)] if old_output_dir else []
+
+    def _remember(root):
+        if not any(len(r) == len(root) and all(a.casefold() == b.casefold() for a, b in zip(r, root))
+                   for r in known_roots):
+            known_roots.append(root)
+
+    # Pass 1: discover old roots from paths whose tail exists here.
+    candidates = []
+    for col in path_cols:
+        for idx, value in metadata[col].items():
+            text = _clean_path_value(value)
+            if text is None or is_under(text, new_root):
+                continue
+            candidates.append((idx, col, text))
+            found = find_anchor_tail(text, new_root)
+            if found is not None:
+                _remember(found[0])
+
+    # Pass 2: rewrite.
+    out = metadata.copy()
+    for idx, col, text in candidates:
+        new_path = None
+        found = find_anchor_tail(text, new_root)
+        if found is not None:
+            new_path = found[1]
+        else:
+            old_exists = Path(text).exists()
+            for root in known_roots:
+                cand = rebase_onto(text, root, new_root)
+                if cand is not None and (cand.exists() or not old_exists):
+                    new_path = cand
+                    break
+        if new_path is None:
+            if not Path(text).exists():
+                report["unresolved"].append((idx, col, text))
+            continue
+        if out[col].dtype != object:
+            out[col] = out[col].astype(object)
+        out.at[idx, col] = str(new_path)
+        report["changed"].append((idx, col, text, str(new_path)))
+
+    report["old_roots"] = [join_parts_for_display(r) for r in known_roots]
+    return out, report
+
+
+def relink_metadata_csv(metadata, csv_path, output_dir, old_output_dir=None, log=print, backup=True):
+    """Run :func:`rebase_metadata_paths` and persist the result to *csv_path*.
+
+    With *backup*, the first time a CSV is rewritten a ``.bak`` copy of the
+    original is kept next to it. Returns the (possibly updated) metadata and
+    the report.
+    """
+    metadata, report = rebase_metadata_paths(metadata, output_dir, old_output_dir=old_output_dir)
+    if report["changed"]:
+        roots = ", ".join(report["old_roots"]) or "?"
+        log(f"🔗 Re-linked {len(report['changed'])} path(s) from {roots} to {output_dir}")
+        if csv_path:
+            csv_path = Path(csv_path)
+            backup_path = csv_path.with_name(csv_path.name + ".bak")
+            if backup and csv_path.exists() and not backup_path.exists():
+                import shutil
+                shutil.copy2(csv_path, backup_path)
+            metadata.to_csv(csv_path, index=False)
+    for _idx, col, text in report["unresolved"][:10]:
+        log(f"⚠️ {col} not found in this output folder or at its stored location: {text}")
+    return metadata, report
 
 def check_behav3d_metadata(
     metadata,

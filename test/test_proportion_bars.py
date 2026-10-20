@@ -7,6 +7,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/private/tmp/behav3d-mpl-cache")
 
 import matplotlib
 import pandas as pd
+import pytest
 
 matplotlib.use("Agg", force=True)
 
@@ -134,3 +135,129 @@ def test_plot_condition_diff_grid_single_column_and_multi_group(tmp_path):
     assert Path(result_grouped["pdf_path"]).exists()
     csv_out_grouped = pd.read_csv(result_grouped["csv_path"])
     assert set(csv_out_grouped["group"].unique()) == {"b1", "b2"}
+
+
+def test_compute_condition_time_series_stats_hand_computed_mean_sem():
+    raw = pd.DataFrame({
+        "condition": ["A", "A", "B", "B"],
+        "time": [0, 0, 0, 0],
+        "state_id": ["rest", "rest", "rest", "rest"],
+        "relative_proportion": [0.2, 0.4, 0.6, 0.9],
+    })
+
+    out = proportion_bars.compute_condition_time_series_stats(
+        raw, class_order=["rest"], condition_col="condition",
+    )
+
+    row_a = out[out["condition"] == "A"].iloc[0]
+    row_b = out[out["condition"] == "B"].iloc[0]
+    assert row_a["mean"] == pytest.approx(0.3)
+    assert row_a["sem"] == pytest.approx(0.1)
+    assert row_a["n"] == 2
+    assert row_a["time_unit"] == "frame"
+    assert row_b["mean"] == pytest.approx(0.75)
+    assert row_b["sem"] == pytest.approx(0.15)
+
+
+def test_compute_condition_time_series_stats_single_unit_sem_is_zero():
+    raw = pd.DataFrame({
+        "condition": ["A"],
+        "time": [0],
+        "state_id": ["rest"],
+        "relative_proportion": [0.5],
+    })
+
+    out = proportion_bars.compute_condition_time_series_stats(
+        raw, class_order=["rest"], condition_col="condition",
+    )
+
+    assert out.iloc[0]["sem"] == 0.0
+    assert out.iloc[0]["n"] == 1
+
+
+def test_build_condition_time_series_raw_table_adds_minutes_column_only_when_given():
+    long_by_unit = pd.DataFrame({
+        "comparison_unit": ["s1 | A", "s2 | B"],
+        "time": [0, 10],
+        "state_id": ["rest", "rest"],
+        "relative_proportion": [0.5, 0.5],
+    })
+    unit_metadata = pd.DataFrame({"condition": ["A", "B"]}, index=["s1 | A", "s2 | B"])
+
+    out_no_minutes = proportion_bars.build_condition_time_series_raw_table(
+        long_by_unit, unit_metadata, condition_col="condition",
+    )
+    assert "time_minutes" not in out_no_minutes.columns
+
+    out_with_minutes = proportion_bars.build_condition_time_series_raw_table(
+        long_by_unit, unit_metadata, condition_col="condition", minutes_per_frame=2.0,
+    )
+    assert list(out_with_minutes["time_minutes"]) == [0.0, 20.0]
+
+
+def test_plot_condition_time_series_grid_paginates_by_class(tmp_path):
+    classes = [f"c{i}" for i in range(5)]
+    rows = []
+    for c in classes:
+        rows.append({"group": "(all)", "condition": "A", "class": c, "time": 0, "time_unit": "frame", "mean": 0.5, "sem": 0.05, "n": 2})
+        rows.append({"group": "(all)", "condition": "B", "class": c, "time": 0, "time_unit": "frame", "mean": 0.3, "sem": 0.05, "n": 2})
+    stats_df = pd.DataFrame(rows)
+    out_pdf = tmp_path / "dyn.pdf"
+
+    result = proportion_bars.plot_condition_time_series_grid(
+        stats_df,
+        class_order=classes,
+        condition_levels=["A", "B"],
+        colors={"A": "#4477AA", "B": "#EE6677"},
+        title="Dynamics",
+        out_pdf=out_pdf,
+        ncols=2,
+        max_rows_per_page=2,
+    )
+
+    pypdf = pytest.importorskip("pypdf")
+    reader = pypdf.PdfReader(result["pdf_path"])
+    assert len(reader.pages) == 2  # 5 classes, 4 panels/page -> ceil(5/4) = 2 pages
+
+
+def test_plot_condition_time_series_grid_multi_group_pages(tmp_path):
+    classes = ["c0", "c1"]
+    rows = []
+    for grp in ["g1", "g2"]:
+        for c in classes:
+            rows.append({"group": grp, "condition": "A", "class": c, "time": 0, "time_unit": "frame", "mean": 0.5, "sem": 0.0, "n": 1})
+    stats_df = pd.DataFrame(rows)
+    out_pdf = tmp_path / "dyn_groups.pdf"
+
+    result = proportion_bars.plot_condition_time_series_grid(
+        stats_df,
+        class_order=classes,
+        condition_levels=["A"],
+        colors={"A": "#4477AA"},
+        title="Dynamics",
+        out_pdf=out_pdf,
+        ncols=2,
+        max_rows_per_page=2,
+    )
+
+    pypdf = pytest.importorskip("pypdf")
+    reader = pypdf.PdfReader(result["pdf_path"])
+    assert len(reader.pages) == 2  # one page per group, both classes fit on each
+
+
+def test_plot_condition_time_series_grid_empty_class_order_writes_placeholder(tmp_path):
+    out_pdf = tmp_path / "empty.pdf"
+    empty_stats = pd.DataFrame(columns=["group", "condition", "class", "time", "time_unit", "mean", "sem", "n"])
+
+    result = proportion_bars.plot_condition_time_series_grid(
+        empty_stats,
+        class_order=[],
+        condition_levels=["A"],
+        colors={"A": "#4477AA"},
+        title="Dynamics",
+        out_pdf=out_pdf,
+    )
+
+    pypdf = pytest.importorskip("pypdf")
+    reader = pypdf.PdfReader(result["pdf_path"])
+    assert len(reader.pages) == 1

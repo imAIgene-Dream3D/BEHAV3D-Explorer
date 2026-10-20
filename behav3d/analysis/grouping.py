@@ -2,7 +2,7 @@
 
 Grouping lives entirely after Filtering, in the Analysis step: it merges
 several cell types' *filtered* track-features CSVs into one pseudo
-cell-type population (``{name}_merged``) for use in Death Dynamics / Single
+cell-type population (``{name}_merged``) for use in Population Dynamics / Single
 Cell. Group membership is recorded in ``behav3d_parameters.yml`` under
 ``cell_type_groups`` — metadata.csv is never touched, so multicolor
 merged-tracking outputs (which must still be processed through Feature
@@ -19,6 +19,7 @@ writing them into metadata.csv.
 from __future__ import annotations
 
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -113,6 +114,15 @@ def create_cell_type_group(output_dir, group_name: str, member_cell_types) -> Pa
     even if their original numbering overlapped for the same sample —
     downstream code groups strictly by ``(TrackID, sample_name)``.
 
+    If a member's filtered CSV already has an ``original_TrackID`` column
+    (stamped by Filtering — see ``filtering.py``'s track-splitting step —
+    to record the pre-split id that matches that member's *own* tracked
+    image pixels), it's resynced to the new ``TrackID`` here too. Otherwise
+    it would keep pointing at that member's pre-merge pixel labels, while
+    backprojection prefers ``original_TrackID`` over ``TrackID`` whenever
+    it's present — silently breaking the pixel lookup against the group's
+    combined tracked image (whose pixels use the new, merged ``TrackID``).
+
     Raises ``FileNotFoundError`` naming every member missing a filtered CSV
     (i.e. not yet run through Filtering), and ``ValueError`` if no member
     cell types are given.
@@ -153,6 +163,8 @@ def create_cell_type_group(output_dir, group_name: str, member_cell_types) -> Pa
         unique_ids = sorted(df["TrackID"].unique())
         remap = {old: new for new, old in enumerate(unique_ids, start=next_id)}
         df["TrackID"] = df["TrackID"].map(remap)
+        if "original_TrackID" in df.columns:
+            df["original_TrackID"] = df["TrackID"]
         next_id = max(remap.values(), default=next_id - 1) + 1
 
     merged = pd.concat(frames, ignore_index=True, sort=False)
@@ -163,7 +175,151 @@ def create_cell_type_group(output_dir, group_name: str, member_cell_types) -> Pa
     return out_csv
 
 
-def create_group_tracked_segments(output_dir, group_id: str, metadata, log=None, progress_cb=None) -> dict:
+def _build_group_tracked_sample(
+    output_dir, group_id: str, sample_name: str, sdf, metadata_row,
+    n_workers: int = 1, log=None, show_progress: bool = True, skipped_out=None,
+):
+    """Build one sample's combined tracked zarr + tracks CSV for a group.
+
+    Samples are processed one at a time (see :func:`create_group_tracked_segments`);
+    parallelism happens *within* a sample, across its timepoints — each
+    timepoint's relabel-and-combine is independent numpy work, dispatched to
+    ``n_workers`` threads (numpy releases the GIL, so this gets real
+    parallel CPU use without the pickling/process overhead of the member
+    label images). Threads write to fixed indices of a pre-allocated output
+    zarr (:func:`~behav3d.io.formats.zarr.write_zarr_parallel`) rather than
+    sequentially appending, since timepoints can finish out of order.
+
+    ``show_progress`` shows one live ``tqdm`` bar for this sample
+    (``"{sample_name} [{group_id}]"``, ticking 0 -> timepoint count) whether
+    ``n_workers`` is 1 or more — safe because samples are never processed
+    concurrently with each other, so there's only ever one bar active.
+
+    Returns ``{"image": Path, "csv": Path}``, or ``None`` if the sample was
+    skipped (logged via ``log``, if given). Skips are also appended as
+    structured ``{"sample_name", "cell_type", "reason"}`` records to
+    ``skipped_out`` (``cell_type`` is ``None`` for a whole-sample skip), if
+    given, so callers can surface them without parsing log text.
+    """
+    from behav3d.io.images import load_image
+    from behav3d.io.formats.zarr import write_zarr_parallel
+    from behav3d.preprocessing.tracking import convert_tracked_image_to_csv
+    from behav3d.preprocessing.tracking.multicolor_tracking_processing import raise_on_label_overlap
+
+    def _log(msg):
+        if log:
+            log(msg)
+
+    def _skip(cell_type, reason):
+        if skipped_out is not None:
+            skipped_out.append({"sample_name": sample_name, "cell_type": cell_type, "reason": reason})
+
+    output_dir = Path(output_dir)
+    row = metadata_row
+
+    member_images = {}
+    n_timepoints = None
+    for cell_type in sorted(sdf["origin_cell_type"].astype(str).unique()):
+        img_path = _member_tracked_image_path(row, cell_type)
+        if not img_path or not Path(img_path).exists():
+            _log(f"  - {sample_name}/{cell_type}: tracked image not found, skipping member")
+            _skip(cell_type, "tracked image not found")
+            continue
+        arr = load_image(img_path)
+        member_images[cell_type] = arr
+        n_timepoints = len(arr) if n_timepoints is None else min(n_timepoints, len(arr))
+
+    if not member_images:
+        _log(f"  - Skipping {sample_name}: no member tracked images available")
+        _skip(None, "no member tracked images available")
+        return None
+
+    img_out = group_tracked_image_path(output_dir, sample_name, group_id)
+    csv_out = group_tracked_csv_path(output_dir, sample_name, group_id)
+    img_out.parent.mkdir(parents=True, exist_ok=True)
+    csv_out.parent.mkdir(parents=True, exist_ok=True)
+    if img_out.exists():
+        shutil.rmtree(img_out) if img_out.is_dir() else img_out.unlink()
+
+    # Per member cell type, per timepoint: pairs of (origin_TrackID in
+    # that member's tracked image, new group TrackID to relabel it to).
+    relabel_by_ct_t: dict[str, dict[int, np.ndarray]] = {}
+    for cell_type in member_images:
+        ct_df = sdf[sdf["origin_cell_type"].astype(str) == cell_type]
+        for t, tdf in ct_df.groupby("position_t"):
+            pairs = tdf[["origin_TrackID", "TrackID"]].dropna().to_numpy()
+            relabel_by_ct_t.setdefault(cell_type, {})[int(t)] = pairs
+
+    first_frame = np.asarray(next(iter(member_images.values()))[0])
+    write_zarr_parallel(
+        outpath=img_out,
+        shape=(n_timepoints,) + first_frame.shape,
+        dtype=first_frame.dtype,
+        overwrite=True,
+    )
+
+    def _process_timepoint(t):
+        combined = None
+        masks_by_ct = {}
+        for cell_type, arr in member_images.items():
+            t_img = np.asarray(arr[t])
+            if combined is None:
+                combined = np.zeros_like(t_img)
+            pairs = relabel_by_ct_t.get(cell_type, {}).get(t, ())
+            if len(pairs) == 0:
+                continue
+            old_ids = pairs[:, 0]
+            mask = np.isin(t_img, old_ids)
+            if np.any(mask):
+                masks_by_ct[cell_type] = mask
+            for old_id, new_id in pairs:
+                combined[t_img == old_id] = new_id
+
+        raise_on_label_overlap(
+            masks_by_ct,
+            context=(
+                f"Voxel overlap detected while building tracked segments for group "
+                f"'{group_id}' sample '{sample_name}' at timepoint {t}"
+            ),
+        )
+        write_zarr_parallel(outpath=img_out, index=t, data=combined)
+
+    desc = f"{sample_name} [{group_id}]"
+    n_workers = max(1, int(n_workers or 1))
+    if n_workers <= 1:
+        frame_iter = range(n_timepoints)
+        if show_progress:
+            frame_iter = tqdm(frame_iter, desc=desc)
+        for t in frame_iter:
+            _process_timepoint(t)
+    else:
+        with ThreadPoolExecutor(max_workers=min(n_workers, n_timepoints)) as ex:
+            futures = [ex.submit(_process_timepoint, t) for t in range(n_timepoints)]
+            done_iter = as_completed(futures)
+            if show_progress:
+                done_iter = tqdm(done_iter, total=len(futures), desc=desc)
+            for fut in done_iter:
+                fut.result()  # surface any per-timepoint exception
+
+    elsize_x = row.get("pixel_distance_xy", 1) or 1
+    elsize_y = row.get("pixel_distance_xy", 1) or 1
+    elsize_z = row.get("pixel_distance_z", 1) or 1
+    convert_tracked_image_to_csv(
+        img_path=img_out,
+        outpath=csv_out,
+        element_size_x=elsize_x,
+        element_size_y=elsize_y,
+        element_size_z=elsize_z,
+    )
+
+    _log(f"  + {sample_name}: {img_out.name}, {csv_out.name}")
+    return {"image": img_out, "csv": csv_out}
+
+
+def create_group_tracked_segments(
+    output_dir, group_id: str, metadata, log=None, progress_cb=None, n_workers: int = 1,
+    skipped_out=None,
+) -> dict:
     """Build per-sample tracked label images + tracks CSVs for a group.
 
     Reuses each member cell type's existing tracked zarr (label value ==
@@ -183,16 +339,30 @@ def create_group_tracked_segments(output_dir, group_id: str, metadata, log=None,
     convention in ``behav3d.napari._background_runner`` so this can be run
     off the UI thread with a live progress bar.
 
+    ``n_workers`` controls parallelism *within* each sample: samples are
+    still built one at a time (each one reads its own member tracked images
+    and writes to its own output paths, but they're processed in sequence
+    so console progress stays legible — see
+    :func:`_build_group_tracked_sample`), while a sample's own timepoints
+    are split across ``n_workers`` threads. This helps most when there are
+    few samples but many timepoints each; the default of ``1`` preserves
+    the original strictly-serial behavior.
+
     Returns ``{sample_name: {"image": Path, "csv": Path}}`` for samples
     that produced output; samples missing every member's tracked image are
-    skipped (logged via ``log`` if given).
+    skipped (logged via ``log`` if given). Skips are also appended as
+    structured ``{"sample_name", "cell_type", "reason"}`` records to
+    ``skipped_out``, if given (``cell_type`` is ``None`` when the whole
+    sample is skipped).
     """
-    from behav3d.io.images import load_image, append_to_zarr
-    from behav3d.preprocessing.tracking import convert_tracked_image_to_csv
 
     def _log(msg):
         if log:
             log(msg)
+
+    def _skip(sample_name, cell_type, reason):
+        if skipped_out is not None:
+            skipped_out.append({"sample_name": sample_name, "cell_type": cell_type, "reason": reason})
 
     def _progress(current, total, label):
         if progress_cb:
@@ -218,70 +388,25 @@ def create_group_tracked_segments(output_dir, group_id: str, metadata, log=None,
         )
 
     written = {}
+    n_workers = max(1, int(n_workers or 1))
     sample_groups = list(df.groupby("sample_name", sort=False))
     n_samples = len(sample_groups)
     for sample_idx, (sample_name, sdf) in enumerate(sample_groups):
+        sample_name = str(sample_name)
         _progress(sample_idx, n_samples, f"{sample_name} ({sample_idx + 1}/{n_samples})")
-        sample_rows = metadata.loc[metadata["sample_name"].astype(str) == str(sample_name)]
+        sample_rows = metadata.loc[metadata["sample_name"].astype(str) == sample_name]
         if sample_rows.empty:
             _log(f"  - Skipping {sample_name}: not found in metadata")
+            _skip(sample_name, None, "sample not found in metadata")
             continue
         row = sample_rows.iloc[0]
 
-        member_images = {}
-        n_timepoints = None
-        for cell_type in sorted(sdf["origin_cell_type"].astype(str).unique()):
-            img_path = _member_tracked_image_path(row, cell_type)
-            if not img_path or not Path(img_path).exists():
-                _log(f"  - {sample_name}/{cell_type}: tracked image not found, skipping member")
-                continue
-            arr = load_image(img_path)
-            member_images[cell_type] = arr
-            n_timepoints = len(arr) if n_timepoints is None else min(n_timepoints, len(arr))
-
-        if not member_images:
-            _log(f"  - Skipping {sample_name}: no member tracked images available")
-            continue
-
-        img_out = group_tracked_image_path(output_dir, sample_name, group_id)
-        csv_out = group_tracked_csv_path(output_dir, sample_name, group_id)
-        img_out.parent.mkdir(parents=True, exist_ok=True)
-        csv_out.parent.mkdir(parents=True, exist_ok=True)
-        if img_out.exists():
-            shutil.rmtree(img_out) if img_out.is_dir() else img_out.unlink()
-
-        # Per member cell type, per timepoint: pairs of (origin_TrackID in
-        # that member's tracked image, new group TrackID to relabel it to).
-        relabel_by_ct_t: dict[str, dict[int, np.ndarray]] = {}
-        for cell_type in member_images:
-            ct_df = sdf[sdf["origin_cell_type"].astype(str) == cell_type]
-            for t, tdf in ct_df.groupby("position_t"):
-                pairs = tdf[["origin_TrackID", "TrackID"]].dropna().to_numpy()
-                relabel_by_ct_t.setdefault(cell_type, {})[int(t)] = pairs
-
-        for t in tqdm(range(n_timepoints), desc=f"{sample_name} [{group_id}]"):
-            combined = None
-            for cell_type, arr in member_images.items():
-                t_img = np.asarray(arr[t])
-                if combined is None:
-                    combined = np.zeros_like(t_img)
-                for old_id, new_id in relabel_by_ct_t.get(cell_type, {}).get(t, ()):
-                    combined[t_img == old_id] = new_id
-            append_to_zarr(img=np.expand_dims(combined, axis=0), outpath=img_out)
-
-        elsize_x = row.get("pixel_distance_xy", 1) or 1
-        elsize_y = row.get("pixel_distance_xy", 1) or 1
-        elsize_z = row.get("pixel_distance_z", 1) or 1
-        convert_tracked_image_to_csv(
-            img_path=img_out,
-            outpath=csv_out,
-            element_size_x=elsize_x,
-            element_size_y=elsize_y,
-            element_size_z=elsize_z,
+        result = _build_group_tracked_sample(
+            output_dir, group_id, sample_name, sdf, row, n_workers=n_workers, log=_log,
+            skipped_out=skipped_out,
         )
-
-        written[str(sample_name)] = {"image": img_out, "csv": csv_out}
-        _log(f"  + {sample_name}: {img_out.name}, {csv_out.name}")
+        if result is not None:
+            written[sample_name] = result
 
     _progress(n_samples, n_samples, "Done")
     return written

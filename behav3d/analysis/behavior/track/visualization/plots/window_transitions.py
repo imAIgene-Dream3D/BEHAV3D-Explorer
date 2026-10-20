@@ -28,7 +28,7 @@ from behav3d.analysis.behavior.state.visualization.plots.state_transitions impor
     _is_main_thread,
     _write_sankey_html,
 )
-from behav3d.analysis.behavior.track.utils import _resolve_dtaidistance_paths, _winfo
+from behav3d.analysis.behavior.track.utils import _resolve_track_paths, _winfo
 
 
 def compute_window_transition_links(
@@ -279,8 +279,8 @@ def save_window_transition_report(
     if state_colors is None:
         state_colors = _get_classification_state_colors(adata_tracks, cluster_key)
 
-    paths = _resolve_dtaidistance_paths(output_dir, cell_type)
-    out_dir = paths["outfolder"] / "window_transitions"
+    paths = _resolve_track_paths(output_dir, cell_type)
+    out_dir = paths.outfolder / "window_transitions"
     out_dir.mkdir(parents=True, exist_ok=True)
     pdf_pages_dir = out_dir / "sankey_pdf_pages"
     html_dir = out_dir / "sankey_html"

@@ -11,22 +11,20 @@ import pytest
 
 matplotlib.use("Agg", force=True)
 
-from behav3d.analysis.behavior.track.contact_state_shift import (
+from behav3d.analysis.behavior.state.contact_state_shift import (
     _first_qualifying_bout_bounds,
     compute_contact_bout_windows,
-    compute_track_state_shift_features,
-    summarize_state_shift_track_fractions,
+    compute_state_shift_features,
     BEFORE_LABEL,
-    AFTER_LABEL,
 )
 from behav3d.analysis.behavior.track.contact_grouping import compute_track_contact_features
-from behav3d.analysis.behavior.track.visualization.plots.contact_state_shift_report import (
-    save_track_contact_state_shift_report,
+from behav3d.analysis.behavior.state.visualization.plots.contact_state_shift_report import (
+    save_state_contact_shift_report,
 )
 
 _N_TIMEPOINTS = 40
 _MIN_BOUT_LENGTH = 5
-_STATE_COL = "behavioral_state"
+_STATE_COL = "full_behavioral_state"
 
 # (TrackID, contact_group, bout_start) — bout occupies [bout_start, bout_start + _MIN_BOUT_LENGTH - 1]
 # for "contact" tracks; "no_contact" tracks never have any contact timepoints.
@@ -47,19 +45,6 @@ def _state_for_contact_track(t, bout_start):
     if t <= bout_end:
         return "scanning"
     return "engaging"
-
-
-def _build_adata_tracks(track_id_dtype=int):
-    obs = pd.DataFrame(
-        {
-            "sample_name": ["sample_1"] * len(_TRACK_SPECS),
-            "TrackID": [track_id_dtype(t[0]) for t in _TRACK_SPECS],
-            "position_t_min": 0,
-            "position_t_max": _N_TIMEPOINTS - 1,
-        }
-    )
-    obs.index = [str(t[0]) for t in _TRACK_SPECS]
-    return ad.AnnData(X=np.zeros((len(_TRACK_SPECS), 1)), obs=obs)
 
 
 def _build_df_timepoints(track_id_dtype=int):
@@ -98,6 +83,22 @@ def _build_adata_states(track_id_dtype=int):
     return ad.AnnData(X=np.zeros((len(obs), 1)), obs=obs)
 
 
+def _build_adata_tracks_for_shared_grouping_check(track_id_dtype=int):
+    """Minimal adata_tracks, used only by `compute_track_contact_features` (the track-side
+    contact grouping this module's bout detection must agree with) — unrelated to the
+    state-native `compute_contact_bout_windows` under test here."""
+    obs = pd.DataFrame(
+        {
+            "sample_name": ["sample_1"] * len(_TRACK_SPECS),
+            "TrackID": [track_id_dtype(t[0]) for t in _TRACK_SPECS],
+            "position_t_min": 0,
+            "position_t_max": _N_TIMEPOINTS - 1,
+        }
+    )
+    obs.index = [str(t[0]) for t in _TRACK_SPECS]
+    return ad.AnnData(X=np.zeros((len(_TRACK_SPECS), 1)), obs=obs)
+
+
 def test_first_qualifying_bout_uses_earliest_run():
     times = list(range(20))
     # Two qualifying runs (length >= 5): [2..6] and [12..17]; must return the first.
@@ -124,11 +125,12 @@ def test_shared_min_bout_length_matches_existing_contact_grouping():
     """The contact/no_contact split produced here must agree with
     contact_grouping.compute_track_contact_features for the same min_bout_length, since both
     analyses are meant to share one definition of 'a real contact bout'."""
-    adata_tracks = _build_adata_tracks()
+    adata_states = _build_adata_states()
+    adata_tracks = _build_adata_tracks_for_shared_grouping_check()
     df_timepoints = _build_df_timepoints()
 
     windows = compute_contact_bout_windows(
-        df_timepoints, adata_tracks, contact_col="macro_contact", min_bout_length=_MIN_BOUT_LENGTH,
+        df_timepoints, adata_states, contact_col="macro_contact", min_bout_length=_MIN_BOUT_LENGTH,
         window_mode="fixed", fixed_window_length=5,
     )
     existing = compute_track_contact_features(
@@ -142,11 +144,11 @@ def test_shared_min_bout_length_matches_existing_contact_grouping():
 
 
 def test_fixed_window_mode_bounds():
-    adata_tracks = _build_adata_tracks()
+    adata_states = _build_adata_states()
     df_timepoints = _build_df_timepoints()
 
     windows = compute_contact_bout_windows(
-        df_timepoints, adata_tracks, contact_col="macro_contact", min_bout_length=_MIN_BOUT_LENGTH,
+        df_timepoints, adata_states, contact_col="macro_contact", min_bout_length=_MIN_BOUT_LENGTH,
         window_mode="fixed", fixed_window_length=5,
     )
     row = windows.loc[("sample_1", "0")]  # bout_start=10, bout_end=14
@@ -160,14 +162,14 @@ def test_fixed_window_mode_bounds():
 
 
 def test_full_window_mode_bounds():
-    adata_tracks = _build_adata_tracks()
+    adata_states = _build_adata_states()
     df_timepoints = _build_df_timepoints()
 
     windows = compute_contact_bout_windows(
-        df_timepoints, adata_tracks, contact_col="macro_contact", min_bout_length=_MIN_BOUT_LENGTH,
+        df_timepoints, adata_states, contact_col="macro_contact", min_bout_length=_MIN_BOUT_LENGTH,
         window_mode="full",
     )
-    row = windows.loc[("sample_1", "0")]  # bout_start=10, bout_end=14, track window [0, 39]
+    row = windows.loc[("sample_1", "0")]  # bout_start=10, bout_end=14, track span [0, 39]
     assert row["before_start_t"] == 0
     assert row["before_end_t"] == 10
     assert row["after_start_t"] == 14
@@ -177,14 +179,14 @@ def test_full_window_mode_bounds():
 
 
 def test_min_window_timepoints_excludes_short_windows():
-    adata_tracks = _build_adata_tracks()
+    adata_states = _build_adata_states()
     df_timepoints = _build_df_timepoints()
 
     # bout_start=10 with fixed_window_length=20 -> before window would need [-10, 10), but is
     # clipped to [0, 10) => only 10 timepoints, which is fine; force a short window instead by
     # requiring more timepoints than available before t=10.
     windows = compute_contact_bout_windows(
-        df_timepoints, adata_tracks, contact_col="macro_contact", min_bout_length=_MIN_BOUT_LENGTH,
+        df_timepoints, adata_states, contact_col="macro_contact", min_bout_length=_MIN_BOUT_LENGTH,
         window_mode="fixed", fixed_window_length=5, min_window_timepoints=6,
     )
     row = windows.loc[("sample_1", "0")]  # before/after windows both have exactly 5 timepoints < 6
@@ -193,19 +195,19 @@ def test_min_window_timepoints_excludes_short_windows():
 
 
 def test_null_reference_reproducible_with_seed():
-    adata_tracks = _build_adata_tracks()
+    adata_states = _build_adata_states()
     df_timepoints = _build_df_timepoints()
 
     windows_a = compute_contact_bout_windows(
-        df_timepoints, adata_tracks, contact_col="macro_contact", min_bout_length=_MIN_BOUT_LENGTH,
+        df_timepoints, adata_states, contact_col="macro_contact", min_bout_length=_MIN_BOUT_LENGTH,
         window_mode="fixed", fixed_window_length=5, null_seed=42,
     )
     windows_b = compute_contact_bout_windows(
-        df_timepoints, adata_tracks, contact_col="macro_contact", min_bout_length=_MIN_BOUT_LENGTH,
+        df_timepoints, adata_states, contact_col="macro_contact", min_bout_length=_MIN_BOUT_LENGTH,
         window_mode="fixed", fixed_window_length=5, null_seed=42,
     )
     windows_c = compute_contact_bout_windows(
-        df_timepoints, adata_tracks, contact_col="macro_contact", min_bout_length=_MIN_BOUT_LENGTH,
+        df_timepoints, adata_states, contact_col="macro_contact", min_bout_length=_MIN_BOUT_LENGTH,
         window_mode="fixed", fixed_window_length=5, null_seed=7,
     )
 
@@ -219,12 +221,11 @@ def test_null_reference_reproducible_with_seed():
 
 
 def test_state_shift_features_and_report(tmp_path):
-    adata_tracks = _build_adata_tracks()
     df_timepoints = _build_df_timepoints()
     adata_states = _build_adata_states()
 
-    result = save_track_contact_state_shift_report(
-        adata_tracks, df_timepoints, adata_states, tmp_path,
+    result = save_state_contact_shift_report(
+        df_timepoints, adata_states, tmp_path,
         contact_col="macro_contact",
         min_bout_length=_MIN_BOUT_LENGTH,
         state_col=_STATE_COL,
@@ -260,87 +261,105 @@ def test_state_shift_features_and_report(tmp_path):
     assert contact_before.loc["static", "proportion"] == pytest.approx(1.0)
 
 
+def test_state_shift_report_groups_by_extra_condition_column(tmp_path):
+    """`extra_group_cols` (metadata columns merged into `adata_states.obs`, e.g. by the widget's
+    "Group per page" multi-select) must write one 2x2-layout page per unique combination of their
+    values, labeled in its title, and tag the CSV rows with those columns — restricted to the
+    tracks in that combination rather than pooling the whole dataset into a single page."""
+    pypdf = pytest.importorskip("pypdf")
+
+    conditions = {"sample_1": "control", "sample_2": "treated"}
+    rows_time, rows_states = [], []
+    for sample_name in conditions:
+        for track_id, group, bout_start in _TRACK_SPECS:
+            contact = np.zeros(_N_TIMEPOINTS, dtype=int)
+            if group == "contact":
+                bout_end = bout_start + _MIN_BOUT_LENGTH - 1
+                contact[bout_start : bout_end + 1] = 1
+            for t in range(_N_TIMEPOINTS):
+                rows_time.append({
+                    "sample_name": sample_name, "TrackID": track_id, "position_t": t,
+                    "macro_contact": int(contact[t]),
+                })
+                state = _state_for_contact_track(t, bout_start) if group == "contact" else "static"
+                rows_states.append({
+                    "sample_name": sample_name, "TrackID": track_id, "position_t": t,
+                    _STATE_COL: state, "condition": conditions[sample_name],
+                })
+    df_timepoints = pd.DataFrame(rows_time)
+    obs = pd.DataFrame(rows_states)
+    obs.index = [str(i) for i in range(len(obs))]
+    adata_states = ad.AnnData(X=np.zeros((len(obs), 1)), obs=obs)
+
+    result = save_state_contact_shift_report(
+        df_timepoints, adata_states, tmp_path,
+        contact_col="macro_contact",
+        min_bout_length=_MIN_BOUT_LENGTH,
+        state_col=_STATE_COL,
+        window_mode="fixed",
+        fixed_window_length=5,
+        min_window_timepoints=3,
+        extra_group_cols=["condition"],
+        verbose=False,
+    )
+
+    reader = pypdf.PdfReader(result["pdf_path"])
+    assert len(reader.pages) == 2
+    page_texts = [page.extract_text() or "" for page in reader.pages]
+    assert any("condition=control" in text for text in page_texts)
+    assert any("condition=treated" in text for text in page_texts)
+
+    diff_csv = pd.read_csv(result["diff_bars_csv"])
+    assert set(diff_csv["condition"].unique()) == {"control", "treated"}
+    stacked_csv = pd.read_csv(result["stacked_composition_csv"])
+    assert set(stacked_csv["condition"].unique()) == {"control", "treated"}
+    windows_csv = pd.read_csv(result["track_windows_csv"])
+    assert set(windows_csv["condition"].unique()) == {"control", "treated"}
+
+
 def test_track_missing_from_csv_raises():
-    """A track present in adata_tracks.obs but entirely absent from df_timepoints (stale filtered
+    """A track present in adata_states.obs but entirely absent from df_timepoints (stale filtered
     CSV) must raise a hard error instead of being silently dropped from the output."""
-    adata_tracks = _build_adata_tracks()
+    adata_states = _build_adata_states()
     df_timepoints = _build_df_timepoints()
     # Drop all rows for TrackID 0 from the CSV, simulating a re-run of filtering that removed it.
     df_timepoints = df_timepoints[df_timepoints["TrackID"] != 0]
 
     with pytest.raises(ValueError, match="have no matching timepoints in the filtered track-features CSV"):
         compute_contact_bout_windows(
-            df_timepoints, adata_tracks, contact_col="macro_contact",
+            df_timepoints, adata_states, contact_col="macro_contact",
             min_bout_length=_MIN_BOUT_LENGTH, window_mode="fixed", fixed_window_length=5,
         )
 
 
-def test_track_present_in_csv_but_no_timepoints_in_window_raises():
-    """A track present in df_timepoints but with zero timepoints inside its classified
-    [position_t_min, position_t_max] window must also raise from compute_contact_bout_windows —
-    previously this track would just silently vanish from the output (no left-merge-back here,
-    unlike compute_track_contact_features). Since adata_tracks is built directly from this CSV,
-    zero overlap can only mean the two are out of sync."""
-    adata_tracks = _build_adata_tracks()
-    df_timepoints = _build_df_timepoints()
-    # Shift TrackID 0's rows in the CSV entirely outside its obs window [0, _N_TIMEPOINTS - 1].
-    mask = df_timepoints["TrackID"] == 0
-    df_timepoints = df_timepoints.copy()
-    df_timepoints.loc[mask, "position_t"] = df_timepoints.loc[mask, "position_t"] + 1000
-
-    with pytest.raises(ValueError, match="have no matching timepoints in the filtered track-features CSV"):
-        compute_contact_bout_windows(
-            df_timepoints, adata_tracks, contact_col="macro_contact",
-            min_bout_length=_MIN_BOUT_LENGTH, window_mode="fixed", fixed_window_length=5,
-        )
-
-
-def test_usable_track_missing_from_states_adata_raises():
-    """A non-excluded track present in the CSV and adata_tracks, but with zero rows at all in
-    adata_states.obs (e.g. the states h5ad wasn't regenerated for this track), must raise a hard
-    error instead of silently contributing zero before/after rows."""
-    adata_tracks = _build_adata_tracks()
-    df_timepoints = _build_df_timepoints()
+def test_track_present_in_csv_but_shifted_out_of_range_raises():
+    """A track present in df_timepoints but entirely shifted outside any plausible overlap with
+    adata_states.obs's own timepoints for that track must also raise — since a state-classified
+    track's window bounds are derived directly from df_timepoints itself, this specifically
+    covers a track whose CSV rows use a completely different position_t range than what
+    adata_states.obs expects it to have (e.g. after a re-run desynced the two sources)."""
     adata_states = _build_adata_states()
-    # Drop all rows for TrackID 0 from the states h5ad only — CSV/adata_tracks stay consistent.
-    adata_states = adata_states[adata_states.obs["TrackID"] != 0].copy()
-
-    with pytest.raises(ValueError, match="no matching timepoints at all in adata_states.obs"):
-        compute_track_state_shift_features(
-            df_timepoints, adata_tracks, adata_states,
-            contact_col="macro_contact", min_bout_length=_MIN_BOUT_LENGTH, state_col=_STATE_COL,
-            window_mode="fixed", fixed_window_length=5,
-        )
-
-
-def test_extra_track_in_states_adata_not_in_csv_raises():
-    """A track present in adata_states.obs but entirely absent from the filtered CSV (e.g. the
-    states h5ad wasn't regenerated after filtering dropped that track) must raise a hard error.
-    adata_tracks/df_timepoints are kept mutually consistent (both drop TrackID 0) so this
-    specifically exercises the adata_states-vs-CSV check, not the adata_tracks-vs-CSV one."""
-    adata_tracks = _build_adata_tracks()
     df_timepoints = _build_df_timepoints()
-    adata_states = _build_adata_states()
-    adata_tracks = adata_tracks[adata_tracks.obs["TrackID"] != 0].copy()
+    # Drop TrackID 0 from the CSV entirely (same failure mode as above, reached via a different
+    # starting scenario description) to keep this a hard, unambiguous desync.
     df_timepoints = df_timepoints[df_timepoints["TrackID"] != 0]
 
-    with pytest.raises(ValueError, match="missing entirely from the filtered track-features CSV"):
-        compute_track_state_shift_features(
-            df_timepoints, adata_tracks, adata_states,
-            contact_col="macro_contact", min_bout_length=_MIN_BOUT_LENGTH, state_col=_STATE_COL,
+    with pytest.raises(ValueError, match="have no matching timepoints in the filtered track-features CSV"):
+        compute_state_shift_features(
+            df_timepoints, adata_states, contact_col="macro_contact",
+            min_bout_length=_MIN_BOUT_LENGTH, state_col=_STATE_COL,
             window_mode="fixed", fixed_window_length=5,
         )
 
 
-def test_dtype_drift_across_all_three_sources():
-    """TrackID as int in adata_tracks.obs vs. '5.0'-style string in a re-read CSV vs. int in the
-    states adata — the join must still succeed for all three sources."""
-    adata_tracks = _build_adata_tracks(track_id_dtype=int)
+def test_dtype_drift_across_both_sources():
+    """TrackID as int in the states adata vs. '5.0'-style string in a re-read CSV — the join must
+    still succeed for both sources."""
     df_timepoints = _build_df_timepoints(track_id_dtype=lambda x: f"{float(x)}")
     adata_states = _build_adata_states(track_id_dtype=int)
 
-    features = compute_track_state_shift_features(
-        df_timepoints, adata_tracks, adata_states,
+    features = compute_state_shift_features(
+        df_timepoints, adata_states,
         contact_col="macro_contact", min_bout_length=_MIN_BOUT_LENGTH, state_col=_STATE_COL,
         window_mode="fixed", fixed_window_length=5,
     )

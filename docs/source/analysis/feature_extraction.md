@@ -43,7 +43,7 @@ Like the Tracking tab, Feature Extraction is organised as **sub-tabs per cell ty
 
 Multicolor channel splits (e.g. `tcell_1_multicolor`) are **not** shown as separate sub-tabs — the merged track set is used instead.
 
-A collapsible **Active Killing** panel sits at the bottom of the tab, hidden until at least one immune cell type is present.
+**Active Killing** becomes available once at least one immune cell type is present.
 
 ## The six feature families
 
@@ -111,11 +111,11 @@ If you already ran extraction with one threshold and want another, change Dead m
 
 ## Active Killing detection
 
-A collapsible **▶ Extended Analysis — Active Killing (Immune Cells)** section sits at the bottom of this tab. It detects, for each effector cell, the timepoints at which the target it touched shows a signal rise large enough to count as killing.
+**▶ Extended Analysis — Active Killing (Immune Cells)** detects, for each effector cell, the timepoints at which the target it touched shows a signal rise large enough to count as killing.
 
 **It is configured and run here, but explained with the population analyses.** It lives in this tab because it needs the per-timepoint contact and signal columns while they are being computed, and it writes its results back into the effector's own feature table. Conceptually it belongs with Death Dynamics, Interaction and Invasiveness, because it is about targets, effectors and contact.
 
-The panel only appears when the metadata contains at least one **immune** cell type, and it requires that cell type's combined feature CSV to exist already — so run baseline Feature Extraction for it first.
+Active Killing requires at least one **immune** cell type in the metadata and that cell type's combined feature CSV — so run baseline Feature Extraction for it first.
 
 **Full explanation, parameters, calibration and outputs: [Active Killing](population_analysis/active_killing.md).**
 
@@ -132,7 +132,7 @@ The main tab (above the sub-tabs) has:
 - **▶ Run Batch Feature Extraction (All Cell Types)** — runs every cell type sequentially.
 - **+🛒** — queues a Feature Extraction step in the [Processing Queue](../plugin_essentials/processing_queue). The queue snapshots the current GUI state and applies it at run time.
 
-Progress is reported in the **Log** at the bottom of the tab and in the console (progress bars per per-sample loop).
+Progress is reported in the **Log** and in the console (progress bars per per-sample loop).
 
 ## Column reference
 
@@ -350,6 +350,6 @@ A **fluctuating** reporter that goes on and off, such as calcium, is a different
 ## See also
 
 - [Filtering](filtering.md) — the next step. Drops low-quality tracks and produces QC plots.
-- [Population Analysis](population_analysis/index) — uses the signal and contact columns for population dynamics, interaction, invasiveness and active killing.
+- [Population Dynamics](population_analysis/index) — uses the signal and contact columns for population dynamics, interaction, invasiveness and active killing.
 - [Single Cell](single_cell/index) — classifies per-cell behavioural states from the movement / contact / morphology table.
 - [Output Directory & File Layout](../plugin_essentials/output_layout) — where the CSVs live.

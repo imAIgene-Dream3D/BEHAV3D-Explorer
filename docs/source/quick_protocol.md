@@ -41,7 +41,7 @@ Method names and defaults here are **what the pipeline does**, not recommended v
 | Otherwise: harder features / touching objects | **ConvPaint** |
 | No GPU available | **Pixel Classifier** |
 
-**Pixel-classifier flow (APOC / ConvPaint / Pixel Classifier):** Generate Training Data → paint a few foreground/background pixels → Train → **Run instance segmentation** (preview) → tune instance post-processing → Batch.
+**Pixel-classifier flow (APOC / ConvPaint / Pixel Classifier):** Generate Training Data (runs in the background — wait for the progress bar to finish) → paint a few foreground/background pixels → Train → **Run instance segmentation** (preview) → tune instance post-processing → Batch.
 
 **Cellpose / Cellpose-SAM:** set the channel mapping → *(v3)* load the model → Run.
 
@@ -62,13 +62,13 @@ Method names and defaults here are **what the pipeline does**, not recommended v
 
 | Between frames… | Method |
 |---|---|
-| Large overlap, mainly **fragments** | **Fragmentation Tracking** |
+| Large overlap, mainly **fragments** | **Fragmentation Propagation** |
 | Overlap but masks **touch / join** | **Bounded Propagation** |
 | **Near-static**, detection flickers on/off | **Reporter Propagation** |
 | **Little / no overlap** (moves ~1 cell diameter or more) | **btrack** |
 | Already tracked elsewhere | **Import** |
 
-*(LAP and TrackPy are centroid-distance linkers, also available.)*
+*(LapTrack and TrackPy are centroid-distance linkers, also available.)*
 
 1. Per sub-tab: pick method → set params → **Run <cell type> Tracking**.
 2. **Inspect in Visualization** — a correctly tracked cell keeps the **same ID / colour across frames**.
@@ -113,7 +113,7 @@ Computes, for every cell at every timepoint, the features every later analysis r
 1. **Run [Filtering](analysis/filtering)** first (Tab 6) — the analyses read the filtered tracks, not the raw ones.
 2. Run whichever analyses you need. The 📊 Analysis tab has two groups.
 
-**Population Analysis** (📊 → 💀 Death Dynamics) — population- and interaction-level readouts:
+**Population Dynamics** (📊 → 👥 Population Dynamics) — population- and interaction-level readouts:
 
 | Analysis | What it gives you |
 |---|---|

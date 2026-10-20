@@ -1002,11 +1002,6 @@ def create_centered_max_projection_cutout(
 
         crop = vol_czyx[:, sz0:sz1, sy0:sy1, sx0:sx1]
 
-        # # choose a padding value that will become bright/white after normalization
-        # if np.issubdtype(vol_czyx.dtype, np.integer):
-        #     pad_val = np.iinfo(vol_czyx.dtype).max  # e.g. 65535 for uint16
-        # else:
-        #     pad_val = 1.0  # for float data
         pad_val = 0
         if any(pad_before) or any(pad_after):
             pad_spec = (
@@ -1525,94 +1520,3 @@ def create_fulltrack_cluster_videos(
 
 
 
-def test():
-    # Example usage (assuming df_analysis is defined)
-    import pandas as pd
-    import numpy as np
-    
-    # ssd_dir = r"F:/"
-    # ssd_dir = Path(ssd_dir)
-    # output_dir = Path(ssd_dir, r"BHVD_BEHAV3D/BEHAV3D_python/runs/ROCHE")
-    
-    downloads_folder = Path("/Users/s.deblank-3/Downloads")
-    # downloads_folder = Path(r"C:\Users\Samde\Downloads")
-    df_windows_path = downloads_folder / "df_windows.csv"
-    df_positions_path = downloads_folder / "df_positions.csv"
-    
-    # df_analysis.to_csv(df_windows_path)
-    # df_tracks_orig.to_csv(df_positions_path)
-
-    df_windows = pd.read_csv(df_windows_path)
-    df_positions = pd.read_csv(df_positions_path)
-
-    # output_folder=r"F:/BHVD_BEHAV3D/BEHAV3D_python/runs/ROCHE"
-    output_folder=r"/Volumes/T7_Sam/BHVD_BEHAV3D/BEHAV3D_python/runs/ROCHE"
-
-    test = stratified_pick_examples(
-        df_windows,
-        X=3
-    )
-    
-    chosen_idx=3
-    for idx, w in test.iterrows():
-        if idx != chosen_idx:
-            continue
-        xy_stack, xz_stack, yz_stack = create_centered_max_projection_cutout(
-            w, df_positions, output_folder, pmax=100
-        )
-        break
-    
-    import napari
-    viewer = napari.Viewer()
-    viewer.add_image(projections[0], rgb=True)
-    
-    
-    create_cluster_videos(
-        df_windows,
-        df_positions,
-        output_folder= output_folder,
-        out_dir = r"C:\Users\Samde\Downloads",
-        # normalize_per_channel: bool = False,
-        fps = 6,
-        # dpi: int = 200,
-        margin = (20, 20, 20),
-        pmin = 0.0,
-        pmax = 99.99,
-        examples_per_cluster = 6,
-        # seed: int = 0,
-        # figsize_per_row=(12.0, 4.0),
-        # traj_pad_frac: float = 0.05,
-    )
-    
-    create_cluster_overview_video(
-        df_windows,
-        df_positions,
-        output_folder=output_folder,
-        out_dir=downloads_folder,
-        examples_per_cluster=3,   # 1 example per cluster per row
-        fps=6,
-        margin = (20, 20, 20),
-        pmin = 0.0,
-        pmax = 99.99,
-        normalize_per_channel=True,
-        seed=1234
-        # figsize_per_example=(6.0, 3.0),  # smaller per example if many clusters
-    )
-
-    create_fulltrack_cluster_videos(
-        df_windows=df_windows,
-        df_positions=df_positions,
-        output_folder=output_folder,  # folder containing images/<sample>/<sample>.zarr
-        out_dir=downloads_folder,
-        clusters=None,                # or e.g. [0, 1, 2]
-        fps=6,
-        margin=20,
-        track_color="#63ff33",
-        pmin=0.0,
-        pmax=99.99,
-        examples_per_cluster=4,
-        seed=1234,
-        normalize_per_channel=True,
-        mask_margin=False,
-    )
-    

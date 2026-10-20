@@ -178,6 +178,12 @@ _ACTIVE_KILLING_SIGNAL_LABELS = {
 }
 
 
+_ACTIVE_KILLING_CONTACT_LABELS = {
+    "contact": "Pixel adjacency (contact)",
+    "contact_on_distance": "Distance threshold (contact_on_distance)",
+}
+
+
 def _apoc_feature_grid_binding(control_id, label, tab, **kwargs):
     checks_by_key = getattr(tab, "_feat_sigma_checks", {}) or {}
     checks = {
@@ -705,23 +711,23 @@ def _tracking_bindings(main_widget) -> list[dict]:
         out.append(_binding(
             "tracking.organoids.track_all_together",
             "Track all organoid types together", together,
-            step="tracking", method="Fragmentation Tracking",
+            step="tracking", method="Fragmentation Propagation",
             cell_type="all organoid types",
         ))
 
     specs = [
         ("method", "Tracking method", "combo_method", None, None),
-        ("lap.frame_link_distance", "LAP frame-to-frame linking distance", "lap_track_cost", "distance", "LAP"),
-        ("lap.gap_closing_distance", "LAP gap-closing distance", "lap_gap_cost", "distance", "LAP"),
-        ("lap.maximum_gap", "LAP maximum gap", "lap_gap_frames", "frames", "LAP"),
-        ("lap.merging_distance", "LAP merging distance", "lap_merge_cost", "distance", "LAP"),
-        ("lap.splitting_distance", "LAP splitting distance", "lap_split_cost", "distance", "LAP"),
+        ("lap.frame_link_distance", "LapTrack frame-to-frame linking distance", "lap_track_cost", "distance", "LapTrack"),
+        ("lap.gap_closing_distance", "LapTrack gap-closing distance", "lap_gap_cost", "distance", "LapTrack"),
+        ("lap.maximum_gap", "LapTrack maximum gap", "lap_gap_frames", "frames", "LapTrack"),
+        ("lap.merging_distance", "LapTrack merging distance", "lap_merge_cost", "distance", "LapTrack"),
+        ("lap.splitting_distance", "LapTrack splitting distance", "lap_split_cost", "distance", "LapTrack"),
         ("trackpy.search_range", "TrackPy search range", "tp_search_range", "distance", "TrackPy"),
         ("trackpy.memory", "TrackPy memory", "tp_memory", "frames", "TrackPy"),
         ("trackpy.adaptive_stop", "TrackPy adaptive stop", "tp_adaptive_stop", "distance", "TrackPy"),
         ("trackpy.adaptive_step", "TrackPy adaptive step", "tp_adaptive_step", None, "TrackPy"),
         ("propagation.track_all_organoids", "Track all organoid types together",
-         "check_all_together_prop", None, "Fragmentation Tracking"),
+         "check_all_together_prop", None, "Fragmentation Propagation"),
         ("bounded_propagation.minimum_overlap", "Bounded Propagation minimum overlap",
          "bp_min_overlap_fraction", None, "Bounded Propagation"),
         ("bounded_propagation.minimum_segment_size",
@@ -743,8 +749,19 @@ def _tracking_bindings(main_widget) -> list[dict]:
         ("btrack.distance_threshold", "btrack optimizer distance threshold", "bt_dist_thresh", "distance", "btrack"),
         ("btrack.time_threshold", "btrack optimizer time threshold", "bt_time_thresh", "frames", "btrack"),
     ]
+    # Map the researcher-facing method label carried by each spec to the
+    # internal method key so parameter visibility follows the selected method
+    # regardless of the dropdown's display order.
+    _label_to_key = {
+        "LapTrack": "lap",
+        "TrackPy": "trackpy",
+        "Fragmentation Propagation": "propagation",
+        "Bounded Propagation": "bounded_propagation",
+        "Reporter Propagation": "reporter_propagation",
+        "btrack": "btrack",
+    }
     for cell_type, panel in panels.items():
-        method_index = _safe(panel.combo_method.currentIndex, 0)
+        method_key = _safe(panel._get_method_key, "") or ""
         optimizer_enabled = bool(_safe(
             getattr(panel, "bt_use_optimize", None).isChecked, False
         )) if getattr(panel, "bt_use_optimize", None) is not None else False
@@ -753,25 +770,15 @@ def _tracking_bindings(main_widget) -> list[dict]:
             if widget is None:
                 continue
             visible = True
-            if method == "LAP":
-                visible = method_index == 0
-            elif method == "TrackPy":
-                visible = method_index == 1
-            elif method == "Fragmentation Tracking":
-                visible = method_index == 2
-            elif method == "Bounded Propagation":
-                visible = method_index == 3
-            elif method == "Reporter Propagation":
-                visible = method_index == 4
-            elif method == "btrack":
-                visible = method_index == 5
-                if suffix in {
+            if method in _label_to_key:
+                visible = method_key == _label_to_key[method]
+                if method == "btrack" and suffix in {
                     "btrack.distance_threshold", "btrack.time_threshold",
                 }:
                     visible = visible and optimizer_enabled
             if unit == "distance":
                 manager = {
-                    "LAP": getattr(panel, "_lap_unit_mgr", None),
+                    "LapTrack": getattr(panel, "_lap_unit_mgr", None),
                     "TrackPy": getattr(panel, "_tp_unit_mgr", None),
                     "btrack": getattr(panel, "_bt_unit_mgr", None),
                 }.get(method)
@@ -786,7 +793,7 @@ def _tracking_bindings(main_widget) -> list[dict]:
                 f"tracking.{cell_type}.btrack.hypotheses",
                 f"{cell_type}: btrack optimization hypotheses", checks,
                 step="tracking", method="btrack", cell_type=str(cell_type),
-                visible=method_index == 5 and optimizer_enabled,
+                visible=method_key == "btrack" and optimizer_enabled,
                 persist=getattr(panel, "_persist", None),
             ))
     return out
@@ -850,34 +857,40 @@ def _feature_bindings(main_widget) -> list[dict]:
              "spin_abs_threshold", None, absolute),
             ("minimum_contact_duration", "Minimum contact duration",
              "spin_min_contact", "timepoints", True),
+            ("contact_column", "Contact column",
+             "contact_column_combo", None, True),
             ("top_killers_to_display", "Top killers to display",
              "spin_top_n", None, True),
         ]
+        _token_label_specs = {
+            "death_signal": _ACTIVE_KILLING_SIGNAL_LABELS,
+            "contact_column": _ACTIVE_KILLING_CONTACT_LABELS,
+        }
         for suffix, label, attr, unit, relevant in specs:
             widget = getattr(active, attr, None)
             if widget is not None:
                 binding_kwargs = {}
-                if suffix == "death_signal":
-                    labels = _ACTIVE_KILLING_SIGNAL_LABELS
+                labels = _token_label_specs.get(suffix)
+                if labels is not None:
                     values = {
                         display.lower(): token
                         for token, display in labels.items()
                     }
 
-                    def get_signal(combo=widget, display_labels=labels):
+                    def get_token(combo=widget, display_labels=labels):
                         token = str(_safe(combo.currentText, "") or "")
                         return display_labels.get(token, token)
 
-                    def set_signal(value, combo=widget, signal_values=values):
-                        token = signal_values.get(str(value).strip().lower())
+                    def set_token(value, combo=widget, token_values=values):
+                        token = token_values.get(str(value).strip().lower())
                         if token is None:
                             return False
                         combo.setCurrentText(token)
                         return str(_safe(combo.currentText, "") or "") == token
 
                     binding_kwargs = {
-                        "getter": get_signal,
-                        "setter": set_signal,
+                        "getter": get_token,
+                        "setter": set_token,
                     }
                 item = _binding(
                     f"features.active_killing.{suffix}",
@@ -892,8 +905,8 @@ def _feature_bindings(main_widget) -> list[dict]:
                     # proposal when the mode checkbox also changes.
                     item["enabled"] = expanded
                     item["active"] = relevant
-                if suffix == "death_signal":
-                    item["choices"] = list(_ACTIVE_KILLING_SIGNAL_LABELS.values())
+                if labels is not None:
+                    item["choices"] = list(labels.values())
                 out.append(item)
         target_list = getattr(active, "target_list", None)
         if target_list is not None:
@@ -912,6 +925,8 @@ def _filter_bindings(main_widget) -> list[dict]:
     panels = getattr(tab, "panels", {}) or {} if tab is not None else {}
     out = []
     specs = [
+        ("first_timepoint_filters.over_range", "First-timepoint filters over the range",
+         "check_first_tp_from_range", None),
         ("trim_to_maximum.enabled", "Trim full time series", "en_exp_duration", None),
         ("trim_to_maximum.timepoints", "Maximum timepoints", "spin_exp_duration", "timepoints"),
         ("minimum_length.enabled", "Filter short tracks", "en_min_length", None),
@@ -925,6 +940,20 @@ def _filter_bindings(main_widget) -> list[dict]:
         ("dead_at_first_timepoint.enabled", "Filter dead cells at first timepoint", "check_filter_dead_t0", None),
         ("time_unit", "Filtering time unit", "combo_time_type", None),
     ]
+    # The timepoint window is global: one binding, taken from any panel,
+    # rather than one per cell type.
+    if panels:
+        any_panel = next(iter(panels.values()))
+        for suffix, label, attr, unit in [
+            ("enabled", "Restrict to a timepoint range (all cell types)", "en_time_range", None),
+            ("start", "Timepoint range start", "spin_t_start", "timepoints"),
+            ("end", "Timepoint range end", "spin_t_end", "timepoints"),
+        ]:
+            widget = getattr(any_panel, attr, None)
+            if widget is not None:
+                out.append(_binding(f"timepoint_range.{suffix}", label, widget,
+                                    step="filtering", unit=unit))
+
     for cell_type, panel in panels.items():
         for suffix, label, attr, unit in specs:
             widget = getattr(panel, attr, None)
@@ -1020,9 +1049,13 @@ def _analysis_bindings(main_widget) -> list[dict]:
             (lambda ct=cell_type: track._persist_track_cfg(ct))
             if cell_type else None
         )
-        original = bool(_safe(
-            getattr(track, "chk_use_original", None).isChecked, False
-        )) if getattr(track, "chk_use_original", None) is not None else False
+        family_combo = getattr(track, "combo_clustering_family", None)
+        family_text = (
+            _safe(family_combo.currentText, "State-based") if family_combo is not None else "State-based"
+        )
+        original = "feature" in (family_text or "").lower()
+        legacy_chk = getattr(track, "chk_run_legacy_behav3d", None)
+        legacy = original and bool(_safe(legacy_chk.isChecked, False)) if legacy_chk is not None else False
         for suffix, label, attr, unit, relevant in [
             ("trajectory_size", "Trajectory size", "spin_traj_size", "timepoints", True),
             ("number_of_clusters", "Number of trajectory clusters",
@@ -1035,12 +1068,18 @@ def _analysis_bindings(main_widget) -> list[dict]:
              "chk_parallel", None, not original),
             ("save_distance_matrix", "Save distance matrix CSV",
              "chk_save_dist", None, not original),
-            ("use_original_behav3d", "Use original feature-based BEHAV3D mode",
-             "chk_use_original", None, True),
+            ("clustering_method", "Trajectory clustering method",
+             "combo_clustering_family", None, True),
+            ("use_state_features_preset", "Use features used in behavioral state clustering",
+             "chk_use_state_features_preset", None, original and not legacy),
+            ("run_legacy_behav3d", "Advanced: run legacy BEHAV3D algorithm",
+             "chk_run_legacy_behav3d", None, original),
+            ("use_exact_original_settings", "Use exact original BEHAV3D settings",
+             "chk_use_exact_original_settings", None, legacy),
             ("umap_neighbors", "UMAP neighbours",
-             "spin_umap_neighbors", None, original),
+             "spin_umap_neighbors", None, legacy),
             ("umap_minimum_distance", "UMAP minimum distance",
-             "spin_umap_min_dist", None, original),
+             "spin_umap_min_dist", None, legacy),
             ("random_seed", "Random seed", "spin_seed", None, not original),
         ]:
             widget = getattr(track, attr, None)

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 
-KNOWLEDGE_VERSION = "2026.08.11.3"
+KNOWLEDGE_VERSION = "2026.08.20.1"
 
 
 GUIDANCE_CARDS = {
@@ -35,7 +35,11 @@ GUIDANCE_CARDS = {
         "the literal CSV-safe line value 'not_added'; never use None. Metadata clarification "
         "prompts must stay experiment-neutral: do not introduce example strain, line, or population "
         "names that were not read from the live context, and do not interrupt an informational "
-        "analysis question with a metadata-building clarification. A processing population is an "
+        "analysis question with a metadata-building clarification. When a confirmed correction changes "
+        "sample or population counts, population names, dead-channel inclusion, or Multicolor expansion, "
+        "rebuild the dependent sample forms and preserve every compatible value already entered. Do not "
+        "leave an old sample-form structure behind or require a separate Create Sample Forms instruction. "
+        "A processing population is an "
         "object or signal distinguishable in the images that needs its own segmentation and track "
         "IDs. Line records biological identity/source and is mandatory; Condition records treatment "
         "or experimental state and is optional. Multicolor is only for one dense biological "
@@ -126,7 +130,10 @@ GUIDANCE_CARDS = {
         "connected region should remain one instance. Mask + EDT is preferred for similarly sized "
         "touching objects. Probability Map + Watershed is the default and handles heterogeneous "
         "sizes. In probability mode, Mask threshold defines the foreground contour; Seed threshold "
-        "is the main splitting lever. Raise Seed threshold in small increments to split merged "
+        "is the main splitting lever. The documented APOC starting values are Mask threshold 0.5 "
+        "and Seed threshold 0.8; keep Seed threshold at least as high as Mask threshold. Values 0.3 "
+        "and 0.5 also occur in the classifier feature-scale list in pixels and are not threshold "
+        "recommendations or a 0.3-0.5 threshold range. Raise Seed threshold in small increments to split merged "
         "objects, but watch for cells disappearing if it becomes too strict. Raising Mask threshold "
         "can tighten borders and can add splitting when combined with Seed threshold. If tuning is "
         "not enough, annotate more background at touching-cell boundaries and retrain. In Mask + "
@@ -171,14 +178,14 @@ GUIDANCE_CARDS = {
         "still overlaps itself in the next frame or how far it moves, then stop without listing methods. "
         "Fast and slow are acquisition-dependent measurements, not properties of a named cell type: "
         "moving about one object diameter per frame, or losing overlap, is fast for tracking purposes. "
-        "Once behavior is known, use Fragmentation Tracking for spatially overlapping, shape-stable "
+        "Once behavior is known, use Fragmentation Propagation for spatially overlapping, shape-stable "
         "objects whose segments may fragment. Use Bounded Propagation when overlapping or touching "
         "segments can join but each track ID must remain confined to one connected region. Use btrack "
         "when moving objects no longer overlap between frames. Use Reporter Propagation only when both "
         "conditions hold: the object is genuinely static and its reporter segmentation flickers or "
         "disappears. It reuses one reference shape and is invalid for real movement or shape change. "
         "For a moving object with a flickering reporter, track a constitutive channel and retain the "
-        "reporter as an intensity feature, or use permissive segmentation plus btrack. LAP and TrackPy "
+        "reporter as an intensity feature, or use permissive segmentation plus btrack. LapTrack and TrackPy "
         "should not be suggested without a specific reason. Set "
         "btrack maximum search radius from the fastest plausible one-frame displacement plus only a "
         "10-25% margin, using metadata time interval and units. Never invent a typical speed. Global "
@@ -192,7 +199,7 @@ GUIDANCE_CARDS = {
         "Change Step size only after an "
         "out-of-memory error, lowering it to reduce RAM. When multiple distinguishable multicellular "
         "structure populations coexist and should share one overlap-based run, track them together with "
-        "Fragmentation Tracking while preserving their origin types. Sometimes Fragmentation Tracking "
+        "Fragmentation Propagation while preserving their origin types. Sometimes Fragmentation Propagation "
         "and Bounded Propagation are both defensible; explain the topology distinction and preview both."
     ),
     "feature_extraction": (
@@ -243,7 +250,9 @@ GUIDANCE_CARDS = {
         "Filtering must be run even when every filter is disabled: it creates the downstream CSV and "
         "interpolates missing timepoints. Minimum track length is optional because state analysis "
         "supports unequal lengths, but removing short tracks can reduce noise and computation. Read "
-        "the track-length distribution before endorsing a number. Trim to a common maximum only for "
+        "the track-length distribution before endorsing a number. An enabled minimum of 0 removes no "
+        "short tracks, and an enabled common output length of 0 does not define a usable analysis "
+        "window; never endorse those placeholders merely because they match. Trim to a common maximum only for "
         "analyses requiring uniform windows. Equal minimum and maximum lengths are valid: the minimum "
         "discards shorter tracks and the maximum trims retained tracks. Splitting divides a long "
         "track into full-size chunks and discards the remainder. For multicellular structures, filtering by initial "
@@ -255,7 +264,7 @@ GUIDANCE_CARDS = {
     "analysis": (
         "First identify the research question and the active analysis view. A general analysis overview "
         "must include Death Dynamics, Interaction Analysis, Invasiveness Analysis, Active Killing, "
-        "Behavioral State, State Trajectory, Contact analysis, Contact State-Shift Analysis, "
+        "Behavioral State, State Trajectory, Contact analysis, "
         "and Backprojection, then use the live metadata to suggest "
         "dataset-specific questions and a sensible sequence. It must not repeatedly navigate to the "
         "Analysis tab. Open a named "
@@ -269,7 +278,15 @@ GUIDANCE_CARDS = {
         "can separate target signal states; its overview window looks back before the transition, and an "
         "optional time range can restrict the experiment. For invasiveness, keep both the per-timepoint "
         "trace and a per-movie summary: Mean averages timepoints, while AUC integrates the trace and "
-        "normalizes by elapsed time."
+        "normalizes by elapsed time. In the Interaction Overview output, the cumulative-interaction "
+        "violin shows the distribution across individual targets, split by target fate when a validated "
+        "switch-on signal is available. The cumulative-to-transition curve includes only targets that "
+        "switch state and aligns their mean cumulative contacts to the transition time, with the band "
+        "showing the standard error. In the Interaction--Active Killing dashboard, the left panel shows "
+        "one point per contact event and its duration; color distinguishes events with and without a "
+        "validated contact-associated target-signal rise. The right panel reports the percentage of "
+        "contact events classified that way for each target group and fate. 'Dead' and 'alive' labels "
+        "are biological only when the configured signal has been validated as death."
     ),
     "hmm": (
         "For Behavioral State, always read and state the live selected cell type before giving setup or "
@@ -304,10 +321,8 @@ GUIDANCE_CARDS = {
         "tracks here instead. Original BEHAV3D feature-based mode is deprecated and requires equal "
         "track lengths. The UMAP may look poor even when agglomerative clusters are sensible. "
         "Categorical DTW supports Contact analysis, which compares trajectory clusters for "
-        "tracks with and without a sufficiently long contact bout. It also supports Contact State-Shift "
-        "Analysis, which compares behavioral-state composition before and after contact against "
-        "timing-matched no-contact tracks and therefore additionally requires Behavioral State results. "
-        "Do not repeat the obsolete claim that these current contact analyses inherently produce empty "
+        "tracks with and without a sufficiently long contact bout. "
+        "Do not repeat the obsolete claim that this contact analysis inherently produces empty "
         "output."
     ),
 }

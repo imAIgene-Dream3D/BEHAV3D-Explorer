@@ -1,7 +1,7 @@
 from behav3d.io.images import load_image, append_to_zarr
 from behav3d.preprocessing import dilate_mask
 from behav3d.preprocessing.segmentation import segment_size_filter
-from behav3d.preprocessing.tracking import convert_tracked_image_to_csv
+from behav3d.preprocessing.tracking import convert_tracked_image_to_csv, prepare_tracking_sample
 
 from skimage.segmentation import watershed
 import numpy as np
@@ -111,6 +111,7 @@ def run_propagation_tracking(
     segment_size_min=100,
     all_organoids=False,
     progress_cb=None,
+    plan=None,
     **kwargs
     ):
     """Run propagation-based tracking on any cell type.
@@ -138,6 +139,9 @@ def run_propagation_tracking(
         per-sample loop so a GUI can drive a progress bar.  ``None`` is
         a no-op (default).  Notebook / queue callers omit this kwarg and
         the function behaves identically to its pre-existing version.
+    plan : behav3d.core.run_plan.RunPlan, optional
+        Per-(sample, cell type) skip / run / overwrite choices; supersedes
+        ``overwrite`` when given.
     **kwargs : dict
     """
     if all_organoids:
@@ -152,6 +156,7 @@ def run_propagation_tracking(
             dilation_nr_pixels=dilation_nr_pixels,
             segment_size_min=segment_size_min,
             progress_cb=progress_cb,
+            plan=plan,
             **kwargs,
         )
 
@@ -191,12 +196,18 @@ def run_propagation_tracking(
             tracked_img_outdir.mkdir(parents=True)
         if not tracked_csv_outdir.exists():
             tracked_csv_outdir.mkdir(parents=True)
-        if (
-            (
-                not tracked_csv_outpath.exists() or 
-                not tracked_img_outpath.exists()
-            ) or overwrite
-            ):
+        if prepare_tracking_sample(
+            sample_name=sample_name,
+            cell_type=cell_type,
+            tracked_img_outpath=tracked_img_outpath,
+            tracked_csv_outpath=tracked_csv_outpath,
+            segments_path=segments_path,
+            element_size_x=element_size_x,
+            element_size_y=element_size_y,
+            element_size_z=element_size_z,
+            overwrite=overwrite,
+            plan=plan,
+        ):
             propagate_tracks(
                 segments_path=segments_path,
                 tracked_img_outpath=tracked_img_outpath,
@@ -207,8 +218,6 @@ def run_propagation_tracking(
                 dilation_nr_pixels=dilation_nr_pixels,
                 segment_size_min=segment_size_min,
             )
-        else:
-            print("Tracking already exists... Provide overwrite=True to overwrite... Loading existing tracking data")
         
         img_col, csv_col = _resolve_tracking_output_columns(cell_type, segments_col)
         _ensure_metadata_output_columns(metadata, img_col, csv_col)

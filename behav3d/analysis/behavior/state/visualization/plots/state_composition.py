@@ -16,12 +16,15 @@ from behav3d.analysis.behavior.utils import _natural_sort_key
 from behav3d.analysis.behavior.general.visualization.plots.proportion_bars import (
     draw_thin_stacked_proportion_barh,
     compute_condition_diff_stats_pairwise,
-    legend_layout,
     plot_condition_diff_grid,
     plot_page_stacked_proportion_barh_grid,
     stacked_proportion_barh_rows_per_page,
     _resolve_effective_group_cols,
     _make_group_label,
+    hash_stable_label_color_map,
+    build_condition_time_series_raw_table,
+    compute_condition_time_series_stats,
+    plot_condition_time_series_grid,
 )
 
 
@@ -72,6 +75,14 @@ def _wrap_title(text, max_chars=28):
     if line and len(lines) < 2:
         lines.append(line)
     return "\n".join(lines)
+
+
+def _right_legend_width_in(labels, *, char_width_in=0.05, swatch_pad_in=0.55, min_width_in=0.9, max_width_in=2.2):
+    """Inches needed for a vertical, one-entry-per-state legend docked to the right edge,
+    sized to the longest label so it doesn't get clipped."""
+    max_len = max((len(str(label)) for label in labels), default=0)
+    width_in = swatch_pad_in + char_width_in * max_len
+    return float(min(max(width_in, min_width_in), max_width_in))
 
 
 def plot_state_composition_over_time(
@@ -251,6 +262,33 @@ def plot_state_composition_over_time(
     return data, fig, ax
 
 
+def _apply_time_binning(df, *, time_col, time_bin_size):
+    """Bin `time_col` into fixed-width buckets (bucket start value) to reduce
+    noise in composition-over-time plots. `time_bin_size` <= 1 or None is a no-op."""
+    if time_bin_size is None or int(time_bin_size) <= 1:
+        return df
+    bin_size = int(time_bin_size)
+    df = df.copy()
+    df[time_col] = (df[time_col] // bin_size) * bin_size
+    return df
+
+
+def _plot_composition_stack(ax, x, y_arrays, colors, labels, *, time_bin_size=None, alpha=0.85):
+    """Draw a stacked composition series as an area (unbinned) or as discrete
+    per-bin bars (time_bin_size > 1), matching `_apply_time_binning`'s bucket
+    start values in `x`."""
+    if time_bin_size is None or int(time_bin_size) <= 1:
+        ax.stackplot(x, *y_arrays, labels=labels, colors=colors, alpha=alpha)
+        return
+    bottom = np.zeros(len(x))
+    for v, color, label in zip(y_arrays, colors, labels):
+        ax.bar(
+            x, v, bottom=bottom, width=int(time_bin_size), align="edge",
+            linewidth=0, color=color, label=label, alpha=alpha,
+        )
+        bottom = bottom + v
+
+
 def _prepare_state_composition_df(
     adata,
     *,
@@ -258,6 +296,7 @@ def _prepare_state_composition_df(
     state_col="ClusterID",
     sample_col="sample_name",
     state_order=None,
+    time_bin_size=None,
 ):
     """Validate/clean obs and return normalized DataFrame + state/sample ordering."""
     obs = adata.obs
@@ -272,6 +311,7 @@ def _prepare_state_composition_df(
     if len(df) == 0:
         raise ValueError("No valid rows remain after filtering NaNs in required columns.")
     df[time_col] = df[time_col].astype(int)
+    df = _apply_time_binning(df, time_col=time_col, time_bin_size=time_bin_size)
     df[state_col] = df[state_col].astype(str)
     df[sample_col] = df[sample_col].astype(str)
 
@@ -430,7 +470,7 @@ def _compute_relative_auc_table(
         time_max = float(x.max()) if n_timepoints > 0 else np.nan
         for state in state_order:
             y = mat[state].to_numpy(dtype=float) if state in mat.columns else np.zeros(n_timepoints, dtype=float)
-            auc = float(np.trapz(y=y, x=x)) if n_timepoints >= 2 else 0.0
+            auc = float(np.trapezoid(y=y, x=x)) if n_timepoints >= 2 else 0.0
             rows.append(
                 {
                     "sample_name": str(sample_name),
@@ -535,7 +575,9 @@ def _plot_overall_summary_bar(ax, overall, *, state_order, state_colors, show_yl
     if show_ylabel:
         ax.set_ylabel("Proportion", fontsize=7)
     else:
-        ax.set_yticklabels([])
+        # Not set_yticklabels([]): callers often create this axis with sharey= the main panel,
+        # and emptying the shared tick labels would wipe the main panel's y-axis labels too.
+        ax.tick_params(axis="y", labelleft=False)
     ax.set_xlabel("Overall", fontsize=7)
     for spine in ax.spines.values():
         spine.set_visible(False)
@@ -580,6 +622,8 @@ def _plot_page_relative_stacked_grid(
     state_colors,
     sample_title_fontsize=8,
     sample_title_pad=2,
+    time_bin_size=None,
+    title="Relative State Composition (Stacked) by Sample",
 ):
     """One A4 page: relative stacked composition per sample (grid)."""
     samples = list(relative_by_sample.keys())
@@ -608,7 +652,8 @@ def _plot_page_relative_stacked_grid(
             continue
         y_arrays = [mat[state].to_numpy(dtype=float) for state in reversed(list(state_order))]
         colors = [state_colors[state] for state in reversed(list(state_order))]
-        ax.stackplot(x, *y_arrays, labels=[str(s) for s in reversed(list(state_order))], colors=colors, alpha=0.85)
+        labels = [str(s) for s in reversed(list(state_order))]
+        _plot_composition_stack(ax, x, y_arrays, colors, labels, time_bin_size=time_bin_size)
         ax.set_ylim(0.0, 1.0)
         ax.set_title(
             _wrap_title(sample),
@@ -633,19 +678,20 @@ def _plot_page_relative_stacked_grid(
         ax_empty.axis("off")
 
     if len(first_labels) > 0:
-        legend_ncol, _, legend_margin_in = legend_layout(len(first_labels), base_margin_in=0.82)
+        legend_width_in = _right_legend_width_in(first_labels)
         fig.legend(
             first_handles,
             first_labels,
-            loc="lower center",
-            ncol=legend_ncol,
+            loc="center right",
+            ncol=1,
             frameon=False,
             fontsize=7,
         )
-        fig.tight_layout(rect=(0.03, legend_margin_in / A4_PORTRAIT[1], 1, 0.93))
+        right_margin = 1.0 - (legend_width_in / A4_PORTRAIT[0])
+        fig.tight_layout(rect=(0.03, 0, right_margin, 0.93))
     else:
         fig.tight_layout(rect=(0.03, 0, 1, 0.93))
-    fig.suptitle("Relative State Composition (Stacked) by Sample", y=0.97, fontsize=12, fontweight="bold")
+    fig.suptitle(title, y=0.97, fontsize=12, fontweight="bold")
     return fig
 
 
@@ -661,6 +707,7 @@ def _plot_page_count_stacked_grid(
     state_colors,
     sample_title_fontsize=8,
     sample_title_pad=2,
+    time_bin_size=None,
 ):
     """One A4 page: absolute cell count stacked composition per sample (grid)."""
     samples = list(count_by_sample.keys())
@@ -698,7 +745,8 @@ def _plot_page_count_stacked_grid(
             continue
         y_arrays = [mat[state].to_numpy(dtype=float) for state in reversed(list(state_order))]
         colors = [state_colors[state] for state in reversed(list(state_order))]
-        ax.stackplot(x, *y_arrays, labels=[str(s) for s in reversed(list(state_order))], colors=colors, alpha=0.85)
+        labels = [str(s) for s in reversed(list(state_order))]
+        _plot_composition_stack(ax, x, y_arrays, colors, labels, time_bin_size=time_bin_size)
         ax.set_ylim(0.0, global_ymax)
         ax.set_title(
             _wrap_title(sample),
@@ -723,16 +771,17 @@ def _plot_page_count_stacked_grid(
         ax_empty.axis("off")
 
     if len(first_labels) > 0:
-        legend_ncol, _, legend_margin_in = legend_layout(len(first_labels), base_margin_in=0.82)
+        legend_width_in = _right_legend_width_in(first_labels)
         fig.legend(
             first_handles,
             first_labels,
-            loc="lower center",
-            ncol=legend_ncol,
+            loc="center right",
+            ncol=1,
             frameon=False,
             fontsize=7,
         )
-        fig.tight_layout(rect=(0.03, legend_margin_in / A4_PORTRAIT[1], 1, 0.93))
+        right_margin = 1.0 - (legend_width_in / A4_PORTRAIT[0])
+        fig.tight_layout(rect=(0.03, 0, right_margin, 0.93))
     else:
         fig.tight_layout(rect=(0.03, 0, 1, 0.93))
     fig.suptitle("Absolute Cell Count (Stacked) by Sample", y=0.97, fontsize=12, fontweight="bold")
@@ -753,6 +802,9 @@ def save_state_condition_comparison_report(
     condition_groups=None,
     state_order=None,
     state_colors=None,
+    include_over_time=False,
+    time_col="position_t",
+    minutes_per_frame=None,
     verbose=True,
 ):
     """Per-cluster overall (pooled, non-per-timepoint) proportion difference between every
@@ -770,6 +822,18 @@ def save_state_condition_comparison_report(
     group_x_levels_map : dict[str, str], optional
         Maps raw `group_x` levels to merged group labels - when given, `group_x` is pooled
         into the merged labels (columns) instead of showing one column per raw level.
+
+    include_over_time : bool, optional
+        When True, appends an extra page (per group_cols section) showing each cluster's
+        prevalence over time, one line + shaded SE ribbon per condition_col level (or
+        merged condition_groups label), at raw per-frame resolution. Purely descriptive -
+        no significance test is computed; the underlying per-unit, per-timepoint values
+        are written to a companion CSV so a significance test can be run externally.
+        Silently skipped (with a verbose note) if `time_col` isn't available.
+
+    minutes_per_frame : float, optional
+        When given (and include_over_time=True), the over-time page's x-axis and raw CSV
+        are converted to minutes; otherwise they stay in raw frame units.
     """
     obs = adata.obs
     effective_group_cols, _ = _resolve_effective_group_cols(group_cols, group_x, None)
@@ -842,6 +906,47 @@ def save_state_condition_comparison_report(
         df[metadata_cols].drop_duplicates(subset=[unit_col]).set_index(unit_col)
     )
 
+    has_time_col = bool(include_over_time) and time_col in obs.columns
+    if bool(include_over_time) and not has_time_col and bool(verbose):
+        print(f"  Note: '{time_col}' not found in adata.obs — skipping over-time dynamics page.")
+
+    raw_time_table = None
+    time_series_stats = None
+    if has_time_col:
+        time_df = df.join(obs[[time_col]], how="left")
+        time_df[time_col] = pd.to_numeric(time_df[time_col], errors="coerce")
+        time_df = time_df.dropna(subset=[time_col]).copy()
+        if len(time_df) == 0:
+            if bool(verbose):
+                print(f"  Note: no valid '{time_col}' rows — skipping over-time dynamics page.")
+        else:
+            time_df[time_col] = time_df[time_col].astype(int)
+            relative_by_unit_time, _ = _compute_relative_matrices_by_sample(
+                time_df,
+                time_col=time_col,
+                state_col=state_col,
+                sample_col=unit_col,
+                state_order=resolved_state_order,
+                sample_order=unit_order,
+            )
+            raw_long = _build_relative_plot_data_table(relative_by_unit_time, label_col_name="comparison_unit")
+            raw_time_table = build_condition_time_series_raw_table(
+                raw_long,
+                unit_metadata,
+                condition_col=condition_col,
+                group_cols=valid_group_cols,
+                condition_groups=condition_groups,
+                unit_col_name="comparison_unit",
+                minutes_per_frame=minutes_per_frame,
+            )
+            time_series_stats = compute_condition_time_series_stats(
+                raw_time_table,
+                class_order=resolved_state_order,
+                condition_col=condition_col,
+                group_cols=valid_group_cols,
+                time_col=("time_minutes" if minutes_per_frame else "time"),
+            )
+
     if state_colors is None:
         state_colors = _get_classification_state_colors(adata, state_col)
     resolved_colors = _normalize_label_color_map(resolved_state_order, colors=state_colors, cmap_name="tab20")
@@ -857,15 +962,49 @@ def save_state_condition_comparison_report(
 
     output_pdf_path = Path(output_pdf_path)
     output_pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_csv_path = output_pdf_path.parent / f"{output_pdf_path.stem}_over_time_raw.csv"
+    summary_csv_path = output_pdf_path.parent / f"{output_pdf_path.stem}_over_time_summary.csv"
+    if raw_time_table is not None:
+        raw_time_table.to_csv(raw_csv_path, index=False)
+
     title = f"{state_col} — {condition_col} pairwise comparison"
-    result = plot_condition_diff_grid(
-        diff_stats_by_group,
-        class_order=resolved_state_order,
-        colors=resolved_colors,
-        title=title,
-        out_pdf=output_pdf_path,
-        out_csv=output_csv_path,
-    )
+    with PdfPages(output_pdf_path) as pdf:
+        result = plot_condition_diff_grid(
+            diff_stats_by_group,
+            class_order=resolved_state_order,
+            colors=resolved_colors,
+            title=title,
+            out_pdf=output_pdf_path,
+            out_csv=output_csv_path,
+            pdf_pages=pdf,
+        )
+        if time_series_stats is not None:
+            condition_levels = unit_metadata[condition_col].astype(str).drop_duplicates().tolist()
+            if condition_groups:
+                condition_levels = list(dict.fromkeys(
+                    condition_groups[lvl] for lvl in condition_levels if lvl in condition_groups
+                ))
+            condition_colors = hash_stable_label_color_map(condition_levels)
+            time_label = "Time (minutes)" if minutes_per_frame else "Time (frame)"
+            ot_title = f"{state_col} — {condition_col} dynamics over time"
+            if minutes_per_frame is None:
+                ot_title += "  (minutes unavailable — no time metadata)"
+            over_time_result = plot_condition_time_series_grid(
+                time_series_stats,
+                class_order=resolved_state_order,
+                condition_levels=condition_levels,
+                colors=condition_colors,
+                title=ot_title,
+                out_pdf=output_pdf_path,
+                out_csv=summary_csv_path,
+                time_label=time_label,
+                pdf_pages=pdf,
+            )
+            result["over_time_raw_csv_path"] = str(raw_csv_path)
+            result["over_time_summary_csv_path"] = over_time_result["csv_path"]
+        else:
+            result["over_time_raw_csv_path"] = None
+            result["over_time_summary_csv_path"] = None
     if bool(verbose):
         print(f"Saved condition comparison report: {result['pdf_path']}")
     return result
@@ -946,6 +1085,7 @@ def _plot_page_grouped_stacked_grid(
     state_colors,
     sample_title_fontsize=8,
     sample_title_pad=2,
+    time_bin_size=None,
 ):
     """One A4 page: relative stacked composition per group (flat grid, for 3+ group_cols)."""
     groups = list(relative_by_group.keys())
@@ -969,7 +1109,8 @@ def _plot_page_grouped_stacked_grid(
             continue
         y_arrays = [mat[state].to_numpy(dtype=float) for state in reversed(list(state_order))]
         colors = [state_colors[state] for state in reversed(list(state_order))]
-        ax.stackplot(x, *y_arrays, labels=[str(s) for s in reversed(list(state_order))], colors=colors, alpha=0.85)
+        labels = [str(s) for s in reversed(list(state_order))]
+        _plot_composition_stack(ax, x, y_arrays, colors, labels, time_bin_size=time_bin_size)
         ax.set_ylim(0.0, 1.0)
         ax.set_title(grp, fontsize=sample_title_fontsize, fontweight="bold", pad=sample_title_pad)
         ax.set_xlabel(time_col, fontsize=8)
@@ -989,16 +1130,17 @@ def _plot_page_grouped_stacked_grid(
         ax_empty.axis("off")
 
     if len(first_labels) > 0:
-        legend_ncol, _, legend_margin_in = legend_layout(len(first_labels), base_margin_in=0.82)
+        legend_width_in = _right_legend_width_in(first_labels)
         fig.legend(
             first_handles,
             first_labels,
-            loc="lower center",
-            ncol=legend_ncol,
+            loc="center right",
+            ncol=1,
             frameon=False,
             fontsize=7,
         )
-        fig.tight_layout(rect=(0.03, legend_margin_in / A4_PORTRAIT[1], 1, 0.93))
+        right_margin = 1.0 - (legend_width_in / A4_PORTRAIT[0])
+        fig.tight_layout(rect=(0.03, 0, right_margin, 0.93))
     else:
         fig.tight_layout(rect=(0.03, 0, 1, 0.93))
     fig.suptitle(
@@ -1023,6 +1165,7 @@ def _plot_page_grouped_count_stacked_grid(
     global_ymax=None,
     sample_title_fontsize=8,
     sample_title_pad=2,
+    time_bin_size=None,
 ):
     """One A4 page: absolute cell count stacked composition per group (flat grid, for 3+ group_cols)."""
     groups = list(count_by_group.keys())
@@ -1056,7 +1199,8 @@ def _plot_page_grouped_count_stacked_grid(
             continue
         y_arrays = [mat[state].to_numpy(dtype=float) for state in reversed(list(state_order))]
         colors = [state_colors[state] for state in reversed(list(state_order))]
-        ax.stackplot(x, *y_arrays, labels=[str(s) for s in reversed(list(state_order))], colors=colors, alpha=0.85)
+        labels = [str(s) for s in reversed(list(state_order))]
+        _plot_composition_stack(ax, x, y_arrays, colors, labels, time_bin_size=time_bin_size)
         ax.set_ylim(0.0, global_ymax)
         ax.set_title(grp, fontsize=sample_title_fontsize, fontweight="bold", pad=sample_title_pad)
         ax.set_xlabel(time_col, fontsize=8)
@@ -1076,16 +1220,17 @@ def _plot_page_grouped_count_stacked_grid(
         ax_empty.axis("off")
 
     if len(first_labels) > 0:
-        legend_ncol, _, legend_margin_in = legend_layout(len(first_labels), base_margin_in=0.82)
+        legend_width_in = _right_legend_width_in(first_labels)
         fig.legend(
             first_handles,
             first_labels,
-            loc="lower center",
-            ncol=legend_ncol,
+            loc="center right",
+            ncol=1,
             frameon=False,
             fontsize=7,
         )
-        fig.tight_layout(rect=(0.03, legend_margin_in / A4_PORTRAIT[1], 1, 0.93))
+        right_margin = 1.0 - (legend_width_in / A4_PORTRAIT[0])
+        fig.tight_layout(rect=(0.03, 0, right_margin, 0.93))
     else:
         fig.tight_layout(rect=(0.03, 0, 1, 0.93))
     fig.suptitle(
@@ -1114,6 +1259,7 @@ def _plot_page_grouped_2d_grid(
     sample_title_fontsize=8,
     sample_title_pad=2,
     page_size=A4_PORTRAIT,
+    time_bin_size=None,
 ):
     """
     One A4 page: grouped state composition arranged in a 2D grid.
@@ -1210,7 +1356,8 @@ def _plot_page_grouped_2d_grid(
 
                 y_arrays = [mat[state].to_numpy(dtype=float) for state in reversed(list(state_order))]
                 colors = [state_colors[state] for state in reversed(list(state_order))]
-                ax.stackplot(x, *y_arrays, labels=[str(s) for s in reversed(list(state_order))], colors=colors, alpha=0.85)
+                labels = [str(s) for s in reversed(list(state_order))]
+                _plot_composition_stack(ax, x, y_arrays, colors, labels, time_bin_size=time_bin_size)
 
                 if mode == "relative":
                     ax.set_ylim(0.0, 1.0)
@@ -1280,7 +1427,8 @@ def _plot_page_grouped_2d_grid(
 
             y_arrays = [mat[state].to_numpy(dtype=float) for state in reversed(list(state_order))]
             colors = [state_colors[state] for state in reversed(list(state_order))]
-            ax.stackplot(x, *y_arrays, labels=[str(s) for s in reversed(list(state_order))], colors=colors, alpha=0.85)
+            labels = [str(s) for s in reversed(list(state_order))]
+            _plot_composition_stack(ax, x, y_arrays, colors, labels, time_bin_size=time_bin_size)
 
             if mode == "relative":
                 ax.set_ylim(0.0, 1.0)
@@ -1314,16 +1462,17 @@ def _plot_page_grouped_2d_grid(
             title_str += f"\n(groups {row_slice[0]+1}–{row_slice[1]} of {total_rows})"
 
     if len(first_labels) > 0:
-        legend_ncol, _, legend_margin_in = legend_layout(len(first_labels), base_margin_in=0.82)
+        legend_width_in = _right_legend_width_in(first_labels)
         fig.legend(
             first_handles,
             first_labels,
-            loc="lower center",
-            ncol=legend_ncol,
+            loc="center right",
+            ncol=1,
             frameon=False,
             fontsize=7,
         )
-        fig.tight_layout(rect=(0.03, legend_margin_in / page_size[1], 1, 0.92))
+        right_margin = 1.0 - (legend_width_in / page_size[0])
+        fig.tight_layout(rect=(0.03, 0, right_margin, 0.92))
     else:
         fig.tight_layout(rect=(0.03, 0, 1, 0.92))
     fig.suptitle(title_str, y=0.97, fontsize=11, fontweight="bold")
@@ -1339,6 +1488,7 @@ def save_state_composition_report(
     state_col="ClusterID",
     sample_col="sample_name",
     state_order=None,
+    time_bin_size=None,
     grid_ncols=3,
     figsize_per_panel=(4.0, 2.8),
     include_pooled_summary=True,
@@ -1364,6 +1514,11 @@ def save_state_composition_report(
         as ``condition_groups`` in ``compute_condition_diff_stats_pairwise``) - when
         given, that axis is pooled into the merged labels instead of showing one panel
         per raw level. Rows whose raw level isn't in the mapping are dropped.
+
+    ``time_bin_size`` : int, optional
+        Groups timepoints into fixed-width buckets (bucket start value) before
+        computing composition, to reduce noise from many raw per-frame timepoints.
+        ``None`` or ``<= 1`` means no binning (raw per-frame resolution).
 
     Outputs:
       1) one combined PDF with all report pages
@@ -1393,6 +1548,7 @@ def save_state_composition_report(
         state_col=state_col,
         sample_col=sample_col,
         state_order=state_order,
+        time_bin_size=time_bin_size,
     )
     if not _state_order_explicit:
         state_order = _apply_state_order(state_order, _get_classification_state_order(adata, state_col))
@@ -1544,6 +1700,7 @@ def save_state_composition_report(
                         axis_cols=axis_cols,
                         sample_title_fontsize=sample_title_fontsize,
                         sample_title_pad=sample_title_pad,
+                        time_bin_size=time_bin_size,
                     )
                     pdf.savefig(fig_g, dpi=dpi)
                     plt.close(fig_g)
@@ -1563,6 +1720,7 @@ def save_state_composition_report(
                         axis_cols=axis_cols,
                         sample_title_fontsize=sample_title_fontsize,
                         sample_title_pad=sample_title_pad,
+                        time_bin_size=time_bin_size,
                     )
                     pdf.savefig(fig_g_cnt, dpi=dpi)
                     plt.close(fig_g_cnt)
@@ -1584,6 +1742,7 @@ def save_state_composition_report(
                         state_colors=state_colors,
                         sample_title_fontsize=sample_title_fontsize,
                         sample_title_pad=sample_title_pad,
+                        time_bin_size=time_bin_size,
                     )
                     pdf.savefig(fig_flat, dpi=dpi)
                     plt.close(fig_flat)
@@ -1603,6 +1762,7 @@ def save_state_composition_report(
                         global_ymax=global_group_ymax,
                         sample_title_fontsize=sample_title_fontsize,
                         sample_title_pad=sample_title_pad,
+                        time_bin_size=time_bin_size,
                     )
                     pdf.savefig(fig_flat_cnt, dpi=dpi)
                     plt.close(fig_flat_cnt)
@@ -1638,6 +1798,7 @@ def save_state_composition_report(
                 state_colors=state_colors,
                 sample_title_fontsize=sample_title_fontsize,
                 sample_title_pad=sample_title_pad,
+                time_bin_size=time_bin_size,
             )
             pdf.savefig(fig1, dpi=dpi)
             plt.close(fig1)
@@ -1657,6 +1818,7 @@ def save_state_composition_report(
                 state_colors=state_colors,
                 sample_title_fontsize=sample_title_fontsize,
                 sample_title_pad=sample_title_pad,
+                time_bin_size=time_bin_size,
             )
             pdf.savefig(fig_counts, dpi=dpi)
             plt.close(fig_counts)
@@ -1731,22 +1893,3 @@ def save_state_composition_report(
         "relative_by_sample": relative_by_sample,
         "relative_pooled": relative_pooled if include_pooled_summary else None,
     }
-
-
-# df_fig, fig, ax = plot_state_composition_over_time(
-#     adata_full, 
-#     time_col="position_t", 
-#     state_col="ClusterID", 
-#     relative=False
-#     )
-
-# df_fig, fig, axes= plot_state_composition_over_time(
-#     adata_full, 
-#     time_col="position_t", 
-#     state_col="ClusterID", 
-#     relative=True,
-#     group_by_sample=True
-#     )
-
-# fig, axes = plot_state_composition_over_time(adata, group_by_sample=True, relative=True)
-# plt.show()

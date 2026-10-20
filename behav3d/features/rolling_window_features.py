@@ -569,11 +569,23 @@ def _create_descriptive_track_worker(
     stride = max(int(stride), 1)
 
     policy = str(incomplete_window_policy).lower()
-    if policy not in {"drop", "partial", "as_far_as_possible"}:
+    if policy not in {"drop", "partial", "as_far_as_possible", "zero"}:
         raise ValueError(
             "incomplete_window_policy must be one of: "
-            "'drop', 'partial' (alias: 'as_far_as_possible')."
+            "'drop', 'partial' (alias: 'as_far_as_possible'), 'zero'."
         )
+
+    # Keys that must survive a 'zero' override of an incomplete window's feature
+    # values -- identical to the set protected in the partial-mode backfill below.
+    _metadata_keys = {
+        id_cols[0],
+        id_cols[1],
+        "sub_TrackID",
+        time_col,
+        f"window_start_{time_col}",
+        f"window_end_{time_col}",
+        "window_length_frames",
+    }
 
     idx_all = np.arange(n, dtype=int)
     time_is_integer_like = False
@@ -586,10 +598,12 @@ def _create_descriptive_track_worker(
 
     for end_idx in range(0, n, stride):
         end_t = float(t_all[end_idx]) if t_all is not None else float(end_idx)
+        has_full_history = True
         if t_all is None:
             # Fallback for inputs without time column: keep row-based trailing windows.
             start_idx = end_idx - window_size + 1
-            if start_idx < 0 and policy == "drop":
+            has_full_history = start_idx >= 0
+            if not has_full_history and policy == "drop":
                 row = {
                     id_cols[0]: sample_val,
                     id_cols[1]: track_id_val,
@@ -601,7 +615,7 @@ def _create_descriptive_track_worker(
                 }
                 out_rows.append(row)
                 continue
-            if start_idx < 0 and policy in {"partial", "as_far_as_possible"}:
+            if not has_full_history:
                 start_idx = 0
             win_idx = idx_all[start_idx : end_idx + 1]
         else:
@@ -622,32 +636,31 @@ def _create_descriptive_track_worker(
             if win_idx.size == 0:
                 win_idx = np.asarray([int(end_idx)], dtype=int)
 
-            if policy == "drop":
-                has_full_history = False
-                if track_min_t is not None and np.isfinite(target_start_t) and float(target_start_t) >= float(track_min_t):
-                    if time_is_integer_like:
-                        expected = np.arange(
-                            int(np.round(target_start_t)),
-                            int(np.round(end_t)) + 1,
-                            dtype=int,
-                        )
-                        observed = np.unique(np.round(t_all[win_idx]).astype(int))
-                        has_full_history = bool(np.all(np.isin(expected, observed)))
-                    else:
-                        has_full_history = bool(len(win_idx) >= int(window_size))
+            has_full_history = False
+            if track_min_t is not None and np.isfinite(target_start_t) and float(target_start_t) >= float(track_min_t):
+                if time_is_integer_like:
+                    expected = np.arange(
+                        int(np.round(target_start_t)),
+                        int(np.round(end_t)) + 1,
+                        dtype=int,
+                    )
+                    observed = np.unique(np.round(t_all[win_idx]).astype(int))
+                    has_full_history = bool(np.all(np.isin(expected, observed)))
+                else:
+                    has_full_history = bool(len(win_idx) >= int(window_size))
 
-                if not has_full_history:
-                    row = {
-                        id_cols[0]: sample_val,
-                        id_cols[1]: track_id_val,
-                        "sub_TrackID": f"{int(track_id_val)}_tNaN-t{int(end_t)}",
-                        time_col: end_t,
-                        f"window_start_{time_col}": np.nan,
-                        f"window_end_{time_col}": end_t,
-                        "window_length_frames": np.nan,
-                    }
-                    out_rows.append(row)
-                    continue
+            if not has_full_history and policy == "drop":
+                row = {
+                    id_cols[0]: sample_val,
+                    id_cols[1]: track_id_val,
+                    "sub_TrackID": f"{int(track_id_val)}_tNaN-t{int(end_t)}",
+                    time_col: end_t,
+                    f"window_start_{time_col}": np.nan,
+                    f"window_end_{time_col}": end_t,
+                    "window_length_frames": np.nan,
+                }
+                out_rows.append(row)
+                continue
 
         start_t = float(t_all[win_idx[0]]) if t_all is not None else float(win_idx[0])
         sub_track_id = f"{int(track_id_val)}_t{int(start_t)}-t{int(end_t)}"
@@ -696,6 +709,14 @@ def _create_descriptive_track_worker(
         # For binary columns, just add the value at the current timepoint (end_idx)
         for col in binary_cols:
             row[f"{col}_value"] = float(sig_arrays[col][end_idx])
+
+        # 'zero' policy: a window shorter than window_size has no reliable motion/
+        # signal feature value yet -- force it to exactly 0.0 instead of reporting
+        # a value computed over the shorter, partial window.
+        if policy == "zero" and not has_full_history:
+            for k in list(row.keys()):
+                if k not in _metadata_keys:
+                    row[k] = 0.0
 
         out_rows.append(row)
 

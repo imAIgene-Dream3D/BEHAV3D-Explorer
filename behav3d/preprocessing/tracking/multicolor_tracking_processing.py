@@ -8,6 +8,7 @@ from tqdm import tqdm
 
 from behav3d.io.images import load_zarr, write_zarr_parallel
 from behav3d.core.metadata import expand_multicolor_celltype_names
+from behav3d.core.run_plan import Action, resolve_action
 
 
 def _remove_output(path):
@@ -130,7 +131,7 @@ def _plan_multicolor_tracking_sample(sample, output_dir, source_cell_types, comb
     }
 
 
-def _plan_multicolor_tracking(metadata, output_dir, source_cell_types, combined_cell_type, overwrite):
+def _plan_multicolor_tracking(metadata, output_dir, source_cell_types, combined_cell_type, overwrite, plan=None):
     sample_name_col = metadata["sample_name"].astype("string").str.strip()
     sample_names = (
         sample_name_col
@@ -149,10 +150,14 @@ def _plan_multicolor_tracking(metadata, output_dir, source_cell_types, combined_
     for sample_name in sample_names:
         sample = metadata[sample_name_col == sample_name].iloc[0]
         sample_plan = _plan_multicolor_tracking_sample(sample, output_dir, source_cell_types, combined_cell_type)
+        sample_plan["action"] = resolve_action(plan, overwrite, sample_name, combined_cell_type)
         sample_plans.append(sample_plan)
-        missing_items.extend(sample_plan["missing"])
+        if sample_plan["action"] is not Action.SKIP:
+            missing_items.extend(sample_plan["missing"])
 
-        if not overwrite:
+        # With a plan the caller already decided per sample, so existing merged
+        # outputs are never a conflict; without one keep the strict behaviour.
+        if plan is None and not overwrite:
             for path in (sample_plan["outputs"]["img"], sample_plan["outputs"]["csv"]):
                 if path.exists():
                     output_conflicts.append(
@@ -212,11 +217,33 @@ def _validate_tracked_shapes(sample_name, source_arrays):
     return next(iter(unique_shapes))
 
 
+def raise_on_label_overlap(masks: dict, context: str) -> None:
+    """Raise ``ValueError`` naming the first colliding pair if any pixel is
+    claimed by more than one mask in ``masks``.
+
+    ``context`` should read like a sentence fragment ending right before
+    " between '<a>' and '<b>'.", e.g. "...at timepoint 3".
+    """
+    occupancy = None
+    for mask in masks.values():
+        occupancy = mask.astype(np.uint8) if occupancy is None else occupancy + mask.astype(np.uint8)
+    if occupancy is None or not np.any(occupancy > 1):
+        return
+
+    items = list(masks.items())
+    for idx_a in range(len(items)):
+        name_a, mask_a = items[idx_a]
+        for idx_b in range(idx_a + 1, len(items)):
+            name_b, mask_b = items[idx_b]
+            if np.any(mask_a & mask_b):
+                raise ValueError(f"{context} between '{name_a}' and '{name_b}'.")
+    raise ValueError(f"{context}.")
+
+
 def _combine_tracked_timepoint(sample_name, t, source_arrays, offsets):
     first_arr = np.asarray(source_arrays[0]["arr"][t])
     combined = np.zeros(first_arr.shape, dtype=np.int64)
-    occupancy = np.zeros(first_arr.shape, dtype=np.uint8)
-    active_types = []
+    active_types = {}
 
     for item in source_arrays:
         cell_type = item["cell_type"]
@@ -224,25 +251,18 @@ def _combine_tracked_timepoint(sample_name, t, source_arrays, offsets):
         mask = vol > 0
         if not np.any(mask):
             continue
-        active_types.append((cell_type, mask))
-        occupancy += mask.astype(np.uint8)
+        active_types[cell_type] = mask
         shifted = vol.astype(np.int64, copy=True)
         shifted[mask] += int(offsets[cell_type])
         combined[mask] = shifted[mask]
 
-    if np.any(occupancy > 1):
-        for idx_a in range(len(active_types)):
-            name_a, mask_a = active_types[idx_a]
-            for idx_b in range(idx_a + 1, len(active_types)):
-                name_b, mask_b = active_types[idx_b]
-                if np.any(mask_a & mask_b):
-                    raise ValueError(
-                        f"Voxel overlap detected while combining tracked images for sample '{sample_name}' "
-                        f"at timepoint {t} between '{name_a}' and '{name_b}'."
-                    )
-        raise ValueError(
-            f"Voxel overlap detected while combining tracked images for sample '{sample_name}' at timepoint {t}."
-        )
+    raise_on_label_overlap(
+        active_types,
+        context=(
+            f"Voxel overlap detected while combining tracked images for sample "
+            f"'{sample_name}' at timepoint {t}"
+        ),
+    )
 
     return combined
 
@@ -255,6 +275,28 @@ def _count_tracks(df):
     return 0
 
 
+def _register_combined_outputs(metadata, sample_name, combined_cell_type, outputs, output_prefix):
+    img_col = f"{combined_cell_type}_tracks_image_path"
+    csv_col = f"{combined_cell_type}_tracks_csv_path"
+    prefixed_img_col = None
+    prefixed_csv_col = None
+    if output_prefix in {"or", "im", "ot"}:
+        prefixed_img_col = f"{output_prefix}_{combined_cell_type}_tracks_image_path"
+        prefixed_csv_col = f"{output_prefix}_{combined_cell_type}_tracks_csv_path"
+
+    cols_to_ensure = [img_col, csv_col]
+    if prefixed_img_col is not None and prefixed_csv_col is not None:
+        cols_to_ensure.extend([prefixed_img_col, prefixed_csv_col])
+    _ensure_metadata_output_columns(metadata, *cols_to_ensure)
+
+    row_idx = metadata.index[metadata["sample_name"].astype("string").str.strip() == sample_name][0]
+    metadata.at[row_idx, img_col] = str(outputs["img"])
+    metadata.at[row_idx, csv_col] = str(outputs["csv"])
+    if prefixed_img_col is not None and prefixed_csv_col is not None:
+        metadata.at[row_idx, prefixed_img_col] = str(outputs["img"])
+        metadata.at[row_idx, prefixed_csv_col] = str(outputs["csv"])
+
+
 def combine_multicolor_tracked_outputs(
     metadata,
     output_dir,
@@ -262,7 +304,15 @@ def combine_multicolor_tracked_outputs(
     combined_cell_type,
     overwrite=False,
     n_workers=1,
+    plan=None,
 ):
+    """Merge per-channel tracked outputs into ``combined_cell_type``.
+
+    ``plan`` (a ``RunPlan`` keyed by ``(sample_name, combined_cell_type)``) decides
+    per sample: ``SKIP`` keeps the existing merged output, anything else rebuilds
+    it.  Without a plan, ``overwrite=False`` raises ``FileExistsError`` when a
+    merged output already exists.
+    """
     metadata = metadata.copy()
     output_dir = Path(output_dir).expanduser()
     source_cell_types = [str(cell_type).strip() for cell_type in source_cell_types if str(cell_type).strip()]
@@ -284,10 +334,18 @@ def combine_multicolor_tracked_outputs(
         source_cell_types=source_cell_types,
         combined_cell_type=combined_cell_type,
         overwrite=overwrite,
+        plan=plan,
     )
 
     for sample_plan in sample_plans:
         sample_name = sample_plan["sample_name"]
+        if sample_plan["action"] is Action.SKIP:
+            print(f"Multicolor merge already complete for sample: {sample_name} — keeping existing data.")
+            _register_combined_outputs(
+                metadata, sample_name, combined_cell_type,
+                sample_plan["outputs"], sample_plan.get("output_prefix"),
+            )
+            continue
         print(f"Combining multicolor tracking for sample: {sample_name}")
 
         source_arrays = []
@@ -316,7 +374,7 @@ def combine_multicolor_tracked_outputs(
 
         outputs["image_dir"].mkdir(parents=True, exist_ok=True)
         outputs["csv_dir"].mkdir(parents=True, exist_ok=True)
-        if overwrite:
+        if overwrite or plan is not None:
             _remove_output(outputs["img"])
             _remove_output(outputs["csv"])
 
@@ -376,26 +434,9 @@ def combine_multicolor_tracked_outputs(
         print(f"  Combined into a total of {total_tracks} tracks")
         combined_df.to_csv(outputs["csv"], index=False)
 
-        img_col = f"{combined_cell_type}_tracks_image_path"
-        csv_col = f"{combined_cell_type}_tracks_csv_path"
-        prefixed_img_col = None
-        prefixed_csv_col = None
-        output_prefix = sample_plan.get("output_prefix")
-        if output_prefix in {"or", "im", "ot"}:
-            prefixed_img_col = f"{output_prefix}_{combined_cell_type}_tracks_image_path"
-            prefixed_csv_col = f"{output_prefix}_{combined_cell_type}_tracks_csv_path"
-
-        cols_to_ensure = [img_col, csv_col]
-        if prefixed_img_col is not None and prefixed_csv_col is not None:
-            cols_to_ensure.extend([prefixed_img_col, prefixed_csv_col])
-        _ensure_metadata_output_columns(metadata, *cols_to_ensure)
-
-        row_idx = metadata.index[metadata["sample_name"].astype("string").str.strip() == sample_name][0]
-        metadata.at[row_idx, img_col] = str(outputs["img"])
-        metadata.at[row_idx, csv_col] = str(outputs["csv"])
-        if prefixed_img_col is not None and prefixed_csv_col is not None:
-            metadata.at[row_idx, prefixed_img_col] = str(outputs["img"])
-            metadata.at[row_idx, prefixed_csv_col] = str(outputs["csv"])
+        _register_combined_outputs(
+            metadata, sample_name, combined_cell_type, outputs, sample_plan.get("output_prefix"),
+        )
 
     return metadata
 
@@ -419,6 +460,85 @@ def combine_multicolor_tracked_outputs_for_base(
         n_workers=n_workers,
     )
     
+def check_multicolor_tracked_overlap(
+    metadata,
+    output_dir,
+    source_cell_types,
+):
+    """Read-only pre-flight: detect cross-channel voxel overlap before merging.
+
+    Loads each channel's tracked image per sample and, for every timepoint,
+    counts the voxels claimed by more than one channel.  Returns a list of
+    overlap records (empty when clean)::
+
+        [{"sample_name": ..., "timepoint": t,
+          "channel_a": ..., "channel_b": ...,
+          "voxel_count": n}, ...]
+
+    Nothing is written.  Callers use a non-empty result to abort a rebuild and
+    leave any existing merged output untouched.
+    """
+    output_dir = Path(output_dir).expanduser()
+    source_cell_types = [
+        str(cell_type).strip()
+        for cell_type in source_cell_types
+        if str(cell_type).strip()
+    ]
+    if len(source_cell_types) < 2:
+        # A single channel cannot overlap with anything.
+        return []
+    if "sample_name" not in metadata.columns:
+        raise ValueError("metadata must contain a 'sample_name' column.")
+
+    sample_name_col = metadata["sample_name"].astype("string").str.strip()
+    sample_names = (
+        sample_name_col.dropna().replace("", pd.NA).dropna().unique().tolist()
+    )
+
+    records = []
+    for sample_name in sample_names:
+        sample = metadata[sample_name_col == sample_name].iloc[0]
+
+        source_arrays = []
+        for cell_type in source_cell_types:
+            img_path, _csv_path, _prefix = _resolve_source_tracking_paths(
+                sample, output_dir, cell_type
+            )
+            if not Path(img_path).exists():
+                # Missing inputs are handled (and reported) by the merge planner;
+                # the overlap pre-flight simply skips what it cannot read.
+                continue
+            source_arrays.append(
+                {"cell_type": cell_type, "arr": load_zarr(img_path)}
+            )
+
+        if len(source_arrays) < 2:
+            continue
+
+        n_timepoints = int(np.asarray(source_arrays[0]["arr"]).shape[0])
+        for t in range(n_timepoints):
+            occupancies = [
+                (np.asarray(item["arr"][t]) > 0, item["cell_type"])
+                for item in source_arrays
+            ]
+            for idx_a in range(len(occupancies)):
+                occ_a, name_a = occupancies[idx_a]
+                for idx_b in range(idx_a + 1, len(occupancies)):
+                    occ_b, name_b = occupancies[idx_b]
+                    voxel_count = int(np.count_nonzero(occ_a & occ_b))
+                    if voxel_count:
+                        records.append(
+                            {
+                                "sample_name": sample_name,
+                                "timepoint": t,
+                                "channel_a": name_a,
+                                "channel_b": name_b,
+                                "voxel_count": voxel_count,
+                            }
+                        )
+    return records
+
+
 def test():
     metadata = "/Volumes/T7_Sam/BHVD_BEHAV3D/BEHAV3D_python/runs/NatureBriefComm/LowDensity_MultiColor/metadata.csv"
     metadata = pd.read_csv(metadata)

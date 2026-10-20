@@ -27,7 +27,7 @@ A full session usually goes like this:
 1. **Open the Segmentation tab** → pick **ConvPaint (DL pixel classifier)** from the method dropdown.
 2. **Pick a device** at the top (CUDA GPU strongly preferred).
 3. **Pick a strategy.** Start with **ConvPaint Mask + EDT/Watershed** (default). Only switch to Probability + Watershed if the initial result has its specific failure mode (a noisy/uncertain mask boundary).
-4. **Set `Examples / sample`** (default 3) and click **Generate Training Data**. The viewer clears and loads timepoints as Image layers plus **one** `User Provided Labels` layer (ConvPaint is multi-class — one Labels layer holds all classes).
+4. **Set `Examples / sample`** (default 3) and click **Generate Training Data**. The images are read in the background (progress bar; napari stays responsive and the other tabs are locked meanwhile), then the viewer clears and loads timepoints as Image layers plus **one** `User Provided Labels` layer (ConvPaint is multi-class — one Labels layer holds all classes).
 5. **Open the `Legend` tab** (the first tab in the *Annotation & Segmentation* tab strip, before the per-cell-type tabs) to see which label index maps to which cell type (`1 = background`, `2 = organoid`, `3 = tcell`, etc.).
 6. **Paint each class on the single Labels layer using its assigned index.** A few hundred pixels per class is usually enough; bias your strokes toward boundaries and confusing regions.
 7. **Open the Feature Extractor group** and (usually) leave it on `VGG16` + `Multichannel` + `Normalize stack` + `Downsample 1`. Switch to DINOv2 / JAFAR DINOv2 only if VGG16's mask is "too smooth" or fails on subtle textures.
@@ -51,7 +51,7 @@ The `Device` dropdown at the top lists `CPU`, `Auto (best available)`, and one e
 |---|---|---|
 | **Strategy** | ConvPaint Mask + EDT/Watershed | One of the strategies listed above. |
 | **Examples / sample** | 3 | Number of timepoints sampled per metadata row as training data (range 1–10). |
-| **Generate Training Data** | — | Clears the viewer and loads the sampled timepoints + a single `User Provided Labels` layer (the multi-class label canvas). |
+| **Generate Training Data** | — | Reads the sampled timepoints in the background, then clears the viewer and loads them + a single `User Provided Labels` layer (the multi-class label canvas). |
 
 A legend tab inside the training widget maps each label index (1, 2, 3, …) to a cell type (background, organoid, tcell, …). Paint each class on the same Labels layer using its assigned index. The shared labeling guidance (where and how much to paint) applies here too — see [Labeling foreground and background](./index.md#labeling-foreground-and-background) (ConvPaint is the multi-class case described there).
 

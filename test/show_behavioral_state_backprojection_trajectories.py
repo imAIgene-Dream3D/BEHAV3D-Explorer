@@ -54,7 +54,7 @@ INTERACTIVE_BEHAV3D_FOLDER = r"F:\BHVD_BEHAV3D\BEHAV3D_python\runs\NatureBriefCo
 INTERACTIVE_SAMPLE_NAME = "BHVD_SB1_Exp009_Img001"
 INTERACTIVE_OUTPUT_DIR = None
 INTERACTIVE_CELL_TYPE = "tcell"
-INTERACTIVE_STATE_COL = "full_behavioral_cluster"
+INTERACTIVE_STATE_COL = "full_behavioral_state"
 INTERACTIVE_RAW_IMAGE_PATH = None
 INTERACTIVE_TRACKED_IMG_PATH = None
 INTERACTIVE_STATE_IMG_PATH = None
@@ -381,7 +381,7 @@ def build_state_trajectory_backprojection_payload(
     sample_name: str,
     output_dir: str | Path,
     cell_type: str,
-    state_col: str = "full_behavioral_cluster",
+    state_col: str = "full_behavioral_state",
     raw_image_path: str | None = None,
     tracked_img_path: str | None = None,
     state_img_path: str | None = None,
@@ -530,7 +530,7 @@ def launch_state_trajectory_backprojection_viewer(payload, run: bool = True):
             trajectory_data=payload["trajectory_data"],
             code_colors=payload["code_colors"],
             label_map=payload["label_map"],
-            output_col=payload.get("state_col", "full_behavioral_cluster"),
+            output_col=payload.get("state_col", "full_behavioral_state"),
             tail_length=payload.get("tail_length"),
             visible=True,
         )
@@ -563,7 +563,7 @@ def show_behavioral_state_backprojection_trajectories(
     sample_name: str,
     output_dir: str | Path,
     cell_type: str,
-    state_col: str = "full_behavioral_cluster",
+    state_col: str = "full_behavioral_state",
     raw_image_path: str | None = None,
     tracked_img_path: str | None = None,
     state_img_path: str | None = None,

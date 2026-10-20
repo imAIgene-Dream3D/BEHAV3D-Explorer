@@ -23,6 +23,22 @@ from matplotlib.backends.backend_pdf import PdfPages
 import seaborn as sns
 
 
+def _norm_track_id(value) -> str:
+    """Canonical string form of a track id.
+
+    ``contact_events_*.csv`` writes ``target_track_ids`` through a float
+    round-trip, so an id can arrive as ``"1.0"`` while the track-feature
+    tables hold ``"1"``. These are joined as plain strings, so without
+    normalising, every float-formatted id silently fails to match and the
+    row is dropped as ``organoid_type == "unknown"``. Strip the redundant
+    ``.0`` so both sides agree.
+    """
+    s = str(value).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers: line-condition grouping and absolute analysis-time window.
 #
@@ -291,6 +307,49 @@ def format_period_label(analysis_period_min) -> str:
 # Timepoint-based temporal range (position_t) — new API
 # ---------------------------------------------------------------------------
 
+def intersect_timepoint_windows(*windows):
+    """Intersect several ``(start, end)`` timepoint windows.
+
+    ``None`` (or a ``None`` bound) means "open", so it never narrows the
+    result. Returns ``None`` when nothing constrains the range.
+
+    Used to combine the GLOBAL filtering window (behav3d_parameters.yml ->
+    timepoint_range) with an explicit per-analysis period: the global
+    window is the floor, and the analysis period may only narrow further
+    inside it.
+    """
+    starts, ends = [], []
+    for w in windows:
+        start, end = _normalize_period_t(w)
+        if start is not None:
+            starts.append(start)
+        if end is not None:
+            ends.append(end)
+    if not starts and not ends:
+        return None
+    return (max(starts) if starts else None, min(ends) if ends else None)
+
+
+def _resolve_global_timepoint_range(output_dir, analysis_period_t):
+    """Narrow ``analysis_period_t`` by the global filtering window.
+
+    Active Killing deliberately scans the raw, unfiltered tracks so that it
+    never has to be re-run when the filtering window changes. Its outputs
+    are therefore a full-movie superset, and the window has to be applied
+    where they are READ - which is here, via the existing period_bounds
+    machinery.
+    """
+    try:
+        from behav3d.io.parameters import load_timepoint_range
+        global_range = load_timepoint_range(output_dir)
+    except Exception:
+        global_range = None
+    if global_range is None:
+        return analysis_period_t, None
+    resolved = intersect_timepoint_windows(global_range, analysis_period_t)
+    return resolved, global_range
+
+
 def _normalize_period_t(analysis_period_t):
     """Coerce a timepoint period spec to ``(start, end)`` ints/None."""
     if analysis_period_t is None:
@@ -390,22 +449,12 @@ def run_interaction_analysis(
 ):
     """
     Run interaction analysis for an organoid cell type.
-    
+
     Parameters
     ----------
-    output_dir : str
-        Base output directory for BEHAV3D results
-    cell_type : str
-        Name of the organoid cell type (e.g., "organoid")
-    interacting_cell_types : list
-        List of cell types to analyze interactions with (e.g., ["tcell", "macrophage"])
     dead_threshold : float
         Retained for backward compatibility. Interaction analysis now reads the
         final death classification directly from the ``dead`` column in the CSV.
-    df_tracks_path : str, optional
-        Path to filtered track features CSV. If None, uses default location.
-    show_plots : bool
-        Whether to display plots inline (default: True)
     group_by_line_condition : bool
         When True, the two *overall* plots are split by the interacting immune
         cell's line condition (``im_{type}_line_condition``): the cumulative
@@ -413,17 +462,8 @@ def run_interaction_analysis(
         by condition (solid = survives, dashed = dies). Default False keeps the
         original single-curve behaviour. Per-sample plots are unaffected.
 
-    Returns
-    -------
-    dict
-        Dictionary with results per interacting cell type:
-        {
-            "cell_type": {
-                "stats_df": pd.DataFrame,
-                "pdf_path": Path,
-                "figs": dict of matplotlib figures (if show_plots=True)
-            }
-        }
+    Returns a dict of results per interacting cell type: {"cell_type": {"stats_df",
+    "pdf_path", "figs" (if show_plots=True)}}.
     """
     
     
@@ -520,6 +560,18 @@ def run_interaction_analysis(
             split_col=split_col,
         )
         
+        # The four PDF panels are time-resolved curves; the summary CSV above
+        # is a per-sample track summary and cannot reproduce them.
+        export_interaction_plot_data(
+            df=df,
+            results_dir=results_dir,
+            cell_type=cell_type,
+            interacting_type=ct,
+            cumulative_col=cumulative_col,
+            split_col=split_col,
+            has_dead_column=has_dead_column,
+        )
+
         # Save PDF
         pdf_path = results_dir / f"interaction_analysis_{cell_type}_vs_{ct}.pdf"
         save_plots_to_pdf(figs, pdf_path)
@@ -603,27 +655,7 @@ def calculate_interaction_stats(
     cumulative_col: str,
     has_dead_column: bool,
 ) -> pd.DataFrame:
-    """
-    Calculate summary statistics for interactions with a specific cell type.
-    
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Track features dataframe with contact columns
-    cell_type : str
-        Organoid cell type name
-    interacting_type : str
-        Interacting cell type name
-    cumulative_col : str
-        Name of cumulative contact column
-    has_dead_column : bool
-        Whether death data is available
-        
-    Returns
-    -------
-    pd.DataFrame
-        Per-sample summary statistics
-    """
+    """Per-sample summary statistics for interactions with `interacting_type`."""
     contact_col = f"{interacting_type}_contact"
     
     # Per-track summary
@@ -672,6 +704,70 @@ def calculate_interaction_stats(
         sample_stats.append(stats)
     
     return pd.DataFrame(sample_stats)
+
+
+def _cumulative_contact_stats(df: pd.DataFrame, cumulative_col: str, by=None) -> pd.DataFrame:
+    """Per-timepoint mean / SEM of a cumulative contact column.
+
+    Single source for the interaction panels and for the CSVs exported next to
+    them, so a figure and its table can never disagree. ``by`` adds grouping
+    columns (sample name, survival status, line condition) ahead of position_t.
+    """
+    keys = list(by or []) + ["position_t"]
+    stats = (
+        df.groupby(keys)[cumulative_col]
+        .agg(["mean", "std", "count"])
+        .reset_index()
+    )
+    stats["sem"] = stats["std"] / np.sqrt(stats["count"])
+    return stats
+
+
+def export_interaction_plot_data(
+    df: pd.DataFrame,
+    results_dir: Path,
+    cell_type: str,
+    interacting_type: str,
+    cumulative_col: str,
+    split_col: str = None,
+    has_dead_column: bool = False,
+) -> Path:
+    """Write the per-timepoint curves behind each panel of the PDF.
+
+    ``interaction_stats_*.csv`` is a per-sample track summary and cannot
+    reconstruct the plotted curves, so each panel gets its own tidy table
+    built by the same helper the panel uses.
+    """
+    outdir = Path(results_dir, "plot_data")
+    outdir.mkdir(parents=True, exist_ok=True)
+    stem = f"{cell_type}_vs_{interacting_type}"
+
+    split = [split_col] if split_col and split_col in df.columns else []
+    tables = {
+        f"cumulative_overall_{stem}": _cumulative_contact_stats(
+            df, cumulative_col, by=split or None
+        ),
+        f"cumulative_per_sample_{stem}": _cumulative_contact_stats(
+            df, cumulative_col, by=["sample_name"]
+        ),
+    }
+    if has_dead_column and "survives" in df.columns:
+        tables[f"alive_vs_dead_overall_{stem}"] = _cumulative_contact_stats(
+            df, cumulative_col, by=split + ["survives"]
+        )
+        tables[f"alive_vs_dead_per_sample_{stem}"] = _cumulative_contact_stats(
+            df, cumulative_col, by=["sample_name", "survives"]
+        )
+
+    for name, table in tables.items():
+        # split_col is an internal scratch name ("__lc_<type>"); export it as
+        # the thing it actually holds.
+        if split_col and split_col in table.columns:
+            table = table.rename(columns={split_col: "line_condition"})
+        path = Path(outdir, f"{name}.csv")
+        table.to_csv(path, index=False)
+        print(f"   Plot data saved: {path.name}")
+    return outdir
 
 
 def generate_interaction_plots(
@@ -766,11 +862,7 @@ def plot_cumulative_overall(
         palette = sns.color_palette("tab10", max(len(groups), 1))
         for gi, gval in enumerate(groups):
             sub = df[df[split_col] == gval]
-            stats = (
-                sub.groupby("position_t")[cumulative_col]
-                .agg(["mean", "std", "count"]).reset_index()
-            )
-            stats["sem"] = stats["std"] / np.sqrt(stats["count"])
+            stats = _cumulative_contact_stats(sub, cumulative_col)
             n_g = sub.groupby(["sample_name", "TrackID"]).ngroups
             ax.plot(
                 stats["position_t"], stats["mean"],
@@ -785,8 +877,7 @@ def plot_cumulative_overall(
         ax.legend(title="Line condition", fontsize=9)
     else:
         # Calculate mean and SEM per timepoint
-        stats = df.groupby("position_t")[cumulative_col].agg(["mean", "std", "count"]).reset_index()
-        stats["sem"] = stats["std"] / np.sqrt(stats["count"])
+        stats = _cumulative_contact_stats(df, cumulative_col)
 
         ax.plot(stats["position_t"], stats["mean"], linewidth=2, color="steelblue")
         ax.fill_between(
@@ -831,10 +922,7 @@ def plot_cumulative_per_sample(
         df_sample = df[df["sample_name"] == sample]
         n_org_sample = df_sample.groupby(["sample_name", "TrackID"]).ngroups
         
-        stats_sample = df_sample.groupby("position_t")[cumulative_col].agg(
-            ["mean", "std", "count"]
-        ).reset_index()
-        stats_sample["sem"] = stats_sample["std"] / np.sqrt(stats_sample["count"])
+        stats_sample = _cumulative_contact_stats(df_sample, cumulative_col)
         
         ax.plot(stats_sample["position_t"], stats_sample["mean"], linewidth=2, color="steelblue")
         ax.fill_between(
@@ -850,7 +938,6 @@ def plot_cumulative_per_sample(
         ax.set_title(f"{sample}\n(n = {n_org_sample})", fontsize=11)
         ax.grid(True, alpha=0.3)
     
-    # Hide unused axes
     for idx in range(len(samples), len(axes)):
         axes[idx].set_visible(False)
     
@@ -892,11 +979,7 @@ def plot_alive_vs_dead_overall(
                 n_sub = sub.groupby(["sample_name", "TrackID"]).ngroups
                 if n_sub == 0:
                     continue
-                stats = (
-                    sub.groupby("position_t")[cumulative_col]
-                    .agg(["mean", "std", "count"]).reset_index()
-                )
-                stats["sem"] = stats["std"] / np.sqrt(stats["count"])
+                stats = _cumulative_contact_stats(sub, cumulative_col)
                 ax.plot(
                     stats["position_t"], stats["mean"],
                     linewidth=2, color=color_map[gval], linestyle=style,
@@ -929,10 +1012,7 @@ def plot_alive_vs_dead_overall(
         if n_subset == 0:
             continue
         
-        stats = df_subset.groupby("position_t")[cumulative_col].agg(
-            ["mean", "std", "count"]
-        ).reset_index()
-        stats["sem"] = stats["std"] / np.sqrt(stats["count"])
+        stats = _cumulative_contact_stats(df_subset, cumulative_col)
         
         ax.plot(
             stats["position_t"], stats["mean"], 
@@ -990,10 +1070,7 @@ def plot_alive_vs_dead_per_sample(
             if n_subset == 0:
                 continue
             
-            stats = df_subset.groupby("position_t")[cumulative_col].agg(
-                ["mean", "std", "count"]
-            ).reset_index()
-            stats["sem"] = stats["std"] / np.sqrt(stats["count"])
+            stats = _cumulative_contact_stats(df_subset, cumulative_col)
             
             ax.plot(
                 stats["position_t"], stats["mean"],
@@ -1013,10 +1090,9 @@ def plot_alive_vs_dead_per_sample(
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
     
-    # Hide unused axes
     for idx in range(len(samples), len(axes)):
         axes[idx].set_visible(False)
-    
+
     fig.suptitle(
         f"Cumulative {interacting_type} Interactions: Surviving vs Dying {cell_type}s (Per Sample)",
         fontsize=14, y=0.995,
@@ -1093,6 +1169,19 @@ def run_multi_organoid_interaction_comparison(
         _use_minutes_fallback = True
     else:
         _use_minutes_fallback = False
+
+    # Narrow by the global filtering window. The track CSVs this reads are
+    # already windowed by filter_tracks, but the active-killing event files
+    # are not (they are produced from the raw tracks on purpose), so without
+    # this the killing panels would count events from timepoints the user
+    # filtered out.
+    analysis_period_t, _global_range = _resolve_global_timepoint_range(
+        output_dir, analysis_period_t
+    )
+    if _global_range is not None:
+        print(f"  Global timepoint range {_global_range} applied; "
+              f"effective analysis period: "
+              f"{format_period_label_timepoints(analysis_period_t)}")
 
     output_dir = Path(output_dir)
     results_dir = output_dir / "analysis" / "multi_organoid_comparison"
@@ -2120,7 +2209,7 @@ def _load_active_killing_data(
         for _, row in (
             df_org[["sample_name", "TrackID"]].drop_duplicates().iterrows()
         ):
-            key = (str(row["sample_name"]), str(row["TrackID"]))
+            key = (str(row["sample_name"]), _norm_track_id(row["TrackID"]))
             track_type_map.setdefault(key, org_type)
 
     all_events: list = []
@@ -2184,6 +2273,7 @@ def _load_active_killing_data(
                     df_tp_kill["targeted_track_id"] = (
                         df_tp_kill["targeted_track_id"]
                         .astype(float).astype("Int64").astype(str)
+                        .map(_norm_track_id)
                     )
                     per_target_kill = (
                         df_tp_kill.groupby(
@@ -2199,7 +2289,7 @@ def _load_active_killing_data(
             df_ev["target_track_ids"].astype(str).str.split(",")
         )
         df_ex = df_ev.explode("_targets")
-        df_ex["target_track_id"] = df_ex["_targets"].str.strip()
+        df_ex["target_track_id"] = df_ex["_targets"].map(_norm_track_id)
         df_ex = df_ex[
             df_ex["target_track_id"].ne("")
             & df_ex["target_track_id"].ne("nan")
@@ -2250,7 +2340,7 @@ def _load_active_killing_data(
     ):
         ts = track_summary[["sample_name", "TrackID", "fate"]].copy()
         ts["sample_name"] = ts["sample_name"].astype(str)
-        ts["TrackID"] = ts["TrackID"].astype(str)
+        ts["TrackID"] = ts["TrackID"].map(_norm_track_id)
         df_all["sample_name"] = df_all["sample_name"].astype(str)
         df_all["target_track_id"] = df_all["target_track_id"].astype(str)
         df_all = df_all.merge(

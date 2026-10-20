@@ -13,6 +13,7 @@ indeterminate (busy) progress bar.  The batch Run shows determinate
 progress at cell-type granularity.  Queue compatibility is preserved by
 defaulting ``block=True``.
 """
+import logging
 import sys
 import traceback
 from pathlib import Path
@@ -26,8 +27,11 @@ from qtpy.QtWidgets import (
 )
 from qtpy.QtCore import Qt, Signal
 
+from behav3d.core.run_plan import ALL_SAMPLES, Action, RunPlan, scan_cell_type_files
 from behav3d.core.qt_help import HelpButton, make_help_row, reset_scroll_on_page_change
 from behav3d.napari._units import UnitGroupManager, TimeUnitGroupManager
+
+logger = logging.getLogger(__name__)
 from behav3d.napari._results_panel import (
     ResultsPanel,
     notify_results_changed,
@@ -36,6 +40,7 @@ from behav3d.napari._background_runner import (
     BackgroundOperation,
     ProgressBarRow,
     fire_extra_callback,
+    refuse_if_busy,
 )
 
 
@@ -74,16 +79,27 @@ class CellTypeFilterPanel(QWidget):
         md = metadata_loader.metadata
         self._has_dead = False
         if md is not None:
-            self._has_dead = "dead_channel" in md.columns and md["dead_channel"].notna().any()
+            self._has_dead = bool(
+                "dead_channel" in md.columns and md["dead_channel"].notna().any()
+            )
 
-        # Read saved config
+        # Back-reference set by FilteringTab._add_panel; used to broadcast
+        # the (global) timepoint range to the sibling panels.
+        self.filtering_tab = None
+
+        # Read saved config. The timepoint range is GLOBAL (one block shared
+        # by every cell type) because cross-cell-type analyses join on
+        # 'position_t' and break silently when two cell types cover
+        # different spans; everything else here is per cell type.
         params = self.metadata_loader.behav3d_parameters
         cfg = params.get("track_filtering", {}).get(self.cell_type, {}) or {}
+        time_range = params.get("timepoint_range") or {}
 
-        self._init_ui(cfg)
+        self._init_ui(cfg, time_range)
 
     # ---- UI ---------------------------------------------------------------
-    def _init_ui(self, cfg):
+    def _init_ui(self, cfg, time_range=None):
+        time_range = time_range or {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
@@ -116,6 +132,122 @@ class CellTypeFilterPanel(QWidget):
         )
         self.btn_preview_lengths.clicked.connect(self._on_preview_lengths_clicked)
         layout.addWidget(self.btn_preview_lengths)
+
+        # ── Timepoint range ─────────────────────────────────────
+        # Placed first because it is applied first: every filter below only
+        # sees the rows inside the selected window.
+        range_row = QHBoxLayout()
+        self.en_time_range = QCheckBox("Restrict analysis to a timepoint range")
+        self.en_time_range.setChecked(bool(time_range.get("enabled", False)))
+        range_row.addWidget(self.en_time_range)
+        range_row.addWidget(HelpButton(
+            "Restrict To Timepoint Range",
+            "When enabled, only rows whose timepoint falls inside the "
+            "inclusive [Start, End] window are kept. This is an absolute "
+            "window into the experiment (e.g. 'timepoints 20 to 80'), not "
+            "a per-track duration like the filters below.\n\n"
+            "It is the very first filtering step, so 'Max timepoints', "
+            "'Min length' and 'Max length' all measure only what is inside "
+            "the window. Tracks that overlap the window only partially are "
+            "kept and simply cropped \u2014 use 'Min length' to drop the ones "
+            "that end up too short.\n\n"
+            "Measured in frames ('position_t'); displayed in frames or "
+            "hours per the unit toggle at the bottom of this panel.\n\n"
+            "This setting is GLOBAL: it applies to every cell type and is "
+            "mirrored on every tab. Cross-cell-type analyses (interaction, "
+            "invasiveness, multi-organoid death dynamics) join cell types "
+            "on the timepoint axis and silently produce wrong denominators "
+            "or fabricated data when two cell types cover different spans, "
+            "so the window cannot be set per cell type.\n\n"
+            "This complements the timepoint clipping in Data Preparation: "
+            "that one cuts the images before analysis, this one narrows an "
+            "already extracted feature set without re-running anything."
+        ))
+        range_row.addStretch()
+        layout.addLayout(range_row)
+
+        self.spin_t_start = QSpinBox()
+        self.spin_t_start.setRange(0, 99999)
+        self.spin_t_start.setMaximumWidth(110)
+        self._time_unit_mgr.register(
+            self.spin_t_start, self._legacy_native_frames(time_range.get("start", 0) or 0)
+        )
+        self.spin_t_end = QSpinBox()
+        self.spin_t_end.setRange(0, 99999)
+        self.spin_t_end.setMaximumWidth(110)
+        self._time_unit_mgr.register(
+            self.spin_t_end, self._legacy_native_frames(time_range.get("end", 0) or 0)
+        )
+
+        range_form = QFormLayout()
+        range_form.setContentsMargins(20, 0, 0, 0)
+        range_form.addRow("Start timepoint:", make_help_row(
+            self.spin_t_start,
+            "Range Start",
+            "First timepoint to keep (inclusive). Rows before this are "
+            "dropped.\n\nUnit follows the frames/hours toggle at the bottom "
+            "of this panel; the underlying filter always runs on frames."
+        ))
+        range_form.addRow("End timepoint:", make_help_row(
+            self.spin_t_end,
+            "Range End",
+            "Last timepoint to keep (inclusive). Rows after this are "
+            "dropped.\n\nUnit follows the frames/hours toggle at the bottom "
+            "of this panel; the underlying filter always runs on frames."
+        ))
+
+        # The two "first timepoint" filters below key on each track's first
+        # frame of the ORIGINAL movie, which a window normally cuts away. This
+        # opt-in re-points them at the window instead. Per cell type (unlike
+        # the window itself), because whether a cell is expected to be small
+        # or already dead at the start of the window is type-specific.
+        self.check_first_tp_from_range = QCheckBox(
+            "Enable first-timepoint filters, measured at the start of this range"
+        )
+        self.check_first_tp_from_range.setChecked(
+            bool(cfg.get("first_timepoint_from_range", False))
+        )
+        range_form.addRow(make_help_row(
+            self.check_first_tp_from_range,
+            "First-Timepoint Filters Over The Range",
+            "The 'min size at first timepoint' and 'dead at first timepoint' "
+            "filters below normally test each track at its first frame of the "
+            "whole movie. When a timepoint range is active that frame has "
+            "usually been cut away, so both filters would silently skip every "
+            "track that started before the window - which is why they are "
+            "greyed out and switched off while this box is unticked.\n\n"
+            "Tick it to re-enable them, measured at each track's first "
+            "timepoint INSIDE the range: a track present from the start of "
+            "the window is judged there, and one that appears part-way "
+            "through is judged at the frame it appears. No track is skipped.\n\n"
+            "Unlike the range itself, this is per cell type.\n\n"
+            "This changes only which row the filters look at. Timepoint "
+            "numbering is never rewritten - 'position_t' and 'relative_time' "
+            "keep their original values, so result plots still show the "
+            "original timepoints of the movie."
+        ))
+
+        range_note = QLabel(
+            "Timepoint numbering is never rewritten: results keep the original "
+            "timepoints, so plots of a 56-78 window read 56-78, not 1-23."
+        )
+        range_note.setWordWrap(True)
+        range_note.setStyleSheet(
+            "QLabel { color: #9aa0a6; font-size: 11px; padding: 2px 0; }"
+        )
+        range_form.addRow(range_note)
+
+        self.range_widget = QWidget()
+        self.range_widget.setLayout(range_form)
+        layout.addWidget(self.range_widget)
+
+        def _toggle_range(state):
+            self.range_widget.setVisible(self.en_time_range.isChecked())
+            self._sync_first_timepoint_filters()
+        self.en_time_range.stateChanged.connect(_toggle_range)
+        self.check_first_tp_from_range.stateChanged.connect(
+            lambda _s: self._sync_first_timepoint_filters()
+        )
 
         # ── Experiment duration ────────────────────────────────────────
         exp_row = QHBoxLayout()
@@ -385,7 +517,30 @@ class CellTypeFilterPanel(QWidget):
 
         layout.addStretch()
 
+        # Deferred until every widget exists: this shows/hides the range block
+        # and puts the two first-timepoint filters into the right state.
+        _toggle_range(None)
+
     # ---- Helpers ----------------------------------------------------------
+    def _sync_first_timepoint_filters(self):
+        """Enable/disable the two 'first timepoint' filters for the window.
+
+        With a timepoint range active, 'relative_time == 1' normally points
+        at a frame the window cut away, so both filters would silently skip
+        every track that started earlier. They are therefore greyed out and
+        switched off unless the user opts in to measuring them at the start
+        of the range instead.
+        """
+        ranged = self.en_time_range.isChecked()
+        self.check_first_tp_from_range.setVisible(ranged)
+
+        # Usable normally when there is no window, or when the user opted in.
+        usable = (not ranged) or self.check_first_tp_from_range.isChecked()
+        for check in (self.check_filter_min_size, self.check_filter_dead_t0):
+            check.setEnabled(usable)
+            if not usable and check.isChecked():
+                check.setChecked(False)
+
     def _on_preview_lengths_clicked(self):
         """Preview per-sample track-length histograms from the *unfiltered*
         combined track features, to help pick a max-track-length threshold
@@ -426,7 +581,11 @@ class CellTypeFilterPanel(QWidget):
             self.log(f"❌ Error generating plot: {e}")
 
     def _collect_params(self) -> dict:
+        # The timepoint range itself is global and lives in its own
+        # top-level block (see FilteringTab._persist_time_range); only the
+        # per-cell-type opt-in below belongs to this cell type.
         d = {
+            "first_timepoint_from_range": self.check_first_tp_from_range.isChecked(),
             "exp_duration_enabled": self.en_exp_duration.isChecked(),
             "exp_duration": int(round(self._time_unit_mgr.get_native(self.spin_exp_duration))),
             "min_length_enabled": self.en_min_length.isChecked(),
@@ -459,6 +618,11 @@ class CellTypeFilterPanel(QWidget):
                 continue
             if ct in parent_tab.panels:
                 p = parent_tab.panels[ct]
+                # The timepoint range is global and already identical on
+                # every panel, so it is deliberately not copied here.
+                p.check_first_tp_from_range.setChecked(
+                    settings.get("first_timepoint_from_range", False)
+                )
                 p.en_exp_duration.setChecked(settings["exp_duration_enabled"])
                 p._time_unit_mgr.set_native(p.spin_exp_duration, settings["exp_duration"])
                 p.en_min_length.setChecked(settings["min_length_enabled"])
@@ -470,6 +634,7 @@ class CellTypeFilterPanel(QWidget):
                 p._size_unit_mgr.set_native(p.spin_min_size_t1, settings["min_size_t1"])
                 p.check_filter_dead_t0.setChecked(settings.get("filter_t0_dead", False))
                 p._time_unit_mgr.switch.setChecked(settings["time_type"] == "hours")
+                p._sync_first_timepoint_filters()
                 count += 1
         scope = "category" if category_only else "all"
         self.log(f"Applied filter settings to {count} other cell types ({scope}).")
@@ -478,6 +643,14 @@ class CellTypeFilterPanel(QWidget):
         params = self.metadata_loader.behav3d_parameters
         filtering = params.setdefault("track_filtering", {})
         filtering[self.cell_type] = self._collect_params()
+
+        # The window is global, so it goes in its own top-level block rather
+        # than being duplicated under each cell type.
+        params["timepoint_range"] = {
+            "enabled": bool(self.en_time_range.isChecked()),
+            "start": int(round(self._time_unit_mgr.get_native(self.spin_t_start))),
+            "end": int(round(self._time_unit_mgr.get_native(self.spin_t_end))),
+        }
 
         out_dir = self.metadata_loader.output_dir
         if out_dir:
@@ -496,6 +669,12 @@ class CellTypeFilterPanel(QWidget):
         here — the backend never needs to interpret these as hours.
         """
         return {
+            # Mirrored from the global block onto every panel, so reading this
+            # panel's own widgets is safe and keeps the snapshot thread-safe.
+            "time_range_enabled": bool(self.en_time_range.isChecked()),
+            "time_range_start": int(round(self._time_unit_mgr.get_native(self.spin_t_start))),
+            "time_range_end": int(round(self._time_unit_mgr.get_native(self.spin_t_end))),
+            "first_timepoint_from_range": bool(self.check_first_tp_from_range.isChecked()),
             "exp_duration_enabled": bool(self.en_exp_duration.isChecked()),
             "exp_duration": int(round(self._time_unit_mgr.get_native(self.spin_exp_duration))),
             "min_length_enabled": bool(self.en_min_length.isChecked()),
@@ -542,6 +721,9 @@ class CellTypeFilterPanel(QWidget):
             "min_track_length": (int(params["min_track_length"]) if params["min_length_enabled"] else None),
             "max_track_length": (int(params["max_track_length"]) if params["max_length_enabled"] else None),
             "split_long_tracks": bool(params.get("split_long_tracks", True)),
+            "t_range_start": (int(params["time_range_start"]) if params.get("time_range_enabled") else None),
+            "t_range_end": (int(params["time_range_end"]) if params.get("time_range_enabled") else None),
+            "first_timepoint_from_range": bool(params.get("first_timepoint_from_range", False)),
             "df_input_path": df_input_path,
             "time_type": params["time_type"],
             "plot_results": True,
@@ -558,14 +740,31 @@ class CellTypeFilterPanel(QWidget):
         print(f"✅ {cell_type} filtering & summarization finished.", file=sys.stderr)
 
     def _check_existing_filtering(self, cell_types: list) -> list:
+        from behav3d.analysis.grouping import filtered_track_features_csv
+
         warnings = []
-        out_dir = Path(self.metadata_loader.output_dir)
+        out_dir = self.metadata_loader.output_dir
         for ct in cell_types:
-            feat_dir = out_dir / "analysis" / ct / "track_features"
-            filtered = feat_dir / f"BEHAV3D_{ct}_filtered_track_features.csv"
+            filtered = filtered_track_features_csv(out_dir, ct)
             if filtered.exists():
                 warnings.append(f"{ct} filtered data ({filtered.name})")
         return warnings
+
+    def _validate_time_range(self) -> bool:
+        """Reject an empty/inverted timepoint window before running."""
+        if not self.en_time_range.isChecked():
+            return True
+        t_start = int(round(self._time_unit_mgr.get_native(self.spin_t_start)))
+        t_end = int(round(self._time_unit_mgr.get_native(self.spin_t_end)))
+        if t_end <= t_start:
+            QMessageBox.warning(
+                self, "Invalid timepoint range",
+                f"End timepoint ({self.spin_t_end.value()}) must be greater "
+                f"than start ({self.spin_t_start.value()}) for "
+                f"'{self.cell_type}'."
+            )
+            return False
+        return True
 
     def _on_run_clicked(self, interactive=True):
         """Run filtering for this cell type in the background.
@@ -576,6 +775,13 @@ class CellTypeFilterPanel(QWidget):
         """
         if self._bg.is_running():
             self.log("⚠️ A filtering run is already in progress for this panel.")
+            return
+        if interactive and refuse_if_busy(
+            self, "starting filtering", bg=self._bg
+        ):
+            return
+
+        if not self._validate_time_range():
             return
 
         self._persist()
@@ -645,6 +851,8 @@ class FilteringTab(QWidget):
         self.viewer = viewer
         self.metadata_loader = metadata_loader
         self.panels: dict[str, CellTypeFilterPanel] = {}
+        # Re-entrancy guard for the global timepoint-range mirroring.
+        self._syncing_range: bool = False
 
         # Background-execution infrastructure for batch runs.
         self._bg = BackgroundOperation(self)
@@ -811,6 +1019,15 @@ class FilteringTab(QWidget):
         )
 
     def _rebuild_tabs(self):
+        for panel in self.panels.values():
+            bg = getattr(panel, "_bg", None)
+            if bg is not None and bg.is_running():
+                logger.warning(
+                    "FilteringTab._rebuild_tabs: cancelling in-flight run "
+                    "for panel %r before rebuilding tabs.", panel.cell_type,
+                )
+                bg.cancel(timeout_ms=500)
+
         self.cell_tabs.clear()
         self.panels.clear()
 
@@ -835,6 +1052,55 @@ class FilteringTab(QWidget):
         for ct in oth:
             self._add_panel(ct, "other", all_types, oth, color_map)
 
+    def _broadcast_time_range(self, source, persist=False):
+        """Mirror ``source``'s timepoint window onto every other panel.
+
+        The window is a single global setting shown on every cell-type tab.
+        It cannot be per cell type: cross-cell-type analyses join on
+        'position_t' and silently produce wrong denominators, dropped rows
+        or fabricated track extensions when two cell types cover different
+        spans.
+        """
+        if self._syncing_range:
+            return
+        self._syncing_range = True
+        try:
+            enabled = source.en_time_range.isChecked()
+            # Broadcast the native frame count; each panel renders it in its
+            # own frames/hours display.
+            start = source._time_unit_mgr.get_native(source.spin_t_start)
+            end = source._time_unit_mgr.get_native(source.spin_t_end)
+            for ct, panel in self.panels.items():
+                if panel is source:
+                    continue
+                panel.en_time_range.setChecked(enabled)
+                panel._time_unit_mgr.set_native(panel.spin_t_start, start)
+                panel._time_unit_mgr.set_native(panel.spin_t_end, end)
+                panel._sync_first_timepoint_filters()
+        finally:
+            self._syncing_range = False
+        if persist:
+            self._persist_time_range(source)
+
+    def _persist_time_range(self, source):
+        """Write the global timepoint window to behav3d_parameters.yml."""
+        params = self.metadata_loader.behav3d_parameters
+        if params is None:
+            return
+        params["timepoint_range"] = {
+            "enabled": bool(source.en_time_range.isChecked()),
+            "start": int(round(source._time_unit_mgr.get_native(source.spin_t_start))),
+            "end": int(round(source._time_unit_mgr.get_native(source.spin_t_end))),
+        }
+        out_dir = self.metadata_loader.output_dir
+        if not out_dir:
+            return
+        try:
+            from behav3d.io.parameters import save_params
+            save_params(params, out_dir)
+        except Exception as e:
+            self._log(f"Warning: Could not save the timepoint range: {e}")
+
     def _add_panel(self, ct, category, all_types, cat_types, color_map):
         panel = CellTypeFilterPanel(
             cell_type=ct, category=category,
@@ -845,6 +1111,25 @@ class FilteringTab(QWidget):
             viewer=self.viewer,
         )
         self.panels[ct] = panel
+        panel.filtering_tab = self
+
+        # Keep the global window in lockstep across tabs. Wired here rather
+        # than in the panel because _rebuild_tabs tears down and recreates
+        # every panel whenever metadata is reloaded.
+        # Mirror on every change so the tabs never disagree, but only write
+        # the file on deliberate edits (toggling the checkbox, or finishing a
+        # spinbox edit) rather than on every intermediate keystroke.
+        panel.en_time_range.stateChanged.connect(
+            lambda _s, src=panel: self._broadcast_time_range(src, persist=True)
+        )
+        for spin in (panel.spin_t_start, panel.spin_t_end):
+            spin.valueChanged.connect(
+                lambda _v, src=panel: self._broadcast_time_range(src)
+            )
+            spin.editingFinished.connect(
+                lambda src=panel: self._broadcast_time_range(src, persist=True)
+            )
+
         icon = color_map.get(category, "")
         self.cell_tabs.addTab(panel, f"{icon} {ct}")
 
@@ -853,7 +1138,7 @@ class FilteringTab(QWidget):
         self.run_batch_filtering(interactive=True, block=False)
 
     def run_batch_filtering(self, interactive=True, skip_existing=False, block=False,
-                            extra_callbacks=None):
+                            extra_callbacks=None, plan=None):
         """Run filtering for all cell types sequentially.
 
         ``block=False`` (default) runs in a background worker thread with a
@@ -875,6 +1160,18 @@ class FilteringTab(QWidget):
             fire_extra_callback(extra_callbacks, "on_failed", "already running")
             return
 
+        if interactive and refuse_if_busy(
+            self, "starting batch filtering", bg=self._bg,
+            extra_callbacks=extra_callbacks,
+        ):
+            return
+
+        # The window is global, so one panel's copy speaks for all of them.
+        first_panel = next(iter(self.panels.values()))
+        if not first_panel._validate_time_range():
+            fire_extra_callback(extra_callbacks, "on_failed", "invalid timepoint range")
+            return
+
         total = len(self.panels)
         self._log(f"Starting batch filtering for {total} cell types…")
 
@@ -882,58 +1179,53 @@ class FilteringTab(QWidget):
         print(f"  Running batch filtering for {total} cell types", file=sys.stderr)
         print(f"{'='*60}", file=sys.stderr)
 
-        # Overwrite check
-        all_cts = list(self.panels.keys())
-        existing = []
-        existing_cts = set()
-        out_dir = Path(self.metadata_loader.output_dir)
-        for ct in all_cts:
-            feat_dir = out_dir / "analysis" / ct / "track_features"
-            filtered = feat_dir / f"BEHAV3D_{ct}_filtered_track_features.csv"
-            if filtered.exists():
-                existing.append(f"{ct} filtered data ({filtered.name})")
-                existing_cts.add(ct)
+        # One filtered file per cell type, so the plan has one item per cell type.
+        from behav3d.analysis.grouping import filtered_track_features_csv
 
-        skip_existing_flag = skip_existing
-        overwrite = not skip_existing
-        if existing:
+        out_dir = Path(self.metadata_loader.output_dir)
+        all_cts = list(self.panels.keys())
+        items = scan_cell_type_files(
+            all_cts, lambda ct: filtered_track_features_csv(out_dir, ct)
+        )
+        if plan is None:
+            plan = (
+                RunPlan.skip_existing(items) if skip_existing
+                else RunPlan.overwrite_all(items)
+            )
             if interactive:
-                from behav3d.napari._overwrite_prompt import prompt_overwrite_batch
-                choice = prompt_overwrite_batch(
-                    self,
-                    "Overwrite Existing Filtered Data?",
-                    existing,
-                )
-                if choice == "cancel":
-                    self._log("Batch filtering cancelled.")
-                    fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
-                    return
-                skip_existing_flag = (choice == "skip")
-                overwrite = not skip_existing_flag
-            else:
-                overwrite = True
+                from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
+                if plan_needs_prompt(items):
+                    choice, plan = prompt_run_plan(
+                        self, "Existing Filtered Data", items,
+                        body_prefix="Filtered data already exists for:",
+                    )
+                    if choice == "cancel":
+                        self._log("Batch filtering cancelled.")
+                        fire_extra_callback(extra_callbacks, "on_failed", "cancelled")
+                        return
 
         # Persist + snapshot every panel's Qt widget state on the Qt
         # thread — the worker must not read widgets.
         panel_params: dict[str, dict] = {}
-        for ct, panel in self.panels.items():
+        panels_snapshot = list(self.panels.items())
+        for ct, panel in panels_snapshot:
             panel._persist()
             panel_params[ct] = panel.collect_runtime_params()
 
         def _do_batch(progress_cb=None):
-            for i, (ct, panel) in enumerate(self.panels.items()):
+            for i, (ct, panel) in enumerate(panels_snapshot):
                 if progress_cb is not None:
                     try:
                         progress_cb(i, total, f"Filtering: {ct}")
                     except Exception:
                         pass
-                if skip_existing_flag and ct in existing_cts:
+                if plan.action(ALL_SAMPLES, ct) is Action.SKIP:
                     self._log(f"--- [{i + 1}/{total}] Skipping {ct} (existing data) ---")
                     continue
                 print(f"\n▶ [{i + 1}/{total}] Filtering: {ct}…", file=sys.stderr)
                 self._log(f"--- [{i + 1}/{total}] Filtering: {ct} ---")
                 panel._run_filtering_for(
-                    ct, overwrite=overwrite,
+                    ct, overwrite=plan.action(ALL_SAMPLES, ct) is Action.OVERWRITE,
                     params=panel_params[ct],
                 )
                 self._log(f"Done: {ct}")

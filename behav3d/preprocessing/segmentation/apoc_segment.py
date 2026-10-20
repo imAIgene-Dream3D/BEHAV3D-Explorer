@@ -17,10 +17,10 @@ from pathlib import Path
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 
-# Defeat buggy PyOpenCL compiler caching that causes TypeErrors on some systems
-os.environ['PYOPENCL_NO_CACHE'] = '1'
-# Suppress compiler output unless there is an actual error
-os.environ['PYOPENCL_COMPILER_OUTPUT'] = '0'
+# Configure PyOpenCL (cache off, build chatter silenced) before
+# apoc/pyclesperanto_prototype are imported below.
+from behav3d.core.opencl_env import configure_pyopencl
+configure_pyopencl()
 
 import numpy as np
 import pandas as pd
@@ -34,6 +34,19 @@ from behav3d.core.metadata import (
     detect_immune_cell_types_from_metadata,
     detect_other_cell_types_from_metadata,
     has_dead_channel,
+)
+from behav3d.core.run_plan import Action, resolve_action
+from behav3d.preprocessing.segmentation.segment_journal import (
+    file_fingerprint,
+    journal_path,
+    mark_done,
+    new_journal,
+    open_output_zarr,
+    params_fingerprint,
+    plan_output,
+    preflight_conflicts,
+    raise_for_conflicts,
+    write_journal,
 )
 
 
@@ -271,25 +284,100 @@ def _cfg_val(cfg, ct, key, default):
     while the notebook widget (``behav3d/widgets/segmentation.py``) writes the
     unprefixed ``{ct}_{key}`` into its own ``pixel_classifier`` config. Prefer
     the prefixed key and fall back to the unprefixed one so both stay correct.
+
+    A key that is *present but* ``None`` counts as missing: the GUI tab's
+    ``get_config()`` emits every post-processing key on every tab, filling in
+    ``None`` for the widgets its own strategy never created (an EDT/Watershed
+    tab still reports ``peak_min_ratio: None``). Those nulls must not shadow
+    the default, or the ``float()``/``int()`` casts downstream crash.
     """
-    prefixed = f"apoc_{ct}_{key}"
-    if prefixed in cfg:
-        return cfg[prefixed]
-    return cfg.get(f"{ct}_{key}", default)
+    val = cfg.get(f"apoc_{ct}_{key}")
+    if val is None:
+        val = cfg.get(f"{ct}_{key}")
+    return default if val is None else val
 
 
-def _open_zarr_output(path, dtype, shape, overwrite):
-    """Open a zarr array for output, creating/recreating as needed."""
-    path = Path(path)
-    if overwrite and path.exists():
-        shutil.rmtree(path)
-    if path.exists():
-        return zarr.open(str(path), mode="r+")
-    else:
-        return zarr.open(
-            str(path), mode="w", shape=shape, dtype=dtype,
-            chunks=(1,) + shape[1:],  # one chunk per timepoint
-        )
+_DEATH_KEYS = frozenset({"dead", "death"})
+
+
+def _death_selected(only_cell_types):
+    """Whether a run restricted to ``only_cell_types`` includes the death mask.
+
+    ``None`` (no restriction) includes it; an explicit list includes it only when
+    it names ``"dead"`` (``"death"`` is accepted as an alias).
+    """
+    if only_cell_types is None:
+        return True
+    return any(str(c).lower() in _DEATH_KEYS for c in only_cell_types)
+
+
+def _select_cell_types(all_cell_types, only_cell_types):
+    """Cell types a run will process, in metadata order. ``None`` = all of them."""
+    if only_cell_types is None:
+        return list(all_cell_types)
+    wanted = {str(c) for c in only_cell_types}
+    return [ct for ct in all_cell_types if ct in wanted]
+
+
+def _requested_timepoints(n_timepoints, timepoint_range):
+    """Explicit list of global T indices a run will touch.
+
+    ``None`` means the whole stack; a ``range``/``list`` is taken as-is; an
+    ``(start, end)`` tuple is inclusive of *end*.
+    """
+    if timepoint_range is None:
+        return list(range(n_timepoints))
+    if isinstance(timepoint_range, (range, list)):
+        return list(timepoint_range)
+    s, e = timepoint_range
+    return list(range(s, e + 1))
+
+
+# ---------------------------------------------------------------------------
+# Resume fingerprints
+# ---------------------------------------------------------------------------
+#
+# Two fingerprints per cell type, because "Only Resegment" reuses the cached mask
+# and rewrites only the instance labels. Changing a post-processing threshold must
+# invalidate the segments without throwing away a mask that is still perfectly good.
+
+
+def _mask_fingerprint(cfg, ct, clf, channels):
+    """Hash everything that determines the *mask* for one cell type."""
+    return params_fingerprint({
+        "engine": "apoc",
+        "stage": "mask",
+        "classifier": file_fingerprint(getattr(clf, "opencl_file", None)),
+        "channels": list(channels or []),
+        "prob_mask_threshold": _cfg_val(cfg, ct, "prob_mask_threshold", 0.5),
+        "opening_nr_pixels": _cfg_val(cfg, ct, "opening_nr_pixels", 0),
+        "fill_holes": _cfg_val(cfg, ct, "fill_holes", True),
+    })
+
+
+def _segments_fingerprint(cfg, ct, clf, channels, strategy):
+    """Hash the mask inputs *plus* everything that turns a mask into instances."""
+    return params_fingerprint({
+        "engine": "apoc",
+        "stage": "segments",
+        "mask": _mask_fingerprint(cfg, ct, clf, channels),
+        "strategy": str(strategy),
+        "prob_seed_threshold": _cfg_val(cfg, ct, "prob_seed_threshold", 0.8),
+        "edt_threshold": _cfg_val(cfg, ct, "edt_threshold", 1.0),
+        "segment_size_min": _cfg_val(cfg, ct, "segment_size_min", 10),
+        "peak_min_distance": _cfg_val(cfg, ct, "peak_min_distance", 0),
+        "peak_min_ratio": _cfg_val(cfg, ct, "peak_min_ratio", 0.35),
+    })
+
+
+def _death_fingerprint(clf_death, channels):
+    """Hash the death mask inputs. The death mask has no instance stage."""
+    return params_fingerprint({
+        "engine": "apoc",
+        "stage": "death",
+        "classifier": file_fingerprint(getattr(clf_death, "opencl_file", None)),
+        "channels": list(channels or []),
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +399,7 @@ def run_apoc_segmentation(
     other_types=None,
     only_segment=False,
     overwrite_existing=False,
+    plan=None,
     n_workers=1,
     gpu_device=None,
     apoc_strategy="APOC (Direct Instance Segmentation)",
@@ -342,30 +431,37 @@ def run_apoc_segmentation(
     other_types = detect_other_cell_types_from_metadata(metadata)
     all_cell_types = organoid_types + immune_types + other_types
 
-    has_death = has_dead_channel(metadata)
+    # Death is part of the selection only when the caller did not restrict the run
+    # or explicitly asked for it; a "Run <cell type>" must not drag the death mask along.
+    has_death = has_dead_channel(metadata) and _death_selected(only_cell_types)
 
-    # --- Load classifiers ---
+    # --- Load classifiers (only for the cell types this run will process) ---
+    selected_cell_types = _select_cell_types(all_cell_types, only_cell_types)
     classifiers = {}
     clf_organoid_paths = clf_organoid_paths or {}
-    for ct in organoid_types:
-        clf = _load_classifier(pixelclass_dir, ct, clf_organoid_paths.get(ct))
-        if clf: classifiers[ct] = clf
-
     clf_immune_paths = clf_immune_paths or {}
-    for ct in immune_types:
-        clf = _load_classifier(pixelclass_dir, ct, clf_immune_paths.get(ct))
-        if clf: classifiers[ct] = clf
-
     clf_other_paths = clf_other_paths or {}
-    for ct in other_types:
-        clf = _load_classifier(pixelclass_dir, ct, clf_other_paths.get(ct))
+    for ct in selected_cell_types:
+        if ct in organoid_types:
+            provided = clf_organoid_paths.get(ct)
+        elif ct in immune_types:
+            provided = clf_immune_paths.get(ct)
+        else:
+            provided = clf_other_paths.get(ct)
+        clf = _load_classifier(pixelclass_dir, ct, provided)
         if clf: classifiers[ct] = clf
 
-    active_cell_types = [ct for ct in all_cell_types if ct in classifiers]
-
-    # Optional cell-type filter (used by per-cell-type Run button in the GUI)
+    # An explicit selection must not silently succeed without its classifier;
+    # a whole-dataset run keeps skipping types that were never trained.
     if only_cell_types is not None:
-        active_cell_types = [ct for ct in active_cell_types if ct in only_cell_types]
+        missing = [ct for ct in selected_cell_types if ct not in classifiers]
+        if missing:
+            raise FileNotFoundError(
+                f"No APOC classifier found for {missing} in {pixelclass_dir}. "
+                f"Train the classifier(s) first."
+            )
+
+    active_cell_types = [ct for ct in selected_cell_types if ct in classifiers]
 
     clf_death = None
     if has_death:
@@ -385,6 +481,11 @@ def run_apoc_segmentation(
                     break
         if death_default.exists():
             clf_death = apoc.ObjectSegmenter(opencl_filename=str(death_default))
+        elif only_cell_types is not None:
+            raise FileNotFoundError(
+                f"No APOC death classifier found in {pixelclass_dir}. "
+                f"Train the death classifier first."
+            )
 
     print(f"  Loaded classifiers for: {list(classifiers.keys())}"
           + (f" + Death" if clf_death else ""))
@@ -396,19 +497,75 @@ def run_apoc_segmentation(
             return _channel_indices_from_config(apoc_config, ct) or [0]
         return _resolve_classifier_channel_indices(opencl_path, ct, apoc_config=apoc_config)
 
-    clf_channels = {ct: get_indices(ct, classifiers.get(ct)) for ct in all_cell_types}
+    clf_channels = {ct: get_indices(ct, classifiers.get(ct)) for ct in selected_cell_types}
     death_channels = get_indices("dead", clf_death) if clf_death else []
 
     # --- Process each sample ---
     sample_names = metadata['sample_name'].unique()
-    
+
+    # ------------------------------------------------------------------
+    # Fingerprint preflight
+    # ------------------------------------------------------------------
+    # Every mismatch is knowable before any frame is written, so find them all now
+    # and fail once rather than aborting the batch half-way through.
+    if plan is not None or not overwrite_existing:
+        conflicts = []
+        for sample_name in sample_names:
+            row = metadata[metadata['sample_name'] == sample_name].iloc[0]
+            raw_path = row.get('raw_image_path')
+            if not raw_path or not Path(raw_path).exists():
+                continue
+            axis = row.get('dimension_order', "TCZYX")
+            if not isinstance(axis, str) or not axis:
+                axis = "TCZYX"
+            try:
+                probe = load_image(Path(raw_path), axis_order=axis)
+                shape = (probe.shape[0],) + tuple(probe.shape[2:])
+            except Exception:
+                continue  # unreadable input is the main loop's problem to report
+            requested_tps = _requested_timepoints(shape[0], timepoint_range)
+            img_dir = output_dir / "images" / sample_name
+            entries = []
+            for ct in active_cell_types:
+                # Items the plan skips or overwrites are never resumed into, so their
+                # journals cannot conflict with the current settings.
+                if resolve_action(plan, overwrite_existing, sample_name, ct) is not Action.RUN:
+                    continue
+                channels = clf_channels[ct] or [0]
+                strategy = (per_ct_strategies or {}).get(ct, apoc_strategy)
+                entries.append((
+                    img_dir / f"{sample_name}_{ct}_segments.zarr", shape, "uint16",
+                    _segments_fingerprint(apoc_config or {}, ct, classifiers[ct], channels, strategy),
+                    f"{ct} segments for {sample_name}",
+                ))
+                if not only_segment:
+                    entries.append((
+                        img_dir / f"{sample_name}_{ct}_mask.zarr", shape, "uint16",
+                        _mask_fingerprint(apoc_config or {}, ct, classifiers[ct], channels),
+                        f"{ct} mask for {sample_name}",
+                    ))
+            if has_death and clf_death and not only_segment and (
+                resolve_action(plan, overwrite_existing, sample_name, "dead") is Action.RUN
+            ):
+                entries.append((
+                    img_dir / f"{sample_name}_mask_dead.zarr", shape, "uint16",
+                    _death_fingerprint(clf_death, death_channels),
+                    f"dead mask for {sample_name}",
+                ))
+            conflicts.extend(preflight_conflicts(
+                entries,
+                overwrite_existing=False if plan is not None else overwrite_existing,
+                timepoint_range=timepoint_range,
+                requested_timepoints=requested_tps,
+            ))
+        raise_for_conflicts(conflicts, "APOC")
+
     for sample_name in sample_names:
         t0 = time.time()
  
         # Output directory
         img_outdir = output_dir / "images" / sample_name
-        done_dir = img_outdir / ".done_markers"
-        
+
         # Use raw_image_path from metadata (source of truth)
         sample_row = metadata[metadata['sample_name'] == sample_name].iloc[0]
         raw_image_path = sample_row.get('raw_image_path')
@@ -429,80 +586,125 @@ def run_apoc_segmentation(
         n_timepoints = img.shape[0]
 
         # Timepoint progress via tqdm (per-sample)
-        if timepoint_range is not None:
-            if isinstance(timepoint_range, (range, list)):
-                t_range = list(timepoint_range)
-            else:
-                # Handle old tuple (start, end)
-                s, e = timepoint_range
-                t_range = list(range(s, e + 1))
-        else:
-            t_range = list(range(n_timepoints))
+        t_range = _requested_timepoints(n_timepoints, timepoint_range)
 
-        # Check existing segmentations for skip logic (cell-type level)
-        active_cts_for_sample = list(active_cell_types)
-        has_death_for_sample = has_death
-
-        if not overwrite_existing:
-            # Check cell types
-            remaining_cts = []
-            for ct in active_cts_for_sample:
-                seg_path = img_outdir / f"{sample_name}_{ct}_segments.zarr"
-                if seg_path.exists():
-                    all_done = all((done_dir / f"{ct}_t{t:04d}.done").exists() for t in t_range)
-                    if all_done:
-                        continue  # Skip this cell type for this sample
-                remaining_cts.append(ct)
-            active_cts_for_sample = remaining_cts
-
-            # Check death mask
-            if has_death_for_sample and clf_death:
-                death_path = img_outdir / f"{sample_name}_mask_dead.zarr"
-                if death_path.exists():
-                    all_done = all((done_dir / f"dead_t{t:04d}.done").exists() for t in t_range)
-                    if all_done:
-                        has_death_for_sample = False
-
-            if not active_cts_for_sample and (not has_death_for_sample or not clf_death):
-                print(f"  ⏭️ Skipping {sample_name} (all selected outputs already exist)")
-                continue
-
-        _ensure_zarr(raw_image_path, label=f"Raw image for '{sample_name}'")
-
-        # Ensure output directories exist
-        img_outdir.mkdir(parents=True, exist_ok=True)
-        done_dir.mkdir(parents=True, exist_ok=True)
-
-        # Spatial shape for output arrays
+        # Spatial shape for output arrays — needed before the skip decisions, which
+        # compare the shape on disk against what this run would write.
         spatial_shape = img.shape[2:]           # (Z, Y, X)  — img is (T, C, Z, Y, X)
         out_shape = (n_timepoints,) + spatial_shape
 
-        # Create output zarr arrays
+        seg_path_of = lambda ct: img_outdir / f"{sample_name}_{ct}_segments.zarr"
+        mask_path_of = lambda ct: img_outdir / f"{sample_name}_{ct}_mask.zarr"
+        death_path = img_outdir / f"{sample_name}_mask_dead.zarr"
+
+        # ------------------------------------------------------------------
+        # Resume / skip / overwrite decision, per output array
+        # ------------------------------------------------------------------
+        active_cts_for_sample = list(active_cell_types)
+        has_death_for_sample = has_death
+
+        seg_fps, mask_fps = {}, {}
+        seg_plans, mask_plans = {}, {}
+        remaining_cts = []
+        for ct in active_cts_for_sample:
+            action = resolve_action(plan, overwrite_existing, sample_name, ct)
+            if action is Action.SKIP:
+                print(f"  ⏭️ {sample_name}/{ct}: skipped by the run plan")
+                continue
+            ow = action is Action.OVERWRITE
+            channels = clf_channels[ct] or [0]
+            strategy = (per_ct_strategies or {}).get(ct, apoc_strategy)
+            mask_fps[ct] = _mask_fingerprint(apoc_config or {}, ct, classifiers[ct], channels)
+            seg_fps[ct] = _segments_fingerprint(
+                apoc_config or {}, ct, classifiers[ct], channels, strategy
+            )
+            seg_plans[ct] = plan_output(
+                seg_path_of(ct), out_shape, "uint16", seg_fps[ct],
+                f"{ct} segments for {sample_name}",
+                overwrite_existing=ow,
+                timepoint_range=timepoint_range,
+                requested_timepoints=t_range,
+            )
+            # Under only_segment the mask is an input, never rewritten, so it gets
+            # no plan of its own — it is read as-is and left untouched.
+            mask_plans[ct] = None if only_segment else plan_output(
+                mask_path_of(ct), out_shape, "uint16", mask_fps[ct],
+                f"{ct} mask for {sample_name}",
+                overwrite_existing=ow,
+                timepoint_range=timepoint_range,
+                requested_timepoints=t_range,
+            )
+            mask_complete = only_segment or mask_plans[ct].complete
+            if seg_plans[ct].complete and mask_complete:
+                print(f"  ⏭️ {sample_name}/{ct}: already complete — skipping")
+                continue  # nothing left to do for this cell type
+            remaining_cts.append(ct)
+        active_cts_for_sample = remaining_cts
+
+        death_plan = None
+        death_action = resolve_action(plan, overwrite_existing, sample_name, "dead")
+        if has_death_for_sample and clf_death and not only_segment and death_action is not Action.SKIP:
+            death_fp = _death_fingerprint(clf_death, death_channels)
+            death_plan = plan_output(
+                death_path, out_shape, "uint16", death_fp,
+                f"dead mask for {sample_name}",
+                overwrite_existing=death_action is Action.OVERWRITE,
+                timepoint_range=timepoint_range,
+                requested_timepoints=t_range,
+            )
+            if death_plan.complete:
+                has_death_for_sample = False
+                death_plan = None
+        else:
+            has_death_for_sample = False
+
+        if not active_cts_for_sample and not has_death_for_sample:
+            print(f"  ⏭️ Skipping {sample_name} (all selected outputs already complete)")
+            continue
+
+        _ensure_zarr(raw_image_path, label=f"Raw image for '{sample_name}'")
+
+        img_outdir.mkdir(parents=True, exist_ok=True)
+
+        # Create output zarr arrays and their journals
         zarr_segs = {}
         zarr_masks = {}
+        seg_journals = {}
+        mask_journals = {}
         for ct in active_cts_for_sample:
-            zarr_segs[ct] = _open_zarr_output(
-                img_outdir / f"{sample_name}_{ct}_segments.zarr",
-                "uint16", out_shape, overwrite_existing if not only_segment else True,
+            zarr_segs[ct] = open_output_zarr(
+                seg_path_of(ct), "uint16", out_shape, seg_plans[ct].recreate,
             )
+            seg_journals[ct] = new_journal(
+                seg_fps[ct], out_shape, "uint16", done=seg_plans[ct].done
+            )
+            write_journal(journal_path(seg_path_of(ct)), seg_journals[ct])
+
             if only_segment:
                 # Open mask in read-only mode, we need it to do resegmentation
-                mask_path = img_outdir / f"{sample_name}_{ct}_mask.zarr"
+                mask_path = mask_path_of(ct)
                 if not mask_path.exists():
                     raise FileNotFoundError(f"Cannot 'Only Resegment' because mask does not exist: {mask_path}")
                 zarr_masks[ct] = zarr.open(str(mask_path), mode="r")
             else:
-                zarr_masks[ct] = _open_zarr_output(
-                    img_outdir / f"{sample_name}_{ct}_mask.zarr",
-                    "uint16", out_shape, overwrite_existing,
+                zarr_masks[ct] = open_output_zarr(
+                    mask_path_of(ct), "uint16", out_shape, mask_plans[ct].recreate,
                 )
+                mask_journals[ct] = new_journal(
+                    mask_fps[ct], out_shape, "uint16", done=mask_plans[ct].done
+                )
+                write_journal(journal_path(mask_path_of(ct)), mask_journals[ct])
 
         zarr_death = None
-        if has_death_for_sample and clf_death and not only_segment:
-            zarr_death = _open_zarr_output(
-                img_outdir / f"{sample_name}_mask_dead.zarr",
-                "uint16", out_shape, overwrite_existing,
+        death_journal = None
+        if has_death_for_sample:
+            zarr_death = open_output_zarr(
+                death_path, "uint16", out_shape, death_plan.recreate,
             )
+            death_journal = new_journal(
+                death_fp, out_shape, "uint16", done=death_plan.done
+            )
+            write_journal(journal_path(death_path), death_journal)
 
         def _load_tp(img_obj, t_idx):
             return np.asarray(img_obj[t_idx])
@@ -511,22 +713,36 @@ def run_apoc_segmentation(
         
         # Prefetch pipeline via ThreadPoolExecutor
         # Overlaps disk I/O (loading next TP) with GPU work (predicting current TP)
+        # Wall-clock per phase, summarised after the sample: tells fixed per-frame
+        # cost (reading the frame) apart from per-cell-type cost (predict + post-process).
+        phase_s = {"read_wait": 0.0, "death": 0.0}
+        ct_s = {ct: 0.0 for ct in active_cts_for_sample}
         with ThreadPoolExecutor(max_workers=1) as executor:
             # Prefetch the first timepoint
             future = executor.submit(_load_tp, img, t_range[0])
-            
+
             for i, t in enumerate(pbar):
                 # 1. Get current timepoint (blocks if disk I/O not finished)
-                t_img = future.result() 
-                
+                _t_read = time.time()
+                t_img = future.result()
+                phase_s["read_wait"] += time.time() - _t_read
+
                 # 2. Prefetch the NEXT timepoint immediately
                 if i + 1 < len(t_range):
                     future = executor.submit(_load_tp, img, t_range[i + 1])
 
                 # 3. Process current timepoint (GPU-bound or CPU-bound if only_segment)
                 for ct in active_cts_for_sample:
-                    if not overwrite_existing and (done_dir / f"{ct}_t{t:04d}.done").exists():
-                        continue  # Skip timepoint for this cell type if already computed
+                    # The journals are authoritative: under overwrite they were
+                    # started empty, so this gate covers both resume and redo.
+                    need_seg = t not in seg_journals[ct]["done"]
+                    need_mask = (not only_segment) and t not in mask_journals[ct]["done"]
+                    if not need_seg and not need_mask:
+                        continue
+                    _t_ct = time.time()
+                    # Instances are derived from the probability map, which is never
+                    # persisted, so segments cannot be produced without re-running the
+                    # mask prediction. When either is missing, both get rewritten.
 
                     cfg = apoc_config or {}
                     opencl_path = getattr(classifiers[ct], "opencl_file", None)
@@ -565,7 +781,7 @@ def run_apoc_segmentation(
                             prob_map = np.asarray(
                                 prob_clf.predict(image=imgs_to_pass)
                             ).astype(np.float32)
-                            if _diag: print(f"    ⏱ {ct} predict (prob): {time.time()-_t0:.2f}s  range=[{prob_map.min():.3f}, {prob_map.max():.3f}]")
+                            if _diag: tqdm.write(f"    ⏱ {ct} predict (prob): {time.time()-_t0:.2f}s  range=[{prob_map.min():.3f}, {prob_map.max():.3f}]")
 
                             _t0 = time.time()
                             mask_thr = float(_cfg_val(cfg, ct, "prob_mask_threshold", 0.5))
@@ -575,14 +791,14 @@ def run_apoc_segmentation(
                                 opening_nr_pixels=opening_nr_pixels,
                             ).astype(np.uint16)
                             zarr_masks[ct][t] = mask_out
-                            if _diag: print(f"    ⏱ {ct} mask threshold + opening + write: {time.time()-_t0:.2f}s")
+                            if _diag: tqdm.write(f"    ⏱ {ct} mask threshold + opening + write: {time.time()-_t0:.2f}s")
                         else:
                             mask_out = np.asarray(zarr_masks[ct][t])
                             prob_map = None
 
                         seed_thr = float(_cfg_val(cfg, ct, "prob_seed_threshold", 0.8))
                         segment_size_min = int(_cfg_val(cfg, ct, "segment_size_min", 10))
-                        if _diag: print(f"    ⚙ {ct} params: mask_thr={mask_thr if not only_segment else 'n/a'}, seed_thr={seed_thr}, min_size={segment_size_min}, opening_px={opening_nr_pixels}")
+                        if _diag: tqdm.write(f"    ⚙ {ct} params: mask_thr={mask_thr if not only_segment else 'n/a'}, seed_thr={seed_thr}, min_size={segment_size_min}, opening_px={opening_nr_pixels}")
 
                         if prob_map is not None:
                             _t0 = time.time()
@@ -614,16 +830,16 @@ def run_apoc_segmentation(
                                     for s in range(1, sub_result.max() + 1):
                                         next_id += 1
                                         segments[slc][sub_result == s] = next_id
-                            if _diag: print(f"    ⏱ {ct} per-component watershed: {time.time()-_t0:.2f}s ({n_comps} components, {n_split} split)")
+                            if _diag: tqdm.write(f"    ⏱ {ct} per-component watershed: {time.time()-_t0:.2f}s ({n_comps} components, {n_split} split)")
                         else:
                             segments = segment_mask(mask_out.astype(bool), edt_thr=seed_thr, segment_size_min=segment_size_min, use_dims=3, n_workers=1)
 
                         _t0 = time.time()
                         segments = segment_size_filter(segments, size_min=segment_size_min)
-                        if _diag: print(f"    ⏱ {ct} size_filter: {time.time()-_t0:.2f}s")
+                        if _diag: tqdm.write(f"    ⏱ {ct} size_filter: {time.time()-_t0:.2f}s")
                         _t0 = time.time()
                         segments = segment_2d_filter(segments)
-                        if _diag: print(f"    ⏱ {ct} 2d_filter: {time.time()-_t0:.2f}s")
+                        if _diag: tqdm.write(f"    ⏱ {ct} 2d_filter: {time.time()-_t0:.2f}s")
                         zarr_segs[ct][t] = np.asarray(segments).astype(np.uint16)
 
                     elif effective_strategy in {
@@ -651,7 +867,7 @@ def run_apoc_segmentation(
                         _raw_peak_dist = _cfg_val(cfg, ct, "peak_min_distance", 0)
                         peak_min_distance = None if (not _raw_peak_dist or float(_raw_peak_dist) <= 0) else float(_raw_peak_dist)
                         peak_min_ratio = float(_cfg_val(cfg, ct, "peak_min_ratio", 0.35))
-                        if _diag: print(f"    ⚙ {ct} params: edt_thr={edt_thr}, min_size={segment_size_min}, fill_holes={fill_holes}, opening_px={opening_nr_pixels}, peak_min_distance={peak_min_distance}, peak_min_ratio={peak_min_ratio}")
+                        if _diag: tqdm.write(f"    ⚙ {ct} params: edt_thr={edt_thr}, min_size={segment_size_min}, fill_holes={fill_holes}, opening_px={opening_nr_pixels}, peak_min_distance={peak_min_distance}, peak_min_ratio={peak_min_ratio}")
                         seg_refined = segment_mask(
                             proc_mask,
                             edt_thr=edt_thr,
@@ -661,7 +877,7 @@ def run_apoc_segmentation(
                             n_workers=1,
                             marker_strategy=(
                                 "peak"
-                                if apoc_strategy == "APOC Mask + Peak EDT/Watershed Resegmentation"
+                                if effective_strategy == "APOC Mask + Peak EDT/Watershed Resegmentation"
                                 else "threshold"
                             ),
                             peak_min_distance=peak_min_distance,
@@ -672,7 +888,7 @@ def run_apoc_segmentation(
                     else:
                         # ── Default: Direct APOC (or unknown strategy) ────
                         if i == 0:
-                            print(f"    ⚙ {ct}: Direct APOC strategy — no postprocessing parameters applied")
+                            tqdm.write(f"    ⚙ {ct}: Direct APOC strategy — no postprocessing parameters applied")
                         if not only_segment:
                             seg_out = np.asarray(classifiers[ct].predict(image=imgs_to_pass)).astype(np.uint16)
                             mask_out = (seg_out > 0).astype(np.uint16)
@@ -681,16 +897,21 @@ def run_apoc_segmentation(
                             mask_out = np.asarray(zarr_masks[ct][t])
                             seg_out = mask_out
                             if t == 0:
-                                print(f"⚠️ Warning: 'Only resegment' selected but strategy is Direct APOC. Cannot tweak instance rules without EDT method. Resaving {ct} instances.")
+                                tqdm.write(f"⚠️ Warning: 'Only resegment' selected but strategy is Direct APOC. Cannot tweak instance rules without EDT method. Resaving {ct} instances.")
                         zarr_segs[ct][t] = seg_out
 
-                    # Mark timepoint as done for this cell type
-                    (done_dir / f"{ct}_t{t:04d}.done").touch()
+                    # Mark this timepoint done, per array, before moving on: the
+                    # failure this guards against gives no chance to flush later.
+                    if not only_segment:
+                        mark_done(mask_journals[ct], journal_path(mask_path_of(ct)), t)
+                    mark_done(seg_journals[ct], journal_path(seg_path_of(ct)), t)
+                    ct_s[ct] += time.time() - _t_ct
 
                 if zarr_death is not None:
-                    if not overwrite_existing and (done_dir / f"dead_t{t:04d}.done").exists():
+                    if t in death_journal["done"]:
                         pass  # Skip timepoint for death mask if already computed
                     else:
+                        _t_death = time.time()
                         n_death_ch_raw = _read_classifier_header_value(clf_death.opencl_file, "n_image_channels")
                         if n_death_ch_raw is not None:
                             try:
@@ -709,7 +930,15 @@ def run_apoc_segmentation(
                         imgs_to_pass = imgs[0] if len(imgs) == 1 else imgs
                         death_mask = (np.asarray(clf_death.predict(image=imgs_to_pass)) > 0).astype(np.uint16)
                         zarr_death[t] = death_mask
-                        (done_dir / f"dead_t{t:04d}.done").touch()
+                        mark_done(death_journal, journal_path(death_path), t)
+                        phase_s["death"] += time.time() - _t_death
+
+        per_ct = ", ".join(f"{ct} {s:.1f}s" for ct, s in ct_s.items())
+        print(
+            f"  ⏱ {sample_name} phases: frame read wait {phase_s['read_wait']:.1f}s"
+            + (f", {per_ct}" if per_ct else "")
+            + (f", dead {phase_s['death']:.1f}s" if zarr_death is not None else "")
+        )
 
         # Update metadata with output paths
         row_idx = metadata.index[metadata['sample_name'] == sample_name].tolist()[0]

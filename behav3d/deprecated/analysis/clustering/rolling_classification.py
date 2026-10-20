@@ -47,7 +47,7 @@ from behav3d.analysis.behavior.state.hmm import (
     run_sticky_hmm_state_classification
 )
 
-from behav3d.analysis.behavior.state.visualization.plots.hmm import (
+from behav3d.deprecated.analysis.clustering.hmm_plots import (
     plot_hmm_top_ranking_features
 )
 

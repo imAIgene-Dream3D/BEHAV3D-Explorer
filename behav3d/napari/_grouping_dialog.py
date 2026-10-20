@@ -1,7 +1,7 @@
 """Cell-type grouping dialog for the Analysis tab.
 
 Lets the user merge several already-*filtered* cell-type populations under
-a single name for use in Death Dynamics / Single Cell. Group membership is
+a single name for use in Population Dynamics / Single Cell. Group membership is
 persisted to ``behav3d_parameters.yml`` (``cell_type_groups``) — metadata.csv
 is never touched, so multicolor merged-tracking outputs (which must still
 be processed through Feature Extraction + Filtering as their own real cell
@@ -27,6 +27,8 @@ from qtpy.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSpinBox,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -46,7 +48,7 @@ from behav3d.analysis.grouping import (
     validate_group_name,
 )
 from behav3d.core.qt_help import HelpButton
-from behav3d.napari._background_runner import BackgroundOperation, ProgressBarRow
+from behav3d.napari._background_runner import BackgroundOperation, ProgressBarRow, ThreadSafeLogger
 
 
 class GroupBuilderDialog(QDialog):
@@ -55,7 +57,7 @@ class GroupBuilderDialog(QDialog):
     Emits :pyattr:`group_created` with the merged cell-type id when the
     user successfully creates a new group, and :pyattr:`group_removed` when
     an existing group is deleted. The host (the Analysis tab) listens to
-    these signals to refresh the Death Dynamics / Single Cell cell-type
+    these signals to refresh the Population Dynamics / Single Cell cell-type
     dropdowns.
     """
 
@@ -86,7 +88,7 @@ class GroupBuilderDialog(QDialog):
             "Select cell types that have already been <b>filtered</b>, give "
             "the group a name, and click <b>Create Group</b>. The group "
             "merges each member's filtered track-features CSV into a single "
-            "population, selectable in Death Dynamics and Single Cell "
+            "population, selectable in Population Dynamics and Single Cell "
             "alongside the original cell types. Metadata is not modified."
         )
         instructions.setWordWrap(True)
@@ -225,12 +227,38 @@ class GroupBuilderDialog(QDialog):
         )
         tracked_row.addWidget(self.build_tracked_checkbox)
         tracked_row.addStretch()
+
+        import multiprocessing as _mp
+        _n_cores = max(1, _mp.cpu_count())
+        _default_w = max(1, _n_cores // 2)
+        tracked_row.addWidget(QLabel("Workers:"))
+        self.spin_workers = QSpinBox()
+        self.spin_workers.setRange(1, max(1, _n_cores - 1))
+        self.spin_workers.setValue(_default_w)
+        self.spin_workers.setMaximumWidth(70)
+        self.spin_workers.setToolTip(
+            "Number of CPU threads used to process each sample's timepoints "
+            "in parallel (samples are still built one at a time).\nThis "
+            "value is shared across all pipeline tabs — changing it here "
+            f"updates every other Workers field (and vice-versa). "
+            f"[{_n_cores} cores detected]"
+        )
+        tracked_row.addWidget(self.spin_workers)
         layout.addLayout(tracked_row)
 
         # Status label
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
+
+        # Log (populated while tracked segments build in the background;
+        # hidden until something is actually logged)
+        self.log_edit = QTextEdit()
+        self.log_edit.setReadOnly(True)
+        self.log_edit.setMaximumHeight(120)
+        self.log_edit.setStyleSheet("font-family: monospace; font-size: 11px;")
+        self.log_edit.setVisible(False)
+        layout.addWidget(self.log_edit)
 
         # Progress bar (shown while tracked segments build in the background)
         self.progress_row = ProgressBarRow(self)
@@ -284,6 +312,18 @@ class GroupBuilderDialog(QDialog):
         layout.addLayout(btn_row)
 
     # ── Helpers ──────────────────────────────────────────────────────
+    def _log(self, msg: str):
+        from behav3d.napari._background_runner import redispatch_to_gui_thread
+
+        if redispatch_to_gui_thread(self._log, msg):
+            return
+        import datetime
+
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        self.log_edit.setVisible(True)
+        self.log_edit.append(f"[{ts}] {msg}")
+        self.log_edit.verticalScrollBar().setValue(self.log_edit.verticalScrollBar().maximum())
+
     def _params(self) -> dict:
         return getattr(self.metadata_loader, "behav3d_parameters", {}) or {}
 
@@ -391,44 +431,64 @@ class GroupBuilderDialog(QDialog):
             self._show_error("Another background operation is already running.")
             return
 
+        log_bridge = ThreadSafeLogger(self._log)
+        skipped: list = []
         self._bg.run(
             fn=create_group_tracked_segments,
             kwargs={
                 "output_dir": output_dir,
                 "group_id": group_id,
                 "metadata": self.metadata_loader.metadata,
+                "n_workers": self.spin_workers.value(),
+                "log": log_bridge,
+                "skipped_out": skipped,
             },
             desc=f"Building tracked segments for '{group_id}'…",
             progress_row=self.progress_row,
             buttons=[self.btn_create, self.btn_remove, self.btn_build_tracked, self.btn_close],
             on_done=lambda written: self._on_tracked_build_done(
-                group_id, written, selected, out_csv, summary_base
+                group_id, written, selected, out_csv, summary_base, skipped
             ),
             on_failed=lambda err: self._on_tracked_build_failed(group_id, err, summary_base),
         )
 
-    def _on_tracked_build_done(self, group_id, written, selected, out_csv, summary_base):
-        status = group_tracked_segments_status(
-            getattr(self.metadata_loader, "output_dir", None), group_id, self.metadata_loader.metadata
-        )
+    def _on_tracked_build_done(self, group_id, written, selected, out_csv, summary_base, skipped):
+        output_dir = getattr(self.metadata_loader, "output_dir", None)
+        status = group_tracked_segments_status(output_dir, group_id, self.metadata_loader.metadata)
         summary = summary_base + (
             f"<br><b style='color:#81c784;'>✓ Tracked segments built for "
             f"{len(written)} sample(s)</b> ({status['built']}/{status['total']} total)."
         )
+        if skipped:
+            summary += (
+                f"<br><b style='color:#ffb74d;'>⚠ {len(skipped)} member(s) skipped "
+                "— see log above.</b>"
+            )
         self.status_label.setText(summary)
+
+        msg_lines = [
+            f"Tracked segments built for {len(written)} sample(s) "
+            f"({status['built']}/{status['total']} total)."
+        ]
+        if skipped:
+            msg_lines.append("")
+            msg_lines.append(f"⚠ WARNING: {len(skipped)} member(s) were skipped:")
+            for rec in skipped[:20]:
+                ct = rec.get("cell_type") or "all members"
+                msg_lines.append(f"  • {rec['sample_name']} / {ct}: {rec['reason']}")
+            if len(skipped) > 20:
+                msg_lines.append(f"  …and {len(skipped) - 20} more (see log above).")
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning if skipped else QMessageBox.Information)
+        box.setWindowTitle("Tracked Segments Built" + (" (with warnings)" if skipped else ""))
+        box.setText("\n".join(msg_lines))
+        box.exec_()
 
         if selected is not None and out_csv is not None:
             # This was the group-creation flow: finish with the same sanity
-            # plot / info dialog / close that the synchronous path used to.
-            output_dir = getattr(self.metadata_loader, "output_dir", None)
+            # plot / close that the synchronous path used to.
             self._show_length_distribution(output_dir, group_id)
-            QMessageBox.information(
-                self,
-                "Group Created",
-                f"Group '{group_id}' was created with {len(selected)} member(s).\n"
-                f"Merged CSV: {out_csv}\n"
-                f"Tracked segments: {len(written)} sample(s) written.",
-            )
             self.accept()
 
     def _on_tracked_build_failed(self, group_id, error, summary_base):
@@ -520,7 +580,7 @@ class GroupBuilderDialog(QDialog):
                 "Confirm Removal",
                 f"Remove group '{group_id}' from the configuration?\n\n"
                 "The merged CSV on disk will be kept, but the group will no "
-                "longer be offered as a population in Death Dynamics / "
+                "longer be offered as a population in Population Dynamics / "
                 "Single Cell.\n\nThis cannot be undone.",
                 QMessageBox.Yes | QMessageBox.Cancel,
                 QMessageBox.Cancel,

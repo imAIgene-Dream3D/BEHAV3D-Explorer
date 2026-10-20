@@ -17,13 +17,14 @@ sections at the top remain enabled so existing outputs can always be loaded.
 from __future__ import annotations
 
 import datetime
+import os
 import traceback
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import yaml
-from qtpy.QtCore import Qt, QTimer
+from qtpy.QtCore import Qt, QTimer, Signal
 from qtpy.QtGui import QDesktopServices
 from qtpy.QtWidgets import (
     QAbstractItemView,
@@ -47,6 +48,7 @@ from qtpy.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QStackedWidget,
+    QTableWidget,
     QTabWidget,
     QTextEdit,
     QToolButton,
@@ -59,16 +61,24 @@ from behav3d.napari._background_runner import (
     BackgroundOperation,
     ProgressBarRow,
     ThreadSafeLogger,
+    install_busy_guard,
+    refuse_if_busy,
+    warn_if_busy,
 )
 from behav3d.napari._pdf_view import open_pdf_in_napari
 from behav3d.napari._rename_dialog import RenameClusterDialog
 from behav3d.napari._preview_dims import (
+    clear_viewer_layers,
+    close_backprojection_legend_docks,
     disconnect_all_preview_dims_listeners,
     register_preview_dims_listener,
     stop_dim_playback,
     unregister_preview_dims_listener,
 )
-from behav3d.core.qt_help import HelpButton, make_help_row, reset_scroll_on_page_change
+from behav3d.core.qt_help import (
+    HelpButton, make_help_row, reset_scroll_on_page_change, scroll_to_top,
+    set_scroll_content_enabled,
+)
 from behav3d.core.utils import rmtree_ignore_missing, format_timepoints_as_time
 from behav3d.core.metadata import resolve_metadata_csv_path
 
@@ -108,7 +118,7 @@ def _detect_sc_cell_types(metadata_loader) -> list[str]:
                 oth.append(ct)
 
         # Every group is offered here regardless of its best-effort display
-        # category — groups exist specifically for Death Dynamics/Single
+        # category — groups exist specifically for Population Dynamics/Single
         # Cell use (see behav3d/analysis/grouping.py), so an "organoid"
         # category (picked from the group's first member, for icon/bucket
         # purposes only) must never cause a group to be silently dropped.
@@ -244,6 +254,24 @@ def _style_rename(btn: QPushButton):
     )
 
 
+def _style_backprojection_box(grp: QGroupBox) -> None:
+    """Style the "Backprojection" group box as a rounded accent card, matching
+    the "guidedCard" look of the Reports & Plots entry (see
+    ``AnalysisExplainer`` in ``_guided.py``) but red instead of orange/blue —
+    Backprojection isn't a Guided-mode entry itself, so it can't reuse that
+    widget directly.
+    """
+    grp.setObjectName("backprojectionCard")
+    grp.setStyleSheet(
+        "QGroupBox#backprojectionCard { background:#2a2a2e; "
+        "border:1px solid #8e3b3b; border-radius:10px; margin-top:1.2em; "
+        "padding-top:10px; font-weight:bold; }"
+        "QGroupBox#backprojectionCard::title { subcontrol-origin: margin; "
+        "subcontrol-position: top left; left:10px; padding:0 6px; "
+        "color:#e57373; font-size:14px; }"
+    )
+
+
 def _make_queue_btn() -> QPushButton:
     btn = QPushButton("+🛒")
     btn.setFixedSize(36, 28)
@@ -273,11 +301,40 @@ def _make_view_btn() -> QPushButton:
     return btn
 
 
+def _wire_view_btn(btn: QPushButton, handler, kind: str) -> None:
+    """Connect a 👁 button to *handler*, passing the button along.
+
+    The handler needs the button so a multi-result chooser menu can be popped
+    up underneath it; a bare ``QMenu.exec_()`` is equivalent to ``exec_(pos())``
+    and a never-shown menu's ``pos()`` is (0, 0), i.e. the screen corner.
+    """
+    btn.clicked.connect(lambda: handler(kind, btn))
+
+
 def _make_timepoint_time_label() -> QLabel:
     """Return a small muted QLabel for showing a timepoint-window's real-time equivalent."""
     lbl = QLabel("")
     lbl.setStyleSheet("color: #999; font-style: italic; font-size: 10px;")
     return lbl
+
+
+def _clear_layout(layout) -> None:
+    """Remove and delete everything in ``layout``, including widgets inside nested
+    layouts (``takeAt`` alone only detaches a nested layout, leaving its widgets
+    drawn on the parent - e.g. stacked, overlapping checkbox grids).
+
+    Widgets are only hidden and scheduled with ``deleteLater`` - never
+    ``setParent(None)``, which hands them to Python and deletes them on the spot,
+    possibly while Qt is still delivering an event to them (a hard crash)."""
+    while layout.count():
+        item = layout.takeAt(0)
+        widget = item.widget()
+        if widget is not None:
+            widget.hide()
+            widget.deleteLater()
+        elif item.layout() is not None:
+            _clear_layout(item.layout())
+            item.layout().deleteLater()
 
 
 def _make_info_label(text: str) -> QLabel:
@@ -288,12 +345,309 @@ def _make_info_label(text: str) -> QLabel:
     return lbl
 
 
+def _scan_state_feature_columns(csv_path, usable_cols, cancel_check=None) -> dict:
+    """Value-based binary/non-numeric column classification over the full
+    track-features CSV. Pure pandas, no Qt/``self`` access — dispatched via
+    ``BackgroundOperation`` from `StateClassificationSubTab._populate_dynamic_features`
+    so the full-CSV scan doesn't block the Qt main thread.
+
+    Columns that are not binary and cannot be parsed as continuous numbers
+    (e.g. "touching_27ts" holding comma-separated contact-ID lists, or
+    unit/label columns) must not be offered as selectable HMM features --
+    picking one silently breaks the .h5ad write later on.
+
+    Delegates to ``classify_feature_columns``: one pass over the CSV, memoized
+    per file version, and shared with ``TrajectoryFeatureSelector``. ``cancel_check``
+    is polled once per chunk, so a teardown mid-scan (e.g. app quit) stops it."""
+    from behav3d.core.column_detection import classify_feature_columns
+    result = classify_feature_columns(Path(csv_path), usable_cols, cancel_check=cancel_check)
+    if cancel_check is not None and cancel_check():
+        return {"bin_cols": [], "feat_cols": []}
+    return {"bin_cols": result["bin_cols"], "feat_cols": result["feat_cols"]}
+
+
+def _read_h5ad_shared(path, **kwargs):
+    """``anndata.read_h5ad`` under the shared HDF5 lock (see ``core/h5_access``).
+
+    Worker threads wait for any writer to finish. The GUI thread never blocks:
+    if a background task is rewriting a file it gets a clear error (which the
+    calling handler surfaces) rather than a frozen window or a corrupt read.
+    """
+    import threading
+
+    import anndata as ad
+    from behav3d.core.h5_access import H5Busy, h5_access
+
+    on_gui = threading.current_thread() is threading.main_thread()
+    try:
+        with h5_access(blocking=not on_gui):
+            return ad.read_h5ad(str(path), **kwargs)
+    except H5Busy:
+        raise RuntimeError(
+            "An .h5ad result file is currently being written by a background task. "
+            "Please wait for it to finish and try again."
+        ) from None
+
+
+_MISSING = object()
+# (kind, (path, mtime_ns, size)) -> longest track length (None = unknown).
+_MAX_TRACK_LEN_CACHE: dict = {}
+
+
+def _h5ad_obs_codes(f, col):
+    """Integer codes (``-1`` = missing) for one obs column of an open h5ad file,
+    read as numpy arrays without building per-row Python objects. Handles both
+    AnnData's categorical (categories/codes) group and plain array encodings."""
+    import h5py
+    import numpy as np
+    import pandas as pd
+
+    node = f["obs"][col]
+    if isinstance(node, h5py.Group):
+        return np.asarray(node["codes"][:], dtype=np.int64)
+    codes, _ = pd.factorize(node[:])
+    return np.asarray(codes, dtype=np.int64)
+
+
+def _longest_group_size(codes_a, codes_b):
+    """Largest number of rows sharing one ``(a, b)`` pair, ignoring rows where
+    either code is ``-1`` (missing). Same result as a pandas
+    ``groupby([a, b]).size().max()`` that drops NaN keys."""
+    import numpy as np
+    import pandas as pd
+
+    valid = (codes_a >= 0) & (codes_b >= 0)
+    if not valid.any():
+        return 0
+    a = codes_a[valid]
+    b = codes_b[valid]
+    combined = a * (int(b.max()) + 1) + b
+    inverse, _ = pd.factorize(combined)
+    return int(np.bincount(inverse).max())
+
+
+def _compute_max_track_length(kind, path, cancel_check=None):
+    """Longest ``(sample_name, TrackID)`` track in the given file, or ``None``.
+    Pure numpy/pandas/h5py, no Qt: runs on a ``BackgroundOperation`` worker.
+
+    ``kind`` is ``"csv"`` (a track-features/positions CSV) or ``"h5ad"`` (the
+    behavioral-states file, whose obs columns are read straight from HDF5)."""
+    try:
+        import pandas as pd
+
+        if kind == "csv":
+            ids = pd.read_csv(path, usecols=["sample_name", "TrackID"])
+            codes_a, _ = pd.factorize(ids["sample_name"])
+            codes_b, _ = pd.factorize(ids["TrackID"])
+            longest = _longest_group_size(codes_a.astype("int64"), codes_b.astype("int64"))
+        else:
+            import h5py
+            from behav3d.core.h5_access import h5_read
+
+            with h5_read(), h5py.File(str(path), "r") as f:
+                obs = f.get("obs", {})
+                if "sample_name" not in obs or "TrackID" not in obs:
+                    return None
+                codes_a = _h5ad_obs_codes(f, "sample_name")
+                codes_b = _h5ad_obs_codes(f, "TrackID")
+            if len(codes_a) == 0 or len(codes_a) != len(codes_b):
+                return None
+            longest = _longest_group_size(codes_a, codes_b)
+        return longest if longest > 0 else None
+    except Exception:
+        return None
+
+
+# (path, mtime_ns, size) -> (preprocessing dict, var names, obs column names)
+_H5AD_LIGHT_META_CACHE: dict = {}
+
+
+def _read_h5ad_light_meta(path):
+    """``(preprocessing, var_names, obs_columns)`` of an h5ad file, read straight
+    from HDF5 *without* loading the obs table (which ``read_h5ad(backed="r")``
+    does, and which is O(rows) for a multi-GB states file). Memoized per file
+    version. Returns ``None`` when the file can't be read this way, so callers
+    can fall back to a backed ``read_h5ad``."""
+    key = _file_key(path)
+    if key is None:
+        return None
+    hit = _H5AD_LIGHT_META_CACHE.get(key)
+    if hit is not None:
+        return hit
+    try:
+        import h5py
+        try:
+            from anndata.io import read_elem
+        except ImportError:  # older anndata
+            from anndata.experimental import read_elem
+
+        with h5py.File(str(path), "r") as f:
+            var_names = [str(v) for v in read_elem(f["var"]).index]
+            obs_columns = {
+                (c.decode() if isinstance(c, bytes) else str(c))
+                for c in f["obs"].attrs["column-order"]
+            }
+            pre = {}
+            if "uns" in f and "preprocessing" in f["uns"]:
+                pre = read_elem(f["uns"]["preprocessing"])
+    except Exception:
+        return None
+    result = (pre if isinstance(pre, dict) else {}, var_names, obs_columns)
+    if len(_H5AD_LIGHT_META_CACHE) >= 8:
+        _H5AD_LIGHT_META_CACHE.pop(next(iter(_H5AD_LIGHT_META_CACHE)))
+    _H5AD_LIGHT_META_CACHE[key] = result
+    return result
+
+
+def _file_key(path):
+    """``(path, mtime_ns, size)`` of ``path`` or ``None``: identifies one *version*
+    of a file, so loaded data can be reused until the file is rewritten."""
+    if not path:
+        return None
+    try:
+        st = Path(path).stat()
+    except OSError:
+        return None
+    return (str(path), st.st_mtime_ns, st.st_size)
+
+
+class _LatestOnlyLoader:
+    """Background-load one file at a time; deliver only the *latest* request.
+
+    The state/track sub-tabs preload the whole ``.h5ad`` on every ``_reload``
+    (cell-type change, tab entry). The old code simply skipped a new request while
+    a load was in flight, so after A -> B in quick succession A's data finished
+    and was delivered as B's model -- wrong results shown with no error. Here a
+    result is handed to ``on_done`` only if its path is still the one most
+    recently requested; a different pending request restarts once the in-flight
+    load ends, and :meth:`invalidate` discards an in-flight result outright.
+    All methods run on the GUI thread; only ``loader`` runs on the worker.
+    """
+
+    def __init__(self, bg: BackgroundOperation) -> None:
+        self._bg = bg
+        self._want = None
+        self._inflight = None
+        self._pending = None
+
+    def invalidate(self) -> None:
+        self._want = None
+        self._pending = None
+
+    def request(self, path, loader, on_done, on_failed, desc="Loading data…") -> None:
+        self._want = path
+        if self._bg.is_running():
+            if self._inflight == path:
+                return  # same file already loading: its result is what we want
+            self._pending = (path, loader, on_done, on_failed, desc)
+            return
+        self._start(path, loader, on_done, on_failed, desc)
+
+    def _start(self, path, loader, on_done, on_failed, desc="Loading data…") -> None:
+        self._inflight = path
+        self._pending = None
+
+        def _done(result):
+            self._inflight = None
+            if path == self._want:
+                on_done(result)
+            self._drain()
+
+        def _failed(err):
+            self._inflight = None
+            if path == self._want:
+                on_failed(err)
+            self._drain()
+
+        self._bg.run(fn=loader, inject_progress=False, desc=desc, on_done=_done, on_failed=_failed)
+
+    def _drain(self) -> None:
+        pending, self._pending = self._pending, None
+        if pending is not None and pending[0] == self._want:
+            self._start(*pending)
+
+
+def _check_data_consistency(csv_path, h5ad_sources, groupby_cols) -> list:
+    """Compare track IDs between the filtered track-features CSV and the
+    track/behavioral-states h5ad output(s). Reads the full CSV (restricted
+    to ``groupby_cols``) and the full ``.obs`` table of each h5ad (in
+    ``backed="r"`` mode, so no X matrix is loaded). Pure pandas/anndata, no
+    Qt/``self`` access — dispatched via ``BackgroundOperation`` from
+    `SingleCellTab._refresh_data_consistency_warning` so these full-file
+    reads don't block the Qt main thread."""
+    import pandas as pd
+    import anndata as ad
+    from behav3d.analysis.behavior.track.contact_grouping import _normalize_id_column
+
+    def _key_set(df):
+        d = df[groupby_cols].copy()
+        for col in groupby_cols:
+            d[col] = _normalize_id_column(d[col])
+        return set(map(tuple, d.drop_duplicates().to_numpy()))
+
+    from behav3d.core.h5_access import h5_access
+
+    csv_keys = _key_set(pd.read_csv(csv_path, usecols=groupby_cols))
+    mismatches = []
+    for label, path in h5ad_sources:
+        # Hold the HDF5 lock for the whole open -> read -> close: a clustering run
+        # rewriting this file concurrently would corrupt a backed-mode read.
+        with h5_access():
+            adata = ad.read_h5ad(str(path), backed="r")
+            try:
+                h5ad_keys = _key_set(adata.obs[groupby_cols])
+            finally:
+                if getattr(adata, "isbacked", False):
+                    adata.file.close()
+        missing = h5ad_keys - csv_keys
+        if missing:
+            mismatches.append((label, len(missing)))
+    return mismatches
+
+
 def _fit_list_widget_height(list_widget, min_rows: int = 2, max_rows: int = 5) -> None:
     """Size a QListWidget's height to its current item count instead of a fixed box,
     so a short candidate-column list doesn't leave a lot of empty space."""
     n = max(min_rows, min(list_widget.count(), max_rows))
     row_h = list_widget.sizeHintForRow(0) if list_widget.count() else 18
     list_widget.setFixedHeight(n * row_h + 2 * list_widget.frameWidth() + 4)
+
+
+def _list_widget_items(list_widget) -> list[str]:
+    """A QListWidget's item texts in row order (drag-reordering changes this)."""
+    return [list_widget.item(i).text() for i in range(list_widget.count())]
+
+
+def _refill_list_keep_selection(list_widget, items) -> None:
+    """Replace a QListWidget's items with `items`, keeping the selection of the ones still present."""
+    prev = {item.text() for item in list_widget.selectedItems()}
+    list_widget.clear()
+    list_widget.addItems(list(items))
+    for i in range(list_widget.count()):
+        item = list_widget.item(i)
+        if item.text() in prev:
+            item.setSelected(True)
+
+
+
+def _inject_known_metadata_cols(adata, md_snapshot) -> None:
+    """Inject known metadata grouping columns (exp_nr, well, *_line_condition) from the loaded
+    metadata CSV into `adata.obs` when missing (for existing h5ad files that predate Fix 1 in
+    classification.py), so a "group per page" selection drawn from those columns is guaranteed
+    to be present on `adata.obs` by the time a report function reads it."""
+    if md_snapshot is None or "sample_name" not in md_snapshot.columns:
+        return
+    known_meta = ["exp_nr", "well"] + [c for c in md_snapshot.columns if c.endswith("_line_condition")]
+    cols_to_inject = [c for c in known_meta if c in md_snapshot.columns and c not in adata.obs.columns]
+    if not cols_to_inject:
+        return
+    meta_map = (
+        md_snapshot[["sample_name"] + cols_to_inject]
+        .drop_duplicates("sample_name")
+        .set_index("sample_name")
+    )
+    for col in cols_to_inject:
+        adata.obs[col] = adata.obs["sample_name"].map(meta_map[col]).astype(str).fillna("(unknown)")
 
 
 def _condition_levels_for_column(col, *, metadata_loader=None, adata=None, h5ad_path=None) -> list[str]:
@@ -316,7 +670,8 @@ def _condition_levels_for_column(col, *, metadata_loader=None, adata=None, h5ad_
     if h5ad_path is not None:
         try:
             import h5py
-            with h5py.File(str(h5ad_path), "r") as f:
+            from behav3d.core.h5_access import h5_read
+            with h5_read(), h5py.File(str(h5ad_path), "r") as f:
                 if "obs" in f and col in f["obs"]:
                     values = TrackClassificationSubTab._read_h5ad_obs_column(f, col)
                     return sorted({str(v) for v in values if v is not None})
@@ -380,8 +735,12 @@ _DEFAULT_LOG_SCALE_FEATURES = {"speed"}
 
 _TECHNICAL_OBS_COLS = {
     "position_t", "sample_name", "TrackID",
+    # Legacy names (retired) kept here too, so files written before columns
+    # were consolidated never offer them as feature-selection checkboxes.
     "intrinsic_behavioral_cluster", "full_behavioral_cluster",
     "hmm_intrinsic_behavioral_state", "behavioral_state",
+    "full_behavioral_state", "hmm_intrinsic_behavioral_state_raw",
+    "hmm_intrinsic_behavioral_state_confidence", "full_behavioral_state_confidence",
 }
 
 _CHANNEL_COLORS = ["cyan", "yellow", "green", "red", "blue", "magenta"]
@@ -434,6 +793,164 @@ def _bp_save_channel_display(viewer, metadata_loader, out_dir_fn):
     _save_behav3d_params(metadata_loader, out_dir_fn)
 
 
+def _resolve_ui_state_col(adata, choice: str) -> str:
+    """Map a state-column combo box's current text to the actual adata.obs column.
+
+    The combo boxes offer the canonical column names (FULL_STATE_COL /
+    INTRINSIC_STATE_COL) as choices, but a state adata read back from a file
+    written before a column rename/consolidation may only have the legacy alias
+    on disk — fall back to it via resolve_full_state_col/resolve_intrinsic_state_col
+    so reports and backprojection still work against old files.
+    """
+    from behav3d.core.state_columns import (
+        FULL_STATE_COL,
+        INTRINSIC_STATE_COL,
+        HMM_INTRINSIC_RAW_STATE_COL,
+        resolve_full_state_col,
+        resolve_intrinsic_state_col,
+    )
+    if choice == FULL_STATE_COL:
+        return resolve_full_state_col(adata) or FULL_STATE_COL
+    if choice == INTRINSIC_STATE_COL:
+        return resolve_intrinsic_state_col(adata) or INTRINSIC_STATE_COL
+    if choice == "raw_hmm_state":
+        return HMM_INTRINSIC_RAW_STATE_COL
+    return choice
+
+
+def _render_compact_statebar_pixmap(
+    track_df, state_color_map, state_col, time_col="position_t",
+    figsize=(3.2, 0.34), dpi=100,
+):
+    """A bare colored strip (no axis/ticks) for one track's state history —
+    the compact per-row version of `render_track_statebar_image` (see
+    `behav3d.analysis.behavior.track.visualization.backprojection`), which
+    always draws a `position_t` axis and is left untouched since the Track
+    Classification click-dock depends on that look.
+
+    Returns ``(pixmap, (xmin, xmax))``. The caller gets the time range back
+    because the image is rendered flush to its edges (no margins), so a
+    pixel x-coordinate maps linearly onto ``(xmin, xmax)`` across the full
+    pixmap width — used by `_StateTimelineScrubber` to turn a click/drag
+    position into a timepoint."""
+    from behav3d.analysis.behavior.track.visualization.plots.exemplar_track_per_cluster import (
+        _compute_state_bar_segments,
+    )
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib import pyplot as plt
+    from qtpy.QtGui import QImage, QPixmap
+
+    segments, xlim = _compute_state_bar_segments(
+        track_df=track_df, state_key=str(state_col), time_key=str(time_col),
+        state_color_map=state_color_map,
+    )
+    fig, ax = plt.subplots(figsize=figsize, dpi=int(dpi))
+    for start, width, color in segments:
+        ax.broken_barh([(start, width)], (0.0, 1.0), facecolors=color)
+    ax.set_xlim(*xlim)
+    ax.set_ylim(0.0, 1.0)
+    ax.axis("off")
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    canvas = FigureCanvasAgg(fig)
+    canvas.draw()
+    rgb = np.ascontiguousarray(np.asarray(canvas.buffer_rgba())[..., :3], dtype=np.uint8)
+    plt.close(fig)
+
+    height, width = rgb.shape[0], rgb.shape[1]
+    fmt_rgb = getattr(QImage, "Format_RGB888", None) or QImage.Format.Format_RGB888
+    qimg = QImage(rgb.data, int(width), int(height), int(3 * width), fmt_rgb).copy()
+    return QPixmap.fromImage(qimg), xlim
+
+
+class _BehaviorMatchRowWidget(QWidget):
+    """One 'Find a Behavior' match: a compact detail line plus its state bar
+    underneath, both inside one table row. `table.selectRow(...)` updates the
+    real selection model even though this cell holds a widget instead of a
+    QTableWidgetItem, so clicking either line still selects the match."""
+
+    def __init__(self, table, row_index, details_text, bar_pixmap, parent=None):
+        super().__init__(parent)
+        self._table = table
+        self._row_index = row_index
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 4, 6, 4)
+        lay.setSpacing(2)
+        detail_label = QLabel(details_text)
+        detail_label.setStyleSheet("font-size: 10px; color: #ccc;")
+        lay.addWidget(detail_label)
+        bar_label = QLabel()
+        if bar_pixmap is not None:
+            bar_label.setPixmap(bar_pixmap)
+        else:
+            bar_label.setText("(state bar unavailable)")
+            bar_label.setStyleSheet("font-size: 9px; color: #777;")
+        lay.addWidget(bar_label)
+
+    def mousePressEvent(self, event):
+        self._table.selectRow(self._row_index)
+        super().mousePressEvent(event)
+
+
+class _StateTimelineScrubber(QWidget):
+    """A visualized track's full state history as a bar, with a live time
+    cursor. Clicking or dragging anywhere on it seeks the viewer to that
+    timepoint.
+
+    The colored strip is rendered once (via `_render_compact_statebar_pixmap`)
+    and stretched to the widget's current size on every paint; the cursor is
+    drawn as a plain line on top rather than being baked into a re-rendered
+    matplotlib image each time, so dragging stays smooth — re-running
+    matplotlib per mouse-move would be visibly janky. Pixel<->time mapping
+    only ever uses `self.width()`, not the base pixmap's native resolution,
+    so no resize handling is needed.
+    """
+
+    def __init__(self, base_pixmap, xlim, on_seek, parent=None):
+        super().__init__(parent)
+        self._base_pixmap = base_pixmap
+        self._tmin, self._tmax = float(xlim[0]), float(xlim[1])
+        self._on_seek = on_seek
+        self._current_time = self._tmin
+        self.setMinimumHeight(48)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def set_current_time(self, t):
+        self._current_time = float(t)
+        self.update()
+
+    def paintEvent(self, event):
+        from qtpy.QtGui import QPainter, QPen, QColor
+
+        painter = QPainter(self)
+        if self._base_pixmap is not None:
+            painter.drawPixmap(self.rect(), self._base_pixmap)
+        span = self._tmax - self._tmin
+        frac = 0.0 if span <= 0 else (self._current_time - self._tmin) / span
+        frac = min(1.0, max(0.0, frac))
+        x = int(round(frac * self.width()))
+        painter.setPen(QPen(QColor("white"), 2))
+        painter.drawLine(x, 0, x, self.height())
+        painter.end()
+
+    def _time_from_x(self, x):
+        frac = min(1.0, max(0.0, x / max(1, self.width())))
+        return int(round(self._tmin + frac * (self._tmax - self._tmin)))
+
+    def _seek_to_x(self, x):
+        t = self._time_from_x(x)
+        self.set_current_time(t)
+        if self._on_seek is not None:
+            self._on_seek(t)
+
+    def mousePressEvent(self, event):
+        self._seek_to_x(event.pos().x())
+
+    def mouseMoveEvent(self, event):
+        # Qt only delivers move events while a button is held (no
+        # setMouseTracking call), so this is drag-to-scrub, not hover.
+        self._seek_to_x(event.pos().x())
+
+
 def _save_behav3d_params(metadata_loader, out_dir_fn):
     params = getattr(metadata_loader, "behav3d_parameters", None)
     if not isinstance(params, dict):
@@ -451,12 +968,203 @@ def _save_behav3d_params(metadata_loader, out_dir_fn):
             pass
 
 
+def _report_widget_value(widget):
+    """A report widget's current setting as a plain YAML-safe value."""
+    if isinstance(widget, DualListGroupSelector):
+        return {
+            "group_1": widget.left_items(),
+            "group_2": widget.right_items(),
+            "excluded": widget.excluded_items(),
+        }
+    if isinstance(widget, QCheckBox):
+        return bool(widget.isChecked())
+    if isinstance(widget, QSpinBox):
+        return int(widget.value())
+    if isinstance(widget, QDoubleSpinBox):
+        return float(widget.value())
+    if isinstance(widget, QComboBox):
+        return widget.currentText()
+    if isinstance(widget, QListWidget):
+        return [
+            widget.item(i).text() for i in range(widget.count()) if widget.item(i).isSelected()
+        ]
+    return None
+
+
+def _apply_report_widget_value(widget, value) -> bool:
+    """Set a report widget to a saved value. Returns False while the widget can't
+    fully take it yet (combo option / list items not filled in), so the caller
+    retries after the next refresh."""
+    if isinstance(widget, DualListGroupSelector):
+        saved = {k: [str(v) for v in (value or {}).get(k) or []] for k in ("group_1", "group_2", "excluded")}
+        wanted = set().union(*saved.values())
+        if not wanted:
+            return True
+        present = set(widget.left_items() + widget.right_items() + widget.excluded_items())
+        if not present:
+            return False
+        widget.set_membership(saved["group_1"], saved["group_2"], saved["excluded"])
+        return wanted <= present
+    if isinstance(widget, QCheckBox):
+        widget.setChecked(bool(value))
+        return True
+    if isinstance(widget, QSpinBox):
+        widget.setValue(int(value))
+        return True
+    if isinstance(widget, QDoubleSpinBox):
+        widget.setValue(float(value))
+        return True
+    if isinstance(widget, QComboBox):
+        idx = widget.findText(str(value))
+        if idx < 0:
+            return False
+        widget.setCurrentIndex(idx)
+        return True
+    if isinstance(widget, QListWidget):
+        wanted = {str(v) for v in value or []}
+        present = set(_list_widget_items(widget))
+        if wanted and not present:
+            return False
+        for i in range(widget.count()):
+            item = widget.item(i)
+            item.setSelected(item.text() in wanted)
+        return wanted <= present
+    return True
+
+
+class _ReportSettingsMixin:
+    """Saves the settings a report ran with to behav3d_parameters.yml, under
+    ``<_REPORT_SECTION>.<cell type>.<report>``, and restores them on reload.
+
+    ``_REPORT_SETTINGS`` maps report -> {yml key: widget attribute name, or a
+    (getter, setter) pair of method names}. Keys are applied in order, so a
+    "Group in X" combo must come before the group selector it refills.
+    """
+
+    _REPORT_SECTION = ""
+    _REPORT_SETTINGS: dict = {}
+
+    def _persist_report_settings(self, ct, *reports):
+        params = getattr(self.metadata_loader, "behav3d_parameters", None)
+        if not isinstance(params, dict) or not ct:
+            return
+        try:
+            if not isinstance(params.get(self._REPORT_SECTION), dict):
+                params[self._REPORT_SECTION] = {}
+            section = params[self._REPORT_SECTION]
+            if not isinstance(section.get(ct), dict):
+                section[ct] = {}
+            pending = getattr(self, "_pending_report_settings", None) or {}
+            for report in reports:
+                values = {}
+                for key, target in self._REPORT_SETTINGS[report].items():
+                    if isinstance(target, tuple):
+                        values[key] = getattr(self, target[0])()
+                    else:
+                        values[key] = _report_widget_value(getattr(self, target))
+                section[ct][report] = values
+                pending.pop(report, None)
+            _save_behav3d_params(self.metadata_loader, self._out_dir)
+        except Exception:
+            traceback.print_exc()
+
+    def _queue_report_settings_restore(self, ct):
+        params = getattr(self.metadata_loader, "behav3d_parameters", None) if self.metadata_loader else None
+        section = params.get(self._REPORT_SECTION) if isinstance(params, dict) else None
+        saved = section.get(ct) if ct and isinstance(section, dict) else None
+        pending = {}
+        for report, values in (saved or {}).items():
+            spec = self._REPORT_SETTINGS.get(report)
+            if spec and isinstance(values, dict):
+                pending[report] = {k: v for k, v in values.items() if k in spec}
+        self._pending_report_settings = pending
+
+    def _apply_pending_report_settings(self):
+        pending = getattr(self, "_pending_report_settings", None)
+        if not pending or getattr(self, "_applying_report_settings", False):
+            return
+        # Applying a combo/checkbox fires its handlers, which may refresh again.
+        self._applying_report_settings = True
+        try:
+            for report in list(pending):
+                values = pending[report]
+                for key, target in self._REPORT_SETTINGS[report].items():
+                    if key not in values:
+                        continue
+                    try:
+                        if isinstance(target, tuple):
+                            done = getattr(self, target[1])(values[key])
+                        else:
+                            done = _apply_report_widget_value(getattr(self, target), values[key])
+                    except Exception:
+                        done = True  # a value the widget can't take is dropped, not retried
+                    if done:
+                        values.pop(key, None)
+                if not values:
+                    pending.pop(report, None)
+        finally:
+            self._applying_report_settings = False
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # State Classification sub-tab
 # ═══════════════════════════════════════════════════════════════════════════
 
-class StateClassificationSubTab(QWidget):
+class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
     """Steps 1-4 for HMM-based behavioral state classification + backprojection."""
+
+    _REPORT_SECTION = "state_reports"
+    _REPORT_SETTINGS = {
+        "composition": {
+            "group_x": "combo_composition_group_x",
+            "group_x_grouped": "chk_composition_group_x_conditions",
+            "group_x_levels": "group_selector_composition_x",
+            "group_y": "combo_composition_group_y",
+            "group_y_grouped": "chk_composition_group_y_conditions",
+            "group_y_levels": "group_selector_composition_y",
+            "group_cols": "list_composition_group_cols",
+            "time_bin_size": "spin_state_composition_time_bin",
+        },
+        "transition": {
+            "min_prob_percent": "spin_state_transition_min_prob",
+            "emphasis_gamma": "spin_state_transition_gamma",
+            "label_style": "combo_state_transition_label_style",
+            "include_transition_matrix": "chk_state_transition_include_matrix",
+            "include_circular_diagram": "chk_state_transition_include_circular",
+            "include_self_transitions": "chk_state_transition_include_self",
+            "include_per_cluster": "chk_state_transition_include_per_cluster",
+            "include_ngram_rankings": "chk_state_transition_include_ngrams",
+            "include_sankey_pairs": "chk_state_transition_include_sankey",
+        },
+        "feature_heatmap": {
+            "state_col": "combo_state_heatmap_state_col",
+            "weighting": "combo_state_heatmap_weighting",
+            "scaling": "combo_state_heatmap_scaling",
+            "features": ("_state_heatmap_picked_items", "_restore_state_heatmap_picked"),
+        },
+        "condition_comparison": {
+            "condition_col": "combo_comparison_condition_col",
+            "group_conditions": "chk_comparison_group_conditions",
+            "condition_groups": "group_selector_comparison",
+            "group_x": "combo_comparison_group_x",
+            "group_x_grouped": "chk_comparison_group_x_conditions",
+            "group_x_levels": "group_selector_comparison_x",
+            "group_cols": "list_comparison_group_cols",
+        },
+        "contact_type_comparison": {
+            "state_col": "combo_state_contact_type_state_col",
+            "contact_cols": "list_state_contact_type_compare_cols",
+            "group_cols": "list_state_contact_group_cols",
+        },
+        "contact_shift": {
+            "contact_col": "combo_state_shift_contact_col",
+            "min_bout_length": "spin_state_shift_min_bout",
+            "window_mode": "combo_state_shift_window_mode",
+            "fixed_window_length": "spin_state_shift_window_length",
+            "state_col": "combo_state_shift_state_col",
+            "group_cols": "list_state_contact_group_cols",
+        },
+    }
 
     def __init__(self, viewer=None, metadata_loader=None, cell_type_getter=None,
                  parent=None):
@@ -465,16 +1173,37 @@ class StateClassificationSubTab(QWidget):
         self.metadata_loader = metadata_loader
         self._get_cell_type = cell_type_getter
         self._model_adata = None
+        # (path, mtime, size) of the file ``_model_adata`` was read from; lets
+        # ``_reload`` keep the loaded copy while the file is unchanged.
+        self._model_adata_key = None
         self._hmm_model = None
         self._hmm_model_cell_type = None
         self._bg = BackgroundOperation(self)
-        self._preload_bg = BackgroundOperation(self)
+        self._preload_bg = BackgroundOperation(self, silent=True, notify=True)
+        self._preload_loader = _LatestOnlyLoader(self._preload_bg)
+        # Dedicated instance for the feature-column scan dispatched from
+        # `_populate_dynamic_features` — kept separate from `_preload_bg`
+        # (used for the h5ad preload later in `_reload()`) so the two don't
+        # collide on `BackgroundOperation`'s one-job-at-a-time guard.
+        self._colscan_bg = BackgroundOperation(self, silent=True, notify=True)
         self._last_features_key: tuple = ()
         # Current-timepoint-only state backprojection preview (see
         # `_refresh_state_bp_layer`): recomputed on every dims scrub instead
         # of writing a full per-sample zarr up front.
         self._state_bp_preview: Optional[dict] = None
         self._state_bp_dims_callback = None
+        # "Find a Behavior" cache: the state adata/column loaded for the
+        # currently-selected combo_state_color_by, and the last search's
+        # results — avoids re-reading the h5ad on every search/visualize.
+        self._bp_sequence_adata = None
+        self._bp_sequence_state_col: Optional[str] = None
+        self._bp_sequence_color_by: Optional[str] = None
+        self._bp_sequence_results = None
+        # Scrubbable state-history bar shown under the viewer while a single
+        # track is visualized (see _on_visualize_matched_track); torn down
+        # alongside the rest of the preview in _teardown_state_bp_preview.
+        self._track_scrubber = None
+        self._track_scrubber_dock = None
         # Populated by _populate_dynamic_features; reused by the log-scaling
         # "Preview feature distributions" histogram button.
         self._logscale_candidate_cols: list = []
@@ -496,12 +1225,16 @@ class StateClassificationSubTab(QWidget):
 
     def _init_ui(self):
         from behav3d.napari._guided import make_back_header
+        from behav3d.core.state_columns import (
+            FULL_STATE_COL,
+            INTRINSIC_STATE_COL,
+        )
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # Pinned above the scroll area (not inside it) so it stays visible
+        # Pinned above the stack (outside any scroll area) so it stays visible
         # regardless of how far the plotting page's content scrolls. Only
         # shown while the plotting page (outer page 1) is active.
         self._plotting_header, self._pipeline_title = make_back_header(
@@ -510,28 +1243,24 @@ class StateClassificationSubTab(QWidget):
         self._plotting_header.hide()
         outer.addWidget(self._plotting_header)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        outer.addWidget(scroll)
-
-        content = QWidget()
-        content_lay = QVBoxLayout(content)
-        content_lay.setContentsMargins(0, 0, 0, 0)
-        content_lay.setSpacing(0)
-        scroll.setWidget(content)
-
         # Outer per-subtab stack: page 0 = clustering settings (Steps 1/2/4 +
         # the "Generate analysis and plots" trigger), page 1 = the fully
-        # isolated plotting page, reached only via that trigger.
+        # isolated plotting page, reached only via that trigger. Each page owns
+        # its scroll area; the stack must not sit inside a shared one, since a
+        # QStackedWidget sizes to its tallest page and would pad the short
+        # plotting page with page 0's height (blank space, mid-page scroll).
         self._subtab_stack = QStackedWidget()
-        content_lay.addWidget(self._subtab_stack)
+        outer.addWidget(self._subtab_stack, stretch=1)
 
+        self._settings_scroll = QScrollArea()
+        self._settings_scroll.setWidgetResizable(True)
+        self._settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         settings_page = QWidget()
         lay = QVBoxLayout(settings_page)
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(6)
-        self._subtab_stack.addWidget(settings_page)  # outer page 0
+        self._settings_scroll.setWidget(settings_page)
+        self._subtab_stack.addWidget(self._settings_scroll)  # outer page 0
 
         # ── Warning label (prerequisite check) ──────────────────────────
         self.warning_label = QLabel("")
@@ -572,21 +1301,49 @@ class StateClassificationSubTab(QWidget):
         self.grp_apply.hide()
         lay.addWidget(self.grp_apply)
 
-        # ── Group: Training (Step 1) ─────────────────────────────────────
-        self.grp_train = QGroupBox("Step 1 — State Clustering")
-        train_lay = QVBoxLayout(self.grp_train)
+        # ── Group: Behavioral state clustering (config + rename) ─────────
+        # A single highlighted collapsible section (not a plain QGroupBox) so
+        # its title reads as an always-visible section header, with the whole
+        # configuration + rename workflow collapsing together as one unit.
+        self.grp_train = CollapsibleSection("Behavioral state clustering", expanded=True, highlight=True)
+        train_lay = self.grp_train.contentLayout()
         train_lay.setSpacing(4)
 
         # Feature Selection
-        feat_sel_sec = CollapsibleSection("Feature Selection", expanded=True)
-        self.feat_sel_scroll = QScrollArea()
-        self.feat_sel_scroll.setWidgetResizable(True)
-        self.feat_sel_scroll.setMinimumHeight(150)
-        feat_sel_content = QWidget()
-        self.feat_sel_lay = QVBoxLayout(feat_sel_content)
-        self.feat_sel_lay.setSpacing(2)
+        # Split into two tabs so "Timepoint features" (the primary, usually
+        # much longer, category-grouped set) is never hidden below the
+        # fold behind the shorter "Window features" block -- both are
+        # equally reachable via the tab bar instead of one continuous
+        # scrolling column. Timepoint features is tab 0 (shown by default)
+        # since it's the primary feature set most configuration goes into.
+        feat_sel_sec = CollapsibleSection("Select features for HMM model fitting", expanded=True)
+        self.feat_sel_tabs = QTabWidget()
+        self.feat_sel_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
-        self.feat_sel_lay.addWidget(QLabel("<b>Window features</b>"))
+        # ── Tab: Timepoint features ────────────────────────────────────
+        timepoint_tab = QWidget()
+        timepoint_tab_lay = QVBoxLayout(timepoint_tab)
+        timepoint_tab_lay.setSpacing(2)
+        timepoint_tab_lay.addWidget(_make_info_label(
+            "Timepoint features are per-frame measurements read directly from the "
+            "track-features table (e.g. speed, sphericity, elongation) — one value per "
+            "timepoint. Select which ones the HMM should cluster on."
+        ))
+        self.timepoint_features_lay = QVBoxLayout()
+        timepoint_tab_lay.addLayout(self.timepoint_features_lay)
+        timepoint_tab_lay.addStretch(1)
+        self.feat_sel_tabs.addTab(timepoint_tab, "Timepoint Features")
+
+        # ── Tab: Window features ───────────────────────────────────────
+        window_tab = QWidget()
+        window_tab_lay = QVBoxLayout(window_tab)
+        window_tab_lay.setSpacing(2)
+        window_tab_lay.addWidget(_make_info_label(
+            "Window features are short-term trajectory-shape descriptors (net displacement, "
+            "straightness, mean-square displacement) computed on the fly over a rolling "
+            "window of consecutive timepoints, then merged in alongside the timepoint "
+            "features for clustering."
+        ))
         win_feat_form = QFormLayout()
         self.spin_window_size = QSpinBox()
         self.spin_window_size.setRange(1, 500)
@@ -601,28 +1358,22 @@ class StateClassificationSubTab(QWidget):
         self.lbl_window_size_time = _make_timepoint_time_label()
         win_feat_form.addRow("", self.lbl_window_size_time)
         self.spin_window_size.valueChanged.connect(self._update_timepoint_time_labels)
-        self.feat_sel_lay.addLayout(win_feat_form)
+        window_tab_lay.addLayout(win_feat_form)
 
         self.chk_net_disp = QCheckBox("net_displacement")
         self.chk_straight = QCheckBox("straightness")
         self.chk_msd = QCheckBox("mean_square_displacement")
-        self.feat_sel_lay.addWidget(self.chk_net_disp)
-        self.feat_sel_lay.addWidget(self.chk_straight)
-        self.feat_sel_lay.addWidget(self.chk_msd)
+        window_tab_lay.addWidget(self.chk_net_disp)
+        window_tab_lay.addWidget(self.chk_straight)
+        window_tab_lay.addWidget(self.chk_msd)
+        window_tab_lay.addStretch(1)
+        self.feat_sel_tabs.addTab(window_tab, "Window Features")
 
-        self.feat_sel_lay.addWidget(QLabel("<b>Timepoint features</b>"))
-        self.timepoint_features_lay = QVBoxLayout()
-        self.feat_sel_lay.addLayout(self.timepoint_features_lay)
-
-        self.feat_sel_scroll.setWidget(feat_sel_content)
-        feat_sel_sec.addWidget(self.feat_sel_scroll)
+        feat_sel_sec.addWidget(self.feat_sel_tabs)
         train_lay.addWidget(feat_sel_sec)
 
         # Feature Processing
-        feat_proc_sec = CollapsibleSection("Feature Processing", expanded=False)
-        self.feat_proc_scroll = QScrollArea()
-        self.feat_proc_scroll.setWidgetResizable(True)
-        self.feat_proc_scroll.setMinimumHeight(150)
+        feat_proc_sec = CollapsibleSection("(Optional) Process features before HMM fitting", expanded=False)
         feat_proc_content = QWidget()
         self.feat_proc_lay = QVBoxLayout(feat_proc_content)
 
@@ -677,23 +1428,20 @@ class StateClassificationSubTab(QWidget):
         ))
         self.feat_proc_lay.addLayout(proc_form)
 
-        self.feat_proc_scroll.setWidget(feat_proc_content)
-        feat_proc_sec.addWidget(self.feat_proc_scroll)
+        feat_proc_sec.addWidget(feat_proc_content)
         train_lay.addWidget(feat_proc_sec)
 
         # Binary Group Selection
-        bin_grp_sec = CollapsibleSection("Binary Group Selection", expanded=False)
-        self.bin_grp_scroll = QScrollArea()
-        self.bin_grp_scroll.setWidgetResizable(True)
-        self.bin_grp_scroll.setMinimumHeight(100)
+        bin_grp_sec = CollapsibleSection(
+            "Assign groups based on binary features (e.g. contact, death)", expanded=False
+        )
         bin_grp_content = QWidget()
         self.bin_grp_lay = QVBoxLayout(bin_grp_content)
-        self.bin_grp_scroll.setWidget(bin_grp_content)
-        bin_grp_sec.addWidget(self.bin_grp_scroll)
+        bin_grp_sec.addWidget(bin_grp_content)
         train_lay.addWidget(bin_grp_sec)
 
         # Advanced Settings
-        adv_sec = CollapsibleSection("⚙ Advanced Configuration", expanded=False)
+        adv_sec = CollapsibleSection("(Optional) Advanced configuration", expanded=False)
         adv_form = QFormLayout()
 
         self.combo_hmm_n_states_mode = QComboBox()
@@ -845,7 +1593,7 @@ class StateClassificationSubTab(QWidget):
 
         # Run button
         row_run = QHBoxLayout()
-        self.btn_run_state = QPushButton("▶ Run State Classification")
+        self.btn_run_state = QPushButton("▶ Run State Clustering")
         _style_primary(self.btn_run_state)
         row_run.addWidget(self.btn_run_state, stretch=1)
         row_run.addWidget(self.btn_queue_state_cluster)
@@ -853,38 +1601,29 @@ class StateClassificationSubTab(QWidget):
         row_run.addWidget(self.btn_view_state)
         train_lay.addLayout(row_run)
 
-        lay.addWidget(self.grp_train)
-
-        # ── Step 2: Rename Clusters ──────────────────────────────────────
-        self.grp2 = QGroupBox("Step 2 — Rename Clusters")
-        g2 = QVBoxLayout(self.grp2)
-        g2.setSpacing(4)
-
-        self.rename_status_lbl = QLabel("ℹ Run state classification first to enable renaming.")
+        # ── Rename clusters (same collapsible card as the config above) ───
+        self.rename_status_lbl = QLabel("ℹ Run state clustering first to enable renaming.")
         self.rename_status_lbl.setStyleSheet("color: #999; font-size: 11px;")
-        g2.addWidget(self.rename_status_lbl)
+        train_lay.addWidget(self.rename_status_lbl)
 
-        rename_intrinsic_row = QHBoxLayout()
-        self.btn_rename_intrinsic = QPushButton("✏  Rename Primary Dynamic State Clusters")
+        self.btn_rename_intrinsic = QPushButton(
+            "✏  Rename intrinsic HMM behavioral states (e.g. morphodynamic)"
+        )
         _style_rename(self.btn_rename_intrinsic)
         self.btn_rename_intrinsic.setEnabled(False)
-        rename_intrinsic_row.addWidget(self.btn_rename_intrinsic, stretch=1)
-        self.btn_view_rename_intrinsic = _make_view_btn()
-        rename_intrinsic_row.addWidget(self.btn_view_rename_intrinsic)
-        g2.addLayout(rename_intrinsic_row)
+        train_lay.addWidget(self.btn_rename_intrinsic)
 
-        rename_full_row = QHBoxLayout()
-        self.btn_rename_full = QPushButton("✏  Rename Full Behavioral Clusters (Binary Groups)")
+        self.btn_rename_full = QPushButton(
+            "✏  Rename full behavioral states (with binary features)"
+        )
         _style_rename(self.btn_rename_full)
         self.btn_rename_full.setEnabled(False)
-        rename_full_row.addWidget(self.btn_rename_full, stretch=1)
-        self.btn_view_rename_full = _make_view_btn()
-        rename_full_row.addWidget(self.btn_view_rename_full)
-        g2.addLayout(rename_full_row)
-        lay.addWidget(self.grp2)
+        train_lay.addWidget(self.btn_rename_full)
+
+        lay.addWidget(self.grp_train)
 
         # ── Step 3: Reports (built directly into per-pipeline group boxes) ──
-        self.grp_state_diagnostics = QGroupBox("Diagnostics")
+        self.grp_state_diagnostics = QGroupBox("Diagnostic")
         g_state_diagnostics = QVBoxLayout(self.grp_state_diagnostics)
         g_state_diagnostics.setSpacing(4)
         g_state_diagnostics.addWidget(_make_info_label(
@@ -928,6 +1667,18 @@ class StateClassificationSubTab(QWidget):
         self.list_composition_group_cols = QListWidget()
         self.list_composition_group_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
         g_state_composition.addWidget(self.list_composition_group_cols)
+        comp_bin_form = QFormLayout()
+        comp_bin_form.setSpacing(3)
+        self.spin_state_composition_time_bin = QSpinBox()
+        self.spin_state_composition_time_bin.setRange(1, 100000)
+        self.spin_state_composition_time_bin.setValue(1)
+        self.spin_state_composition_time_bin.setMaximumWidth(100)
+        comp_bin_form.addRow("Time bin size:", make_help_row(
+            self.spin_state_composition_time_bin, "Time bin size (timepoints)",
+            "Groups timepoints into buckets of this size before computing composition, "
+            "to reduce visual noise. 1 = no binning (raw per-frame resolution)."
+        ))
+        g_state_composition.addLayout(comp_bin_form)
         g_state_composition.addWidget(_make_info_label(
             "Plots the proportion of each behavioral state per sample. Tick \"Group conditions\" "
             "under Group in X/Y to pool that axis's levels into two custom groups."
@@ -953,6 +1704,165 @@ class StateClassificationSubTab(QWidget):
         self.btn_view_transition = _make_view_btn()
         trans_row.addWidget(self.btn_view_transition)
         g_state_transition.addLayout(trans_row)
+
+        adv_state_transition = CollapsibleSection("⚙ Advanced Configuration", expanded=True)
+        st_trans_form = QFormLayout()
+        st_trans_form.setSpacing(3)
+        self.spin_state_transition_min_prob = QDoubleSpinBox()
+        self.spin_state_transition_min_prob.setRange(0.0, 100.0)
+        self.spin_state_transition_min_prob.setDecimals(1)
+        self.spin_state_transition_min_prob.setSingleStep(0.5)
+        self.spin_state_transition_min_prob.setValue(0.0)
+        self.spin_state_transition_min_prob.setSuffix(" %")
+        st_trans_form.addRow("Min probability cutoff:", make_help_row(
+            self.spin_state_transition_min_prob, "Min Probability Cutoff",
+            "In the circular transition diagram, a transition below this probability is "
+            "dropped entirely (not just faded) so rare, noisy transitions don't clutter "
+            "the plot."
+        ))
+        self.spin_state_transition_gamma = QDoubleSpinBox()
+        self.spin_state_transition_gamma.setRange(0.5, 5.0)
+        self.spin_state_transition_gamma.setDecimals(1)
+        self.spin_state_transition_gamma.setSingleStep(0.1)
+        self.spin_state_transition_gamma.setValue(1.0)
+        st_trans_form.addRow("Emphasis (gamma):", make_help_row(
+            self.spin_state_transition_gamma, "Emphasis Gamma",
+            "How hard the circular diagram's line width/opacity fall off for weaker "
+            "transitions. 1.0 is linear; higher values (e.g. 2-3) make the strongest "
+            "transitions stand out much more clearly against everything else."
+        ))
+        self.combo_state_transition_label_style = QComboBox()
+        self.combo_state_transition_label_style.addItems(["On dots", "Side legend"])
+        self.combo_state_transition_label_style.setCurrentIndex(1)
+        st_trans_form.addRow("Node labels:", make_help_row(
+            self.combo_state_transition_label_style, "Node Labels",
+            "Where the circular diagram's cluster/state names are shown: written inside "
+            "each dot ('On dots'), or moved to a numbered legend beside the plot ('Side "
+            "legend') - useful when names are long or there are many clusters."
+        ))
+        adv_state_transition.addLayout(st_trans_form)
+
+        self.chk_state_transition_include_matrix = QCheckBox("Transition matrix heatmap")
+        self.chk_state_transition_include_matrix.setChecked(True)
+        adv_state_transition.addLayout(_make_chk_help_row(
+            self.chk_state_transition_include_matrix, "Transition Matrix Heatmap",
+            "Include the transition-probability/count heatmap page(s)."
+        ))
+        self.chk_state_transition_include_circular = QCheckBox("Circular transition diagram")
+        self.chk_state_transition_include_circular.setChecked(True)
+        adv_state_transition.addLayout(_make_chk_help_row(
+            self.chk_state_transition_include_circular, "Circular Transition Diagram",
+            "Include the circular inter-cluster transition diagram pages: one page weighted by "
+            "outgoing probability (P(next | current)), then one weighted by incoming probability "
+            "(P(previous | current) - for each cluster, what share of its arrivals came from "
+            "each source)."
+        ))
+        self.chk_state_transition_include_self = QCheckBox("Include self-transitions")
+        self.chk_state_transition_include_self.setChecked(False)
+        adv_state_transition.addLayout(_make_chk_help_row(
+            self.chk_state_transition_include_self, "Include Self-Transitions",
+            "Self-transitions are never drawn as arrows (a cluster can't arc to itself). This "
+            "instead picks which probabilities the circular diagram(s) are scaled from: off "
+            "(default) renormalizes over inter-cluster switches only, so the arrows show how a "
+            "cluster splits between the states it switches to. On uses each transition's share "
+            "of all activity, including time spent not switching, which dilutes the arrows for "
+            "clusters that mostly self-transition."
+        ))
+        self.chk_state_transition_include_per_cluster = QCheckBox("Show per-cluster breakdown grid")
+        self.chk_state_transition_include_per_cluster.setChecked(True)
+        adv_state_transition.addLayout(_make_chk_help_row(
+            self.chk_state_transition_include_per_cluster, "Per-Cluster Breakdown Grid",
+            "Add two pages, each with one small panel per cluster: outgoing (that cluster's own "
+            "transitions to others) and incoming (that cluster's arrivals, broken down by "
+            "source), arrow weight scaled to that cluster's own transitions in each case - "
+            "useful when the single overlaid diagrams get too busy to read."
+        ))
+        self.chk_state_transition_include_ngrams = QCheckBox("N-gram rankings")
+        self.chk_state_transition_include_ngrams.setChecked(True)
+        adv_state_transition.addLayout(_make_chk_help_row(
+            self.chk_state_transition_include_ngrams, "N-gram Rankings",
+            "Include the top state-sequence n-gram ranking pages."
+        ))
+        self.chk_state_transition_include_sankey = QCheckBox("Sankey diagrams (all state pairs)")
+        self.chk_state_transition_include_sankey.setChecked(False)
+        adv_state_transition.addLayout(_make_chk_help_row(
+            self.chk_state_transition_include_sankey, "Sankey Diagrams",
+            "Include the Sankey diagrams for every pair of states - the heaviest part of "
+            "this report to compute; uncheck to skip it entirely and speed up regeneration."
+        ))
+        g_state_transition.addWidget(adv_state_transition)
+
+        self.grp_state_feature_heatmap = QGroupBox("State Feature Heatmap")
+        g_sfheat = QVBoxLayout(self.grp_state_feature_heatmap)
+        g_sfheat.setSpacing(4)
+        g_sfheat.addWidget(_make_info_label(
+            "Heatmap of behavioral states x features: the mean of each selected "
+            "per-timepoint feature per state. The features the states were built on are "
+            "preselected below; move others across from Available, then drag rows in "
+            "Selected to set the order they appear in the plot. Cell labels show the "
+            "unscaled state mean."
+        ))
+        sfheat_form = QFormLayout()
+        sfheat_form.setSpacing(3)
+        self.combo_state_heatmap_state_col = QComboBox()
+        self.combo_state_heatmap_state_col.addItem(FULL_STATE_COL, FULL_STATE_COL)
+        self.combo_state_heatmap_state_col.addItem(INTRINSIC_STATE_COL, INTRINSIC_STATE_COL)
+        self.combo_state_heatmap_state_col.setMinimumWidth(200)
+        sfheat_form.addRow("States:", make_help_row(
+            self.combo_state_heatmap_state_col, "States",
+            f"'{FULL_STATE_COL}': the final states, including the binary groups (e.g. "
+            f"contact). '{INTRINSIC_STATE_COL}': the HMM states before binary groups are merged in."
+        ))
+        self.combo_state_heatmap_weighting = QComboBox()
+        self.combo_state_heatmap_weighting.addItem("Every timepoint counts", "timepoints")
+        self.combo_state_heatmap_weighting.addItem("Each track counts once", "tracks")
+        self.combo_state_heatmap_weighting.setMinimumWidth(200)
+        sfheat_form.addRow("Average:", make_help_row(
+            self.combo_state_heatmap_weighting, "Average",
+            "'Every timepoint counts': mean over all timepoints in each state. 'Each track "
+            "counts once': each track is first averaged over its own timepoints in a state, "
+            "then tracks are averaged, so long tracks don't dominate."
+        ))
+        self.combo_state_heatmap_scaling = QComboBox()
+        self.combo_state_heatmap_scaling.addItems(["z-score", "min-max"])
+        self.combo_state_heatmap_scaling.setMaximumWidth(130)
+        sfheat_form.addRow("Colour scaling:", make_help_row(
+            self.combo_state_heatmap_scaling, "Colour scaling",
+            "'z-score': each feature is standardized, then averaged per state; 0 = average, "
+            "red = higher, blue = lower. 'min-max': state means rescaled 0-1 per feature."
+        ))
+        g_sfheat.addLayout(sfheat_form)
+        g_sfheat.addWidget(QLabel("Available features (click to select, then Add):"))
+        self.list_state_heatmap_available = QListWidget()
+        self.list_state_heatmap_available.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        g_sfheat.addWidget(self.list_state_heatmap_available)
+        self.btn_state_heatmap_add = QPushButton("Add ▼")
+        g_sfheat.addWidget(self.btn_state_heatmap_add)
+        g_sfheat.addWidget(QLabel("Selected features - drag to set the plot order:"))
+        self.list_state_heatmap_picked = QListWidget()
+        self.list_state_heatmap_picked.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.list_state_heatmap_picked.setDragDropMode(QAbstractItemView.InternalMove)
+        self.list_state_heatmap_picked.setDefaultDropAction(Qt.MoveAction)
+        g_sfheat.addWidget(self.list_state_heatmap_picked)
+        self.btn_state_heatmap_remove = QPushButton("▲ Remove")
+        g_sfheat.addWidget(self.btn_state_heatmap_remove)
+        sfheat_sel_row = QHBoxLayout()
+        self.btn_state_heatmap_defaults = QPushButton("Select used features")
+        self.btn_state_heatmap_all = QPushButton("Select all")
+        self.btn_state_heatmap_clear = QPushButton("Clear")
+        for _b in (self.btn_state_heatmap_defaults, self.btn_state_heatmap_all, self.btn_state_heatmap_clear):
+            sfheat_sel_row.addWidget(_b)
+        g_sfheat.addLayout(sfheat_sel_row)
+        sfheat_row = QHBoxLayout()
+        self.btn_state_feature_heatmap = QPushButton("▶ Create State Feature Heatmap")
+        _style_secondary(self.btn_state_feature_heatmap)
+        sfheat_row.addWidget(self.btn_state_feature_heatmap, stretch=1)
+        self.btn_view_state_feature_heatmap = _make_view_btn()
+        sfheat_row.addWidget(self.btn_view_state_feature_heatmap)
+        g_sfheat.addLayout(sfheat_row)
+        self._state_heatmap_candidates = []
+        self._state_heatmap_defaults = []
+        self._state_heatmap_cache_key = None
 
         self.grp_state_comparison = QGroupBox("Condition Comparison Report")
         g_state_comparison = QVBoxLayout(self.grp_state_comparison)
@@ -1017,6 +1927,106 @@ class StateClassificationSubTab(QWidget):
         comparison_row.addWidget(self.btn_view_condition_comparison)
         g_state_comparison.addLayout(comparison_row)
 
+        self.grp_state_contact = QGroupBox("Contact Analysis")
+        g_state_contact = QVBoxLayout(self.grp_state_contact)
+        g_state_contact.setSpacing(4)
+        g_state_contact.addWidget(_make_info_label(
+            "Per-timepoint contact analysis — no track-DTW classification needed, only "
+            "behavioral-state classification plus the per-timepoint tracks CSV."
+        ))
+
+        g_state_contact.addWidget(_make_info_label(
+            "Group per page (Ctrl/Cmd click for multiple) — splits the reports below into "
+            "one page set per group:"
+        ))
+        self.list_state_contact_group_cols = QListWidget()
+        self.list_state_contact_group_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        g_state_contact.addWidget(self.list_state_contact_group_cols)
+
+        g_state_contact.addWidget(_make_info_label(
+            "Contact type comparison — compares contacting-state proportions between "
+            "selected contact columns (e.g. healthy vs. tumor organoid contact): "
+            "cluster-size difference (Welch's t-test) plus stacked composition."
+        ))
+        state_contact_type_form = QFormLayout()
+        state_contact_type_form.setSpacing(3)
+        self.combo_state_contact_type_state_col = QComboBox()
+        self.combo_state_contact_type_state_col.addItems(
+            [FULL_STATE_COL, INTRINSIC_STATE_COL, "raw_hmm_state"]
+        )
+        state_contact_type_form.addRow("State column:", self.combo_state_contact_type_state_col)
+        g_state_contact.addLayout(state_contact_type_form)
+        g_state_contact.addWidget(_make_info_label("Contact columns to compare (Ctrl/Cmd click for 2+):"))
+        self.list_state_contact_type_compare_cols = QListWidget()
+        self.list_state_contact_type_compare_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        g_state_contact.addWidget(self.list_state_contact_type_compare_cols)
+        state_contact_type_row = QHBoxLayout()
+        self.btn_state_contact_type_comparison = QPushButton("▶ Create Contact Type Comparison")
+        _style_secondary(self.btn_state_contact_type_comparison)
+        state_contact_type_row.addWidget(self.btn_state_contact_type_comparison, stretch=1)
+        self.btn_view_state_contact_type_comparison = _make_view_btn()
+        state_contact_type_row.addWidget(self.btn_view_state_contact_type_comparison)
+        g_state_contact.addLayout(state_contact_type_row)
+
+        # State-shift analysis is a development feature: only shown when the
+        # GUI runs in dev mode (BEHAV3D_DEV_MODE=1, set by launch_napari.py).
+        self.state_shift_container = QWidget()
+        g_state_shift = QVBoxLayout(self.state_shift_container)
+        g_state_shift.setContentsMargins(0, 0, 0, 0)
+        g_state_shift.setSpacing(4)
+        g_state_contact.addWidget(self.state_shift_container)
+        self.state_shift_container.setVisible(os.environ.get("BEHAV3D_DEV_MODE") == "1")
+
+        state_contact_sep = QFrame()
+        state_contact_sep.setFrameShape(QFrame.HLine)
+        g_state_shift.addWidget(state_contact_sep)
+
+        g_state_shift.addWidget(QLabel("State-shift analysis (behavioral state before → after contact):"))
+        state_shift_form = QFormLayout()
+        state_shift_form.setSpacing(3)
+        self.combo_state_shift_contact_col = QComboBox()
+        self.combo_state_shift_contact_col.setMinimumWidth(200)
+        state_shift_form.addRow("Contact column:", self.combo_state_shift_contact_col)
+        self.spin_state_shift_min_bout = QSpinBox()
+        self.spin_state_shift_min_bout.setRange(1, 100000)
+        self.spin_state_shift_min_bout.setValue(5)
+        self.spin_state_shift_min_bout.setMaximumWidth(100)
+        state_shift_form.addRow("Min. contiguous bout:", make_help_row(
+            self.spin_state_shift_min_bout, "Min. contiguous contact bout (timepoints)",
+            "A track counts as 'contact' if it has at least one unbroken run of this many "
+            "consecutive contact timepoints; otherwise it is 'no_contact'."
+        ))
+        self.combo_state_shift_window_mode = QComboBox()
+        self.combo_state_shift_window_mode.addItems(["Fixed", "Full"])
+        state_shift_form.addRow("Window mode:", make_help_row(
+            self.combo_state_shift_window_mode, "Before/after window mode",
+            "'Fixed': compare a fixed number of timepoints immediately before the contact bout "
+            "starts vs. immediately after it ends. 'Full': compare everything before the bout to "
+            "everything after it, within the track's full timepoint span."
+        ))
+        self.spin_state_shift_window_length = QSpinBox()
+        self.spin_state_shift_window_length.setRange(1, 100000)
+        self.spin_state_shift_window_length.setValue(10)
+        self.spin_state_shift_window_length.setMaximumWidth(100)
+        state_shift_form.addRow("Fixed window length:", make_help_row(
+            self.spin_state_shift_window_length, "Fixed window length (timepoints)",
+            "Only used in 'Fixed' window mode: number of timepoints immediately before the bout "
+            "start / after the bout end to compare."
+        ))
+        self.combo_state_shift_state_col = QComboBox()
+        self.combo_state_shift_state_col.addItems(
+            [FULL_STATE_COL, INTRINSIC_STATE_COL, "raw_hmm_state"]
+        )
+        state_shift_form.addRow("State column:", self.combo_state_shift_state_col)
+        g_state_shift.addLayout(state_shift_form)
+        state_shift_row = QHBoxLayout()
+        self.btn_state_contact_shift = QPushButton("▶ Run State-Shift Analysis")
+        _style_secondary(self.btn_state_contact_shift)
+        state_shift_row.addWidget(self.btn_state_contact_shift, stretch=1)
+        self.btn_view_state_contact_shift = _make_view_btn()
+        state_shift_row.addWidget(self.btn_view_state_contact_shift)
+        g_state_shift.addLayout(state_shift_row)
+
         from behav3d.napari._guided import GuidedPanel
         from behav3d.napari.analysis_guided_copy import (
             STATE_REPORTS_ENTRY, STATE_REPORT_PIPELINES,
@@ -1024,10 +2034,11 @@ class StateClassificationSubTab(QWidget):
 
         # Entry trigger stays inline on the clustering-settings page; Start
         # navigates to the fully isolated plotting page (outer page 1) below.
-        lay.addWidget(
-            GuidedPanel([STATE_REPORTS_ENTRY],
-                        start_cb=lambda _id: self._open_plotting_page())
-        )
+        plots_entry = GuidedPanel([STATE_REPORTS_ENTRY],
+                                  start_cb=lambda _id: self._open_plotting_page())
+        # Greyed out by _refresh_buttons until a behavioral clustering exists.
+        self._plots_entry_btn = plots_entry.explainers[STATE_REPORTS_ENTRY["id"]].start_button
+        lay.addWidget(plots_entry)
 
         plotting_page = QWidget()
         plotting_lay = QVBoxLayout(plotting_page)
@@ -1063,20 +2074,24 @@ class StateClassificationSubTab(QWidget):
         pipeline_content_lay.addWidget(self.grp_state_diagnostics)
         pipeline_content_lay.addWidget(self.grp_state_composition)
         pipeline_content_lay.addWidget(self.grp_state_transition)
+        pipeline_content_lay.addWidget(self.grp_state_feature_heatmap)
         pipeline_content_lay.addWidget(self.grp_state_comparison)
+        pipeline_content_lay.addWidget(self.grp_state_contact)
         pipeline_content_lay.addStretch()
         self._pipeline_scroll.setWidget(pipeline_content)
         reset_scroll_on_page_change(self._plots_stack)
 
         self._plots_stack.setCurrentIndex(0)
         plotting_lay.addWidget(self._plots_stack)
+        # No reset_scroll_on_page_change on _subtab_stack: Back must return
+        # page 0 to where the user left it; _open_plotting_page resets page 1.
         self._subtab_stack.addWidget(plotting_page)  # outer page 1
-        reset_scroll_on_page_change(self._subtab_stack)
 
         self._subtab_stack.setCurrentIndex(0)
 
         # ── Step 4: Backprojection ───────────────────────────────────────
-        self.grp_bp = QGroupBox("Step 4 — Backprojection")
+        self.grp_bp = QGroupBox("Backprojection")
+        _style_backprojection_box(self.grp_bp)
         g_bp = QVBoxLayout(self.grp_bp)
         g_bp.setSpacing(6)
 
@@ -1107,15 +2122,15 @@ class StateClassificationSubTab(QWidget):
 
         self.combo_state_color_by = QComboBox()
         self.combo_state_color_by.addItems(
-            ["full_behavioral_cluster", "intrinsic_behavioral_cluster", "raw_hmm_state"]
+            [FULL_STATE_COL, INTRINSIC_STATE_COL, "raw_hmm_state"]
         )
         self.combo_state_color_by.setMinimumWidth(220)
         bp_form.addRow("Color by:", make_help_row(
             self.combo_state_color_by, "Color by",
             "Which clustering label to use for coloring the backprojection overlay. "
-            "'full_behavioral_cluster' includes binary grouping; "
-            "'intrinsic_behavioral_cluster' shows only the HMM states; "
-            "'raw_hmm_state' shows the HMM output of Step 1 before any renaming."
+            f"'{FULL_STATE_COL}' includes binary grouping; "
+            f"'{INTRINSIC_STATE_COL}' shows only the HMM states; "
+            "'raw_hmm_state' shows the HMM output before any renaming."
         ))
 
         self.spin_state_opacity = QSpinBox()
@@ -1126,6 +2141,15 @@ class StateClassificationSubTab(QWidget):
         bp_form.addRow("Opacity:", make_help_row(
             self.spin_state_opacity, "Opacity",
             "Opacity of the colored state overlay layer in napari (10–100%)."
+        ))
+
+        self.chk_show_state_trajectories = QCheckBox("Show trajectories")
+        self.chk_show_state_trajectories.setChecked(True)
+        bp_form.addRow("Trajectories:", _make_chk_help_row(
+            self.chk_show_state_trajectories, "Show trajectories",
+            "Overlay each track's full path as a line whose color changes over "
+            "time to match its state at each timepoint. On by default — adds "
+            "one napari Tracks layer per state."
         ))
         g_view.addLayout(bp_form)
 
@@ -1141,6 +2165,94 @@ class StateClassificationSubTab(QWidget):
         export_run_row.addWidget(self.btn_export_state_bp, stretch=1)
         g_view.addLayout(export_run_row)
         g_bp.addWidget(grp_view)
+
+        # Find a Behavior: search tracks for a user-ordered state sequence,
+        # then visualize a single matched track in isolation.
+        grp_find_behavior = QGroupBox("🔎 Find a Behavior")
+        g_find = QVBoxLayout(grp_find_behavior)
+        g_find.setSpacing(4)
+
+        info_find = QLabel(
+            "Build an ordered sequence of states, search the whole dataset "
+            "for tracks whose state history matches it, then visualize one "
+            "matched track in isolation (segmentation, state mask, and a "
+            "trajectory colored per timepoint by state)."
+        )
+        info_find.setStyleSheet("color: #999; font-size: 10px;")
+        info_find.setWordWrap(True)
+        g_find.addWidget(info_find)
+
+        seq_build_row = QHBoxLayout()
+        self.combo_bp_sequence_state = QComboBox()
+        self.combo_bp_sequence_state.setMinimumWidth(140)
+        self.combo_bp_sequence_state.setEnabled(False)
+        self.btn_bp_sequence_load_states = QPushButton("🔄 Load States")
+        _style_secondary(self.btn_bp_sequence_load_states)
+        self.btn_bp_sequence_add = QPushButton("➕ Add")
+        seq_build_row.addWidget(self.combo_bp_sequence_state, stretch=1)
+        seq_build_row.addWidget(self.btn_bp_sequence_load_states)
+        seq_build_row.addWidget(self.btn_bp_sequence_add)
+        g_find.addLayout(seq_build_row)
+
+        self.list_bp_sequence = QListWidget()
+        self.list_bp_sequence.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.list_bp_sequence.setMaximumHeight(90)
+        g_find.addWidget(self.list_bp_sequence)
+
+        seq_reorder_row = QHBoxLayout()
+        self.btn_bp_sequence_up = QPushButton("⬆")
+        self.btn_bp_sequence_down = QPushButton("⬇")
+        self.btn_bp_sequence_remove = QPushButton("✕ Remove")
+        self.btn_bp_sequence_clear = QPushButton("🗑 Clear")
+        for b in (
+            self.btn_bp_sequence_up,
+            self.btn_bp_sequence_down,
+            self.btn_bp_sequence_remove,
+            self.btn_bp_sequence_clear,
+        ):
+            seq_reorder_row.addWidget(b)
+        g_find.addLayout(seq_reorder_row)
+
+        self.chk_bp_sequence_strict = QCheckBox("Require no other state in between (strict)")
+        g_find.addLayout(_make_chk_help_row(
+            self.chk_bp_sequence_strict, "Strict match",
+            "Unchecked (default): other states may occur between sequence "
+            "steps, as long as the order holds (subsequence match). Checked: "
+            "sequence steps must be immediately adjacent bouts with nothing "
+            "else in between (contiguous match)."
+        ))
+
+        self.chk_bp_sequence_start = QCheckBox("Sequence must start the track")
+        self.chk_bp_sequence_end = QCheckBox("Sequence must end the track")
+        g_find.addWidget(self.chk_bp_sequence_start)
+        g_find.addWidget(self.chk_bp_sequence_end)
+
+        find_row = QHBoxLayout()
+        self.btn_bp_sequence_find = QPushButton("🔎 Find Matching Tracks")
+        _style_primary(self.btn_bp_sequence_find)
+        find_row.addWidget(self.btn_bp_sequence_find, stretch=1)
+        g_find.addLayout(find_row)
+
+        # Single spanning column: each row's cell holds a _BehaviorMatchRowWidget
+        # (details line + colored state bar underneath), not plain text items.
+        self.tbl_bp_sequence_matches = QTableWidget(0, 1)
+        self.tbl_bp_sequence_matches.horizontalHeader().setVisible(False)
+        self.tbl_bp_sequence_matches.verticalHeader().setVisible(False)
+        self.tbl_bp_sequence_matches.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tbl_bp_sequence_matches.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tbl_bp_sequence_matches.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.tbl_bp_sequence_matches.horizontalHeader().setStretchLastSection(True)
+        self.tbl_bp_sequence_matches.setMaximumHeight(220)
+        g_find.addWidget(self.tbl_bp_sequence_matches)
+
+        visualize_row = QHBoxLayout()
+        self.btn_bp_sequence_visualize = QPushButton("▶ Visualize This Track")
+        _style_primary(self.btn_bp_sequence_visualize)
+        self.btn_bp_sequence_visualize.setEnabled(False)
+        visualize_row.addWidget(self.btn_bp_sequence_visualize, stretch=1)
+        g_find.addLayout(visualize_row)
+
+        g_bp.addWidget(grp_find_behavior)
 
         lay.addWidget(self.grp_bp)
 
@@ -1165,26 +2277,65 @@ class StateClassificationSubTab(QWidget):
         self.combo_hmm_n_states_mode.currentTextChanged.connect(self._toggle_n_states_mode)
         self.chk_hmm_sticky.toggled.connect(self._toggle_sticky_hmm)
         self.btn_run_state.clicked.connect(self._on_run_state)
-        self.btn_view_state.clicked.connect(lambda: self._on_view("state_qc"))
+        _wire_view_btn(self.btn_view_state, self._on_view, "state_qc")
         self.btn_rename_intrinsic.clicked.connect(self._on_rename_intrinsic)
         self.btn_rename_full.clicked.connect(self._on_rename_full)
         self.btn_state_diagnostics.clicked.connect(self._on_state_diagnostics)
-        self.btn_view_state_diagnostics.clicked.connect(lambda: self._on_view("state_diagnostics"))
+        _wire_view_btn(self.btn_view_state_diagnostics, self._on_view, "state_diagnostics")
         self.btn_state_composition.clicked.connect(self._on_state_composition)
-        self.btn_view_composition.clicked.connect(lambda: self._on_view("state_composition"))
+        _wire_view_btn(self.btn_view_composition, self._on_view, "state_composition")
         self.btn_state_transition.clicked.connect(self._on_state_transition)
-        self.btn_view_transition.clicked.connect(lambda: self._on_view("state_transition"))
+        _wire_view_btn(self.btn_view_transition, self._on_view, "state_transition")
+        self.btn_state_feature_heatmap.clicked.connect(self._on_state_feature_heatmap)
+        _wire_view_btn(self.btn_view_state_feature_heatmap, self._on_view, "state_feature_heatmap")
+        self.btn_state_heatmap_defaults.clicked.connect(self._select_state_heatmap_defaults)
+        self.btn_state_heatmap_all.clicked.connect(
+            lambda: self._set_state_heatmap_picked(self._state_heatmap_candidates)
+        )
+        self.btn_state_heatmap_clear.clicked.connect(lambda: self._set_state_heatmap_picked([]))
+        self.btn_state_heatmap_add.clicked.connect(self._state_heatmap_add_selected)
+        self.btn_state_heatmap_remove.clicked.connect(self._state_heatmap_remove_selected)
+        self.list_state_heatmap_available.itemDoubleClicked.connect(
+            lambda item: self._set_state_heatmap_picked(
+                _list_widget_items(self.list_state_heatmap_picked) + [item.text()]
+            )
+        )
+        self.list_state_heatmap_picked.itemDoubleClicked.connect(
+            lambda item: self._set_state_heatmap_picked(
+                [c for c in _list_widget_items(self.list_state_heatmap_picked) if c != item.text()]
+            )
+        )
         self.btn_condition_comparison.clicked.connect(self._on_condition_comparison)
-        self.btn_view_condition_comparison.clicked.connect(lambda: self._on_view("state_condition_comparison"))
+        _wire_view_btn(self.btn_view_condition_comparison, self._on_view, "state_condition_comparison")
+        self.btn_state_contact_type_comparison.clicked.connect(self._on_state_contact_type_comparison)
+        _wire_view_btn(
+            self.btn_view_state_contact_type_comparison, self._on_view, "state_contact_type_comparison"
+        )
+        self.btn_state_contact_shift.clicked.connect(self._on_state_contact_shift)
+        _wire_view_btn(self.btn_view_state_contact_shift, self._on_view, "state_contact_shift")
         self.btn_browse_hmm.clicked.connect(self._browse_hmm_artifact)
         self.btn_apply_hmm.clicked.connect(self._on_apply_hmm)
         self.btn_show_state_bp.clicked.connect(self._on_show_state_bp)
         self.btn_export_state_bp.clicked.connect(self._on_export_state_bp)
+        self.btn_bp_sequence_load_states.clicked.connect(self._on_bp_sequence_load_states)
+        self.btn_bp_sequence_add.clicked.connect(self._on_bp_sequence_add_state)
+        self.btn_bp_sequence_up.clicked.connect(self._on_bp_sequence_move_up)
+        self.btn_bp_sequence_down.clicked.connect(self._on_bp_sequence_move_down)
+        self.btn_bp_sequence_remove.clicked.connect(self._on_bp_sequence_remove_selected)
+        self.btn_bp_sequence_clear.clicked.connect(self.list_bp_sequence.clear)
+        self.btn_bp_sequence_find.clicked.connect(self._on_find_behavior_sequence)
+        self.tbl_bp_sequence_matches.itemSelectionChanged.connect(
+            self._on_bp_sequence_selection_changed
+        )
+        self.btn_bp_sequence_visualize.clicked.connect(self._on_visualize_matched_track)
 
         self.spin_window_size.valueChanged.connect(self._update_config_summary)
         self.chk_net_disp.toggled.connect(self._update_config_summary)
         self.chk_straight.toggled.connect(self._update_config_summary)
         self.chk_msd.toggled.connect(self._update_config_summary)
+        self.chk_net_disp.toggled.connect(self._update_feature_tab_labels)
+        self.chk_straight.toggled.connect(self._update_feature_tab_labels)
+        self.chk_msd.toggled.connect(self._update_feature_tab_labels)
         self.spin_hmm_feature_smoothing_window.valueChanged.connect(self._update_config_summary)
         self.spin_quant_lo.valueChanged.connect(self._update_config_summary)
         self.spin_quant_hi.valueChanged.connect(self._update_config_summary)
@@ -1207,8 +2358,10 @@ class StateClassificationSubTab(QWidget):
 
         if csv_filtered.exists():
             self.warning_label.hide()
-            for grp in [self.grp_train, self.grp2, self._subtab_stack, self.grp_bp]:
+            for grp in [self.grp_train, self.grp_bp]:
                 grp.setEnabled(True)
+            # Not _subtab_stack.setEnabled: keep its pages scrollable.
+            set_scroll_content_enabled(self._subtab_stack, True)
             _apply_group_tracked_gate(self.warning_label, self.grp_bp, self.metadata_loader, ct)
             return True
         elif csv_unfiltered.exists():
@@ -1218,8 +2371,10 @@ class StateClassificationSubTab(QWidget):
                 "Using unfiltered data as a fallback."
             )
             self.warning_label.show()
-            for grp in [self.grp_train, self.grp2, self._subtab_stack, self.grp_bp]:
+            for grp in [self.grp_train, self.grp_bp]:
                 grp.setEnabled(True)
+            # Not _subtab_stack.setEnabled: keep its pages scrollable.
+            set_scroll_content_enabled(self._subtab_stack, True)
             _apply_group_tracked_gate(self.warning_label, self.grp_bp, self.metadata_loader, ct)
             return True
         else:
@@ -1228,14 +2383,15 @@ class StateClassificationSubTab(QWidget):
                 "Run Filtering first, then return here."
             )
             self.warning_label.show()
-            for grp in [self.grp_train, self.grp2, self._subtab_stack, self.grp_bp]:
+            for grp in [self.grp_train, self.grp_bp]:
                 grp.setEnabled(False)
+            # Not _subtab_stack.setEnabled: keep its pages scrollable.
+            set_scroll_content_enabled(self._subtab_stack, False)
             return False
 
     # ── Guided pipeline dispatch (Step 3 reports) ────────────────────────
     _STATE_PIPELINE_RUN_BUTTONS = {
         "state_diagnostics": "btn_state_diagnostics",
-        "state_transition": "btn_state_transition",
     }
 
     def _on_pipeline_start(self, pipeline_id: str):
@@ -1249,7 +2405,9 @@ class StateClassificationSubTab(QWidget):
             return
         self._focus_pipeline(pipeline_id)
         self._plots_stack.setCurrentIndex(1)
-        self._pipeline_scroll.verticalScrollBar().setValue(0)
+        scroll_to_top(self._pipeline_scroll)
+        # Again once the shown/hidden groups have been laid out.
+        QTimer.singleShot(0, lambda: scroll_to_top(self._pipeline_scroll))
 
     def _focus_pipeline(self, pipeline_id: str):
         """Show only the group box relevant to ``pipeline_id``, hide the rest."""
@@ -1258,11 +2416,14 @@ class StateClassificationSubTab(QWidget):
             "state_diagnostics": {self.grp_state_diagnostics},
             "state_composition": {self.grp_state_composition},
             "state_transition": {self.grp_state_transition},
+            "state_feature_heatmap": {self.grp_state_feature_heatmap},
             "state_comparison": {self.grp_state_comparison},
+            "state_contact": {self.grp_state_contact},
         }.get(pipeline_id, set())
         for group in (
             self.grp_state_diagnostics, self.grp_state_composition,
-            self.grp_state_transition, self.grp_state_comparison,
+            self.grp_state_transition, self.grp_state_feature_heatmap, self.grp_state_comparison,
+            self.grp_state_contact,
         ):
             group.setVisible(group in visible)
         title = next(
@@ -1277,6 +2438,7 @@ class StateClassificationSubTab(QWidget):
         self._pipeline_title.setText("")
         self._subtab_stack.setCurrentIndex(1)
         self._plotting_header.show()
+        scroll_to_top(self._plots_stack.widget(0))
 
     def _plotting_back(self):
         """Contextual Back inside the plotting page: report settings → report
@@ -1291,9 +2453,8 @@ class StateClassificationSubTab(QWidget):
     # ── Toggle helpers ───────────────────────────────────────────────────
 
     def _toggle_apply_mode(self, checked):
-        """Hide Steps 1+2 when apply-existing mode is active."""
+        """Hide the clustering/rename card when apply-existing mode is active."""
         self.grp_train.setVisible(not checked)
-        self.grp2.setVisible(not checked)
         self.grp_apply.setVisible(checked)
 
     def _toggle_n_states_mode(self, mode):
@@ -1408,16 +2569,82 @@ class StateClassificationSubTab(QWidget):
             format_timepoints_as_time(self.spin_hmm_feature_smoothing_window.value(), metadata)
         )
 
+    def _state_track_features_csv_path(self, ct: str) -> Optional[Path]:
+        """Per-timepoint tracks CSV for `ct`, preferring the filtered variant — the same file
+        `_populate_dynamic_features` reads for feature listing."""
+        from behav3d.analysis.behavior.state.utils import _resolve_state_paths
+        out = self._out_dir()
+        if not ct or not out:
+            return None
+        paths = _resolve_state_paths(out, ct)
+        if paths.filtered_tracks_csv.exists():
+            return paths.filtered_tracks_csv
+        if paths.combined_tracks_csv.exists():
+            return paths.combined_tracks_csv
+        return None
+
+    def _refresh_state_contact_columns(self):
+        import pandas as pd
+        from behav3d.analysis.behavior.track.contact_grouping import list_available_contact_columns
+        ct = self._cell_type()
+        contact_cols = []
+        if ct:
+            csv_path = self._state_track_features_csv_path(ct)
+            if csv_path and csv_path.exists():
+                try:
+                    contact_cols = list_available_contact_columns(pd.read_csv(csv_path, nrows=0))
+                except Exception:
+                    contact_cols = []
+
+        candidate_group_cols = self._composition_candidate_columns()
+        prev_group_selection = {item.text() for item in self.list_state_contact_group_cols.selectedItems()}
+        self.list_state_contact_group_cols.blockSignals(True)
+        self.list_state_contact_group_cols.clear()
+        for col in candidate_group_cols:
+            self.list_state_contact_group_cols.addItem(col)
+        for i in range(self.list_state_contact_group_cols.count()):
+            item = self.list_state_contact_group_cols.item(i)
+            if item.text() in prev_group_selection:
+                item.setSelected(True)
+        self.list_state_contact_group_cols.blockSignals(False)
+        _fit_list_widget_height(self.list_state_contact_group_cols)
+
+        prev_type_selection = {item.text() for item in self.list_state_contact_type_compare_cols.selectedItems()}
+        self.list_state_contact_type_compare_cols.blockSignals(True)
+        self.list_state_contact_type_compare_cols.clear()
+        self.list_state_contact_type_compare_cols.addItems(contact_cols)
+        for i in range(self.list_state_contact_type_compare_cols.count()):
+            item = self.list_state_contact_type_compare_cols.item(i)
+            if item.text() in prev_type_selection:
+                item.setSelected(True)
+        self.list_state_contact_type_compare_cols.blockSignals(False)
+
+        prev_shift_contact_col = self.combo_state_shift_contact_col.currentText()
+        self.combo_state_shift_contact_col.blockSignals(True)
+        self.combo_state_shift_contact_col.clear()
+        self.combo_state_shift_contact_col.addItems(contact_cols)
+        if prev_shift_contact_col in contact_cols:
+            self.combo_state_shift_contact_col.setCurrentText(prev_shift_contact_col)
+        self.combo_state_shift_contact_col.blockSignals(False)
+        self.combo_state_shift_contact_col.setEnabled(len(contact_cols) > 0)
+
+        full_path = self._full_adata_path(ct) if ct else None
+        has_full_states = bool(full_path and full_path.exists())
+        self.btn_state_contact_type_comparison.setEnabled(len(contact_cols) >= 2 and has_full_states)
+        self.btn_state_contact_shift.setEnabled(len(contact_cols) > 0 and has_full_states)
+
     def _reload(self):
         try:
             self._update_timepoint_time_labels()
             ct = self._cell_type()
+            self._queue_report_settings_restore(ct)
             if not ct:
                 self._model_adata = None
                 self._refresh_buttons()
                 return
 
             self._populate_dynamic_features(ct)
+            self._refresh_state_contact_columns()
 
             self._check_prerequisites()
             self._update_view_buttons()
@@ -1425,44 +2652,65 @@ class StateClassificationSubTab(QWidget):
 
             path = self._model_adata_path(ct)
             if not path or not path.exists():
+                self._preload_loader.invalidate()
                 self._model_adata = None
+                self._model_adata_key = None
                 self._refresh_buttons()
                 return
 
-            if self._preload_bg.is_running():
+            # The model h5ad can be multi-GB; re-reading it on every refresh (cell
+            # type change, tab entry) is what made revisits slow. Keep the loaded
+            # copy while the file on disk is the same version (a run that rewrites
+            # it changes mtime/size, so it still reloads).
+            key = _file_key(path)
+            if self._model_adata is not None and key is not None and key == self._model_adata_key:
+                self._refresh_buttons()
                 return
 
             self._model_adata = None
+            self._model_adata_key = None
             self._refresh_buttons()
 
             def _load():
-                import anndata as ad
-                return ad.read_h5ad(str(path))
+                from behav3d.core.h5_access import read_h5ad_locked
+                return read_h5ad_locked(path)
 
             def _on_done(result):
                 self._model_adata = result
+                self._model_adata_key = key
                 self._refresh_buttons()
 
             def _on_failed(err):
                 print(f"[BEHAV3D] State model adata failed to load: {err}")
                 self._model_adata = None
+                self._model_adata_key = None
                 self._refresh_buttons()
 
-            self._preload_bg.run(
-                fn=_load,
-                inject_progress=False,
-                on_done=_on_done,
-                on_failed=_on_failed,
+            self._preload_loader.request(
+                path, _load, _on_done, _on_failed, desc=f"Loading behavioral-state model ({ct})…"
             )
         except Exception:
             traceback.print_exc()
 
+    def _update_feature_tab_labels(self):
+        """Show a live '(N selected)' count on each Feature Selection tab so
+        selections in the non-visible tab aren't overlooked."""
+        tabs = getattr(self, "feat_sel_tabs", None)
+        if tabs is None:
+            return
+        n_timepoint = sum(
+            1 for cb in getattr(self, "_timepoint_checkboxes", {}).values() if cb.isChecked()
+        )
+        n_window = sum(
+            1 for cb in (self.chk_net_disp, self.chk_straight, self.chk_msd) if cb.isChecked()
+        )
+        tabs.setTabText(0, f"Timepoint Features ({n_timepoint})")
+        tabs.setTabText(1, f"Window Features ({n_window})")
+
     def _rebuild_log_scale_features(self, state=None):
-        while self.log_scale_lay.count():
-            child = self.log_scale_lay.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
-                
+        self._update_feature_tab_labels()
+        _clear_layout(self.log_scale_lay)
+
         selected_feats = [f for f, cb in getattr(self, "_timepoint_checkboxes", {}).items() if cb.isChecked()]
         ct = self._cell_type()
         cfg = getattr(self.metadata_loader, "behav3d_parameters", {}).get("state_classification", {}).get(ct, {}) if ct else {}
@@ -1552,10 +2800,7 @@ class StateClassificationSubTab(QWidget):
         self.setUpdatesEnabled(False)
         try:
             for lay in [self.timepoint_features_lay, self.log_scale_lay, self.bin_grp_lay]:
-                while lay.count():
-                    child = lay.takeAt(0)
-                    if child.widget():
-                        child.widget().deleteLater()
+                _clear_layout(lay)
 
             if not csv_path.exists():
                 self.timepoint_features_lay.addWidget(_make_info_label(
@@ -1570,6 +2815,7 @@ class StateClassificationSubTab(QWidget):
                 for w in [self.spin_window_size, self.chk_net_disp, self.chk_straight, self.chk_msd,
                           self.spin_hmm_feature_smoothing_window, self.spin_quant_lo, self.spin_quant_hi]:
                     w.setEnabled(False)
+                self._update_feature_tab_labels()
                 self._last_features_key = features_key
                 return
 
@@ -1638,86 +2884,154 @@ class StateClassificationSubTab(QWidget):
             md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
             excluded = excluded_non_behavior_columns(cols, metadata=md)
             usable_cols = [c for c in cols if c not in excluded]
-            # Value-based binary detection over the full CSV (see
-            # behav3d.widgets.base_state_classification.detect_binary_columns_from_csv).
-            # The previous 5-row dtype heuristic mis-classified numeric feature
-            # columns as "binary" whenever the sampled rows were NaN/blank, so
-            # switching cell types could dump every feature into the binary list.
-            from behav3d.widgets.base_state_classification import (
-                detect_binary_columns_from_csv,
-                detect_non_numeric_columns_from_csv,
-            )
-            bin_cols = detect_binary_columns_from_csv(Path(csv_path), usable_cols)
-            bin_set = set(bin_cols)
-            # Columns that aren't binary and can't be parsed as continuous numbers
-            # (e.g. "touching_27ts" holding comma-separated contact-ID lists, or
-            # unit/label columns) must not be offered as selectable HMM features --
-            # picking one silently breaks the .h5ad write later on.
-            non_feature_candidates = [c for c in usable_cols if c not in bin_set]
-            non_numeric_cols = set(
-                detect_non_numeric_columns_from_csv(Path(csv_path), non_feature_candidates)
-            )
-            feat_cols = [c for c in non_feature_candidates if c not in non_numeric_cols]
+
+            # The value-based binary/non-numeric column classification below
+            # scans the *full* CSV (see behav3d.core.column_detection) and is
+            # dispatched to a background thread via self._colscan_bg so it
+            # doesn't block the Qt main thread. Show a placeholder until it
+            # completes.
+            self.timepoint_features_lay.addWidget(_make_info_label("<i>Scanning feature columns…</i>"))
+            self.log_scale_lay.addWidget(_make_info_label("<i>Scanning feature columns…</i>"))
+            self.bin_grp_lay.addWidget(_make_info_label("<i>Scanning feature columns…</i>"))
+        finally:
+            self.setUpdatesEnabled(True)
+
+        # Live "(n/total selected)" count on each category's collapsed
+        # header, so a collapsed group's selections aren't overlooked.
+        def _refresh_group_header(gname, group_sec, checkboxes):
+            n = sum(1 for cb in checkboxes if cb.isChecked())
+            group_sec.setTitle(f"{gname} ({n}/{len(checkboxes)} selected)")
+
+        def _current_features_key():
+            try:
+                cur_mtime = csv_path.stat().st_mtime if csv_path.exists() else None
+            except OSError:
+                cur_mtime = None
+            return (self._cell_type(), str(csv_path), cur_mtime)
+
+        def _on_scan_done(result):
+            if _current_features_key() != features_key:
+                # Stale — the user moved on to a different cell type/CSV
+                # while this scan was running. Re-trigger for what's current.
+                self._populate_dynamic_features(self._cell_type())
+                return
+
+            bin_cols = result["bin_cols"]
+            feat_cols = result["feat_cols"]
             # Continuous features eligible for log scaling; reused by the
             # "Preview feature distributions" histogram button.
             self._logscale_candidate_cols = list(feat_cols)
             self._logscale_csv_path = Path(csv_path)
 
-            from copy import deepcopy
-            base_groups = deepcopy(behav3d_calculated_features)
-            matched = set()
-            for gname, patterns in base_groups.items():
-                vals = []
-                for pat in patterns:
-                    vals.extend(expand_column_patterns(pat, feat_cols))
-                clean_vals = sorted({x for x in vals if x in feat_cols})
-                if clean_vals:
-                    group_sec = CollapsibleSection(gname, expanded=False)
+            self.setUpdatesEnabled(False)
+            try:
+                for lay in [self.timepoint_features_lay, self.bin_grp_lay]:
+                    while lay.count():
+                        child = lay.takeAt(0)
+                        if child.widget():
+                            child.widget().deleteLater()
+
+                from copy import deepcopy
+                base_groups = deepcopy(behav3d_calculated_features)
+                matched = set()
+                for gname, patterns in base_groups.items():
+                    vals = []
+                    for pat in patterns:
+                        vals.extend(expand_column_patterns(pat, feat_cols))
+                    clean_vals = sorted({x for x in vals if x in feat_cols})
+                    if clean_vals:
+                        group_sec = CollapsibleSection(gname, expanded=False)
+                        group_content = QWidget()
+                        grid = QGridLayout(group_content)
+                        group_checkboxes = []
+                        for i, f in enumerate(clean_vals):
+                            cb = QCheckBox(f)
+                            if f in saved_features:
+                                cb.setChecked(True)
+                            cb.stateChanged.connect(self._rebuild_log_scale_features)
+                            self._timepoint_checkboxes[f] = cb
+                            group_checkboxes.append(cb)
+                            grid.addWidget(cb, i // 3, i % 3)
+                        group_sec.addWidget(group_content)
+                        self.timepoint_features_lay.addWidget(group_sec)
+                        matched.update(clean_vals)
+                        for cb in group_checkboxes:
+                            cb.stateChanged.connect(
+                                lambda _=None, g=gname, s=group_sec, cbs=group_checkboxes: _refresh_group_header(g, s, cbs)
+                            )
+                        _refresh_group_header(gname, group_sec, group_checkboxes)
+
+                other = sorted([c for c in feat_cols if c not in matched])
+                if other:
+                    group_sec = CollapsibleSection("other", expanded=False)
                     group_content = QWidget()
                     grid = QGridLayout(group_content)
-                    for i, f in enumerate(clean_vals):
+                    group_checkboxes = []
+                    for i, f in enumerate(other):
                         cb = QCheckBox(f)
                         if f in saved_features:
                             cb.setChecked(True)
                         cb.stateChanged.connect(self._rebuild_log_scale_features)
                         self._timepoint_checkboxes[f] = cb
+                        group_checkboxes.append(cb)
                         grid.addWidget(cb, i // 3, i % 3)
                     group_sec.addWidget(group_content)
                     self.timepoint_features_lay.addWidget(group_sec)
-                    matched.update(clean_vals)
+                    for cb in group_checkboxes:
+                        cb.stateChanged.connect(
+                            lambda _=None, g="other", s=group_sec, cbs=group_checkboxes: _refresh_group_header(g, s, cbs)
+                        )
+                    _refresh_group_header("other", group_sec, group_checkboxes)
 
-            other = sorted([c for c in feat_cols if c not in matched])
-            if other:
-                group_sec = CollapsibleSection("other", expanded=False)
-                group_content = QWidget()
-                grid = QGridLayout(group_content)
-                for i, f in enumerate(other):
-                    cb = QCheckBox(f)
-                    if f in saved_features:
-                        cb.setChecked(True)
-                    cb.stateChanged.connect(self._rebuild_log_scale_features)
-                    self._timepoint_checkboxes[f] = cb
-                    grid.addWidget(cb, i // 3, i % 3)
-                group_sec.addWidget(group_content)
-                self.timepoint_features_lay.addWidget(group_sec)
+                self._rebuild_log_scale_features()
 
-            self._rebuild_log_scale_features()
+                if not bin_cols:
+                    self.bin_grp_lay.addWidget(QLabel("<i>No binary columns detected yet.</i>"))
+                else:
+                    for b in bin_cols:
+                        cb = QCheckBox(b)
+                        if b in saved_bin:
+                            cb.setChecked(True)
+                        cb.stateChanged.connect(self._update_config_summary)
+                        self._bingrp_checkboxes[b] = cb
+                        self.bin_grp_lay.addWidget(cb)
+                    self._update_config_summary()
 
-            if not bin_cols:
-                self.bin_grp_lay.addWidget(QLabel("<i>No binary columns detected yet.</i>"))
-            else:
-                for b in bin_cols:
-                    cb = QCheckBox(b)
-                    if b in saved_bin:
-                        cb.setChecked(True)
-                    cb.stateChanged.connect(self._update_config_summary)
-                    self._bingrp_checkboxes[b] = cb
-                    self.bin_grp_lay.addWidget(cb)
-                self._update_config_summary()
+                self._last_features_key = features_key
+            finally:
+                self.setUpdatesEnabled(True)
 
-            self._last_features_key = features_key
-        finally:
-            self.setUpdatesEnabled(True)
+        def _on_scan_failed(err):
+            traceback.print_exc()
+            if _current_features_key() != features_key:
+                self._populate_dynamic_features(self._cell_type())
+                return
+            self.setUpdatesEnabled(False)
+            try:
+                for lay in [self.timepoint_features_lay, self.bin_grp_lay]:
+                    while lay.count():
+                        child = lay.takeAt(0)
+                        if child.widget():
+                            child.widget().deleteLater()
+                self.timepoint_features_lay.addWidget(
+                    _make_info_label(f"<i>Could not scan feature columns: {err}</i>")
+                )
+                self.bin_grp_lay.addWidget(_make_info_label("<i>Could not scan feature columns.</i>"))
+            finally:
+                self.setUpdatesEnabled(True)
+
+        if self._colscan_bg.is_running():
+            return
+
+        self._colscan_bg.run(
+            fn=_scan_state_feature_columns,
+            args=(csv_path, usable_cols),
+            desc=f"Scanning feature columns ({ct})…",
+            inject_progress=False,
+            inject_cancel_check=True,
+            on_done=_on_scan_done,
+            on_failed=_on_scan_failed,
+        )
 
     def _model_adata_path(self, cell_type: str) -> Optional[Path]:
         out = self._out_dir()
@@ -1763,6 +3077,23 @@ class StateClassificationSubTab(QWidget):
         od = getattr(self.metadata_loader, "output_dir", None) if self.metadata_loader else None
         return Path(str(od)).expanduser() if od else None
 
+    def _state_run_qc_pdfs(self, ct: str) -> list:
+        """The two QC PDFs written by a State Classification run itself.
+
+        `run_hmm_state_clustering` puts these under the ``raw/`` sub-folder of
+        the QC directory (see `_resolve_hmm_quality_control_outdir`), which is
+        what separates them from the re-generated PDFs that the Step 3
+        "Create Diagnostics" button writes to the QC folder root.
+        """
+        qc_dir = self._state_diagnostics_qc_dir(ct)
+        if not qc_dir:
+            return []
+        raw = qc_dir / "raw"
+        return [
+            ("Clustering diagnostics", raw / "behavioral_clustering_diagnostics.pdf"),
+            ("Feature distributions", raw / "behavioral_clustering_feature_distributions.pdf"),
+        ]
+
     def _state_diagnostics_qc_dir(self, ct: str) -> Optional[Path]:
         """Path to the HMM diagnostics QC folder, without creating it."""
         out = self._out_dir()
@@ -1799,16 +3130,24 @@ class StateClassificationSubTab(QWidget):
                     pass
         return hmm_model
 
-    def _regenerate_state_diagnostics(self, ct: str, *, model_adata=None, verbose: bool = True):
-        """(Re)generate the HMM state-classification diagnostics PDF/CSVs for `ct`."""
+    def _regenerate_state_diagnostics(self, ct: str, *, model_adata=None, verbose: bool = True,
+                                      hmm_model=None):
+        """(Re)generate the HMM state-classification diagnostics PDF/CSVs for `ct`.
+
+        ``hmm_model`` lets a worker pass an already-loaded model so this does
+        not unpickle the artifact again or write ``self._hmm_model`` off the
+        GUI thread.
+        """
         from behav3d.analysis.behavior.state.classification import (
             INTRINSIC_STATE_COL,
             save_hmm_quality_control_outputs,
             _resolve_hmm_quality_control_outdir,
+            resolve_intrinsic_state_col,
         )
         adata = model_adata if model_adata is not None else self._model_adata
         if adata is None:
             raise ValueError("No model adata loaded.")
+        cluster_col = resolve_intrinsic_state_col(adata) or INTRINSIC_STATE_COL
         out = self._out_dir()
         preprocessing_meta = adata.uns.get("preprocessing", {})
         if not isinstance(preprocessing_meta, dict):
@@ -1821,17 +3160,18 @@ class StateClassificationSubTab(QWidget):
         feature_cols = [str(c) for c in feature_cols if str(c) in adata.var_names]
         scaler_meta = preprocessing_meta.get("scaler", {}) if isinstance(preprocessing_meta, dict) else {}
         qc_dir = _resolve_hmm_quality_control_outdir(output_dir=str(out) if out else "", cell_type=ct)
-        hmm_model = self._resolve_hmm_model_for_state_diagnostics(ct)
+        if hmm_model is None:
+            hmm_model = self._resolve_hmm_model_for_state_diagnostics(ct)
         return save_hmm_quality_control_outputs(
             adata,
             feature_cols=feature_cols,
             output_dir=qc_dir,
             model=hmm_model,
             selection_df=None,
-            cluster_col=INTRINSIC_STATE_COL,
+            cluster_col=cluster_col,
             scaler_mean=scaler_meta.get("mean", None) if isinstance(scaler_meta, dict) else None,
             scaler_scale=scaler_meta.get("scale", None) if isinstance(scaler_meta, dict) else None,
-            title=f"all_data | hmm | curated {INTRINSIC_STATE_COL}",
+            title=f"all_data | hmm | curated {cluster_col}",
             preprocessing_params=preprocessing_meta,
             verbose=verbose,
         )
@@ -1839,7 +3179,7 @@ class StateClassificationSubTab(QWidget):
     def _load_model_adata(self, path: Path):
         try:
             import anndata as ad
-            self._model_adata = ad.read_h5ad(str(path))
+            self._model_adata = _read_h5ad_shared(str(path))
         except Exception:
             traceback.print_exc()
             self._model_adata = None
@@ -1847,20 +3187,35 @@ class StateClassificationSubTab(QWidget):
     # ── Button state management ──────────────────────────────────────────
 
     def _refresh_buttons(self):
+        from behav3d.core.state_columns import (
+            resolve_full_state_col,
+            resolve_intrinsic_state_col,
+        )
+
         has_model = self._model_adata is not None
-        has_intrinsic = has_model and "intrinsic_behavioral_cluster" in self._model_adata.obs.columns
-        has_full = has_model and "full_behavioral_cluster" in self._model_adata.obs.columns
+        intrinsic_col = resolve_intrinsic_state_col(self._model_adata) if has_model else None
+        full_col = resolve_full_state_col(self._model_adata) if has_model else None
+        has_intrinsic = intrinsic_col is not None
+        has_full = full_col is not None
 
         self.btn_rename_intrinsic.setEnabled(has_intrinsic)
         self.btn_rename_full.setEnabled(has_full)
         self.btn_state_diagnostics.setEnabled(has_intrinsic)
 
+        # Checks the file, not the (slow, async) loaded model, so the entry
+        # unlocks as soon as a clustering result is on disk.
+        ct_now = self._cell_type()
+        model_path = self._model_adata_path(ct_now) if ct_now else None
+        has_clustering = bool(model_path and model_path.exists())
+        self._plots_entry_btn.setEnabled(has_clustering)
+        self._plots_entry_btn.setToolTip(
+            "" if has_clustering
+            else "Run Behavioral State clustering first to generate analysis and plots."
+        )
+
         if has_intrinsic:
-            n_intr = self._model_adata.obs["intrinsic_behavioral_cluster"].astype(str).nunique()
-            n_full = (
-                self._model_adata.obs["full_behavioral_cluster"].astype(str).nunique()
-                if has_full else 0
-            )
+            n_intr = self._cluster_count(self._model_adata, intrinsic_col)
+            n_full = self._cluster_count(self._model_adata, full_col) if has_full else 0
             self.rename_status_lbl.setText(
                 f"✅ Model loaded: {n_intr} intrinsic clusters"
                 + (f", {n_full} full clusters." if has_full else ".")
@@ -1869,6 +3224,166 @@ class StateClassificationSubTab(QWidget):
             self.rename_status_lbl.setText("ℹ Run state classification first to enable renaming.")
 
         self._refresh_composition_group_cols()
+        self._refresh_state_heatmap_features()
+        self._apply_pending_report_settings()
+
+    def _cluster_count(self, adata, col) -> int:
+        """Number of distinct values of ``adata.obs[col]`` (as strings). Counting
+        converts every row to a string, which is slow on a large model and was
+        redone on every ``_refresh_buttons``; remember it per loaded adata."""
+        import weakref
+
+        cache = getattr(self, "_cluster_count_cache", None)
+        if cache is None or cache[0]() is not adata:
+            # Weak reference: must not keep a replaced multi-GB adata alive.
+            cache = (weakref.ref(adata), {})
+            self._cluster_count_cache = cache
+        counts = cache[1]
+        if col not in counts:
+            counts[col] = int(adata.obs[col].astype(str).nunique())
+        return counts[col]
+
+    def _set_state_heatmap_picked(self, picked):
+        """Set the "Selected features" list (in ``picked``'s order - the plot's row
+        order) and put every other candidate back into "Available features"."""
+        picked = [c for c in dict.fromkeys(picked) if c in self._state_heatmap_candidates]
+        picked_set = set(picked)
+        self.list_state_heatmap_picked.clear()
+        self.list_state_heatmap_picked.addItems(picked)
+        self.list_state_heatmap_available.clear()
+        self.list_state_heatmap_available.addItems(
+            [c for c in self._state_heatmap_candidates if c not in picked_set]
+        )
+        _fit_list_widget_height(self.list_state_heatmap_available, max_rows=10)
+        _fit_list_widget_height(self.list_state_heatmap_picked, max_rows=10)
+
+    def _state_heatmap_add_selected(self):
+        chosen = [
+            self.list_state_heatmap_available.item(i).text()
+            for i in range(self.list_state_heatmap_available.count())
+            if self.list_state_heatmap_available.item(i).isSelected()
+        ]
+        if chosen:
+            self._set_state_heatmap_picked(_list_widget_items(self.list_state_heatmap_picked) + chosen)
+
+    def _state_heatmap_remove_selected(self):
+        remove = {
+            self.list_state_heatmap_picked.item(i).text()
+            for i in range(self.list_state_heatmap_picked.count())
+            if self.list_state_heatmap_picked.item(i).isSelected()
+        }
+        if remove:
+            self._set_state_heatmap_picked(
+                [c for c in _list_widget_items(self.list_state_heatmap_picked) if c not in remove]
+            )
+
+    def _refresh_state_heatmap_features(self):
+        """Fill the state-heatmap available/selected feature lists (state features
+        preselected); keeps the user's picked list and order when nothing changed on disk."""
+        ct = self._cell_type()
+        out = self._out_dir()
+        full_path = self._full_adata_path(ct) if ct else None
+        has_states = bool(full_path and full_path.exists())
+        self.btn_state_feature_heatmap.setEnabled(has_states)
+        if not ct or not out or not has_states:
+            self.list_state_heatmap_available.clear()
+            self.list_state_heatmap_picked.clear()
+            self._state_heatmap_candidates = []
+            self._state_heatmap_cache_key = None
+            return
+        from behav3d.analysis.behavior.state.utils import _resolve_positions_csv_path
+        mtimes = [full_path.stat().st_mtime]
+        try:
+            mtimes.append(_resolve_positions_csv_path(output_dir=str(out), cell_type=ct).stat().st_mtime)
+        except Exception:
+            mtimes.append(None)
+        key = (str(out), ct, tuple(mtimes))
+        if key == self._state_heatmap_cache_key:
+            return
+        from behav3d.analysis.behavior.track.visualization.plots.feature_heatmap import (
+            list_track_feature_candidates,
+        )
+        try:
+            candidates, defaults = list_track_feature_candidates(str(out), ct)
+        except Exception as exc:
+            self._log(f"⚠ Could not list features for the state heatmap: {exc}")
+            candidates, defaults = [], []
+        previous_picked = _list_widget_items(self.list_state_heatmap_picked)
+        keep_previous = (
+            self._state_heatmap_cache_key is not None and key[:2] == self._state_heatmap_cache_key[:2]
+        )
+        self._state_heatmap_cache_key = key
+        self._state_heatmap_candidates = list(candidates)
+        self._state_heatmap_defaults = list(defaults)
+        candidate_set = set(candidates)
+        picked = (
+            [c for c in previous_picked if c in candidate_set]
+            if keep_previous and previous_picked else list(defaults)
+        )
+        self._set_state_heatmap_picked(picked)
+
+    def _state_heatmap_picked_items(self):
+        return _list_widget_items(self.list_state_heatmap_picked)
+
+    def _restore_state_heatmap_picked(self, features) -> bool:
+        if not self._state_heatmap_candidates:
+            return False
+        self._set_state_heatmap_picked([str(f) for f in features or []])
+        return True
+
+    def _select_state_heatmap_defaults(self):
+        self._set_state_heatmap_picked(self._state_heatmap_defaults)
+
+    def _on_state_feature_heatmap(self):
+        ct = self._cell_type()
+        if not ct:
+            return
+        if self._bg.is_running():
+            QMessageBox.warning(self, "Busy", "Another operation is running.")
+            return
+        full_path = self._full_adata_path(ct)
+        if not full_path or not full_path.exists():
+            QMessageBox.warning(self, "No data", "Run state classification first.")
+            return
+        features = _list_widget_items(self.list_state_heatmap_picked)
+        if not features:
+            QMessageBox.warning(self, "No features", "Add at least one feature to the heatmap.")
+            return
+        out = self._out_dir()
+        state_col_choice = self.combo_state_heatmap_state_col.currentData()
+        weighting = self.combo_state_heatmap_weighting.currentData()
+        scaling = "zscore" if self.combo_state_heatmap_scaling.currentText() == "z-score" else "minmax"
+        self._log(
+            f"▶ Creating state feature heatmap for '{ct}' ({len(features)} features, {state_col_choice}, {weighting})…"
+        )
+
+        def _run(**kw):
+            import anndata as ad
+            from behav3d.analysis.behavior.track.visualization.plots.feature_heatmap import (
+                save_state_feature_heatmap,
+            )
+            adata = _read_h5ad_shared(str(full_path))
+            state_col = _resolve_ui_state_col(adata, state_col_choice)
+            return save_state_feature_heatmap(
+                adata, str(out), ct, features,
+                state_col=state_col, weighting=weighting, scaling=scaling, verbose=True,
+            )
+
+        self._persist_report_settings(ct, "feature_heatmap")
+        self._bg.run(
+            fn=_run,
+            desc=f"State feature heatmap ({ct})…",
+            progress_row=self.progress_row,
+            buttons=[self.btn_state_feature_heatmap],
+            viewer=self.viewer,
+            inject_progress=False,
+            on_done=lambda r: (
+                self._log(f"✅ State feature heatmap done for '{ct}': {r.get('feature_heatmap_pdf')}"),
+                self._update_view_buttons(),
+                self._notify_results(),
+            ),
+            on_failed=lambda e: self._log(f"❌ State feature heatmap failed: {e}"),
+        )
 
     def _composition_candidate_columns(self):
         cols = []
@@ -1895,7 +3410,8 @@ class StateClassificationSubTab(QWidget):
                 return cols
             try:
                 import h5py
-                with h5py.File(str(full_path), "r") as f:
+                from behav3d.core.h5_access import h5_read
+                with h5_read(), h5py.File(str(full_path), "r") as f:
                     obs_cols = list(f.get("obs", {}).keys())
             except Exception:
                 return cols
@@ -1909,9 +3425,7 @@ class StateClassificationSubTab(QWidget):
 
     def _refresh_composition_group_cols(self):
         candidate_cols = self._composition_candidate_columns()
-        self.list_composition_group_cols.clear()
-        for col in candidate_cols:
-            self.list_composition_group_cols.addItem(col)
+        _refill_list_keep_selection(self.list_composition_group_cols, candidate_cols)
         _fit_list_widget_height(self.list_composition_group_cols)
 
         for combo in (self.combo_composition_group_x, self.combo_composition_group_y):
@@ -1933,9 +3447,7 @@ class StateClassificationSubTab(QWidget):
             self.combo_comparison_condition_col.setCurrentText(prev_cond)
         self.combo_comparison_condition_col.blockSignals(False)
 
-        self.list_comparison_group_cols.clear()
-        for col in candidate_cols:
-            self.list_comparison_group_cols.addItem(col)
+        _refill_list_keep_selection(self.list_comparison_group_cols, candidate_cols)
         _fit_list_widget_height(self.list_comparison_group_cols)
 
         prev = self.combo_comparison_group_x.currentText()
@@ -2041,11 +3553,17 @@ class StateClassificationSubTab(QWidget):
             for btn in (
                 self.btn_view_state, self.btn_view_state_diagnostics, self.btn_view_composition,
                 self.btn_view_transition, self.btn_view_condition_comparison,
+                self.btn_view_state_feature_heatmap,
+                self.btn_view_state_contact_type_comparison, self.btn_view_state_contact_shift,
             ):
                 btn.setEnabled(False)
             return
-        model_path = self._model_adata_path(ct)
-        self.btn_view_state.setEnabled(bool(model_path and model_path.exists()))
+        self.btn_view_state_feature_heatmap.setEnabled(
+            len(self._get_view_candidates("state_feature_heatmap", ct)) > 0
+        )
+        self.btn_view_state.setEnabled(
+            any(p.exists() for _lbl, p in self._state_run_qc_pdfs(ct))
+        )
         qc_dir = self._state_diagnostics_qc_dir(ct)
         self.btn_view_state_diagnostics.setEnabled(
             bool(qc_dir and qc_dir.exists() and any(qc_dir.glob("*.pdf")))
@@ -2056,6 +3574,12 @@ class StateClassificationSubTab(QWidget):
         self.btn_view_transition.setEnabled(bool(trans and trans.exists()))
         self.btn_view_condition_comparison.setEnabled(
             len(self._get_view_candidates("state_condition_comparison", ct)) > 0
+        )
+        self.btn_view_state_contact_type_comparison.setEnabled(
+            len(self._get_view_candidates("state_contact_type_comparison", ct)) > 0
+        )
+        self.btn_view_state_contact_shift.setEnabled(
+            len(self._get_view_candidates("state_contact_shift", ct)) > 0
         )
 
     def _update_bp_buttons(self):
@@ -2077,6 +3601,10 @@ class StateClassificationSubTab(QWidget):
         return "" if txt.startswith("—") else txt
 
     def _log(self, msg: str):
+        from behav3d.napari._background_runner import redispatch_to_gui_thread
+
+        if redispatch_to_gui_thread(self._log, msg):
+            return
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         formatted = f"[{ts}] {msg}"
         self.log_edit.append(formatted)
@@ -2110,22 +3638,39 @@ class StateClassificationSubTab(QWidget):
             self._log(f"Could not show results-folder dialog: {e}")
 
     def _on_run_state(self):
+        # Busy check first: don't show validation popups for a run that
+        # would be refused anyway.
+        if refuse_if_busy(self, "starting state classification"):
+            return
         ct = self._cell_type()
         if not ct:
             QMessageBox.warning(self, "No cell type", "Select a cell type first.")
             return
-        if self._bg.is_running():
-            QMessageBox.warning(self, "Busy", "Another operation is running.")
-            return
         self._log(f"▶ Running state classification for '{ct}'…")
         params = self._collect_state_params(ct)
+
+        # The fitted model is handed back through this dict and published on the GUI
+        # thread in the callback: assigning ``self._hmm_model`` and
+        # ``self._hmm_model_cell_type`` from the worker let the GUI observe the new
+        # model paired with the *old* cell type (two non-atomic writes).
+        _hmm_out = {}
+        _post_path = self._model_adata_path(ct)
+        _post_out = self._out_dir()
 
         def _run(**kw):
             from behav3d.analysis.behavior.state.classification import run_hmm_state_clustering
             res = run_hmm_state_clustering(**params, verbose=True, return_details=True)
-            self._hmm_model = res["hmm_model"]
-            self._hmm_model_cell_type = ct
+            _hmm_out["model"] = res["hmm_model"]
+            # Heavy follow-up (h5ad reload + artifact pickle) stays off the GUI thread.
+            _hmm_out["post"] = self._state_run_postprocess(
+                ct, res["hmm_model"], _post_path, _post_out,
+            )
             return res["model_adata"]
+
+        def _state_done(result):
+            self._hmm_model = _hmm_out.get("model")
+            self._hmm_model_cell_type = ct
+            self._on_state_done(result, preloaded=_hmm_out.get("post"))
 
         self._bg.run(
             fn=_run,
@@ -2134,7 +3679,7 @@ class StateClassificationSubTab(QWidget):
             buttons=[self.btn_run_state],
             viewer=self.viewer,
             inject_progress=False,
-            on_done=self._on_state_done,
+            on_done=_state_done,
             on_failed=lambda e: self._log(f"❌ State classification failed: {e}"),
         )
 
@@ -2194,14 +3739,55 @@ class StateClassificationSubTab(QWidget):
         params.setdefault("state_classification", {})[ct] = collected
         _save_behav3d_params(self.metadata_loader, self._out_dir)
 
-    def _on_state_done(self, result, interactive: bool = True):
+    def _state_run_postprocess(self, ct: str, hmm_model, path, out) -> dict:
+        """Worker-side tail of a state-classification run.
+
+        Reloads the freshly written model h5ad (multi-GB for big datasets) and
+        pickles the HMM deployment artifact. Both used to run in
+        ``_on_state_done`` on the GUI thread, freezing napari. Touches no
+        widgets; the caller publishes the returned values on the GUI thread.
+        """
+        path_exists = bool(path and path.exists())
+        loaded = None
+        if path_exists:
+            try:
+                loaded = _read_h5ad_shared(str(path))
+            except Exception:
+                traceback.print_exc()
+        if hmm_model is not None and ct and out:
+            from behav3d.analysis.behavior.state.classification import (
+                save_hmm_deployment_artifact,
+                _resolve_hmm_deployment_artifact_path,
+            )
+            _art_path = _resolve_hmm_deployment_artifact_path(output_dir=str(out), cell_type=ct)
+            try:
+                save_hmm_deployment_artifact(
+                    output_path=_art_path,
+                    model_adata=loaded,
+                    hmm_model=hmm_model,
+                    verbose=False,
+                )
+            except Exception:
+                pass
+        return {"path_exists": path_exists, "model_adata": loaded}
+
+    def _on_state_done(self, result, interactive: bool = True, *, preloaded=None):
+        """GUI-thread completion of a state-classification run.
+
+        ``preloaded`` is the dict from :meth:`_state_run_postprocess` (the heavy
+        reload + artifact write already happened on the worker). When omitted
+        the reload and artifact write run inline, as before.
+        """
         ct = self._cell_type()
         self._persist_state_cfg(ct)
         self._log(f"✅ State classification complete for '{ct}'.")
         path = self._model_adata_path(ct)
-        if path and path.exists():
+        if preloaded is not None:
+            if preloaded["path_exists"]:
+                self._model_adata = preloaded["model_adata"]
+        elif path and path.exists():
             self._load_model_adata(path)
-        if self._hmm_model is not None and ct:
+        if preloaded is None and self._hmm_model is not None and ct:
             out = self._out_dir()
             if out:
                 from behav3d.analysis.behavior.state.classification import (
@@ -2252,15 +3838,25 @@ class StateClassificationSubTab(QWidget):
         on_done_cb = extra_callbacks.get("on_done") if extra_callbacks else None
         on_fail_cb = extra_callbacks.get("on_failed") if extra_callbacks else None
 
+        _hmm_out = {}  # published on the GUI thread in _done (see _on_run_state)
+        _post_path = self._model_adata_path(ct)
+        _post_out = self._out_dir()
+
         def _run(**kw):
             from behav3d.analysis.behavior.state.classification import run_hmm_state_clustering
             res = run_hmm_state_clustering(**params, verbose=True, return_details=True)
-            self._hmm_model = res["hmm_model"]
-            self._hmm_model_cell_type = ct
+            _hmm_out["model"] = res["hmm_model"]
+            _hmm_out["post"] = self._state_run_postprocess(
+                ct, res["hmm_model"], _post_path, _post_out,
+            )
             return res["model_adata"]
 
         def _done(result):
-            self._on_state_done(result, interactive=interactive)
+            self._hmm_model = _hmm_out.get("model")
+            self._hmm_model_cell_type = ct
+            self._on_state_done(
+                result, interactive=interactive, preloaded=_hmm_out.get("post"),
+            )
             if on_done_cb:
                 on_done_cb(result)
 
@@ -2304,7 +3900,9 @@ class StateClassificationSubTab(QWidget):
         if self._model_adata is None:
             QMessageBox.warning(self, "No model", "Run state classification first.")
             return
-        if "full_behavioral_cluster" not in self._model_adata.obs.columns:
+        from behav3d.core.state_columns import resolve_full_state_col
+
+        if resolve_full_state_col(self._model_adata) is None:
             QMessageBox.warning(
                 self, "No full clusters",
                 "Run intrinsic cluster renaming first (full clusters are created when "
@@ -2335,69 +3933,26 @@ class StateClassificationSubTab(QWidget):
             return
 
         from behav3d.analysis.behavior.state.classification import (
-            INTRINSIC_STATE_COL,
-            FULL_STATE_COL,
             save_hmm_deployment_artifact,
             apply_hmm_deployment_artifact_to_full_dataset,
+            load_hmm_deployment_artifact,
             _resolve_hmm_deployment_artifact_path,
-        )
-        from behav3d.analysis.behavior.state.utils import (
-            _get_classification_state_colors,
-            _get_classification_state_order,
-            _set_classification_state_colors,
-            _set_classification_state_order,
         )
 
         artifact_path = _resolve_hmm_deployment_artifact_path(output_dir=str(out), cell_type=ct)
 
-        hmm_model = self._resolve_hmm_model_for_state_diagnostics(ct)
+        # Snapshot on the GUI thread. The unpickle of the saved artifact and the
+        # re-save below can be slow for big models, so they run in the worker.
+        cached_model = (
+            getattr(self, "_hmm_model", None)
+            if getattr(self, "_hmm_model_cell_type", None) == ct
+            else None
+        )
 
-        if hmm_model is None:
-            self._log(
-                "⚠ Cannot apply states to full dataset: HMM model not in memory and no saved artifact found. "
-                "Re-run Step 1 to regenerate."
-            )
-            return
-
-        # Sync columns so the artifact builder uses the renamed labels.
-        if "intrinsic_behavioral_cluster" in self._model_adata.obs.columns:
-            self._model_adata.obs[INTRINSIC_STATE_COL] = (
-                self._model_adata.obs["intrinsic_behavioral_cluster"].copy()
-            )
-        if "full_behavioral_cluster" in self._model_adata.obs.columns:
-            self._model_adata.obs[FULL_STATE_COL] = (
-                self._model_adata.obs["full_behavioral_cluster"].copy()
-            )
-
-        # Sync saved colors/order too — the rename dialog saves them under the raw
-        # dialog obs-column names, not the classification-constant column names the
-        # deployment artifact/full-dataset pipeline looks them up under.
-        raw_intrinsic_colors = _get_classification_state_colors(self._model_adata, "intrinsic_behavioral_cluster")
-        raw_intrinsic_order = _get_classification_state_order(self._model_adata, "intrinsic_behavioral_cluster")
-        if raw_intrinsic_colors:
-            _set_classification_state_colors(self._model_adata, INTRINSIC_STATE_COL, raw_intrinsic_colors)
-        if raw_intrinsic_order:
-            _set_classification_state_order(self._model_adata, INTRINSIC_STATE_COL, raw_intrinsic_order)
-
-        raw_full_colors = _get_classification_state_colors(self._model_adata, "full_behavioral_cluster")
-        raw_full_order = _get_classification_state_order(self._model_adata, "full_behavioral_cluster")
-        if raw_full_colors:
-            _set_classification_state_colors(self._model_adata, FULL_STATE_COL, raw_full_colors)
-        if raw_full_order:
-            _set_classification_state_order(self._model_adata, FULL_STATE_COL, raw_full_order)
-
-        try:
-            save_hmm_deployment_artifact(
-                output_path=artifact_path,
-                model_adata=self._model_adata,
-                hmm_model=hmm_model,
-                cell_type=ct,
-                output_dir=str(out),
-                verbose=False,
-            )
-        except Exception as exc:
-            self._log(f"⚠ Could not save updated HMM artifact: {exc}")
-            return
+        # No column/color/order sync needed here: RenameClusterDialog now
+        # writes renamed labels, colors and order directly onto the
+        # canonical INTRINSIC_STATE_COL/FULL_STATE_COL columns, which
+        # self._model_adata already holds.
 
         self._log(f"▶ Applying state labels to full dataset for '{ct}'…")
         _artifact_path = artifact_path
@@ -2405,6 +3960,28 @@ class StateClassificationSubTab(QWidget):
         model_adata = self._model_adata
 
         def _run(**kw):
+            hmm_model = cached_model
+            if hmm_model is None and _artifact_path.exists():
+                try:
+                    hmm_model = load_hmm_deployment_artifact(str(_artifact_path)).get("model")
+                except Exception:
+                    pass
+            if hmm_model is None:
+                return {"skipped": (
+                    "⚠ Cannot apply states to full dataset: HMM model not in memory and no saved artifact found. "
+                    "Re-run state clustering to regenerate."
+                )}
+            try:
+                save_hmm_deployment_artifact(
+                    output_path=_artifact_path,
+                    model_adata=model_adata,
+                    hmm_model=hmm_model,
+                    cell_type=ct,
+                    output_dir=str(_out),
+                    verbose=False,
+                )
+            except Exception as exc:
+                return {"skipped": f"⚠ Could not save updated HMM artifact: {exc}"}
             apply_hmm_deployment_artifact_to_full_dataset(
                 output_dir=str(_out),
                 cell_type=ct,
@@ -2413,10 +3990,32 @@ class StateClassificationSubTab(QWidget):
             )
             diagnostics_warning = None
             try:
-                self._regenerate_state_diagnostics(ct, model_adata=model_adata, verbose=True)
+                self._regenerate_state_diagnostics(
+                    ct, model_adata=model_adata, verbose=True, hmm_model=hmm_model,
+                )
             except Exception as exc:
                 diagnostics_warning = str(exc)
-            return {"diagnostics_warning": diagnostics_warning}
+            return {"diagnostics_warning": diagnostics_warning, "hmm_model": hmm_model}
+
+        def _on_applied(r):
+            if isinstance(r, dict) and r.get("skipped"):
+                self._log(r["skipped"])
+                return
+            # Publish a model loaded from the artifact on the GUI thread
+            # (both fields together, never from the worker).
+            if (
+                isinstance(r, dict) and r.get("hmm_model") is not None
+                and getattr(self, "_hmm_model_cell_type", None) != ct
+            ):
+                self._hmm_model = r["hmm_model"]
+                self._hmm_model_cell_type = ct
+            self._log(f"✅ State labels applied to full dataset for '{ct}'.")
+            if isinstance(r, dict) and r.get("diagnostics_warning"):
+                self._log(f"⚠ Could not refresh state diagnostics: {r.get('diagnostics_warning')}")
+            else:
+                self._log("✅ State diagnostics refreshed.")
+            self._update_bp_buttons()
+            self._update_view_buttons()
 
         self._bg.run(
             fn=_run,
@@ -2425,14 +4024,7 @@ class StateClassificationSubTab(QWidget):
             buttons=[],
             viewer=self.viewer,
             inject_progress=False,
-            on_done=lambda r: (
-                self._log(f"✅ State labels applied to full dataset for '{ct}'."),
-                self._log(f"⚠ Could not refresh state diagnostics: {r.get('diagnostics_warning')}")
-                if isinstance(r, dict) and r.get("diagnostics_warning")
-                else self._log("✅ State diagnostics refreshed."),
-                self._update_bp_buttons(),
-                self._update_view_buttons(),
-            ),
+            on_done=_on_applied,
             on_failed=lambda e: self._log(f"❌ Apply to full dataset failed: {e}"),
         )
 
@@ -2480,6 +4072,7 @@ class StateClassificationSubTab(QWidget):
             return
         out = self._out_dir()
         self._log(f"▶ Generating state composition report for '{ct}'…")
+        time_bin_size = int(self.spin_state_composition_time_bin.value())
         selected_cols = [item.text() for item in self.list_composition_group_cols.selectedItems()]
         group_x = self.combo_composition_group_x.currentText()
         group_x = None if group_x in ("", "(none)") else group_x
@@ -2516,12 +4109,16 @@ class StateClassificationSubTab(QWidget):
 
         def _run(**kw):
             import anndata as ad
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+            from behav3d.core.state_columns import (
+                FULL_STATE_COL,
+                resolve_full_state_col,
+            )
             from behav3d.analysis.behavior.state.utils import _resolve_state_paths
             from behav3d.analysis.behavior.state.visualization.plots.state_composition import (
                 save_state_composition_report,
             )
-            adata = ad.read_h5ad(str(full_path))
+            adata = _read_h5ad_shared(str(full_path))
+            state_col = resolve_full_state_col(adata) or FULL_STATE_COL
 
             # Inject known metadata grouping columns from metadata CSV into obs (for
             # existing h5ad files that predate Fix 1 in classification.py).
@@ -2558,7 +4155,7 @@ class StateClassificationSubTab(QWidget):
                 output_pdf_path=composition_dir / "state_composition_report.pdf",
                 output_csv_path=composition_dir / "state_composition_report.csv",
                 time_col="position_t",
-                state_col=FULL_STATE_COL,
+                state_col=state_col,
                 sample_col="sample_name",
                 include_pooled_summary=True,
                 group_cols=selected_cols,
@@ -2566,11 +4163,13 @@ class StateClassificationSubTab(QWidget):
                 group_y=group_y,
                 group_x_levels_map=group_x_levels_map,
                 group_y_levels_map=group_y_levels_map,
-                state_colors=_get_classification_state_colors(adata, FULL_STATE_COL),
-                state_order=_get_classification_state_order(adata, FULL_STATE_COL),
+                state_colors=_get_classification_state_colors(adata, state_col),
+                state_order=_get_classification_state_order(adata, state_col),
+                time_bin_size=time_bin_size,
                 verbose=True,
             )
 
+        self._persist_report_settings(ct, "composition")
         self._bg.run(
             fn=_run,
             desc=f"State composition report ({ct})…",
@@ -2584,6 +4183,140 @@ class StateClassificationSubTab(QWidget):
                 self._notify_results(),
             ),
             on_failed=lambda e: self._log(f"❌ Composition report failed: {e}"),
+        )
+
+    def _on_state_contact_type_comparison(self):
+        ct = self._cell_type()
+        if not ct:
+            return
+        if self._bg.is_running():
+            QMessageBox.warning(self, "Busy", "Another operation is running.")
+            return
+        full_path = self._full_adata_path(ct)
+        if not full_path or not full_path.exists():
+            QMessageBox.warning(self, "No data", "Run state classification first.")
+            return
+        contact_cols = [item.text() for item in self.list_state_contact_type_compare_cols.selectedItems()]
+        if len(contact_cols) < 2:
+            QMessageBox.warning(self, "Missing selection", "Select at least 2 contact columns to compare.")
+            return
+        csv_path = self._state_track_features_csv_path(ct)
+        if not csv_path or not csv_path.exists():
+            QMessageBox.warning(self, "No data", "Track-features CSV not found. Run feature extraction first.")
+            return
+        state_col_choice = self.combo_state_contact_type_state_col.currentText()
+        selected_extra_cols = [item.text() for item in self.list_state_contact_group_cols.selectedItems()]
+        _raw_md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
+        md_snapshot = _raw_md.copy() if _raw_md is not None else None
+        out = self._out_dir()
+        self._log(f"▶ Running state contact type comparison for '{ct}'…")
+
+        def _run(**kw):
+            import pandas as pd
+            import anndata as ad
+            from behav3d.analysis.behavior.state.utils import _resolve_state_paths
+            from behav3d.analysis.behavior.state.visualization.plots.contact_type_report import (
+                save_state_contact_type_comparison,
+            )
+            adata = _read_h5ad_shared(str(full_path))
+            state_col = _resolve_ui_state_col(adata, state_col_choice)
+            df_timepoints = pd.read_csv(csv_path)
+            state_dir = _resolve_state_paths(out, ct).state_outdir
+            _inject_known_metadata_cols(adata, md_snapshot)
+            return save_state_contact_type_comparison(
+                adata,
+                df_timepoints,
+                state_dir,
+                contact_cols=contact_cols,
+                state_col=state_col,
+                extra_group_cols=selected_extra_cols or None,
+                verbose=True,
+            )
+
+        self._persist_report_settings(ct, "contact_type_comparison")
+        self._bg.run(
+            fn=_run,
+            desc=f"State contact type comparison ({ct})…",
+            progress_row=self.progress_row,
+            buttons=[self.btn_state_contact_type_comparison],
+            viewer=self.viewer,
+            inject_progress=False,
+            on_done=lambda r: (
+                self._log(f"✅ Contact type comparison done for '{ct}'."),
+                self._update_view_buttons(),
+                self._notify_results(),
+            ),
+            on_failed=lambda e: self._log(f"❌ Contact type comparison failed: {e}"),
+        )
+
+    def _on_state_contact_shift(self):
+        ct = self._cell_type()
+        if not ct:
+            return
+        if self._bg.is_running():
+            QMessageBox.warning(self, "Busy", "Another operation is running.")
+            return
+        full_path = self._full_adata_path(ct)
+        if not full_path or not full_path.exists():
+            QMessageBox.warning(self, "No data", "Run state classification first.")
+            return
+        contact_col = self.combo_state_shift_contact_col.currentText()
+        if not contact_col:
+            QMessageBox.warning(self, "Missing selection", "Select a contact column to analyze.")
+            return
+        csv_path = self._state_track_features_csv_path(ct)
+        if not csv_path or not csv_path.exists():
+            QMessageBox.warning(self, "No data", "Track-features CSV not found. Run feature extraction first.")
+            return
+        min_bout_length = int(self.spin_state_shift_min_bout.value())
+        window_mode = self.combo_state_shift_window_mode.currentText().lower()
+        fixed_window_length = int(self.spin_state_shift_window_length.value())
+        state_col_choice = self.combo_state_shift_state_col.currentText()
+        selected_extra_cols = [item.text() for item in self.list_state_contact_group_cols.selectedItems()]
+        _raw_md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
+        md_snapshot = _raw_md.copy() if _raw_md is not None else None
+        out = self._out_dir()
+        self._log(f"▶ Running state contact-shift analysis for '{ct}'…")
+
+        def _run(**kw):
+            import pandas as pd
+            import anndata as ad
+            from behav3d.analysis.behavior.state.utils import _resolve_state_paths
+            from behav3d.analysis.behavior.state.visualization.plots.contact_state_shift_report import (
+                save_state_contact_shift_report,
+            )
+            adata = _read_h5ad_shared(str(full_path))
+            state_col = _resolve_ui_state_col(adata, state_col_choice)
+            df_timepoints = pd.read_csv(csv_path)
+            state_dir = _resolve_state_paths(out, ct).state_outdir
+            _inject_known_metadata_cols(adata, md_snapshot)
+            return save_state_contact_shift_report(
+                df_timepoints,
+                adata,
+                state_dir,
+                contact_col=contact_col,
+                min_bout_length=min_bout_length,
+                state_col=state_col,
+                window_mode=window_mode,
+                fixed_window_length=fixed_window_length,
+                extra_group_cols=selected_extra_cols or None,
+                verbose=True,
+            )
+
+        self._persist_report_settings(ct, "contact_shift")
+        self._bg.run(
+            fn=_run,
+            desc=f"State contact-shift analysis ({ct})…",
+            progress_row=self.progress_row,
+            buttons=[self.btn_state_contact_shift],
+            viewer=self.viewer,
+            inject_progress=False,
+            on_done=lambda r: (
+                self._log(f"✅ Contact state-shift analysis done for '{ct}'."),
+                self._update_view_buttons(),
+                self._notify_results(),
+            ),
+            on_failed=lambda e: self._log(f"❌ Contact state-shift analysis failed: {e}"),
         )
 
     def _on_state_transition(self):
@@ -2600,9 +4333,24 @@ class StateClassificationSubTab(QWidget):
         out = self._out_dir()
         self._log(f"▶ Generating state transition report for '{ct}'…")
 
+        circular_min_prob_to_draw = self.spin_state_transition_min_prob.value() / 100.0
+        circular_emphasis_gamma = self.spin_state_transition_gamma.value()
+        circular_label_style = (
+            "legend" if self.combo_state_transition_label_style.currentIndex() == 1 else "on_node"
+        )
+        include_transition_matrix = self.chk_state_transition_include_matrix.isChecked()
+        include_circular_diagram = self.chk_state_transition_include_circular.isChecked()
+        circular_include_self_transitions = self.chk_state_transition_include_self.isChecked()
+        include_circular_diagram_per_cluster = self.chk_state_transition_include_per_cluster.isChecked()
+        include_ngram_rankings = self.chk_state_transition_include_ngrams.isChecked()
+        include_sankey_pairs = self.chk_state_transition_include_sankey.isChecked()
+
         def _run(**kw):
             import anndata as ad
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+            from behav3d.core.state_columns import (
+                FULL_STATE_COL,
+                resolve_full_state_col,
+            )
             from behav3d.analysis.behavior.state.utils import _resolve_state_paths
             from behav3d.analysis.behavior.state.visualization.plots.state_transitions import (
                 save_state_transition_report,
@@ -2611,19 +4359,30 @@ class StateClassificationSubTab(QWidget):
                 _get_classification_state_colors,
                 _get_classification_state_order,
             )
-            adata = ad.read_h5ad(str(full_path))
+            adata = _read_h5ad_shared(str(full_path))
+            state_col = resolve_full_state_col(adata) or FULL_STATE_COL
             transition_dir = _resolve_state_paths(out, ct).state_transitions_outdir
             transition_dir.mkdir(parents=True, exist_ok=True)
             return save_state_transition_report(
                 adata=adata,
                 output_dir=transition_dir,
-                state_col=FULL_STATE_COL,
+                state_col=state_col,
                 time_col="position_t",
-                state_colors=_get_classification_state_colors(adata, FULL_STATE_COL),
-                state_order=_get_classification_state_order(adata, FULL_STATE_COL),
+                state_colors=_get_classification_state_colors(adata, state_col),
+                state_order=_get_classification_state_order(adata, state_col),
+                include_transition_matrix=include_transition_matrix,
+                include_circular_diagram=include_circular_diagram,
+                circular_min_prob_to_draw=circular_min_prob_to_draw,
+                circular_emphasis_gamma=circular_emphasis_gamma,
+                circular_label_style=circular_label_style,
+                circular_include_self_transitions=circular_include_self_transitions,
+                include_circular_diagram_per_cluster=include_circular_diagram_per_cluster,
+                include_ngram_rankings=include_ngram_rankings,
+                include_sankey_pairs=include_sankey_pairs,
                 verbose=True,
             )
 
+        self._persist_report_settings(ct, "transition")
         self._bg.run(
             fn=_run,
             desc=f"State transition report ({ct})…",
@@ -2684,11 +4443,15 @@ class StateClassificationSubTab(QWidget):
             group_x_levels_map = {lvl: "+".join(left) for lvl in left}
             group_x_levels_map.update({lvl: "+".join(right) for lvl in right})
         out = self._out_dir()
+        md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
         self._log(f"▶ Generating condition comparison report for '{ct}'…")
 
         def _run(**kw):
             import anndata as ad
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+            from behav3d.core.state_columns import (
+                FULL_STATE_COL,
+                resolve_full_state_col,
+            )
             from behav3d.analysis.behavior.state.utils import (
                 _resolve_state_paths,
                 _get_classification_state_colors,
@@ -2698,7 +4461,10 @@ class StateClassificationSubTab(QWidget):
                 save_state_condition_comparison_report,
             )
             from behav3d.analysis.behavior.utils import _sanitize_filename_token
-            adata = ad.read_h5ad(str(full_path))
+            from behav3d.core.utils import minutes_per_frame_from_metadata
+            minutes_per_frame, minutes_valid = minutes_per_frame_from_metadata(md)
+            adata = _read_h5ad_shared(str(full_path))
+            state_col = resolve_full_state_col(adata) or FULL_STATE_COL
             state_paths = _resolve_state_paths(out, ct)
             comp_dir = state_paths.state_composition_outdir / "behavior_proportions"
             comp_dir.mkdir(parents=True, exist_ok=True)
@@ -2708,18 +4474,21 @@ class StateClassificationSubTab(QWidget):
                 adata=adata,
                 output_pdf_path=out_pdf,
                 output_csv_path=out_pdf.with_suffix(".csv"),
-                state_col=FULL_STATE_COL,
+                state_col=state_col,
                 sample_col="sample_name",
                 condition_col=condition_col,
                 group_cols=group_cols or None,
                 group_x=group_x,
                 group_x_levels_map=group_x_levels_map,
                 condition_groups=condition_groups,
-                state_colors=_get_classification_state_colors(adata, FULL_STATE_COL),
-                state_order=_get_classification_state_order(adata, FULL_STATE_COL),
+                state_colors=_get_classification_state_colors(adata, state_col),
+                state_order=_get_classification_state_order(adata, state_col),
+                include_over_time=True,
+                minutes_per_frame=minutes_per_frame if minutes_valid else None,
                 verbose=True,
             )
 
+        self._persist_report_settings(ct, "condition_comparison")
         self._bg.run(
             fn=_run,
             desc=f"Condition comparison report ({ct})…",
@@ -2760,6 +4529,13 @@ class StateClassificationSubTab(QWidget):
         unregister_preview_dims_listener(self.viewer, self)
         self._state_bp_dims_callback = None
         self._state_bp_preview = None
+        if self._track_scrubber_dock is not None:
+            try:
+                self._track_scrubber_dock.close()
+            except Exception:
+                pass
+        self._track_scrubber_dock = None
+        self._track_scrubber = None
 
     def _connect_state_bp_dims_listener(self):
         if self._state_bp_dims_callback is not None and self.viewer is not None:
@@ -2774,6 +4550,8 @@ class StateClassificationSubTab(QWidget):
 
         def _on_step(*_):
             self._refresh_state_bp_layer()
+            if self._track_scrubber is not None:
+                self._track_scrubber.set_current_time(self._current_viewer_frame())
 
         try:
             self.viewer.dims.events.current_step.connect(_on_step)
@@ -2832,10 +4610,10 @@ class StateClassificationSubTab(QWidget):
         color_by = self.combo_state_color_by.currentText()
         if color_by == "raw_hmm_state":
             state_path = self._model_adata_path(ct)
-            err_hint = "Model adata not found. Run State Classification (Step 1) first."
+            err_hint = "Model adata not found. Run State Clustering first."
         else:
             state_path = self._full_adata_path(ct)
-            err_hint = f"State adata not found:\n{state_path}\n\nRun State Classification first."
+            err_hint = f"State adata not found:\n{state_path}\n\nRun State Clustering first."
         if not state_path or not state_path.exists():
             QMessageBox.warning(self, "No state adata", err_hint)
             return
@@ -2864,9 +4642,18 @@ class StateClassificationSubTab(QWidget):
             out_dir = self._out_dir()
             if not out_dir:
                 raise ValueError("No output directory set.")
-            adata = sc.read_h5ad(str(state_path))
-            resolved_col = "hmm_intrinsic_behavioral_state_raw" if color_by == "raw_hmm_state" else color_by
-            state_col = resolved_col if (resolved_col and resolved_col in adata.obs.columns) else "full_behavioral_cluster"
+            adata = _read_h5ad_shared(str(state_path))
+            if self.chk_show_state_trajectories.isChecked():
+                try:
+                    from behav3d.analysis.behavior.track.visualization.plots.exemplar_coordinate_utils import (
+                        ensure_exemplar_coordinate_columns,
+                    )
+                    ensure_exemplar_coordinate_columns(
+                        adata, output_dir=out_dir, cell_type=ct, require_pixel_for_video=True,
+                    )
+                except Exception as exc:
+                    self._log(f"⚠️ Could not prepare trajectory positions: {exc}")
+            state_col = _resolve_ui_state_col(adata, color_by)
             obs_samples = adata.obs["sample_name"].astype(str)
             sample_name = sample if sample else obs_samples.iloc[0]
             sample_adata = adata[obs_samples == str(sample_name)]
@@ -2917,7 +4704,7 @@ class StateClassificationSubTab(QWidget):
             self._teardown_state_bp_preview()
             stop_dim_playback(self.viewer)
             disconnect_all_preview_dims_listeners(self.viewer)
-            self.viewer.layers.clear()
+            clear_viewer_layers(self.viewer)
             saved_channels = (
                 getattr(self.metadata_loader, "behav3d_parameters", {})
                 .get("viewer_display", {})
@@ -2949,24 +4736,472 @@ class StateClassificationSubTab(QWidget):
             self._refresh_state_bp_layer()
             self._connect_state_bp_dims_listener()
 
-            mapping_text = _build_state_mapping_text(label_map, code_colors)
-            _existing_dock = getattr(self, "_state_mapping_dock", None)
-            if _existing_dock is not None:
+            if self.chk_show_state_trajectories.isChecked():
                 try:
-                    self.viewer.window.remove_dock_widget(_existing_dock)
-                except Exception:
-                    pass
-            self._state_mapping_dock = _add_mapping_dock_widget(
+                    from behav3d.analysis.behavior.track.visualization.backprojection import (
+                        add_track_cluster_trajectory_layers,
+                    )
+                    from behav3d.analysis.behavior.state.visualization.backprojection import (
+                        prepare_state_trajectory_data,
+                    )
+                    trajectory_data = prepare_state_trajectory_data(
+                        sample_adata.obs, state_col=state_col,
+                    )
+                    add_track_cluster_trajectory_layers(
+                        self.viewer,
+                        trajectory_data=trajectory_data,
+                        code_colors=code_colors,
+                        label_map=label_map,
+                        output_col=state_col,
+                        tail_length=int(tracked_img.shape[0]),
+                        blending="opaque",
+                        single_layer=True,
+                    )
+                except Exception as exc:
+                    self._log(f"⚠️ Could not add state trajectory layers: {exc}")
+
+            mapping_text = _build_state_mapping_text(label_map, code_colors)
+            close_backprojection_legend_docks(self.viewer)
+            state_mapping_dock = _add_mapping_dock_widget(
                 self.viewer,
                 mapping_text=mapping_text,
                 label_map=label_map,
                 code_colors=code_colors,
                 title="State Class Mapping",
             )
+            if state_mapping_dock is not None:
+                state_mapping_dock.widget()._behav3d_backprojection_legend_dock = True
             self._log("✅ State backprojection loaded (current timepoint; updates as you scrub).")
         except Exception as e:
             traceback.print_exc()
             self._log(f"❌ Backprojection failed: {e}")
+
+    # ── Find a Behavior ──────────────────────────────────────────────────
+
+    def _on_bp_sequence_load_states(self):
+        """Load the state adata for the current `combo_state_color_by`
+        choice and populate `combo_bp_sequence_state`. Also warms the cache
+        `_on_find_behavior_sequence` reuses, so searching never re-reads the
+        h5ad unless the color-by choice has changed since."""
+        ct = self._cell_type()
+        if not ct:
+            QMessageBox.warning(self, "No cell type", "Select a cell type first.")
+            return
+        color_by = self.combo_state_color_by.currentText()
+        if color_by == "raw_hmm_state":
+            state_path = self._model_adata_path(ct)
+            err_hint = "Model adata not found. Run State Clustering first."
+        else:
+            state_path = self._full_adata_path(ct)
+            err_hint = f"State adata not found:\n{state_path}\n\nRun State Clustering first."
+        if not state_path or not state_path.exists():
+            QMessageBox.warning(self, "No state adata", err_hint)
+            return
+        try:
+            import scanpy as sc
+            from behav3d.analysis.behavior.state.visualization.backprojection import (
+                _build_code_map,
+            )
+            from behav3d.analysis.behavior.state.utils import (
+                _get_classification_state_order,
+            )
+            adata = _read_h5ad_shared(str(state_path))
+            state_col = _resolve_ui_state_col(adata, color_by)
+            state_order = _get_classification_state_order(adata, state_col)
+            code_map = _build_code_map(adata.obs, state_col=state_col, state_order=state_order)
+            self._bp_sequence_adata = adata
+            self._bp_sequence_state_col = state_col
+            self._bp_sequence_color_by = color_by
+            self.combo_bp_sequence_state.clear()
+            self.combo_bp_sequence_state.addItems(list(code_map.keys()))
+            self.combo_bp_sequence_state.setEnabled(len(code_map) > 0)
+            self._log(f"✅ Loaded {len(code_map)} state label(s) for '{state_col}'.")
+        except Exception as e:
+            traceback.print_exc()
+            self._log(f"❌ Could not load states: {e}")
+
+    def _on_bp_sequence_add_state(self):
+        label = self.combo_bp_sequence_state.currentText()
+        if not label:
+            return
+        if self.chk_bp_sequence_strict.isChecked() and self.list_bp_sequence.count() > 0:
+            last = self.list_bp_sequence.item(self.list_bp_sequence.count() - 1).text()
+            if last == label:
+                QMessageBox.warning(
+                    self,
+                    "Unmatchable sequence",
+                    "Strict mode requires sequence steps to be directly adjacent "
+                    "bouts; the same state can never immediately repeat in a "
+                    "track's bout-collapsed history, so this sequence could never "
+                    "match anything. Uncheck strict mode, or add a different state.",
+                )
+                return
+        self.list_bp_sequence.addItem(label)
+
+    def _on_bp_sequence_move_up(self):
+        row = self.list_bp_sequence.currentRow()
+        if row > 0:
+            item = self.list_bp_sequence.takeItem(row)
+            self.list_bp_sequence.insertItem(row - 1, item)
+            self.list_bp_sequence.setCurrentRow(row - 1)
+
+    def _on_bp_sequence_move_down(self):
+        row = self.list_bp_sequence.currentRow()
+        if 0 <= row < self.list_bp_sequence.count() - 1:
+            item = self.list_bp_sequence.takeItem(row)
+            self.list_bp_sequence.insertItem(row + 1, item)
+            self.list_bp_sequence.setCurrentRow(row + 1)
+
+    def _on_bp_sequence_remove_selected(self):
+        row = self.list_bp_sequence.currentRow()
+        if row >= 0:
+            self.list_bp_sequence.takeItem(row)
+
+    def _on_bp_sequence_selection_changed(self):
+        # selectedItems() only ever returns QTableWidgetItems, and this table
+        # has none (cell widgets replace them) — selectionModel() works at
+        # the index level regardless, so table.selectRow(...) (called from
+        # _BehaviorMatchRowWidget.mousePressEvent) is reflected correctly.
+        self.btn_bp_sequence_visualize.setEnabled(
+            self.tbl_bp_sequence_matches.selectionModel().hasSelection()
+        )
+
+    def _on_find_behavior_sequence(self):
+        ct = self._cell_type()
+        if not ct:
+            QMessageBox.warning(self, "No cell type", "Select a cell type first.")
+            return
+        target_states = _list_widget_items(self.list_bp_sequence)
+        if len(target_states) == 0:
+            QMessageBox.warning(self, "No sequence", "Add at least one state to the sequence.")
+            return
+        color_by = self.combo_state_color_by.currentText()
+        try:
+            if self._bp_sequence_adata is None or self._bp_sequence_color_by != color_by:
+                self._on_bp_sequence_load_states()
+                if self._bp_sequence_adata is None:
+                    return
+            adata = self._bp_sequence_adata
+            state_col = self._bp_sequence_state_col
+            match_mode = "contiguous" if self.chk_bp_sequence_strict.isChecked() else "subsequence"
+            from behav3d.analysis.behavior.state.sequence_search import (
+                find_tracks_matching_state_sequence,
+            )
+            self._log(f"🔎 Searching for sequence {target_states!r} ({match_mode})…")
+            results = find_tracks_matching_state_sequence(
+                adata,
+                target_states=target_states,
+                state_col=state_col,
+                match_mode=match_mode,
+                require_track_start=self.chk_bp_sequence_start.isChecked(),
+                require_track_end=self.chk_bp_sequence_end.isChecked(),
+            )
+            self._bp_sequence_results = results
+            self._populate_bp_sequence_results_table(results)
+            self._log(f"✅ Found {len(results)} matching track(s).")
+        except Exception as e:
+            traceback.print_exc()
+            self._log(f"❌ Behavior sequence search failed: {e}")
+
+    def _populate_bp_sequence_results_table(self, results):
+        table = self.tbl_bp_sequence_matches
+        table.setRowCount(0)
+        table.setRowCount(len(results))
+        adata = self._bp_sequence_adata
+        state_col = self._bp_sequence_state_col
+        state_color_map, track_lookup = {}, {}
+        if adata is not None and state_col is not None and len(results) > 0:
+            from behav3d.analysis.behavior.track.visualization.plots.exemplar_track_per_cluster import (
+                _build_state_color_map,
+            )
+            from behav3d.analysis.behavior.track.visualization.backprojection import (
+                build_track_state_sequence_lookup,
+            )
+            try:
+                _, state_color_map = _build_state_color_map(adata, state_col)
+                track_lookup = build_track_state_sequence_lookup(adata, state_col=state_col)
+            except Exception as exc:
+                self._log(f"⚠️ Could not prepare state bars: {exc}")
+        for row_idx, (_, row) in enumerate(results.iterrows()):
+            sample_name = str(row["sample_name"])
+            track_id = int(row["TrackID"])
+            start_t, end_t = int(row["start_time"]), int(row["end_time"])
+            # start_t/end_t are the matched sequence's own span, not the whole
+            # track's — show the track's full length alongside it so it's
+            # clear how much of the track the match covers.
+            details_text = f"Sample {sample_name} · TrackID {track_id} · match t {start_t}–{end_t}"
+            track_df = track_lookup.get((sample_name, str(track_id)))
+            if track_df is not None and len(track_df) > 0:
+                import pandas as pd
+                track_times = pd.to_numeric(track_df["position_t"], errors="coerce").dropna()
+                if len(track_times) > 0:
+                    track_length = int(track_times.max()) - int(track_times.min()) + 1
+                    details_text += f" · track length {track_length}"
+            pixmap = None
+            if track_df is not None and len(state_color_map) > 0:
+                try:
+                    pixmap, _xlim = _render_compact_statebar_pixmap(track_df, state_color_map, state_col=state_col)
+                except Exception:
+                    pixmap = None
+            table.setCellWidget(
+                row_idx, 0,
+                _BehaviorMatchRowWidget(table, row_idx, details_text, pixmap),
+            )
+            table.resizeRowToContents(row_idx)
+        self.btn_bp_sequence_visualize.setEnabled(False)
+
+    def _on_visualize_matched_track(self):
+        row_idx = self.tbl_bp_sequence_matches.currentRow()
+        if row_idx < 0 or self._bp_sequence_results is None:
+            return
+        match = self._bp_sequence_results.iloc[row_idx]
+        sample_name = str(match["sample_name"])
+        track_id = int(match["TrackID"])
+        start_time = int(match["start_time"])
+        end_time = int(match["end_time"])
+        ct = self._cell_type()
+        out_dir = self._out_dir()
+        if not ct or not out_dir:
+            QMessageBox.warning(self, "Missing setup", "Cell type / output directory not set.")
+            return
+        opacity = self.spin_state_opacity.value() / 100.0
+        color_by = self.combo_state_color_by.currentText()
+        adata = self._bp_sequence_adata
+        state_col = self._bp_sequence_state_col
+        self._log(f"▶ Visualizing TrackID {track_id} in sample '{sample_name}'…")
+        try:
+            import pandas as pd
+            from behav3d.analysis.behavior.state.visualization.backprojection import (
+                _resolve_raw_image_path,
+                _resolve_tracked_image_path,
+                _build_code_map,
+                _build_state_code_color_map,
+                _add_mapping_dock_widget,
+                _build_state_mapping_text,
+                _align_labels_to_raw_shape_for_view,
+                _validate_required_obs_columns,
+                prepare_state_code_lookup,
+                prepare_state_trajectory_data,
+            )
+            from behav3d.analysis.behavior.state.utils import (
+                _get_classification_state_colors,
+                _get_classification_state_order,
+                _normalize_label_color_map,
+            )
+            from behav3d.analysis.backprojection import filter_track_image_to_ids
+            from behav3d.analysis.behavior.track.visualization.backprojection import (
+                add_track_cluster_trajectory_layers,
+            )
+            from behav3d.io.images import load_image
+
+            try:
+                from behav3d.analysis.behavior.track.visualization.plots.exemplar_coordinate_utils import (
+                    ensure_exemplar_coordinate_columns,
+                )
+                ensure_exemplar_coordinate_columns(
+                    adata, output_dir=out_dir, cell_type=ct, require_pixel_for_video=True,
+                )
+            except Exception as exc:
+                self._log(f"⚠️ Could not prepare trajectory positions: {exc}")
+
+            obs_samples = adata.obs["sample_name"].astype(str)
+            sample_adata = adata[obs_samples == sample_name]
+            if sample_adata.n_obs == 0:
+                raise ValueError(f"No rows found for sample '{sample_name}' in state adata.")
+            _validate_required_obs_columns(
+                sample_adata.obs, required_cols=["TrackID", "position_t", state_col]
+            )
+
+            # Legend/colors are built from the whole sample's obs (not the
+            # single-track subset below) so they stay consistent with the
+            # rest of the UI rather than being whatever states this one
+            # track happens to visit.
+            state_order = _get_classification_state_order(sample_adata, state_col)
+            code_map = _build_code_map(sample_adata.obs, state_col=state_col, state_order=state_order)
+            if len(code_map) == 0:
+                raise ValueError(f"'{state_col}' has no non-empty labels for sample '{sample_name}'.")
+            state_colors = _normalize_label_color_map(
+                code_map.keys(), colors=_get_classification_state_colors(sample_adata, state_col)
+            )
+            code_colors = _build_state_code_color_map(code_map, state_colors=state_colors)
+            label_map = {str(code): str(label) for label, code in code_map.items()}
+
+            track_numeric = pd.to_numeric(sample_adata.obs["TrackID"], errors="coerce")
+            track_obs = sample_adata.obs[track_numeric == track_id].copy()
+            if len(track_obs) == 0:
+                raise ValueError(f"TrackID {track_id} not found in sample '{sample_name}'.")
+            state_code_lookup = prepare_state_code_lookup(
+                track_obs, state_col=state_col, code_map=code_map,
+            )
+
+            gui_metadata_csv_path = resolve_metadata_csv_path(self.metadata_loader)
+            raw_path = _resolve_raw_image_path(
+                out_dir, sample_name, verbose=False, metadata_csv_path=gui_metadata_csv_path
+            )
+            if raw_path is None or not Path(raw_path).exists():
+                raise FileNotFoundError(f"Raw image not found for sample '{sample_name}'.")
+            tracked_path = _resolve_tracked_image_path(
+                out_dir, sample_name, ct, verbose=False, metadata_csv_path=gui_metadata_csv_path
+            )
+            if tracked_path is None or not Path(tracked_path).exists():
+                raise FileNotFoundError(
+                    f"Tracked image not found for sample '{sample_name}', cell_type '{ct}'."
+                )
+            raw_img = load_image(raw_path)
+            tracked_img = load_image(tracked_path)
+            tracked_view = _align_labels_to_raw_shape_for_view(tracked_img, raw_img, "TrackID", verbose=False)
+            tracked_view = filter_track_image_to_ids(tracked_view, [track_id])
+
+            # Full viewer reset — identical pattern to _on_show_state_bp, so
+            # this preview never coexists with a previous whole-sample or
+            # feature backprojection preview.
+            self._teardown_state_bp_preview()
+            stop_dim_playback(self.viewer)
+            disconnect_all_preview_dims_listeners(self.viewer)
+            clear_viewer_layers(self.viewer)
+            saved_channels = (
+                getattr(self.metadata_loader, "behav3d_parameters", {})
+                .get("viewer_display", {})
+                .get("channels", {})
+            )
+            try:
+                md = self.metadata_loader.metadata
+                row = md[md["sample_name"] == sample_name].iloc[0]
+                dim_order = str(row.get("dimension_order", "TCZYX")).strip() or "TCZYX"
+            except Exception:
+                dim_order = "TCZYX"
+            ch_names = _bp_add_raw_channels(self.viewer, raw_img, sample_name, saved_channels, dim_order)
+            for lname in ch_names:
+                try:
+                    layer = self.viewer.layers[lname]
+                    layer.events.contrast_limits.connect(self._on_bp_layer_display_changed)
+                    layer.events.colormap.connect(self._on_bp_layer_display_changed)
+                except (KeyError, IndexError):
+                    pass
+            self.viewer.add_labels(tracked_view, name="filtered TrackID", visible=False, opacity=opacity)
+
+            self._state_bp_preview = {
+                "tracked_path": Path(tracked_path),
+                "code_lookup": state_code_lookup,
+                "layer_name": color_by,
+                "opacity": opacity,
+                "code_colors": code_colors,
+            }
+            self._refresh_state_bp_layer()
+            self._connect_state_bp_dims_listener()
+
+            trajectory_data = prepare_state_trajectory_data(track_obs, state_col=state_col)
+            add_track_cluster_trajectory_layers(
+                self.viewer,
+                trajectory_data=trajectory_data,
+                code_colors=code_colors,
+                label_map=label_map,
+                output_col=state_col,
+                tail_length=int(tracked_img.shape[0]),
+                blending="opaque",
+                single_layer=True,
+            )
+
+            # Close any stale legend/statebar dock up front — including a
+            # previous visualize-matched-track scrubber — before adding the
+            # new scrubber and legend below, since both are now tagged for
+            # this same cleanup and calling it again in between would just
+            # remove the scrubber this method itself just created.
+            close_backprojection_legend_docks(self.viewer)
+
+            try:
+                scrub_pixmap, scrub_xlim = _render_compact_statebar_pixmap(
+                    track_obs, state_colors, state_col=state_col,
+                    figsize=(8.0, 0.5), dpi=120,
+                )
+                self._track_scrubber = _StateTimelineScrubber(
+                    scrub_pixmap, scrub_xlim, on_seek=self._on_track_scrubber_seek,
+                )
+                scrubber_container = QWidget()
+                scrubber_layout = QVBoxLayout(scrubber_container)
+                scrubber_layout.setContentsMargins(4, 2, 4, 2)
+                scrubber_layout.setSpacing(2)
+                scrubber_hint = QLabel("Click anywhere on the bar to jump to that timepoint.")
+                scrubber_hint.setStyleSheet("color: #888; font-size: 11px;")
+                scrubber_layout.addWidget(scrubber_hint)
+                scrubber_layout.addWidget(self._track_scrubber)
+                self._track_scrubber_dock = self.viewer.window.add_dock_widget(
+                    scrubber_container, area="bottom", name="State timeline",
+                )
+                # Tag it the same way the state/track mapping legends are
+                # tagged (see close_backprojection_legend_docks) so it closes
+                # itself on tab navigation instead of lingering below the
+                # viewer while the user works on an unrelated tab. Its native
+                # title-bar close (x) button already lets the user dismiss it
+                # directly, via the same viewer.window.remove_dock_widget
+                # path — so both close routes end up destroying the same
+                # QDockWidget, and the `destroyed` connection below is the
+                # one place that needs to notice either of them and drop our
+                # otherwise-stale references to it.
+                self._track_scrubber_dock.widget()._behav3d_backprojection_legend_dock = True
+                dock_ref = self._track_scrubber_dock
+                dock_ref.destroyed.connect(
+                    lambda *_a, _dock=dock_ref: self._on_track_scrubber_dock_destroyed(_dock)
+                )
+                self._track_scrubber.set_current_time(start_time)
+            except Exception as exc:
+                self._log(f"⚠️ Could not add state timeline scrubber: {exc}")
+
+            mapping_text = _build_state_mapping_text(label_map, code_colors)
+            state_mapping_dock = _add_mapping_dock_widget(
+                self.viewer,
+                mapping_text=mapping_text,
+                label_map=label_map,
+                code_colors=code_colors,
+                title="State Class Mapping",
+            )
+            if state_mapping_dock is not None:
+                state_mapping_dock.widget()._behav3d_backprojection_legend_dock = True
+
+            current_step = list(self.viewer.dims.current_step)
+            current_step[0] = int(start_time)
+            self.viewer.dims.current_step = tuple(current_step)
+
+            self._log(
+                f"✅ Visualizing TrackID {track_id} in '{sample_name}' "
+                f"(t={start_time}..{end_time})."
+            )
+        except Exception as e:
+            traceback.print_exc()
+            self._log(f"❌ Could not visualize matched track: {e}")
+
+    def _on_track_scrubber_seek(self, t):
+        """Called by `_StateTimelineScrubber` on click/drag. Jumps the viewer
+        the same way `_on_visualize_matched_track` jumps to a match's start
+        time; this fires napari's own `current_step` event, which loops back
+        through `_connect_state_bp_dims_listener`'s callback to keep the
+        state mask layer and the scrubber's own cursor in sync regardless of
+        whether the user dragged this bar or napari's native slider."""
+        if self.viewer is None:
+            return
+        current_step = list(self.viewer.dims.current_step)
+        current_step[0] = int(t)
+        self.viewer.dims.current_step = tuple(current_step)
+
+    def _on_track_scrubber_dock_destroyed(self, dock):
+        """The state-timeline dock was torn down — either the user closed it
+        with its own title-bar (x), or `close_backprojection_legend_docks`
+        closed it on tab navigation (it's tagged like the legend docks; see
+        `_on_visualize_matched_track`). Either way that QDockWidget and its
+        `_StateTimelineScrubber` are gone, so drop our references rather than
+        leaving `_teardown_state_bp_preview` a stale dock/widget to `.close()`
+        next time around, and leaving `_connect_state_bp_dims_listener`'s
+        per-frame callback updating a cursor nobody can see.
+
+        Guarded by identity (`dock` is the dock this callback was bound to
+        at creation time): `_teardown_state_bp_preview` only hides the old
+        dock rather than fully removing it, so a visualize-another-track
+        call can leave a stale dock object whose eventual `destroyed` must
+        not clear out the new one that replaced it.
+        """
+        if self._track_scrubber_dock is dock:
+            self._track_scrubber_dock = None
+            self._track_scrubber = None
 
     def _on_export_state_bp(self):
         ct = self._cell_type()
@@ -2976,7 +5211,7 @@ class StateClassificationSubTab(QWidget):
             return
         state_path = self._full_adata_path(ct)
         if not state_path or not state_path.exists():
-            QMessageBox.warning(self, "No state adata", "Run State Classification first.")
+            QMessageBox.warning(self, "No state adata", "Run State Clustering first.")
             return
         if self._bg.is_running():
             QMessageBox.warning(self, "Busy", "Another operation is running.")
@@ -2988,11 +5223,12 @@ class StateClassificationSubTab(QWidget):
 
         def _run(**kw):
             import scanpy as sc
+            from behav3d.core.state_columns import FULL_STATE_COL
             from behav3d.analysis.behavior.state.visualization.backprojection import (
                 export_behavioral_state_backprojection_zarrs,
             )
-            adata = sc.read_h5ad(str(state_path))
-            state_col = color_by if color_by else "full_behavioral_cluster"
+            adata = _read_h5ad_shared(str(state_path))
+            state_col = _resolve_ui_state_col(adata, color_by) if color_by else FULL_STATE_COL
             sample_name = sample if sample else None
             export_adata = (
                 adata[adata.obs["sample_name"].astype(str) == str(sample_name)]
@@ -3022,7 +5258,7 @@ class StateClassificationSubTab(QWidget):
 
     # ── View helpers ─────────────────────────────────────────────────────
 
-    def _on_view(self, kind: str):
+    def _on_view(self, kind: str, btn: Optional[QPushButton] = None):
         ct = self._cell_type()
         if not ct:
             return
@@ -3037,15 +5273,17 @@ class StateClassificationSubTab(QWidget):
             for lbl, path in existing:
                 act = menu.addAction(f"👁  {lbl}")
                 act.triggered.connect(lambda _=False, _p=path: self._open_pdf(_p))
-            menu.exec_()
+            if btn is not None:
+                menu.exec_(btn.mapToGlobal(btn.rect().bottomLeft()))
+            else:
+                menu.exec_()
 
     def _get_view_candidates(self, kind: str, ct: str):
         out = self._out_dir()
         if not out:
             return []
         if kind == "state_qc":
-            p = self._model_adata_path(ct)
-            return [(f"Model adata ({ct})", p)] if p else []
+            return self._state_run_qc_pdfs(ct)
         if kind == "state_diagnostics":
             qc_dir = self._state_diagnostics_qc_dir(ct)
             if not qc_dir or not qc_dir.exists():
@@ -3057,6 +5295,14 @@ class StateClassificationSubTab(QWidget):
         if kind == "state_transition":
             p = self._report_path(ct, "state_transition_report")
             return [(f"Transition report ({ct})", p)] if p else []
+        if kind == "state_feature_heatmap":
+            heat_dir = out / "analysis" / ct / "behavioral_states" / "state_feature_heatmaps"
+            if not heat_dir.exists():
+                return []
+            return [
+                (p.stem.replace("state_feature_heatmap_", "feature heatmap: "), p)
+                for p in sorted(heat_dir.glob("state_feature_heatmap_*.pdf"))
+            ]
         if kind == "state_condition_comparison":
             comp_dir = out / "analysis" / ct / "behavioral_states" / "state_composition" / "behavior_proportions"
             if not comp_dir.exists():
@@ -3064,6 +5310,22 @@ class StateClassificationSubTab(QWidget):
             return [
                 (p.stem.replace("condition_comparison_", ""), p)
                 for p in sorted(comp_dir.glob("condition_comparison_*.pdf"))
+            ]
+        if kind == "state_contact_type_comparison":
+            comp_dir = out / "analysis" / ct / "behavioral_states" / "contact_analysis" / "contact_type_comparison"
+            if not comp_dir.exists():
+                return []
+            return [
+                (f.parent.name, f)
+                for f in sorted(comp_dir.glob("*/contact_type_comparison.pdf"))
+            ]
+        if kind == "state_contact_shift":
+            contact_dir = out / "analysis" / ct / "behavioral_states" / "contact_analysis" / "contact_state_shift"
+            if not contact_dir.exists():
+                return []
+            return [
+                (f.parent.name, f)
+                for f in sorted(contact_dir.glob("*/contact_state_shift.pdf"))
             ]
         return []
 
@@ -3094,11 +5356,497 @@ class StateClassificationSubTab(QWidget):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Feature selection for trajectory clustering without behavioral states
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TrajectoryFeatureSelector(QWidget):
+    """Pick the per-timepoint features (and their preprocessing) for feature-based
+    trajectory DTW run directly on the track-features CSV, with no behavioral states.
+
+    Mirrors the State Classification feature selection: category-grouped timepoint
+    features, optional window features, binary (0/1) columns, and processing
+    (smoothing, percentile caps, log scaling, start offset). ``params()`` returns
+    keyword arguments for
+    ``behav3d.analysis.behavior.track.trajectory_features.build_trajectory_feature_adata``.
+    """
+
+    _WINDOW_FEATURES = ("net_displacement", "straightness", "mean_square_displacement")
+
+    paramsChanged = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._timepoint_checkboxes: dict = {}
+        self._binary_checkboxes: dict = {}
+        self._logscale_checkboxes: dict = {}
+        self._pending_cfg: dict = {}
+        self._loaded_key = None
+        self._scanning = False
+        self._scan_queued = None
+        # Column classification of the whole CSV runs here, off the GUI thread.
+        self._scan_bg = BackgroundOperation(self, silent=True, notify=True)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(3)
+        lay.addWidget(_make_info_label(
+            "Features for trajectory DTW, read directly from the track-features table "
+            "(no behavioral states needed). Continuous features are smoothed / capped / "
+            "log-scaled as set below, then z-scored; binary columns are standardized and "
+            "weighted by 'Binary weight' (Advanced Configuration)."
+        ))
+
+        self.tabs = QTabWidget()
+        tp_tab = QWidget()
+        tp_lay = QVBoxLayout(tp_tab)
+        tp_lay.setSpacing(2)
+        self.timepoint_lay = QVBoxLayout()
+        tp_lay.addLayout(self.timepoint_lay)
+        tp_lay.addStretch(1)
+        self.tabs.addTab(tp_tab, "Timepoint Features")
+
+        win_tab = QWidget()
+        win_lay = QVBoxLayout(win_tab)
+        win_lay.setSpacing(2)
+        win_lay.addWidget(_make_info_label(
+            "Short-term trajectory-shape descriptors computed over a rolling window of "
+            "consecutive timepoints (needs position_x/y/z)."
+        ))
+        win_form = QFormLayout()
+        self.spin_window_size = QSpinBox()
+        self.spin_window_size.setRange(2, 500)
+        self.spin_window_size.setValue(5)
+        self.spin_window_size.setMaximumWidth(90)
+        self.spin_window_size.valueChanged.connect(self.paramsChanged)
+        win_form.addRow("Window size (timepoints):", self.spin_window_size)
+        win_lay.addLayout(win_form)
+        self._window_checkboxes = {}
+        for name in self._WINDOW_FEATURES:
+            cb = QCheckBox(name)
+            cb.stateChanged.connect(self._rebuild_logscale)
+            self._window_checkboxes[name] = cb
+            win_lay.addWidget(cb)
+
+        win_lay.addWidget(_make_info_label(
+            "Full-tracklet descriptors (not windowed): straight-line distance from the "
+            "first timepoint of each trajectory unit -- the whole track, or each tracklet "
+            "when 'Divide long tracks' is on -- back to that point at every later timepoint."
+        ))
+        self.chk_tracklet_net_disp = QCheckBox("net_displacement_tracklet")
+        self.chk_tracklet_net_disp.stateChanged.connect(self._update_tab_labels)
+        win_lay.addWidget(self.chk_tracklet_net_disp)
+        self.chk_tracklet_net_disp_sq = QCheckBox("net_displacement_tracklet_squared")
+        self.chk_tracklet_net_disp_sq.stateChanged.connect(self._update_tab_labels)
+        win_lay.addWidget(self.chk_tracklet_net_disp_sq)
+
+        win_lay.addStretch(1)
+        self.tabs.addTab(win_tab, "Window Features")
+
+        bin_tab = QWidget()
+        bin_tab_lay = QVBoxLayout(bin_tab)
+        bin_tab_lay.setSpacing(2)
+        bin_tab_lay.addWidget(_make_info_label(
+            "0/1 columns (e.g. contacts) to include in the DTW distance."
+        ))
+        self.binary_lay = QVBoxLayout()
+        bin_tab_lay.addLayout(self.binary_lay)
+        bin_tab_lay.addStretch(1)
+        self.tabs.addTab(bin_tab, "Binary Features")
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumHeight(220)
+        scroll.setWidget(self.tabs)
+        lay.addWidget(scroll)
+
+        proc = CollapsibleSection("Feature Processing", expanded=False)
+        proc_form = QFormLayout()
+        proc_form.setSpacing(3)
+        self.spin_smoothing = QSpinBox()
+        self.spin_smoothing.setRange(1, 100)
+        self.spin_smoothing.setValue(1)
+        self.spin_smoothing.setMaximumWidth(90)
+        self.spin_smoothing.valueChanged.connect(self.paramsChanged)
+        proc_form.addRow("Smooth window (timepoints):", make_help_row(
+            self.spin_smoothing, "Feature smoothing window",
+            "Rolling-mean window applied to the continuous timepoint features per track. "
+            "1 = no smoothing."
+        ))
+        self.spin_quant_lo = QDoubleSpinBox()
+        self.spin_quant_lo.setRange(0.0, 0.5)
+        self.spin_quant_lo.setSingleStep(0.01)
+        self.spin_quant_lo.setValue(0.0)
+        self.spin_quant_lo.setMaximumWidth(90)
+        self.spin_quant_lo.valueChanged.connect(self.paramsChanged)
+        proc_form.addRow("Low percentile cap:", make_help_row(
+            self.spin_quant_lo, "Low percentile cap",
+            "Clip feature values below this quantile (0 = no clipping)."
+        ))
+        self.spin_quant_hi = QDoubleSpinBox()
+        self.spin_quant_hi.setRange(0.5, 1.0)
+        self.spin_quant_hi.setSingleStep(0.01)
+        self.spin_quant_hi.setValue(1.0)
+        self.spin_quant_hi.setMaximumWidth(90)
+        self.spin_quant_hi.valueChanged.connect(self.paramsChanged)
+        proc_form.addRow("High percentile cap:", make_help_row(
+            self.spin_quant_hi, "High percentile cap",
+            "Clip feature values above this quantile (1 = no clipping)."
+        ))
+        self.spin_start_offset = QSpinBox()
+        self.spin_start_offset.setRange(0, 100)
+        self.spin_start_offset.setValue(1)
+        self.spin_start_offset.setMaximumWidth(90)
+        self.spin_start_offset.valueChanged.connect(self.paramsChanged)
+        proc_form.addRow("Start offset (timepoints):", make_help_row(
+            self.spin_start_offset, "Start offset",
+            "Drop each track's first N timepoints. The first frame's motion features "
+            "(e.g. speed) are a fabricated 0, so 1 is recommended."
+        ))
+        proc_holder = QWidget()
+        proc_holder.setLayout(proc_form)
+        proc.addWidget(proc_holder)
+        proc.addWidget(QLabel("Log scaling (log1p) of selected features:"))
+        self.logscale_lay = QGridLayout()
+        log_holder = QWidget()
+        log_holder.setLayout(self.logscale_lay)
+        proc.addWidget(log_holder)
+        lay.addWidget(proc)
+
+    # ── population ──────────────────────────────────────────────────────
+    def populate(self, csv_path, metadata=None, cfg=None):
+        """(Re)build the checkboxes from the track-features CSV.
+
+        The header is read here, but the value-based binary / non-numeric column
+        classification needs a pass over the whole (multi-GB) CSV, so it runs on
+        a background worker (memoized per file version, and shared with the State
+        tab's own scan); the checkboxes appear when it finishes."""
+        import pandas as pd
+        from behav3d.widgets.utils import excluded_non_behavior_columns
+
+        cfg = dict(cfg or {})
+        try:
+            mtime = Path(csv_path).stat().st_mtime if csv_path and Path(csv_path).exists() else None
+        except OSError:
+            mtime = None
+        key = (str(csv_path), mtime)
+        if key == self._loaded_key:
+            if cfg:
+                self.set_params(cfg)
+            return
+        self._loaded_key = key
+        self._pending_cfg = cfg
+
+        for sub in (self.timepoint_lay, self.binary_lay):
+            _clear_layout(sub)
+        self._timepoint_checkboxes = {}
+        self._binary_checkboxes = {}
+
+        if not csv_path or not Path(csv_path).exists():
+            self.timepoint_lay.addWidget(_make_info_label(
+                "<i>No track-features CSV found for this cell type. Run feature extraction first.</i>"
+            ))
+            self._rebuild_logscale()
+            return
+
+        cols = list(pd.read_csv(csv_path, nrows=0).columns)
+        excluded = excluded_non_behavior_columns(cols, metadata=metadata)
+        usable = [c for c in cols if c not in excluded]
+
+        self.timepoint_lay.addWidget(_make_info_label("<i>Scanning feature columns…</i>"))
+        self.binary_lay.addWidget(_make_info_label("<i>Scanning feature columns…</i>"))
+        self._scanning = True
+
+        def _on_scan_done(result):
+            if self._loaded_key != key:
+                return  # a newer populate() superseded this one and runs its own scan
+            self._scanning = False
+            for sub in (self.timepoint_lay, self.binary_lay):
+                _clear_layout(sub)
+            self._build_checkboxes(result["bin_cols"], result["feat_cols"], dict(self._pending_cfg or {}))
+
+        def _on_scan_failed(err):
+            if self._loaded_key != key:
+                return
+            self._scanning = False
+            traceback.print_exc()
+            for sub in (self.timepoint_lay, self.binary_lay):
+                _clear_layout(sub)
+            self.timepoint_lay.addWidget(_make_info_label(f"<i>Could not scan feature columns: {err}</i>"))
+            self._rebuild_logscale()
+
+        if self._scan_bg.is_running():
+            # One scan at a time: re-run for whatever is current once it ends.
+            self._scan_queued = (csv_path, metadata, cfg)
+            return
+        self._start_scan(key, csv_path, usable, _on_scan_done, _on_scan_failed)
+
+    def _start_scan(self, key, csv_path, usable, on_done, on_failed):
+        def _finished(result):
+            on_done(result)
+            self._run_queued_scan()
+
+        def _failed(err):
+            on_failed(err)
+            self._run_queued_scan()
+
+        self._scan_bg.run(
+            fn=_scan_state_feature_columns,
+            args=(csv_path, usable),
+            desc="Scanning trajectory feature columns…",
+            inject_progress=False,
+            inject_cancel_check=True,
+            on_done=_finished,
+            on_failed=_failed,
+        )
+
+    def _run_queued_scan(self):
+        queued, self._scan_queued = self._scan_queued, None
+        if queued is not None:
+            csv_path, metadata, cfg = queued
+            self._loaded_key = None  # force populate() to rebuild for the latest request
+            self.populate(csv_path, metadata=metadata, cfg=cfg)
+
+    def is_populating(self) -> bool:
+        """True while the column scan behind the checkboxes is still running."""
+        return bool(self._scanning)
+
+    def _build_checkboxes(self, bin_cols, feat_cols, cfg):
+        """Create the checkbox groups once the column scan is available."""
+        from copy import deepcopy
+        from behav3d.widgets.utils import behav3d_calculated_features
+        from behav3d.core.utils import expand_column_patterns
+
+        # Image/physical coordinates locate a cell; they don't describe its behavior.
+        coord_cols = {"position_x", "position_y", "position_z"}
+        feat_cols = [
+            c for c in feat_cols
+            if c not in coord_cols and not str(c).startswith("pixel_position_")
+        ]
+
+        saved = cfg.get("features")
+        saved = set(saved) if saved is not None else set(_DEFAULT_TIMEPOINT_FEATURES)
+        saved_bin = set(cfg.get("binary_features", []) or [])
+
+        def _add_group(title, names):
+            sec = CollapsibleSection(title, expanded=False)
+            content = QWidget()
+            grid = QGridLayout(content)
+            boxes = []
+            for i, f in enumerate(names):
+                cb = QCheckBox(f)
+                cb.setChecked(f in saved)
+                cb.stateChanged.connect(self._rebuild_logscale)
+                self._timepoint_checkboxes[f] = cb
+                boxes.append(cb)
+                grid.addWidget(cb, i // 3, i % 3)
+            sec.addWidget(content)
+
+            def _refresh(*_):
+                sec.setTitle(f"{title} ({sum(b.isChecked() for b in boxes)}/{len(boxes)} selected)")
+            for cb in boxes:
+                cb.stateChanged.connect(_refresh)
+            _refresh()
+            self.timepoint_lay.addWidget(sec)
+
+        matched = set()
+        for gname, patterns in deepcopy(behav3d_calculated_features).items():
+            vals = []
+            for pat in patterns:
+                vals.extend(expand_column_patterns(pat, feat_cols))
+            names = sorted({v for v in vals if v in feat_cols and v not in matched})
+            if names:
+                _add_group(gname, names)
+                matched.update(names)
+        other = sorted(c for c in feat_cols if c not in matched)
+        if other:
+            _add_group("other", other)
+
+        if not bin_cols:
+            self.binary_lay.addWidget(QLabel("<i>No binary columns detected.</i>"))
+        for b in bin_cols:
+            cb = QCheckBox(b)
+            cb.setChecked(b in saved_bin)
+            cb.stateChanged.connect(self._update_tab_labels)
+            self._binary_checkboxes[b] = cb
+            self.binary_lay.addWidget(cb)
+
+        self.set_params(cfg, rebuild_checks=False)
+        self._rebuild_logscale()
+
+    def _selected_continuous(self):
+        feats = [f for f, cb in self._timepoint_checkboxes.items() if cb.isChecked()]
+        return feats + [f for f, cb in self._window_checkboxes.items() if cb.isChecked()]
+
+    def _rebuild_logscale(self, *_):
+        # Features already listed keep their current tick; only newly listed ones
+        # take the saved / default choice.
+        prev_present = set(self._logscale_checkboxes)
+        prev = {f for f, cb in self._logscale_checkboxes.items() if cb.isChecked()}
+        pending = set(self._pending_cfg.get("log_scale_features", []) or [])
+        _clear_layout(self.logscale_lay)
+        self._logscale_checkboxes = {}
+        selected = self._selected_continuous()
+        default_log = set(_DEFAULT_LOG_SCALE_FEATURES) if "log_scale_features" not in self._pending_cfg else set()
+        for i, f in enumerate(selected):
+            cb = QCheckBox(f)
+            cb.setChecked(f in prev if f in prev_present else (f in pending or f in default_log))
+            cb.stateChanged.connect(self.paramsChanged)
+            self._logscale_checkboxes[f] = cb
+            self.logscale_lay.addWidget(cb, i // 3, i % 3)
+        self._update_tab_labels()
+
+    def _update_tab_labels(self, *_):
+        self.paramsChanged.emit()
+        n_tp = sum(cb.isChecked() for cb in self._timepoint_checkboxes.values())
+        n_win = (
+            sum(cb.isChecked() for cb in self._window_checkboxes.values())
+            + int(self.chk_tracklet_net_disp.isChecked())
+            + int(self.chk_tracklet_net_disp_sq.isChecked())
+        )
+        n_bin = sum(cb.isChecked() for cb in self._binary_checkboxes.values())
+        self.tabs.setTabText(0, f"Timepoint Features ({n_tp})")
+        self.tabs.setTabText(1, f"Window Features ({n_win})")
+        self.tabs.setTabText(2, f"Binary Features ({n_bin})")
+
+    # ── params ──────────────────────────────────────────────────────────
+    def params(self) -> dict:
+        lo = float(self.spin_quant_lo.value())
+        hi = float(self.spin_quant_hi.value())
+        if self._scanning:
+            # The checkboxes don't exist yet; report the saved selection rather
+            # than an empty one, so persisting the settings while the column scan
+            # is still running can never wipe what was saved.
+            pending = self._pending_cfg or {}
+            features = list(pending.get("features") or [])
+            binary = list(pending.get("binary_features") or [])
+            log_scale = list(pending.get("log_scale_features") or [])
+        else:
+            features = [f for f, cb in self._timepoint_checkboxes.items() if cb.isChecked()]
+            binary = [b for b, cb in self._binary_checkboxes.items() if cb.isChecked()]
+            log_scale = [f for f, cb in self._logscale_checkboxes.items() if cb.isChecked()]
+        return {
+            "features": features,
+            "binary_features": binary,
+            "additional_window_features": [f for f, cb in self._window_checkboxes.items() if cb.isChecked()],
+            "window_features_window": int(self.spin_window_size.value()),
+            "feature_smoothing_window": int(self.spin_smoothing.value()),
+            "lower_quantile_cap": lo if lo > 0 else None,
+            "upper_quantile_cap": hi if hi < 1 else None,
+            "log_scale_features": log_scale,
+            "start_offset": int(self.spin_start_offset.value()),
+        }
+
+    def set_params(self, cfg: dict, rebuild_checks: bool = True):
+        cfg = dict(cfg or {})
+        self._pending_cfg = cfg
+        if rebuild_checks:
+            if "features" in cfg:
+                wanted = set(cfg["features"] or [])
+                for f, cb in self._timepoint_checkboxes.items():
+                    cb.setChecked(f in wanted)
+            if "binary_features" in cfg:
+                wanted = set(cfg["binary_features"] or [])
+                for f, cb in self._binary_checkboxes.items():
+                    cb.setChecked(f in wanted)
+        if "additional_window_features" in cfg:
+            wanted = set(cfg["additional_window_features"] or [])
+            for f, cb in self._window_checkboxes.items():
+                cb.setChecked(f in wanted)
+        if cfg.get("window_features_window") is not None:
+            self.spin_window_size.setValue(int(cfg["window_features_window"]))
+        if cfg.get("feature_smoothing_window") is not None:
+            self.spin_smoothing.setValue(int(cfg["feature_smoothing_window"]))
+        if "lower_quantile_cap" in cfg:
+            self.spin_quant_lo.setValue(float(cfg["lower_quantile_cap"] or 0.0))
+        if "upper_quantile_cap" in cfg:
+            self.spin_quant_hi.setValue(float(cfg["upper_quantile_cap"] or 1.0))
+        if cfg.get("start_offset") is not None:
+            self.spin_start_offset.setValue(int(cfg["start_offset"]))
+        if rebuild_checks:
+            self._logscale_checkboxes = {}
+            self._rebuild_logscale()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Track Classification sub-tab
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TrackClassificationSubTab(QWidget):
-    """Steps 1-5 for DTW-based track trajectory classification + backprojection."""
+class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
+    """Track clustering (config + rename), classifier training, reports/plots and
+    backprojection for DTW-based track trajectory classification."""
+
+    _REPORT_SECTION = "track_reports"
+    _REPORT_SETTINGS = {
+        "track_composition": {
+            "group_x": "combo_track_proportion_group_x",
+            "group_x_grouped": "chk_track_proportion_group_x_conditions",
+            "group_x_levels": "group_selector_track_proportion_x",
+            "group_y": "combo_track_proportion_group_y",
+            "group_y_grouped": "chk_track_proportion_group_y_conditions",
+            "group_y_levels": "group_selector_track_proportion_y",
+            "group_cols": "list_track_proportion_group_cols",
+            "time_bin_size": "spin_track_composition_time_bin",
+        },
+        "feature_heatmap": {
+            "scaling": "combo_feature_heatmap_scaling",
+            "features": ("_feature_heatmap_picked_items", "_restore_feature_heatmap_picked"),
+        },
+        "transition": {
+            "min_prob_percent": "spin_transanalysis_min_prob",
+            "emphasis_gamma": "spin_transanalysis_gamma",
+            "label_style": "combo_transanalysis_label_style",
+            "include_transition_matrix": "chk_transanalysis_include_matrix",
+            "include_circular_diagram": "chk_transanalysis_include_circular",
+            "include_self_transitions": "chk_transanalysis_include_self",
+            "include_per_cluster": "chk_transanalysis_include_per_cluster",
+            "include_window_sankey": "chk_transanalysis_include_window_sankey",
+        },
+        "condition_comparison": {
+            "condition_col": "combo_track_comparison_condition_col",
+            "group_conditions": "chk_track_comparison_group_conditions",
+            "condition_groups": "group_selector_track_comparison",
+            "group_x": "combo_track_comparison_group_x",
+            "group_x_grouped": "chk_track_comparison_group_x_conditions",
+            "group_x_levels": "group_selector_track_comparison_x",
+            "group_cols": "list_track_comparison_group_cols",
+        },
+        "exemplars": {
+            "n_per_cluster": "spin_n_per_cluster",
+            "overview_statebars": "chk_overview_statebars",
+            "backprojection_pdf": "chk_backproj_pdf",
+            "backprojection_mp4": "chk_backproj_mp4",
+        },
+        # Shared by every contact analysis button.
+        "contact": {
+            "contact_col": "combo_contact_col",
+            "min_bout_length": "spin_contact_min_bout",
+            "use_target_class": "chk_use_target_class",
+            "target_class_source": "combo_target_class_source",
+            "target_state_col": "combo_target_state_col",
+            "group_x": "combo_contact_group_x",
+            "group_x_grouped": "chk_contact_group_x_conditions",
+            "group_x_levels": "group_selector_contact_x",
+            "group_y": "combo_contact_group_y",
+            "group_y_grouped": "chk_contact_group_y_conditions",
+            "group_y_levels": "group_selector_contact_y",
+            "group_cols": "list_contact_group_cols",
+        },
+        "contact_duration": {
+            "test_mode": "combo_duration_test_mode",
+            "pairing_cols": "list_duration_pairing_cols",
+            # Unit before threshold: the unit sets the threshold's range.
+            "long_contact_unit": "combo_long_contact_unit",
+            "long_contact_threshold": "spin_long_contact_threshold",
+            "comparisons_per_page": "spin_duration_comparisons_per_page",
+        },
+        "contact_type_comparison": {
+            "contact_cols": "list_contact_type_compare_cols",
+        },
+        "contact_overview": {
+            "state_col": "combo_contact_shift_state_col",
+            "rows_per_page": "spin_track_overview_rows_per_page",
+        },
+    }
 
     def __init__(self, viewer=None, metadata_loader=None, cell_type_getter=None,
                  parent=None):
@@ -3107,9 +5855,18 @@ class TrackClassificationSubTab(QWidget):
         self.metadata_loader = metadata_loader
         self._get_cell_type = cell_type_getter
         self._track_adata = None
+        # (path, mtime, size) of the file ``_track_adata`` was read from; lets
+        # ``_reload`` keep the loaded copy while the file is unchanged.
+        self._track_adata_key = None
         self._track_adata_load_error: Optional[str] = None
+        # Longest-track lookup for the Trajectory size cap (see
+        # ``_apply_max_trajectory_size``); kept off ``_preload_bg`` so the two
+        # don't collide on BackgroundOperation's one-job-at-a-time guard.
+        self._maxlen_bg = BackgroundOperation(self, silent=True, notify=True)
+        self._max_len_wanted = None
         self._bg = BackgroundOperation(self)
-        self._preload_bg = BackgroundOperation(self)
+        self._preload_bg = BackgroundOperation(self, silent=True, notify=True)
+        self._preload_loader = _LatestOnlyLoader(self._preload_bg)
         # Current-timepoint-only track-cluster backprojection preview (see
         # `_refresh_track_bp_layer`): recomputed on every dims scrub instead
         # of writing a full per-sample zarr up front.
@@ -3132,12 +5889,16 @@ class TrackClassificationSubTab(QWidget):
 
     def _init_ui(self):
         from behav3d.napari._guided import make_back_header
+        from behav3d.core.state_columns import (
+            FULL_STATE_COL,
+            INTRINSIC_STATE_COL,
+        )
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # Pinned above the scroll area (not inside it) so it stays visible
+        # Pinned above the stack (outside any scroll area) so it stays visible
         # regardless of how far the plotting page's content scrolls. Only
         # shown while the plotting page (outer page 1) is active.
         self._plotting_header, self._pipeline_title = make_back_header(
@@ -3146,28 +5907,25 @@ class TrackClassificationSubTab(QWidget):
         self._plotting_header.hide()
         outer.addWidget(self._plotting_header)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        outer.addWidget(scroll)
-
-        content = QWidget()
-        content_lay = QVBoxLayout(content)
-        content_lay.setContentsMargins(0, 0, 0, 0)
-        content_lay.setSpacing(0)
-        scroll.setWidget(content)
-
-        # Outer per-subtab stack: page 0 = clustering settings (Steps 1/2/4 +
-        # the "Generate analysis and plots" trigger), page 1 = the fully
-        # isolated plotting page, reached only via that trigger.
+        # Outer per-subtab stack: page 0 = clustering settings (track clustering,
+        # train classifier, backprojection + the "Generate analysis and plots"
+        # trigger), page 1 = the fully isolated plotting page, reached only via
+        # that trigger. Each page owns its scroll area; the stack must not sit
+        # inside a shared one, since a QStackedWidget sizes to its tallest page
+        # and would pad the short plotting page with page 0's height (blank
+        # space, mid-page scroll).
         self._subtab_stack = QStackedWidget()
-        content_lay.addWidget(self._subtab_stack)
+        outer.addWidget(self._subtab_stack, stretch=1)
 
+        self._settings_scroll = QScrollArea()
+        self._settings_scroll.setWidgetResizable(True)
+        self._settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         settings_page = QWidget()
         lay = QVBoxLayout(settings_page)
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(6)
-        self._subtab_stack.addWidget(settings_page)  # outer page 0
+        self._settings_scroll.setWidget(settings_page)
+        self._subtab_stack.addWidget(self._settings_scroll)  # outer page 0
 
         # ── Warning label (prerequisite check) ──────────────────────────
         self.warning_label = QLabel("")
@@ -3190,7 +5948,8 @@ class TrackClassificationSubTab(QWidget):
         ap_lay.setSpacing(5)
 
         ap_lay.addWidget(_make_info_label("Load an existing trained classifier (.pkl) and behavioral states file (.h5ad)"
-                                           " to classify trajectories without running Steps 1–3."))
+                                           " to classify trajectories without running track clustering, renaming, or"
+                                           " classifier training first."))
 
         self.le_pretrained_clf_path = QLineEdit()
         self.le_pretrained_clf_path.setPlaceholderText("Path to trained classifier .pkl")
@@ -3217,20 +5976,97 @@ class TrackClassificationSubTab(QWidget):
         self.grp_apply_pretrained.hide()
         lay.addWidget(self.grp_apply_pretrained)
 
-        # ── Step 1: Track Clustering ─────────────────────────────────────
-        self.grp1 = QGroupBox("Step 1 — Track Clustering")
-        g1 = QVBoxLayout(self.grp1)
+        # ── Group: Track clustering (config + rename) ─────────────────────
+        self.grp_track = CollapsibleSection("Track clustering", expanded=True, highlight=True)
+        g1 = self.grp_track.contentLayout()
         g1.setSpacing(4)
 
-        # "Use original" at top (shown only when original mode is active)
-        self.chk_use_original_top = QCheckBox(
-            "Use original feature-based BEHAV3D DTW Clustering"
+        # Trajectory clustering method — the top-level choice between the
+        # state-based pipelines (DTW/Bouts/state-features, chosen via Basis just
+        # below once selected) and feature-based clustering (raw per-timepoint
+        # features, picked via the Trajectory Features tabs below). Styled as a
+        # standalone highlighted card so it reads as the first decision to make
+        # here, not just another form row.
+        method_frame = QFrame()
+        method_frame.setObjectName("clusteringMethodCard")
+        method_frame.setStyleSheet(
+            "QFrame#clusteringMethodCard { background: #1b2b3a; "
+            "border: 1px solid #3a6ea5; border-radius: 6px; }"
         )
-        self.chk_use_original_top.setChecked(False)
-        self.chk_use_original_top.hide()
-        g1.addWidget(self.chk_use_original_top)
+        method_lay = QHBoxLayout(method_frame)
+        method_lay.setContentsMargins(8, 6, 8, 6)
+        method_label = QLabel("Trajectory clustering method:")
+        method_label.setStyleSheet("font-weight: bold; font-size: 12px; color: #ddeeff;")
+        method_lay.addWidget(method_label)
+        self.combo_clustering_family = QComboBox()
+        self.combo_clustering_family.addItem("State-based", "state_based")
+        self.combo_clustering_family.addItem("Feature-based", "feature_based")
+        self.combo_clustering_family.setStyleSheet("font-weight: bold;")
+        method_lay.addWidget(self.combo_clustering_family, stretch=1)
+        method_lay.addWidget(HelpButton(
+            "Trajectory clustering method",
+            "'State-based' clusters tracks using their behavioral-state sequence "
+            "(from State Classification): choose the Basis below (dtw on the state "
+            "sequence, or bouts/proportions). 'Feature-based' instead clusters "
+            "tracks by dynamic time warping over hand-picked raw per-timepoint "
+            "features (Trajectory Features below), and does not require State "
+            "Classification to have been run; tick 'Use features used in "
+            "behavioral state clustering' there to instead run DTW over the state "
+            "model's own numeric features with its exact scaling. An 'Advanced: "
+            "run legacy BEHAV3D algorithm' option in Advanced Configuration "
+            "switches Feature-based to the original BEHAV3D DTW+UMAP+KMeans "
+            "pipeline instead of the newer DTW+Agglomerative/Leiden one."
+        ))
+        g1.addWidget(method_frame)
 
-        # Shared: Trajectory size + N clusters (always visible)
+        self._state_features_preset_frame = QFrame()
+        state_features_preset_lay = QVBoxLayout(self._state_features_preset_frame)
+        state_features_preset_lay.setContentsMargins(0, 0, 0, 0)
+        self.chk_use_state_features_preset = QCheckBox(
+            "Use features used in behavioral state clustering"
+        )
+        self.chk_use_state_features_preset.setChecked(False)
+        state_features_preset_lay.addLayout(_make_chk_help_row(
+            self.chk_use_state_features_preset, "Use features used in behavioral state clustering",
+            "Reuse the exact continuous and binary features -- and the exact saved "
+            "scaling/preprocessing -- the behavioral-state model was built from, "
+            "instead of hand-picking and re-scaling features below. Locks the "
+            "Trajectory Features selector below. Only shown once State "
+            "Classification has been run for this cell type."
+        ))
+        self.lbl_state_features_preset = QLabel("")
+        self.lbl_state_features_preset.setWordWrap(True)
+        self.lbl_state_features_preset.setStyleSheet(
+            "QLabel { background: #1a2e2e; color: #66ddcc; border-radius: 4px; "
+            "padding: 6px 8px; font-size: 11px; font-family: monospace; }"
+        )
+        self.lbl_state_features_preset.hide()
+        state_features_preset_lay.addWidget(self.lbl_state_features_preset)
+        self._state_features_preset_frame.setVisible(False)
+        g1.addWidget(self._state_features_preset_frame)
+
+        self._traj_features_section = CollapsibleSection("Trajectory Features", expanded=True)
+        self.traj_feature_selector = TrajectoryFeatureSelector()
+        self.traj_feature_selector.paramsChanged.connect(self._update_track_config_summary)
+        self._traj_features_section.addWidget(self.traj_feature_selector)
+        self._traj_features_section.setVisible(False)
+        g1.addWidget(self._traj_features_section)
+
+        # Feature-based configuration summary — which features/preprocessing were
+        # chosen. Placed directly under Trajectory Features (rather than after the
+        # clustering-parameter widgets below, e.g. the State Classification tab's
+        # mirrored config_summary_label) so the feature selection is visible at a
+        # glance before the clustering parameters that follow it.
+        self.traj_config_summary_label = QLabel("")
+        self.traj_config_summary_label.setWordWrap(True)
+        self.traj_config_summary_label.setStyleSheet(
+            "QLabel { background: #1a2e2e; color: #66ddcc; border-radius: 4px; "
+            "padding: 8px 10px; font-size: 11px; font-family: monospace; }"
+        )
+        self.traj_config_summary_label.hide()
+        g1.addWidget(self.traj_config_summary_label)
+
+        # Shared: Trajectory size + divide-long-tracks (always visible)
         basic_form = QFormLayout()
         basic_form.setSpacing(3)
         self.spin_traj_size = QSpinBox()
@@ -3248,48 +6084,84 @@ class TrackClassificationSubTab(QWidget):
         self.lbl_traj_size_time = _make_timepoint_time_label()
         basic_form.addRow("", self.lbl_traj_size_time)
         self.spin_traj_size.valueChanged.connect(self._update_timepoint_time_labels)
+        self.chk_split_long_tracks = QCheckBox("Divide long tracks")
+        self.chk_split_long_tracks.setChecked(False)
+        basic_form.addRow("", _make_chk_help_row(
+            self.chk_split_long_tracks, "Divide long tracks",
+            "Split tracks longer than Trajectory size into non-overlapping full-length "
+            "analysis windows. Leftover timepoints are discarded. Original TrackID values "
+            "are preserved for backprojection."
+        ))
+        g1.addLayout(basic_form)
+
+        # N clusters — only meaningful for agglomerative clustering (Leiden's cluster
+        # count is emergent, set via Leiden resolution instead below), so it lives in
+        # its own frame that _apply_clustering_controls_mode hides/shows as a whole row.
+        self._n_clusters_frame = QFrame()
+        n_clusters_form = QFormLayout(self._n_clusters_frame)
+        n_clusters_form.setSpacing(3)
         self.spin_n_clusters = QSpinBox()
         self.spin_n_clusters.setRange(2, 200)
         self.spin_n_clusters.setValue(6)
         self.spin_n_clusters.setMaximumWidth(90)
-        basic_form.addRow("N clusters:", make_help_row(
+        n_clusters_form.addRow("N clusters:", make_help_row(
             self.spin_n_clusters, "N clusters",
             "Number of trajectory clusters to create via hierarchical clustering of "
             "DTW distances."
         ))
-        g1.addLayout(basic_form)
+        g1.addWidget(self._n_clusters_frame)
 
         # Trajectory basis + clustering method — the two main choices, kept always
         # visible (not buried in Advanced Configuration) since they each gate a
-        # different set of downstream parameter fields.
+        # different set of downstream parameter fields. The Basis row only applies
+        # to State-based mode; the Method row applies to State-based and the new
+        # (non-legacy) Feature-based pipeline, but not legacy Feature-based, which
+        # is always KMeans (see _apply_clustering_family_mode).
         self._basis_method_frame = QFrame()
         basis_method_form = QFormLayout(self._basis_method_frame)
         basis_method_form.setSpacing(3)
 
+        self._basis_row = QFrame()
+        basis_row_form = QFormLayout(self._basis_row)
+        basis_row_form.setContentsMargins(0, 0, 0, 0)
+        basis_row_form.setSpacing(3)
         self.combo_trajectory_basis = QComboBox()
         self.combo_trajectory_basis.addItems(["dtw", "bouts"])
         self.combo_trajectory_basis.setMaximumWidth(130)
-        basis_method_form.addRow("Basis:", make_help_row(
+        basis_row_form.addRow("Basis:", make_help_row(
             self.combo_trajectory_basis, "Trajectory basis",
             "'dtw' clusters tracks by dynamic time warping distance over their raw "
-            "per-timepoint state sequences. 'bouts' instead describes each track with "
-            "bout/proportion features (fraction of time per state, bout counts/lengths, "
-            "state-transition probabilities, n-grams) and clusters those feature vectors."
+            "per-timepoint behavioral-state sequences. 'bouts' describes each track "
+            "with bout/proportion features (fraction of time per state, bout "
+            "counts/lengths, state-transition probabilities, n-grams) and clusters "
+            "those feature vectors. To instead run DTW over the numeric features the "
+            "states were built from (continuous features with the state model's exact "
+            "scaling, plus the binary grouping columns) rather than the state labels "
+            "themselves, switch 'Trajectory clustering method' to 'Feature-based' and "
+            "tick 'Use features used in behavioral state clustering' below."
         ))
+        basis_method_form.addRow(self._basis_row)
 
+        self._method_row = QFrame()
+        method_row_form = QFormLayout(self._method_row)
+        method_row_form.setContentsMargins(0, 0, 0, 0)
+        method_row_form.setSpacing(3)
         self.combo_clustering_method = QComboBox()
         self.combo_clustering_method.addItems(["agglomerative", "leiden"])
         self.combo_clustering_method.setMaximumWidth(130)
-        basis_method_form.addRow("Method:", make_help_row(
+        method_row_form.addRow("Method:", make_help_row(
             self.combo_clustering_method, "Clustering method",
-            "Algorithm used to group tracks from the chosen basis above. "
+            "Algorithm used to group tracks from the chosen basis/features above. "
             "'agglomerative' uses a fixed cluster count (N clusters, Linkage below). "
             "'leiden' finds density-based communities instead, so the number of "
             "clusters is emergent (set via Leiden resolution below)."
         ))
+        basis_method_form.addRow(self._method_row)
         g1.addWidget(self._basis_method_frame)
 
-        # UMAP parameters (only in original mode)
+        # UMAP parameters (only in legacy Feature-based mode; placed into
+        # Advanced Configuration's _legacy_settings_frame below, since this
+        # widget must exist before that frame is built)
         self._umap_frame = QFrame()
         self._umap_frame.setVisible(False)
         umap_form = QFormLayout(self._umap_frame)
@@ -3314,14 +6186,14 @@ class TrackClassificationSubTab(QWidget):
             "Minimum distance between points in the UMAP embedding. Smaller values "
             "produce tighter clusters."
         ))
-        g1.addWidget(self._umap_frame)
 
         # Advanced Configuration (hidden in original mode, contains "Use original" checkbox)
         self.adv1 = CollapsibleSection("⚙ Advanced Configuration", expanded=False)
 
-        # Trim mode + divide-long-tracks apply to both bases (DTW and Bouts/proportions
-        # both truncate/split tracks the same way before clustering), so they stay in a
-        # plain shared form rather than a basis-toggled frame.
+        # Trim mode applies to both bases (DTW and Bouts/proportions both truncate
+        # tracks to Trajectory size the same way before clustering), so it stays in a
+        # plain shared form rather than a basis-toggled frame. ("Divide long tracks" is
+        # shown up in the always-visible basic_form, directly under Trajectory size.)
         trim_form = QFormLayout()
         trim_form.setSpacing(3)
         self.combo_trim = QComboBox()
@@ -3332,14 +6204,6 @@ class TrackClassificationSubTab(QWidget):
             "How to trim each track to Trajectory size: "
             "'last' keeps each track's final N timepoints (removes leading/early ones); "
             "'first' keeps each track's first N timepoints (removes trailing/late ones)."
-        ))
-        self.chk_split_long_tracks = QCheckBox("Divide long tracks")
-        self.chk_split_long_tracks.setChecked(False)
-        trim_form.addRow("", _make_chk_help_row(
-            self.chk_split_long_tracks, "Divide long tracks",
-            "Split tracks longer than Trajectory size into non-overlapping full-length "
-            "analysis windows. Leftover timepoints are discarded. Original TrackID values "
-            "are preserved for backprojection."
         ))
         self.adv1.addLayout(trim_form)
 
@@ -3469,14 +6333,6 @@ class TrackClassificationSubTab(QWidget):
             "(threshold 0.95) before clustering -- catches exact collinearities such as K "
             "fractions that must sum to 1."
         ))
-        self.chk_bouts_plot_exemplars = QCheckBox("Also generate exemplar PDFs")
-        self.chk_bouts_plot_exemplars.setChecked(True)
-        bouts_form.addRow("", _make_chk_help_row(
-            self.chk_bouts_plot_exemplars, "Also generate exemplar PDFs",
-            "Generate exemplar-track PDFs during Run, matching the DTW basis's automatic "
-            "exemplar overview. Bouts diagnostics/exemplar PDFs are produced inline here; "
-            "the separate Diagnostics/Exemplar PDF buttons below are DTW-only."
-        ))
         self.adv1.addWidget(self._bouts_frame)
 
         # Parallel computation / save-distance-matrix are DTW-distance-matrix-specific
@@ -3504,6 +6360,73 @@ class TrackClassificationSubTab(QWidget):
         ))
         self.adv1.addWidget(self._dtw_technical_frame)
 
+        # Feature-DTW only: Feature-based's DTW pipeline, including when the "Use
+        # features used in behavioral state clustering" preset is checked (which
+        # reuses the state model's own binary grouping columns) -- how much the
+        # binary (contact) columns count relative to the continuous features in
+        # the DTW distance.
+        self._dtw_features_frame = QFrame()
+        dtw_features_form = QFormLayout(self._dtw_features_frame)
+        dtw_features_form.setSpacing(3)
+        self.spin_binary_weight = QDoubleSpinBox()
+        self.spin_binary_weight.setRange(0.0, 10.0)
+        self.spin_binary_weight.setSingleStep(0.25)
+        self.spin_binary_weight.setDecimals(2)
+        self.spin_binary_weight.setValue(1.0)
+        self.spin_binary_weight.setMaximumWidth(90)
+        dtw_features_form.addRow("Binary weight:", make_help_row(
+            self.spin_binary_weight, "Binary weight",
+            "Weight of the binary (e.g. contact) columns in the feature DTW distance. "
+            "They are standardized like the continuous features, so 1 = each binary column "
+            "counts as much as one continuous feature; 0 leaves them out; >1 makes "
+            "contacts drive the clustering more."
+        ))
+        self.adv1.addWidget(self._dtw_features_frame)
+
+        # QC UMAP embedding of the DTW distance matrix. Display only: these never
+        # change the distance matrix or the cluster assignments.
+        self._dtw_umap_frame = QFrame()
+        dtw_umap_form = QFormLayout(self._dtw_umap_frame)
+        dtw_umap_form.setSpacing(3)
+        self.spin_dtw_umap_neighbors = QSpinBox()
+        self.spin_dtw_umap_neighbors.setRange(2, 200)
+        self.spin_dtw_umap_neighbors.setValue(15)
+        self.spin_dtw_umap_neighbors.setMaximumWidth(90)
+        dtw_umap_form.addRow("UMAP n_neighbors:", make_help_row(
+            self.spin_dtw_umap_neighbors, "UMAP n_neighbors",
+            "Number of neighbouring tracks used to build the UMAP graph. Lower values "
+            "(5-10) emphasise local structure and can split apart tight clumps; higher "
+            "values capture more global structure. Only affects the UMAP plot, not the clusters."
+        ))
+        self.spin_dtw_umap_min_dist = QDoubleSpinBox()
+        self.spin_dtw_umap_min_dist.setRange(0.0, 3.0)
+        self.spin_dtw_umap_min_dist.setSingleStep(0.05)
+        self.spin_dtw_umap_min_dist.setDecimals(3)
+        self.spin_dtw_umap_min_dist.setValue(0.1)
+        self.spin_dtw_umap_min_dist.setMaximumWidth(90)
+        dtw_umap_form.addRow("UMAP min_dist:", make_help_row(
+            self.spin_dtw_umap_min_dist, "UMAP min_dist",
+            "Minimum distance between points in the UMAP embedding. Raise it (0.3-0.8) "
+            "if points look too compact; lower it for tighter clusters. Must be <= spread. "
+            "Only affects the UMAP plot, not the clusters."
+        ))
+        self.spin_dtw_umap_spread = QDoubleSpinBox()
+        self.spin_dtw_umap_spread.setRange(0.1, 5.0)
+        self.spin_dtw_umap_spread.setSingleStep(0.25)
+        self.spin_dtw_umap_spread.setDecimals(2)
+        self.spin_dtw_umap_spread.setValue(1.0)
+        self.spin_dtw_umap_spread.setMaximumWidth(90)
+        dtw_umap_form.addRow("UMAP spread:", make_help_row(
+            self.spin_dtw_umap_spread, "UMAP spread",
+            "Overall scale of the UMAP embedding. Together with min_dist it controls how "
+            "spread out points are; raising it (1.5-3) spreads everything out. "
+            "Only affects the UMAP plot, not the clusters."
+        ))
+        # UMAP requires min_dist <= spread; keep the controls consistent.
+        self.spin_dtw_umap_spread.valueChanged.connect(self.spin_dtw_umap_min_dist.setMaximum)
+        self.spin_dtw_umap_min_dist.setMaximum(self.spin_dtw_umap_spread.value())
+        self.adv1.addWidget(self._dtw_umap_frame)
+
         self.spin_seed = QSpinBox()
         self.spin_seed.setRange(0, 99999)
         self.spin_seed.setValue(123)
@@ -3516,22 +6439,57 @@ class TrackClassificationSubTab(QWidget):
         ))
         self.adv1.addLayout(seed_form)
 
-        # Separator + "Use original" checkbox at the bottom of Advanced Config
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("color: #444;")
-        self.adv1.addWidget(sep)
+        # Separator + Feature-based-only settings at the bottom of Advanced
+        # Config: shown only when the top-level method dropdown is set to
+        # Feature-based. Nested inside: the "run legacy BEHAV3D" toggle itself
+        # (an advanced, rarely-used option — the default is the newer
+        # DTW+Agglomerative/Leiden pipeline configured above) plus its own
+        # exact-settings/UMAP sub-controls.
+        self._feature_based_sep = QFrame()
+        self._feature_based_sep.setFrameShape(QFrame.HLine)
+        self._feature_based_sep.setStyleSheet("color: #444;")
+        self._feature_based_sep.setVisible(False)
+        self.adv1.addWidget(self._feature_based_sep)
 
-        self.chk_use_original = QCheckBox(
-            "Use original feature-based BEHAV3D DTW Clustering"
+        self._feature_based_frame = QFrame()
+        self._feature_based_frame.setVisible(False)
+        fb_lay = QVBoxLayout(self._feature_based_frame)
+        fb_lay.setContentsMargins(0, 0, 0, 0)
+        fb_lay.setSpacing(4)
+
+        self.chk_run_legacy_behav3d = QCheckBox(
+            "Advanced: run legacy BEHAV3D algorithm (DTW → UMAP → KMeans)"
         )
-        self.chk_use_original.setChecked(False)
-        self.adv1.addLayout(_make_chk_help_row(
-            self.chk_use_original, "Use original BEHAV3D DTW",
-            "Switch to the original feature-based BEHAV3D DTW pipeline (run_tcell_analysis). "
-            "When checked, the checkbox moves to the top of Step 1, Advanced Configuration "
-            "is hidden, and UMAP parameters appear."
+        self.chk_run_legacy_behav3d.setChecked(False)
+        fb_lay.addLayout(_make_chk_help_row(
+            self.chk_run_legacy_behav3d, "Run legacy BEHAV3D algorithm",
+            "When unchecked (default), Feature-based clustering runs the newer pipeline: "
+            "a DTW distance matrix over the features selected above, clustered directly "
+            "via Agglomerative or Leiden (Method, above). When checked, it instead runs "
+            "the original BEHAV3D R pipeline's algorithm: DTW distance → UMAP "
+            "embedding → KMeans on the UMAP coordinates."
         ))
+
+        self._legacy_settings_frame = QFrame()
+        legacy_lay = QVBoxLayout(self._legacy_settings_frame)
+        legacy_lay.setContentsMargins(0, 0, 0, 0)
+        legacy_lay.setSpacing(4)
+
+        self.chk_use_exact_original_settings = QCheckBox(
+            "Use exact original BEHAV3D settings"
+        )
+        self.chk_use_exact_original_settings.setChecked(True)
+        legacy_lay.addLayout(_make_chk_help_row(
+            self.chk_use_exact_original_settings, "Use exact original BEHAV3D settings",
+            "When checked, reproduces the original BEHAV3D R pipeline exactly: DTW over "
+            "mean_square_displacement, speed and mean_dead_dye (quantile-scaled), plus "
+            "every detected contact column (min-max scaled). Uncheck to instead use "
+            "whichever features are selected in Trajectory Features above."
+        ))
+        legacy_lay.addWidget(self._umap_frame)
+        fb_lay.addWidget(self._legacy_settings_frame)
+
+        self.adv1.addWidget(self._feature_based_frame)
 
         g1.addWidget(self.adv1)
 
@@ -3541,31 +6499,20 @@ class TrackClassificationSubTab(QWidget):
         _style_primary(self.btn_run_track)
         run_row.addWidget(self.btn_run_track, stretch=1)
         run_row.addWidget(self.btn_queue_track_cluster)
-        self.btn_view_track = _make_view_btn()
-        run_row.addWidget(self.btn_view_track)
         g1.addLayout(run_row)
 
-        lay.addWidget(self.grp1)
-
-        # ── Step 2: Rename ───────────────────────────────────────────────
-        self.grp2 = QGroupBox("Step 2 — Rename Track Clusters")
-        g2 = QVBoxLayout(self.grp2)
-        g2.setSpacing(4)
-
+        # ── Rename clusters (same collapsible card as the config above) ───
         self.rename_track_status = QLabel("ℹ Run clustering first to enable renaming.")
         self.rename_track_status.setStyleSheet("color: #999; font-size: 11px;")
         self.rename_track_status.setWordWrap(True)
-        g2.addWidget(self.rename_track_status)
+        g1.addWidget(self.rename_track_status)
 
-        rename_row = QHBoxLayout()
         self.btn_rename_track = QPushButton("✏  Rename Track Clusters")
         _style_rename(self.btn_rename_track)
         self.btn_rename_track.setEnabled(False)
-        rename_row.addWidget(self.btn_rename_track, stretch=1)
-        self.btn_view_rename_track = _make_view_btn()
-        rename_row.addWidget(self.btn_view_rename_track)
-        g2.addLayout(rename_row)
-        lay.addWidget(self.grp2)
+        g1.addWidget(self.btn_rename_track)
+
+        lay.addWidget(self.grp_track)
 
         # ── Train Track Classifier (last step) ───────────────────────────
         self.grp3 = CollapsibleSection("Train track classifier", expanded=False)
@@ -3678,8 +6625,6 @@ class TrackClassificationSubTab(QWidget):
         self.btn_train_track.setEnabled(False)
         train_rf_run_row.addWidget(self.btn_train_track, stretch=1)
         train_rf_run_row.addWidget(self.btn_queue_train_track)
-        self.btn_view_train_track = _make_view_btn()
-        train_rf_run_row.addWidget(self.btn_view_train_track)
         g_train_rf.addLayout(train_rf_run_row)
         g3.addWidget(grp_train_rf)
 
@@ -3714,12 +6659,10 @@ class TrackClassificationSubTab(QWidget):
         self.btn_apply_track.setEnabled(False)
         apply_clf_run_row.addWidget(self.btn_apply_track, stretch=1)
         apply_clf_run_row.addWidget(self.btn_queue_apply_track)
-        self.btn_view_apply_track = _make_view_btn()
-        apply_clf_run_row.addWidget(self.btn_view_apply_track)
         g_apply_clf.addLayout(apply_clf_run_row)
         g3.addWidget(grp_apply_clf)
 
-        # ── Step 3: Create Plots (built directly into per-pipeline group boxes) ──
+        # ── Step 3: Reports & Plots (built directly into per-pipeline group boxes) ──
         self.grp_diag = QGroupBox("Diagnostic")
         g_diag = QVBoxLayout(self.grp_diag)
         g_diag.setSpacing(4)
@@ -3735,7 +6678,7 @@ class TrackClassificationSubTab(QWidget):
         diag_row.addWidget(self.btn_view_diagnostics)
         g_diag.addLayout(diag_row)
 
-        self.grp_track_proportions = QGroupBox("Track Proportions")
+        self.grp_track_proportions = QGroupBox("Track Composition Report")
         g_prop = QVBoxLayout(self.grp_track_proportions)
         g_prop.setSpacing(4)
         g_prop.addWidget(_make_info_label(
@@ -3768,30 +6711,195 @@ class TrackClassificationSubTab(QWidget):
         self.list_track_proportion_group_cols = QListWidget()
         self.list_track_proportion_group_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
         g_prop.addWidget(self.list_track_proportion_group_cols)
+        track_bin_form = QFormLayout()
+        track_bin_form.setSpacing(3)
+        self.spin_track_composition_time_bin = QSpinBox()
+        self.spin_track_composition_time_bin.setRange(1, 100000)
+        self.spin_track_composition_time_bin.setValue(1)
+        self.spin_track_composition_time_bin.setMaximumWidth(100)
+        track_bin_form.addRow("Time bin size:", make_help_row(
+            self.spin_track_composition_time_bin, "Time bin size (timepoints)",
+            "Groups timepoints into buckets of this size before computing composition, "
+            "to reduce visual noise. 1 = no binning (raw per-frame resolution)."
+        ))
+        g_prop.addLayout(track_bin_form)
         prop_row = QHBoxLayout()
-        self.btn_track_proportions = QPushButton("▶ Create Track Proportion Plots")
+        self.btn_track_proportions = QPushButton("▶ Track Composition Report")
         _style_secondary(self.btn_track_proportions)
         prop_row.addWidget(self.btn_track_proportions, stretch=1)
         self.btn_view_track_proportions = _make_view_btn()
         prop_row.addWidget(self.btn_view_track_proportions)
         g_prop.addLayout(prop_row)
 
-        self.grp_window_transitions = QGroupBox("Window Transitions")
-        g_wintrans = QVBoxLayout(self.grp_window_transitions)
-        g_wintrans.setSpacing(4)
-        g_wintrans.addWidget(_make_info_label(
-            "Sankey diagram of how each track's trajectory cluster changes from one "
-            "window to the next - reconnects the sub-tracks 'Divide long tracks' split "
-            "a track into, back through their shared parent TrackID. One diagram per "
-            "sample, plus a pooled page. Needs 'Divide long tracks' to have been used."
+        self.grp_feature_heatmap = QGroupBox("Feature Heatmap")
+        g_fheat = QVBoxLayout(self.grp_feature_heatmap)
+        g_fheat.setSpacing(4)
+        g_fheat.addWidget(_make_info_label(
+            "Heatmap of trajectory clusters x features: each feature is averaged over "
+            "every track's trajectory timepoints, then per cluster. The features the "
+            "clustering / states used are preselected below; move others across from "
+            "Available, then drag rows in Selected to set the order they appear in the "
+            "plot. Cell labels show the unscaled cluster mean."
         ))
-        wintrans_row = QHBoxLayout()
-        self.btn_window_transitions = QPushButton("▶ Create Window Transition Sankey")
-        _style_secondary(self.btn_window_transitions)
-        wintrans_row.addWidget(self.btn_window_transitions, stretch=1)
+        g_fheat.addWidget(QLabel("Available features (click to select, then Add):"))
+        self.list_feature_heatmap_available = QListWidget()
+        self.list_feature_heatmap_available.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        g_fheat.addWidget(self.list_feature_heatmap_available)
+        self.btn_feature_heatmap_add = QPushButton("Add ▼")
+        g_fheat.addWidget(self.btn_feature_heatmap_add)
+        g_fheat.addWidget(QLabel("Selected features - drag to set the plot order:"))
+        self.list_feature_heatmap_picked = QListWidget()
+        self.list_feature_heatmap_picked.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.list_feature_heatmap_picked.setDragDropMode(QAbstractItemView.InternalMove)
+        self.list_feature_heatmap_picked.setDefaultDropAction(Qt.MoveAction)
+        g_fheat.addWidget(self.list_feature_heatmap_picked)
+        self.btn_feature_heatmap_remove = QPushButton("▲ Remove")
+        g_fheat.addWidget(self.btn_feature_heatmap_remove)
+        fheat_sel_row = QHBoxLayout()
+        self.btn_feature_heatmap_defaults = QPushButton("Select used features")
+        self.btn_feature_heatmap_all = QPushButton("Select all")
+        self.btn_feature_heatmap_clear = QPushButton("Clear")
+        for _b in (self.btn_feature_heatmap_defaults, self.btn_feature_heatmap_all,
+                   self.btn_feature_heatmap_clear):
+            fheat_sel_row.addWidget(_b)
+        g_fheat.addLayout(fheat_sel_row)
+
+        # Selected-features summary -- mirrors config_summary_label / traj_config_summary_label
+        # so the current pick is visible at a glance instead of having to scroll the list above.
+        self.feature_heatmap_summary_label = QLabel("")
+        self.feature_heatmap_summary_label.setWordWrap(True)
+        self.feature_heatmap_summary_label.setStyleSheet(
+            "QLabel { background: #1a2e2e; color: #66ddcc; border-radius: 4px; "
+            "padding: 6px 8px; font-size: 11px; font-family: monospace; }"
+        )
+        self.feature_heatmap_summary_label.hide()
+        g_fheat.addWidget(self.feature_heatmap_summary_label)
+
+        fheat_form = QFormLayout()
+        fheat_form.setSpacing(3)
+        self.combo_feature_heatmap_scaling = QComboBox()
+        self.combo_feature_heatmap_scaling.addItems(["z-score", "min-max"])
+        self.combo_feature_heatmap_scaling.setMaximumWidth(130)
+        fheat_form.addRow("Colour scaling:", make_help_row(
+            self.combo_feature_heatmap_scaling, "Colour scaling",
+            "'z-score': each feature is standardized across all tracks, then averaged per "
+            "cluster; 0 = the average track, red = higher, blue = lower. 'min-max': cluster "
+            "means rescaled 0-1 per feature, showing which cluster is highest/lowest."
+        ))
+        g_fheat.addLayout(fheat_form)
+        fheat_row = QHBoxLayout()
+        self.btn_feature_heatmap = QPushButton("▶ Create Feature Heatmap")
+        _style_secondary(self.btn_feature_heatmap)
+        fheat_row.addWidget(self.btn_feature_heatmap, stretch=1)
+        self.btn_view_feature_heatmap = _make_view_btn()
+        fheat_row.addWidget(self.btn_view_feature_heatmap)
+        g_fheat.addLayout(fheat_row)
+        self._feature_heatmap_candidates = []
+        self._feature_heatmap_defaults = []
+        self._feature_heatmap_cache_key = None
+
+        self.grp_transition_analysis = QGroupBox("Track Transition Report")
+        g_transanalysis = QVBoxLayout(self.grp_transition_analysis)
+        g_transanalysis.setSpacing(4)
+        g_transanalysis.addWidget(_make_info_label(
+            "Pooled inter-cluster transition analysis: a circular diagram of how often each "
+            "trajectory cluster transitions into every other cluster (window index is "
+            "collapsed), plus the row-normalized transition-probability matrix. Optionally "
+            "also a per-sample Sankey of how each track's cluster changes from one window "
+            "to the next. Needs 'Divide long tracks' to have been used."
+        ))
+        transanalysis_row = QHBoxLayout()
+        self.btn_transition_analysis = QPushButton("▶ Track Transition Report")
+        _style_secondary(self.btn_transition_analysis)
+        transanalysis_row.addWidget(self.btn_transition_analysis, stretch=1)
+        self.btn_view_transition_analysis = _make_view_btn()
+        transanalysis_row.addWidget(self.btn_view_transition_analysis)
+        g_transanalysis.addLayout(transanalysis_row)
+
+        adv_transition_analysis = CollapsibleSection("⚙ Advanced Configuration", expanded=True)
+        transanalysis_form = QFormLayout()
+        transanalysis_form.setSpacing(3)
+        self.spin_transanalysis_min_prob = QDoubleSpinBox()
+        self.spin_transanalysis_min_prob.setRange(0.0, 100.0)
+        self.spin_transanalysis_min_prob.setDecimals(1)
+        self.spin_transanalysis_min_prob.setSingleStep(0.5)
+        self.spin_transanalysis_min_prob.setValue(3.0)
+        self.spin_transanalysis_min_prob.setSuffix(" %")
+        transanalysis_form.addRow("Min probability cutoff:", make_help_row(
+            self.spin_transanalysis_min_prob, "Min Probability Cutoff",
+            "In the circular transition diagram, a transition below this probability is "
+            "dropped entirely (not just faded) so rare, noisy transitions don't clutter "
+            "the plot."
+        ))
+        self.spin_transanalysis_gamma = QDoubleSpinBox()
+        self.spin_transanalysis_gamma.setRange(0.5, 5.0)
+        self.spin_transanalysis_gamma.setDecimals(1)
+        self.spin_transanalysis_gamma.setSingleStep(0.1)
+        self.spin_transanalysis_gamma.setValue(2.0)
+        transanalysis_form.addRow("Emphasis (gamma):", make_help_row(
+            self.spin_transanalysis_gamma, "Emphasis Gamma",
+            "How hard the circular diagram's line width/opacity fall off for weaker "
+            "transitions. 1.0 is linear; higher values (e.g. 2-3) make the strongest "
+            "transitions stand out much more clearly against everything else."
+        ))
+        self.combo_transanalysis_label_style = QComboBox()
+        self.combo_transanalysis_label_style.addItems(["On dots", "Side legend"])
+        transanalysis_form.addRow("Node labels:", make_help_row(
+            self.combo_transanalysis_label_style, "Node Labels",
+            "Where the circular diagram's cluster names are shown: written inside each "
+            "dot ('On dots'), or moved to a numbered legend beside the plot ('Side "
+            "legend') - useful when names are long or there are many clusters."
+        ))
+        adv_transition_analysis.addLayout(transanalysis_form)
+
+        self.chk_transanalysis_include_matrix = QCheckBox("Transition matrix heatmap")
+        self.chk_transanalysis_include_matrix.setChecked(True)
+        adv_transition_analysis.addLayout(_make_chk_help_row(
+            self.chk_transanalysis_include_matrix, "Transition Matrix Heatmap",
+            "Include the transition-probability/count heatmap page."
+        ))
+        self.chk_transanalysis_include_circular = QCheckBox("Circular transition diagram")
+        self.chk_transanalysis_include_circular.setChecked(True)
+        adv_transition_analysis.addLayout(_make_chk_help_row(
+            self.chk_transanalysis_include_circular, "Circular Transition Diagram",
+            "Include the circular inter-cluster transition diagram pages: one page weighted by "
+            "outgoing probability (P(next | current)), then one weighted by incoming probability "
+            "(P(previous | current) - for each cluster, what share of its arrivals came from "
+            "each source)."
+        ))
+        self.chk_transanalysis_include_self = QCheckBox("Include self-transitions")
+        self.chk_transanalysis_include_self.setChecked(False)
+        adv_transition_analysis.addLayout(_make_chk_help_row(
+            self.chk_transanalysis_include_self, "Include Self-Transitions",
+            "Self-transitions are never drawn as arrows (a cluster can't arc to itself). This "
+            "instead picks which probabilities the circular diagram(s) are scaled from: off "
+            "(default) renormalizes over inter-cluster switches only, so the arrows show how a "
+            "cluster splits between the clusters it switches to. On uses each transition's "
+            "share of all activity, including windows spent not switching, which dilutes the "
+            "arrows for clusters that mostly self-transition."
+        ))
+        self.chk_transanalysis_include_per_cluster = QCheckBox("Show per-cluster breakdown grid")
+        self.chk_transanalysis_include_per_cluster.setChecked(True)
+        adv_transition_analysis.addLayout(_make_chk_help_row(
+            self.chk_transanalysis_include_per_cluster, "Per-Cluster Breakdown Grid",
+            "Add two pages, each with one small panel per cluster: outgoing (that cluster's own "
+            "transitions to others) and incoming (that cluster's arrivals, broken down by "
+            "source), arrow weight scaled to that cluster's own transitions in each case - "
+            "useful when the single overlaid diagrams get too busy to read."
+        ))
+        self.chk_transanalysis_include_window_sankey = QCheckBox("Window transition Sankey (per sample)")
+        self.chk_transanalysis_include_window_sankey.setChecked(True)
+        window_sankey_row = _make_chk_help_row(
+            self.chk_transanalysis_include_window_sankey, "Window Transition Sankey",
+            "Also write a Sankey diagram of how each track's trajectory cluster changes from "
+            "one window to the next - reconnects the sub-tracks 'Divide long tracks' split a "
+            "track into, back through their shared parent TrackID. One diagram per sample, "
+            "plus a pooled page, saved as a separate PDF (👁 next to this option reopens it)."
+        )
         self.btn_view_window_transitions = _make_view_btn()
-        wintrans_row.addWidget(self.btn_view_window_transitions)
-        g_wintrans.addLayout(wintrans_row)
+        window_sankey_row.addWidget(self.btn_view_window_transitions)
+        adv_transition_analysis.addLayout(window_sankey_row)
+        g_transanalysis.addWidget(adv_transition_analysis)
 
         self.grp_track_comparison = QGroupBox("Condition Comparison Report")
         g_track_comparison = QVBoxLayout(self.grp_track_comparison)
@@ -3859,13 +6967,23 @@ class TrackClassificationSubTab(QWidget):
         self.grp_contact_analysis = QGroupBox("Contact analysis")
         g_contact = QVBoxLayout(self.grp_contact_analysis)
         g_contact.setSpacing(4)
-        g_contact.addWidget(QLabel(
+        g_contact.addWidget(_make_info_label(
             "Contact-based grouping (tracks with vs. without a sufficiently long contact bout):"
         ))
         g_contact.addWidget(_make_info_label(
             "Tick \"Group conditions\" under Group in X/Y to pool that axis's levels into two "
             "custom groups."
         ))
+        contact_shared_settings_note = _make_info_label(
+            "⚙ The settings below (Contact column, Min. contiguous bout, target classification, "
+            "Group in X/Y, Group per page) are shared: they apply to every analysis button in "
+            "this section, not just the one below them."
+        )
+        contact_shared_settings_note.setStyleSheet(
+            "QLabel { background: #1d3a52; color: #8ecbff; border-radius: 4px; "
+            "padding: 6px 8px; font-size: 11px; }"
+        )
+        g_contact.addWidget(contact_shared_settings_note)
         contact_form = QFormLayout()
         contact_form.setSpacing(3)
         self.combo_contact_col = QComboBox()
@@ -3889,7 +7007,7 @@ class TrackClassificationSubTab(QWidget):
         contact_form.addRow("Target classification:", self.combo_target_class_source)
         self.combo_target_state_col = QComboBox()
         self.combo_target_state_col.addItems(
-            ["full_behavioral_cluster", "intrinsic_behavioral_cluster", "raw_hmm_state"]
+            [FULL_STATE_COL, INTRINSIC_STATE_COL, "raw_hmm_state"]
         )
         contact_form.addRow("Target state column:", self.combo_target_state_col)
         self.label_target_class_warning = QLabel("")
@@ -3923,19 +7041,73 @@ class TrackClassificationSubTab(QWidget):
         self.chk_contact_group_y_conditions.toggled.connect(
             self._on_contact_group_y_conditions_toggled
         )
-        g_contact.addWidget(QLabel("Group per page (Ctrl/Cmd click for multiple):"))
+        g_contact.addWidget(_make_info_label("Group per page (Ctrl/Cmd click for multiple):"))
         self.list_contact_group_cols = QListWidget()
         self.list_contact_group_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
         g_contact.addWidget(self.list_contact_group_cols)
-        contact_row = QHBoxLayout()
-        self.btn_contact_analysis = QPushButton("▶ Run Contact-vs-No-Contact Analysis")
-        _style_secondary(self.btn_contact_analysis)
-        contact_row.addWidget(self.btn_contact_analysis, stretch=1)
-        self.btn_view_contact_analysis = _make_view_btn()
-        contact_row.addWidget(self.btn_view_contact_analysis)
-        g_contact.addLayout(contact_row)
+        contact_shared_settings_sep = QFrame()
+        contact_shared_settings_sep.setFrameShape(QFrame.HLine)
+        g_contact.addWidget(contact_shared_settings_sep)
 
-        g_contact.addWidget(QLabel(
+        self.btn_run_all_contact = QPushButton("▶▶ Run All Contact Analyses")
+        self.btn_run_all_contact.setStyleSheet(
+            "background-color: #007bff; color: white; font-weight: bold; "
+            "border-radius: 4px; padding: 10px; font-size: 14px;"
+        )
+        g_contact.addWidget(self.btn_run_all_contact)
+        contact_run_all_sep = QFrame()
+        contact_run_all_sep.setFrameShape(QFrame.HLine)
+        g_contact.addWidget(contact_run_all_sep)
+
+        g_contact.addWidget(_make_info_label(
+            "Contact rate (per-sample % of tracks in contact, plus per-target-class contact "
+            "fraction if 'Use contact cell classification' is on):"
+        ))
+        contact_rate_row = QHBoxLayout()
+        self.btn_contact_rate = QPushButton("▶ Create Contact Rate Report")
+        _style_secondary(self.btn_contact_rate)
+        contact_rate_row.addWidget(self.btn_contact_rate, stretch=1)
+        self.btn_view_contact_rate = _make_view_btn()
+        contact_rate_row.addWidget(self.btn_view_contact_rate)
+        g_contact.addLayout(contact_rate_row)
+
+        g_contact.addWidget(_make_info_label(
+            "Contact composition (class composition grid split by contact/no-contact, faceted by "
+            "Group in X/Y/page):"
+        ))
+        contact_composition_row = QHBoxLayout()
+        self.btn_contact_composition = QPushButton("▶ Create Contact Composition Grid")
+        _style_secondary(self.btn_contact_composition)
+        contact_composition_row.addWidget(self.btn_contact_composition, stretch=1)
+        self.btn_view_contact_composition = _make_view_btn()
+        contact_composition_row.addWidget(self.btn_view_contact_composition)
+        g_contact.addLayout(contact_composition_row)
+
+        g_contact.addWidget(_make_info_label(
+            "Contact condition comparison (Welch's t-test grid of class composition between "
+            "contact/no-contact groups):"
+        ))
+        contact_condition_comparison_row = QHBoxLayout()
+        self.btn_contact_condition_comparison = QPushButton("▶ Create Contact Condition Comparison")
+        _style_secondary(self.btn_contact_condition_comparison)
+        contact_condition_comparison_row.addWidget(self.btn_contact_condition_comparison, stretch=1)
+        self.btn_view_contact_condition_comparison = _make_view_btn()
+        contact_condition_comparison_row.addWidget(self.btn_view_contact_condition_comparison)
+        g_contact.addLayout(contact_condition_comparison_row)
+
+        g_contact.addWidget(_make_info_label(
+            "Contact cluster heatmap (contact amount per behavioral cluster of the classified "
+            "population itself, heatmaps + per-track distributions):"
+        ))
+        cluster_heatmap_row = QHBoxLayout()
+        self.btn_contact_cluster_heatmap = QPushButton("▶ Create Contact Cluster Heatmap")
+        _style_secondary(self.btn_contact_cluster_heatmap)
+        cluster_heatmap_row.addWidget(self.btn_contact_cluster_heatmap, stretch=1)
+        self.btn_view_contact_cluster_heatmap = _make_view_btn()
+        cluster_heatmap_row.addWidget(self.btn_view_contact_cluster_heatmap)
+        g_contact.addLayout(cluster_heatmap_row)
+
+        g_contact.addWidget(_make_info_label(
             "Contact duration comparison (how long tracks stay in contact with each touched class "
             "of 'Use contact cell classification', pairwise and each class vs. the rest):"
         ))
@@ -3949,17 +7121,51 @@ class TrackClassificationSubTab(QWidget):
             self.combo_duration_test_mode, "Comparison test",
             "'Welch's t-test': compares the raw per-touch durations between the two groups without "
             "assuming equal variances. 'Paired t-test': averages durations within each 'Pairing "
-            "column' value first, then pairs the two groups' averages for the same value (e.g. the "
-            "same sample) — pairing units missing either side are dropped."
+            "column(s)' value (combined, if more than one is selected) first, then pairs the two "
+            "groups' averages for the same value (e.g. the same sample) — pairing units missing "
+            "either side are dropped."
         ))
-        self.combo_duration_pairing_col = QComboBox()
-        duration_form.addRow("Pairing column:", self.combo_duration_pairing_col)
+        g_contact.addLayout(duration_form)
+        self.label_duration_pairing_cols = QLabel("Pairing column(s) (Ctrl/Cmd click for multiple):")
+        self.label_duration_pairing_cols.setWordWrap(True)
+        g_contact.addWidget(self.label_duration_pairing_cols)
+        self.list_duration_pairing_cols = QListWidget()
+        self.list_duration_pairing_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        g_contact.addWidget(self.list_duration_pairing_cols)
+        duration_form2 = QFormLayout()
+        duration_form2.setSpacing(3)
         self.spin_duration_comparisons_per_page = QSpinBox()
         self.spin_duration_comparisons_per_page.setRange(1, 100)
         self.spin_duration_comparisons_per_page.setValue(12)
         self.spin_duration_comparisons_per_page.setMaximumWidth(100)
-        duration_form.addRow("Comparisons per page:", self.spin_duration_comparisons_per_page)
-        g_contact.addLayout(duration_form)
+        duration_form2.addRow("Comparisons per page:", self.spin_duration_comparisons_per_page)
+        self.spin_long_contact_threshold = QDoubleSpinBox()
+        self.spin_long_contact_threshold.setDecimals(1)
+        self.spin_long_contact_threshold.setValue(0.0)
+        self.spin_long_contact_threshold.setSpecialValueText("(off)")
+        self.spin_long_contact_threshold.setMaximumWidth(100)
+        duration_form2.addRow("Long contact threshold:", make_help_row(
+            self.spin_long_contact_threshold, "Long contact threshold",
+            "When set above 0, adds an extra page per group: for tracks in contact with each "
+            "touched class, the percentage with 'long' contact — the track's contact with that "
+            "class reached this threshold, in the unit picked below — vs. 'short' contact, "
+            "restricted to tracks that touched that class at all (long vs. short contact, not "
+            "vs. no contact). 'Percent': the track spent at least this % of its classified time "
+            "window in contact with the class (contiguity-agnostic: brief gaps don't reset it; "
+            "no time metadata needed). 'Seconds'/'Minutes'/'Hours': its longest sustained "
+            "contact bout with the class reached this real-time length (requires time metadata)."
+        ))
+        self.combo_long_contact_unit = QComboBox()
+        self.combo_long_contact_unit.addItem("Percent of time window", "percent")
+        self.combo_long_contact_unit.addItem("Seconds", "seconds")
+        self.combo_long_contact_unit.addItem("Minutes", "minutes")
+        self.combo_long_contact_unit.addItem("Hours", "hours")
+        self.combo_long_contact_unit.setCurrentIndex(2)  # minutes by default
+        self.combo_long_contact_unit.setMaximumWidth(160)
+        self.combo_long_contact_unit.currentIndexChanged.connect(self._on_long_contact_unit_changed)
+        duration_form2.addRow("Long contact unit:", self.combo_long_contact_unit)
+        g_contact.addLayout(duration_form2)
+        self._on_long_contact_unit_changed()
         duration_row = QHBoxLayout()
         self.btn_duration_comparison = QPushButton("▶ Create Contact Duration Comparison")
         _style_secondary(self.btn_duration_comparison)
@@ -3969,45 +7175,33 @@ class TrackClassificationSubTab(QWidget):
         g_contact.addLayout(duration_row)
         self._on_duration_test_mode_changed()
 
-        g_contact.addWidget(QLabel("State-shift analysis (behavioral state before → after contact):"))
-        shift_form = QFormLayout()
-        shift_form.setSpacing(3)
-        self.combo_contact_shift_window_mode = QComboBox()
-        self.combo_contact_shift_window_mode.addItems(["Fixed", "Full"])
-        shift_form.addRow("Window mode:", make_help_row(
-            self.combo_contact_shift_window_mode, "Before/after window mode",
-            "'Fixed': compare a fixed number of timepoints immediately before the contact bout "
-            "starts vs. immediately after it ends. 'Full': compare everything before the bout to "
-            "everything after it, within the track's classified window."
+        g_contact.addWidget(_make_info_label(
+            "Contact type comparison (mean contact fraction per cluster, side by side across "
+            "selected contact columns — e.g. healthy vs. tumor organoid contact; purely "
+            "descriptive, no significance test):"
         ))
-        self.spin_contact_shift_window_length = QSpinBox()
-        self.spin_contact_shift_window_length.setRange(1, 100000)
-        self.spin_contact_shift_window_length.setValue(10)
-        self.spin_contact_shift_window_length.setMaximumWidth(100)
-        shift_form.addRow("Fixed window length:", make_help_row(
-            self.spin_contact_shift_window_length, "Fixed window length (timepoints)",
-            "Only used in 'Fixed' window mode: number of timepoints immediately before the bout "
-            "start / after the bout end to compare."
-        ))
-        self.combo_contact_shift_state_col = QComboBox()
-        self.combo_contact_shift_state_col.addItems(
-            ["full_behavioral_cluster", "intrinsic_behavioral_cluster", "raw_hmm_state"]
-        )
-        shift_form.addRow("State column:", self.combo_contact_shift_state_col)
-        g_contact.addLayout(shift_form)
-        shift_row = QHBoxLayout()
-        self.btn_contact_state_shift = QPushButton("▶ Run State-Shift Analysis")
-        _style_secondary(self.btn_contact_state_shift)
-        shift_row.addWidget(self.btn_contact_state_shift, stretch=1)
-        self.btn_view_contact_state_shift = _make_view_btn()
-        shift_row.addWidget(self.btn_view_contact_state_shift)
-        g_contact.addLayout(shift_row)
+        g_contact.addWidget(_make_info_label("Contact columns to compare (Ctrl/Cmd click for 2+):"))
+        self.list_contact_type_compare_cols = QListWidget()
+        self.list_contact_type_compare_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        g_contact.addWidget(self.list_contact_type_compare_cols)
+        contact_type_row = QHBoxLayout()
+        self.btn_contact_type_comparison = QPushButton("▶ Create Contact Type Comparison")
+        _style_secondary(self.btn_contact_type_comparison)
+        contact_type_row.addWidget(self.btn_contact_type_comparison, stretch=1)
+        self.btn_view_contact_type_comparison = _make_view_btn()
+        contact_type_row.addWidget(self.btn_view_contact_type_comparison)
+        g_contact.addLayout(contact_type_row)
 
-        g_contact.addWidget(QLabel(
+        g_contact.addWidget(_make_info_label(
             "Track contact overview (full state trajectory + contact-bout markers, one page per sample):"
         ))
         overview_form = QFormLayout()
         overview_form.setSpacing(3)
+        self.combo_contact_shift_state_col = QComboBox()
+        self.combo_contact_shift_state_col.addItems(
+            [FULL_STATE_COL, INTRINSIC_STATE_COL, "raw_hmm_state"]
+        )
+        overview_form.addRow("State column:", self.combo_contact_shift_state_col)
         self.spin_track_overview_rows_per_page = QSpinBox()
         self.spin_track_overview_rows_per_page.setRange(1, 100)
         self.spin_track_overview_rows_per_page.setValue(6)
@@ -4047,17 +7241,24 @@ class TrackClassificationSubTab(QWidget):
         opts_row.addWidget(HelpButton("Overview statebars",
             "Generate a PDF with stacked state bar plots for all exemplar tracks."))
 
+        # Backprojection PDF/MP4 exemplar outputs are a development feature: only
+        # shown when the GUI runs in dev mode (BEHAV3D_DEV_MODE=1, set by launch_napari.py).
+        self.exemplar_backproj_container = QWidget()
+        backproj_opts_row = QHBoxLayout(self.exemplar_backproj_container)
+        backproj_opts_row.setContentsMargins(0, 0, 0, 0)
         self.chk_backproj_pdf = QCheckBox("PDFs")
         self.chk_backproj_pdf.setChecked(False)
-        opts_row.addWidget(self.chk_backproj_pdf)
-        opts_row.addWidget(HelpButton("PDFs",
+        backproj_opts_row.addWidget(self.chk_backproj_pdf)
+        backproj_opts_row.addWidget(HelpButton("PDFs",
             "Generate backprojection PDFs showing exemplar tracks overlaid on raw images."))
 
         self.chk_backproj_mp4 = QCheckBox("MP4")
         self.chk_backproj_mp4.setChecked(False)
-        opts_row.addWidget(self.chk_backproj_mp4)
-        opts_row.addWidget(HelpButton("MP4",
+        backproj_opts_row.addWidget(self.chk_backproj_mp4)
+        backproj_opts_row.addWidget(HelpButton("MP4",
             "Generate backprojection video (MP4) for exemplar tracks."))
+        opts_row.addWidget(self.exemplar_backproj_container)
+        self.exemplar_backproj_container.setVisible(os.environ.get("BEHAV3D_DEV_MODE") == "1")
         opts_row.addStretch()
         g_exemplar.addLayout(opts_row)
 
@@ -4076,10 +7277,11 @@ class TrackClassificationSubTab(QWidget):
 
         # Entry trigger stays inline on the clustering-settings page; Start
         # navigates to the fully isolated plotting page (outer page 1) below.
-        lay.addWidget(
-            GuidedPanel([TRACK_PLOTS_ENTRY],
-                        start_cb=lambda _id: self._open_plotting_page())
-        )
+        plots_entry = GuidedPanel([TRACK_PLOTS_ENTRY],
+                                  start_cb=lambda _id: self._open_plotting_page())
+        # Greyed out by _refresh_buttons until a trajectory clustering exists.
+        self._plots_entry_btn = plots_entry.explainers[TRACK_PLOTS_ENTRY["id"]].start_button
+        lay.addWidget(plots_entry)
 
         plotting_page = QWidget()
         plotting_lay = QVBoxLayout(plotting_page)
@@ -4113,29 +7315,38 @@ class TrackClassificationSubTab(QWidget):
         pipeline_content_lay.setContentsMargins(6, 6, 6, 6)
         pipeline_content_lay.setSpacing(6)
         pipeline_content_lay.addWidget(self.grp_diag)
+        pipeline_content_lay.addWidget(self.grp_exemplar)
+        pipeline_content_lay.addWidget(self.grp_feature_heatmap)
         pipeline_content_lay.addWidget(self.grp_track_proportions)
-        pipeline_content_lay.addWidget(self.grp_window_transitions)
+        pipeline_content_lay.addWidget(self.grp_transition_analysis)
         pipeline_content_lay.addWidget(self.grp_track_comparison)
         pipeline_content_lay.addWidget(self.grp_contact_analysis)
-        pipeline_content_lay.addWidget(self.grp_exemplar)
         pipeline_content_lay.addStretch()
         self._pipeline_scroll.setWidget(pipeline_content)
         reset_scroll_on_page_change(self._plots_stack)
 
         self._plots_stack.setCurrentIndex(0)
         plotting_lay.addWidget(self._plots_stack)
+        # Kept as an attribute so `_check_prerequisites` can disable *only* this
+        # plotting page (create-plots) when state adata is missing, without
+        # disabling the whole `_subtab_stack` — which would also grey out
+        # page 0's track-clustering block (grp_track) and its "Run Original
+        # BEHAV3D DTW" button.
+        self._plotting_page = plotting_page
+        # No reset_scroll_on_page_change on _subtab_stack: Back must return
+        # page 0 to where the user left it; _open_plotting_page resets page 1.
         self._subtab_stack.addWidget(plotting_page)  # outer page 1
-        reset_scroll_on_page_change(self._subtab_stack)
 
         self._subtab_stack.setCurrentIndex(0)
 
-        # ── Step 5: Backprojection ───────────────────────────────────────
-        self.grp_bp = QGroupBox("Step 4 — Backprojection")
+        # ── Step 4: Backprojection ───────────────────────────────────────
+        self.grp_bp = QGroupBox("Backprojection")
+        _style_backprojection_box(self.grp_bp)
         g_bp5 = QVBoxLayout(self.grp_bp)
         g_bp5.setSpacing(6)
 
         # Live napari view
-        grp_track_view = QGroupBox("Live Napari Layer Backprojection (Tracks)")
+        grp_track_view = QGroupBox("Live Napari Layer Backprojection")
         g_track_view = QVBoxLayout(grp_track_view)
         g_track_view.setSpacing(4)
 
@@ -4178,12 +7389,11 @@ class TrackClassificationSubTab(QWidget):
         ))
 
         self.chk_show_track_trajectories = QCheckBox("Show trajectories")
-        self.chk_show_track_trajectories.setChecked(False)
+        self.chk_show_track_trajectories.setChecked(True)
         tbp_form.addRow("Trajectories:", _make_chk_help_row(
             self.chk_show_track_trajectories, "Show trajectories",
             "Overlay each track's full path as a colored line, matching its class "
-            "color below. Off by default — adds one napari Tracks layer per class "
-            "when enabled."
+            "color below. On by default — adds one napari Tracks layer per class."
         ))
         g_track_view.addLayout(tbp_form)
 
@@ -4223,38 +7433,64 @@ class TrackClassificationSubTab(QWidget):
         self.chk_apply_pretrained.toggled.connect(self._toggle_pretrained_mode)
         self.combo_trajectory_basis.currentTextChanged.connect(self._apply_clustering_controls_mode)
         self.combo_clustering_method.currentTextChanged.connect(self._apply_clustering_controls_mode)
-        self.chk_use_original.toggled.connect(self._on_original_toggled_from_adv)
-        self.chk_use_original_top.toggled.connect(self._on_original_toggled_from_top)
+        self.combo_clustering_family.currentIndexChanged.connect(self._on_clustering_family_changed)
+        self.chk_run_legacy_behav3d.toggled.connect(self._on_run_legacy_toggled)
+        self.chk_use_exact_original_settings.toggled.connect(self._on_exact_settings_toggled)
+        self.chk_use_state_features_preset.toggled.connect(self._on_use_state_features_preset_toggled)
         self.btn_run_track.clicked.connect(self._on_run_cluster)
-        self.btn_view_track.clicked.connect(lambda: self._on_view("track_adata"))
         self.btn_rename_track.clicked.connect(self._on_rename_track)
         self.btn_train_track.clicked.connect(self._on_train_track)
-        self.btn_view_train_track.clicked.connect(lambda: self._on_view("track_classifier"))
         self.btn_apply_track.clicked.connect(self._on_apply_track)
-        self.btn_view_apply_track.clicked.connect(lambda: self._on_view("track_applied"))
         self.btn_exemplars.clicked.connect(self._on_exemplars)
-        self.btn_view_exemplars.clicked.connect(lambda: self._on_view("track_exemplars"))
+        _wire_view_btn(self.btn_view_exemplars, self._on_view, "track_exemplars")
         self.btn_diagnostics.clicked.connect(self._on_diagnostics)
-        self.btn_view_diagnostics.clicked.connect(lambda: self._on_view("track_diagnostics"))
+        _wire_view_btn(self.btn_view_diagnostics, self._on_view, "track_diagnostics")
         self.btn_track_proportions.clicked.connect(self._on_track_proportions)
-        self.btn_view_track_proportions.clicked.connect(lambda: self._on_view("track_proportions"))
-        self.btn_window_transitions.clicked.connect(self._on_window_transitions)
-        self.btn_view_window_transitions.clicked.connect(lambda: self._on_view("window_transitions"))
-        self.btn_track_condition_comparison.clicked.connect(self._on_track_condition_comparison)
-        self.btn_view_track_condition_comparison.clicked.connect(
-            lambda: self._on_view("track_condition_comparison")
+        _wire_view_btn(self.btn_view_track_proportions, self._on_view, "track_proportions")
+        self.btn_feature_heatmap.clicked.connect(self._on_feature_heatmap)
+        _wire_view_btn(self.btn_view_feature_heatmap, self._on_view, "feature_heatmap")
+        self.btn_feature_heatmap_defaults.clicked.connect(self._select_feature_heatmap_defaults)
+        self.btn_feature_heatmap_all.clicked.connect(
+            lambda: self._set_feature_heatmap_picked(self._feature_heatmap_candidates)
         )
-        self.btn_contact_analysis.clicked.connect(self._on_contact_analysis)
-        self.btn_view_contact_analysis.clicked.connect(lambda: self._on_view("contact_analysis"))
+        self.btn_feature_heatmap_clear.clicked.connect(lambda: self._set_feature_heatmap_picked([]))
+        self.btn_feature_heatmap_add.clicked.connect(self._feature_heatmap_add_selected)
+        self.btn_feature_heatmap_remove.clicked.connect(self._feature_heatmap_remove_selected)
+        self.list_feature_heatmap_available.itemDoubleClicked.connect(
+            lambda item: self._set_feature_heatmap_picked(
+                _list_widget_items(self.list_feature_heatmap_picked) + [item.text()]
+            )
+        )
+        self.list_feature_heatmap_picked.itemDoubleClicked.connect(
+            lambda item: self._set_feature_heatmap_picked(
+                [c for c in _list_widget_items(self.list_feature_heatmap_picked) if c != item.text()]
+            )
+        )
+        _wire_view_btn(self.btn_view_window_transitions, self._on_view, "window_transitions")
+        self.btn_transition_analysis.clicked.connect(self._on_transition_analysis)
+        _wire_view_btn(self.btn_view_transition_analysis, self._on_view, "transition_analysis")
+        self.btn_track_condition_comparison.clicked.connect(self._on_track_condition_comparison)
+        _wire_view_btn(self.btn_view_track_condition_comparison, self._on_view, "track_condition_comparison")
+        self.btn_contact_rate.clicked.connect(lambda: self._on_contact_rate_report())
+        _wire_view_btn(self.btn_view_contact_rate, self._on_view, "contact_rate")
+        self.btn_contact_composition.clicked.connect(lambda: self._on_contact_composition_report())
+        _wire_view_btn(self.btn_view_contact_composition, self._on_view, "contact_composition")
+        self.btn_contact_condition_comparison.clicked.connect(lambda: self._on_contact_condition_comparison())
+        _wire_view_btn(
+            self.btn_view_contact_condition_comparison, self._on_view, "contact_condition_comparison"
+        )
+        self.btn_contact_cluster_heatmap.clicked.connect(lambda: self._on_contact_cluster_heatmap())
+        _wire_view_btn(self.btn_view_contact_cluster_heatmap, self._on_view, "contact_cluster_heatmap")
         self.combo_contact_col.currentTextChanged.connect(self._sync_contact_target_class_controls)
         self.chk_use_target_class.stateChanged.connect(self._sync_contact_target_class_controls)
         self.combo_target_class_source.currentTextChanged.connect(self._sync_contact_target_class_controls)
-        self.btn_duration_comparison.clicked.connect(self._on_duration_comparison)
-        self.btn_view_duration_comparison.clicked.connect(lambda: self._on_view("contact_duration"))
-        self.btn_contact_state_shift.clicked.connect(self._on_contact_state_shift_analysis)
-        self.btn_view_contact_state_shift.clicked.connect(lambda: self._on_view("contact_state_shift"))
-        self.btn_track_contact_overview.clicked.connect(self._on_track_contact_overview)
-        self.btn_view_track_contact_overview.clicked.connect(lambda: self._on_view("track_contact_overview"))
+        self.btn_duration_comparison.clicked.connect(lambda: self._on_duration_comparison())
+        _wire_view_btn(self.btn_view_duration_comparison, self._on_view, "contact_duration")
+        self.btn_contact_type_comparison.clicked.connect(lambda: self._on_contact_type_comparison())
+        _wire_view_btn(self.btn_view_contact_type_comparison, self._on_view, "contact_type_comparison")
+        self.btn_track_contact_overview.clicked.connect(lambda: self._on_track_contact_overview())
+        _wire_view_btn(self.btn_view_track_contact_overview, self._on_view, "track_contact_overview")
+        self.btn_run_all_contact.clicked.connect(self._on_run_all_contact_analyses)
         self.btn_browse_pretrained_clf.clicked.connect(self._browse_pretrained_clf)
         self.btn_browse_pretrained_states.clicked.connect(self._browse_pretrained_states)
         self.btn_run_apply_pretrained.clicked.connect(self._on_apply_pretrained)
@@ -4268,11 +7504,13 @@ class TrackClassificationSubTab(QWidget):
     def _check_prerequisites(self) -> bool:
         """Check if behavioral states h5ad exists; conditionally enable/disable steps.
 
-        - If state adata is absent: Step 1 (grp1) stays enabled but is locked into
-          'original BEHAV3D DTW' mode (chk_use_original forced True + disabled).
-          Steps 2-5 are disabled since they all require state adata.
-        - If state adata is present: all steps enabled; if the checkbox was previously
-          force-locked, it is automatically unchecked and re-enabled (standard mode).
+        - If state adata is absent: the track-clustering block (grp_track) stays
+          enabled but is locked into 'Feature-based' mode (combo_clustering_family
+          forced + disabled), since State-based clustering cannot run without it.
+          The train-classifier block, plotting page and backprojection are disabled
+          since they all require state adata.
+        - If state adata is present: all steps enabled; if the dropdown was previously
+          force-locked, it is automatically reset to State-based and re-enabled.
         """
         ct = self._cell_type()
         out = self._out_dir()
@@ -4280,45 +7518,54 @@ class TrackClassificationSubTab(QWidget):
             self.warning_label.hide()
             return True
 
-        states_path = self._state_adata_path(ct)
-        if not states_path or not states_path.exists():
+        if not self._behavioral_states_available(ct):
             self.warning_label.setText(
                 f"⚠ Behavioral states not found for cell type '{ct}'.\n"
-                "Run State Classification first to unlock all steps.\n"
-                "You can still run the original BEHAV3D DTW clustering (Step 1) below."
+                "State-based clustering requires running State Classification first "
+                "and is unavailable until then.\n"
+                "You can still run Feature-based clustering below."
             )
             self.warning_label.show()
 
-            # Step 1 stays available, but lock into 'original DTW' mode.
-            self.grp1.setEnabled(True)
-            for grp in [self.grp2, self.grp3, self._subtab_stack, self.grp_bp]:
+            # Track clustering stays available, but lock into Feature-based mode.
+            # NB: disable only the plotting page, not the whole `_subtab_stack`
+            # — grp_track lives on page 0 of that stack, so disabling the stack
+            # would also grey out its "Run Feature-based BEHAV3D Clustering"
+            # button despite the setEnabled(True) above.
+            self.grp_track.setEnabled(True)
+            for grp in [self.grp3, self.grp_bp]:
                 grp.setEnabled(False)
+            # Not _plotting_page.setEnabled: keep its lists scrollable.
+            set_scroll_content_enabled(self._plotting_page, False)
 
-            # Force 'use original' on and prevent the user from unchecking it.
-            for chk in (self.chk_use_original, self.chk_use_original_top):
-                chk.blockSignals(True)
-                chk.setChecked(True)
-                chk.setEnabled(False)
-                chk.blockSignals(False)
-            self._apply_original_mode(True)
+            # Force the method dropdown to Feature-based and prevent switching.
+            self.combo_clustering_family.blockSignals(True)
+            self.combo_clustering_family.setCurrentIndex(
+                self.combo_clustering_family.findData("feature_based")
+            )
+            self.combo_clustering_family.setEnabled(False)
+            self.combo_clustering_family.blockSignals(False)
+            self._apply_clustering_family_mode("feature_based")
 
             return False
         else:
             self.warning_label.hide()
-            for grp in [self.grp1, self.grp2, self.grp3, self._subtab_stack, self.grp_bp]:
+            for grp in [self.grp_track, self.grp3, self.grp_bp]:
                 grp.setEnabled(True)
+            set_scroll_content_enabled(self._plotting_page, True)
 
-            # Only revert to standard mode if the checkbox was previously force-locked
+            # Only revert to State-based if the dropdown was previously force-locked
             # (i.e. disabled because state adata was missing). Otherwise preserve the
             # user's/config's current choice.
-            was_force_locked = not self.chk_use_original.isEnabled()
-            for chk in (self.chk_use_original, self.chk_use_original_top):
-                chk.blockSignals(True)
-                if was_force_locked:
-                    chk.setChecked(False)
-                chk.setEnabled(True)
-                chk.blockSignals(False)
-            self._apply_original_mode(self.chk_use_original.isChecked())
+            was_force_locked = not self.combo_clustering_family.isEnabled()
+            self.combo_clustering_family.blockSignals(True)
+            if was_force_locked:
+                self.combo_clustering_family.setCurrentIndex(
+                    self.combo_clustering_family.findData("state_based")
+                )
+            self.combo_clustering_family.setEnabled(True)
+            self.combo_clustering_family.blockSignals(False)
+            self._apply_clustering_family_mode(self.combo_clustering_family.currentData())
 
             _apply_group_tracked_gate(self.warning_label, self.grp_bp, self.metadata_loader, ct)
             return True
@@ -4337,42 +7584,74 @@ class TrackClassificationSubTab(QWidget):
         data = node[:]
         return [v.decode() if isinstance(v, bytes) else v for v in data]
 
-    def _max_available_track_length(self, ct: str):
-        """Longest (sample_name, TrackID) track in this cell type's behavioral-states
-        h5ad — the same file/keys the dtaidistance clustering step reads — so the
-        Trajectory size spinbox can never be pushed past what any track can supply."""
-        states_path = self._state_adata_path(ct) if ct else None
+    def _max_track_length_source(self, ct: str):
+        """``(kind, path)`` of the file the longest-track length is read from, or
+        ``None``: the positions CSV in 'Directly from features' mode, otherwise
+        the behavioral-states h5ad (the same file/keys the dtaidistance
+        clustering step reads)."""
+        if not ct:
+            return None
+        if self._track_input_is_features():
+            try:
+                from behav3d.analysis.behavior.state.utils import _resolve_positions_csv_path
+                return ("csv", _resolve_positions_csv_path(output_dir=str(self._out_dir()), cell_type=ct))
+            except Exception:
+                return None
+        states_path = self._state_adata_path(ct)
         if not states_path or not states_path.exists():
             return None
-        try:
-            import h5py
-            import pandas as pd
-            with h5py.File(str(states_path), "r") as f:
-                obs = f.get("obs", {})
-                if "sample_name" not in obs or "TrackID" not in obs:
-                    return None
-                sample_names = self._read_h5ad_obs_column(f, "sample_name")
-                track_ids = self._read_h5ad_obs_column(f, "TrackID")
-            if not sample_names or len(sample_names) != len(track_ids):
-                return None
-            counts = pd.DataFrame({"sample_name": sample_names, "TrackID": track_ids}).groupby(
-                ["sample_name", "TrackID"]
-            ).size()
-            max_len = int(counts.max()) if len(counts) else 0
-            return max_len if max_len > 0 else None
-        except Exception:
-            return None
+        return ("h5ad", states_path)
 
     def _apply_max_trajectory_size(self, ct: str):
         """Cap the Trajectory size spinbox at the longest available track,
-        so a value guaranteed to filter out every track can't be selected."""
-        max_len = self._max_available_track_length(ct)
-        self.spin_traj_size.setMaximum(max_len if max_len else 9999)
+        so a value guaranteed to filter out every track can't be selected.
+
+        Finding the longest track means reading every row's sample/track id of a
+        multi-GB file, so it never runs on the GUI thread: a cached value (per
+        file version) is applied immediately, otherwise it is computed in the
+        background and applied when ready. Until then the previous cap stays.
+        """
+        source = self._max_track_length_source(ct)
+        file_key = _file_key(source[1]) if source else None
+        if source is None or file_key is None:
+            self.spin_traj_size.setMaximum(9999)
+            self._max_len_wanted = None
+            return
+        key = (source[0], file_key)
+        self._max_len_wanted = (key, source)
+        cached = _MAX_TRACK_LEN_CACHE.get(key, _MISSING)
+        if cached is not _MISSING:
+            self.spin_traj_size.setMaximum(cached if cached else 9999)
+            return
+        self._start_max_len_scan()
+
+    def _start_max_len_scan(self):
+        wanted = getattr(self, "_max_len_wanted", None)
+        if wanted is None or self._maxlen_bg.is_running():
+            return  # the scan in flight re-checks what is wanted when it ends
+        key, source = wanted
+        kind, path = source
+
+        def _finish(result):
+            _MAX_TRACK_LEN_CACHE[key] = result
+            current = getattr(self, "_max_len_wanted", None)
+            if current is not None and current[0] == key:
+                self.spin_traj_size.setMaximum(result if result else 9999)
+            elif current is not None:
+                self._apply_max_trajectory_size(self._cell_type())
+
+        self._maxlen_bg.run(
+            fn=_compute_max_track_length,
+            args=(kind, str(path)),
+            desc="Finding the longest track…",
+            inject_progress=False,
+            on_done=_finish,
+            on_failed=lambda err: _finish(None),
+        )
 
     # ── Guided pipeline dispatch (Step 3 create plots) ───────────────────
     _TRACK_PIPELINE_RUN_BUTTONS = {
         "track_diagnostics": "btn_diagnostics",
-        "track_window_transitions": "btn_window_transitions",
     }
 
     def _on_pipeline_start(self, pipeline_id: str):
@@ -4386,21 +7665,25 @@ class TrackClassificationSubTab(QWidget):
             return
         self._focus_pipeline(pipeline_id)
         self._plots_stack.setCurrentIndex(1)
-        self._pipeline_scroll.verticalScrollBar().setValue(0)
+        scroll_to_top(self._pipeline_scroll)
+        # Again once the shown/hidden groups have been laid out.
+        QTimer.singleShot(0, lambda: scroll_to_top(self._pipeline_scroll))
 
     def _focus_pipeline(self, pipeline_id: str):
         """Show only the group box relevant to ``pipeline_id``, hide the rest."""
         from behav3d.napari.analysis_guided_copy import TRACK_PLOT_PIPELINES
         visible = {
             "track_diagnostics": {self.grp_diag},
+            "track_exemplars": {self.grp_exemplar},
+            "track_feature_heatmap": {self.grp_feature_heatmap},
             "track_proportions": {self.grp_track_proportions},
-            "track_window_transitions": {self.grp_window_transitions},
+            "track_transition_analysis": {self.grp_transition_analysis},
             "track_comparison": {self.grp_track_comparison},
             "track_contact": {self.grp_contact_analysis},
-            "track_exemplars": {self.grp_exemplar},
         }.get(pipeline_id, set())
-        for group in (self.grp_diag, self.grp_track_proportions, self.grp_window_transitions,
-                      self.grp_track_comparison, self.grp_contact_analysis, self.grp_exemplar):
+        for group in (self.grp_diag, self.grp_exemplar, self.grp_feature_heatmap,
+                      self.grp_track_proportions, self.grp_transition_analysis,
+                      self.grp_track_comparison, self.grp_contact_analysis):
             group.setVisible(group in visible)
         title = next(
             (s["title"] for s in TRACK_PLOT_PIPELINES if s["id"] == pipeline_id), ""
@@ -4414,6 +7697,7 @@ class TrackClassificationSubTab(QWidget):
         self._pipeline_title.setText("")
         self._subtab_stack.setCurrentIndex(1)
         self._plotting_header.show()
+        scroll_to_top(self._plots_stack.widget(0))
 
     def _plotting_back(self):
         """Contextual Back inside the plotting page: report settings → report
@@ -4428,37 +7712,150 @@ class TrackClassificationSubTab(QWidget):
     # ── Toggle helpers ───────────────────────────────────────────────────
 
     def _toggle_pretrained_mode(self, checked: bool):
-        """Hide Steps 1–2 and the train classifier box when apply-pretrained mode is active."""
-        self.grp1.setVisible(not checked)
-        self.grp2.setVisible(not checked)
+        """Hide the track-clustering block and the train classifier box when
+        apply-pretrained mode is active."""
+        self.grp_track.setVisible(not checked)
         self.grp3.setVisible(not checked)
         self.grp_apply_pretrained.setVisible(checked)
 
-    def _on_original_toggled_from_adv(self, checked: bool):
-        """Checkbox in Advanced Config toggled → sync top checkbox + apply mode."""
-        self.chk_use_original_top.blockSignals(True)
-        self.chk_use_original_top.setChecked(checked)
-        self.chk_use_original_top.blockSignals(False)
-        self._apply_original_mode(checked)
+    def _on_clustering_family_changed(self, *_args):
+        """Top-level method dropdown changed by the user → apply mode."""
+        self._apply_clustering_family_mode(self.combo_clustering_family.currentData())
+
+    def _on_run_legacy_toggled(self, checked: bool):
+        """'Advanced: run legacy BEHAV3D algorithm' toggled → apply mode + disclaimer."""
+        self._apply_clustering_family_mode(self.combo_clustering_family.currentData())
         if checked:
             self._show_original_dtw_disclaimer()
 
-    def _on_original_toggled_from_top(self, checked: bool):
-        """Top checkbox toggled (user unchecks from top) → sync adv checkbox + apply mode."""
-        self.chk_use_original.blockSignals(True)
-        self.chk_use_original.setChecked(checked)
-        self.chk_use_original.blockSignals(False)
-        self._apply_original_mode(checked)
+    def _on_exact_settings_toggled(self, checked: bool):
+        """'Use exact original BEHAV3D settings' toggled → show/hide the shared
+        Trajectory Features selector (legacy's custom-columns path)."""
+        self._apply_clustering_family_mode(self.combo_clustering_family.currentData())
+
+    def _on_use_state_features_preset_toggled(self, checked: bool):
+        """'Use features used in behavioral state clustering' toggled → locks
+        (for display) the Trajectory Features selector to the state model's own
+        feature columns. The actual clustering dispatch (_dispatch_track_cluster)
+        bypasses this selector entirely when checked, clustering directly on the
+        saved behavioral-state h5ad with its exact HMM preprocessing instead."""
+        self.traj_feature_selector.setEnabled(not checked)
         if checked:
-            self._show_original_dtw_disclaimer()
+            self._apply_state_features_preset()
+            # position_x/y/z aren't retained in the saved behavioral-states h5ad,
+            # so the full-tracklet displacement features can't be computed under
+            # this preset; setEnabled(False) above already greys them out, but
+            # clear them too so a stale checked state doesn't silently persist.
+            self.traj_feature_selector.chk_tracklet_net_disp.setChecked(False)
+            self.traj_feature_selector.chk_tracklet_net_disp_sq.setChecked(False)
+        else:
+            self.lbl_state_features_preset.hide()
+
+    def _apply_state_features_preset(self):
+        """Populate the (locked) Trajectory Features selector display and the
+        preset label with the state model's own feature columns, for the user's
+        benefit -- dispatch itself (_dispatch_track_cluster) does not read this
+        selector when the preset is checked; see _behavioral_states_available /
+        use_state_preset there."""
+        cont_cols, binary_cols = self._state_model_feature_columns()
+        self.traj_feature_selector.set_params({
+            "features": cont_cols,
+            "binary_features": binary_cols,
+        })
+        if not cont_cols and not binary_cols:
+            self.lbl_state_features_preset.setText(
+                "No behavioral-state feature set found for this cell type "
+                "(run State Classification first)."
+            )
+        else:
+            self.lbl_state_features_preset.setText("\n".join([
+                f"Continuous features ({len(cont_cols)}): {', '.join(sorted(cont_cols)) or '—'}",
+                f"Binary features ({len(binary_cols)}): {', '.join(sorted(binary_cols)) or '—'}",
+            ]))
+        self.lbl_state_features_preset.show()
+        self._update_track_config_summary()
+
+    def _behavioral_states_available(self, ct: Optional[str] = None) -> bool:
+        """Whether a behavioral-states h5ad exists on disk for the given (or
+        current) cell type -- i.e. whether State Classification has been run."""
+        ct = ct if ct is not None else self._cell_type()
+        if not ct:
+            return False
+        states_path = self._state_adata_path(ct)
+        return bool(states_path and states_path.exists())
+
+    def _state_model_feature_columns(self) -> tuple:
+        """Continuous/binary feature column names the current cell type's
+        behavioral-state model was built from -- what the 'Use features used in
+        behavioral state clustering' checkbox (and the old, removed State-based
+        'dtw features' Basis) feeds into `resolve_state_feature_matrix`, read
+        directly from the saved h5ad's preprocessing metadata without loading
+        the full matrix."""
+        ct = self._cell_type()
+        if not self._behavioral_states_available(ct):
+            return [], []
+        state_path = self._state_adata_path(ct)
+        try:
+            import anndata as ad
+            from behav3d.core.h5_access import H5Busy, h5_access
+
+            # Read what we need and close the backed handle inside the lock: left
+            # open it blocks rewriting the file on Windows and is a live reader
+            # while a clustering run overwrites it.
+            try:
+                with h5_access(blocking=False):
+                    light = _read_h5ad_light_meta(state_path)
+                    if light is not None:
+                        pre, all_var_names, obs_columns = light
+                        pre = pre or {}
+                    else:
+                        adata = ad.read_h5ad(str(state_path), backed="r")
+                        try:
+                            pre = adata.uns.get("preprocessing", {}) or {}
+                            all_var_names = [str(v) for v in adata.var_names]
+                            obs_columns = set(adata.obs.columns)
+                        finally:
+                            if getattr(adata, "isbacked", False):
+                                adata.file.close()
+            except H5Busy:
+                return [], []  # file is being written; hint is retried on next refresh
+            var_names = set(all_var_names)
+
+            def _as_list(value):
+                # Lists round-trip through h5ad as numpy arrays, whose
+                # truthiness is ambiguous for more than one element -- so
+                # `value or fallback` can't be used directly here (mirrors
+                # dtw.resolve_state_feature_matrix's own _as_list).
+                if value is None:
+                    return []
+                return [str(v) for v in np.atleast_1d(np.asarray(value, dtype=object)).tolist()]
+
+            cont_source = (
+                _as_list(pre.get("continuous_feature_cols"))
+                or _as_list(pre.get("kept_features"))
+                or all_var_names
+            )
+            cont_cols = [str(c) for c in cont_source if str(c) in var_names]
+            binary_cols = [
+                str(c) for c in _as_list(pre.get("binary_cols_to_merge"))
+                if str(c) in obs_columns
+            ]
+            return cont_cols, binary_cols
+        except Exception as exc:
+            self._log(f"⚠ Could not resolve behavioral-state features: {exc}")
+            return [], []
 
     def _apply_clustering_controls_mode(self, *_args):
         """Update visibility of basis/method-specific controls (Linkage vs Bouts
         linkage vs Leiden neighbors/resolution; DTW-only technical controls vs
-        bouts feature toggles)."""
-        is_bouts = self.combo_trajectory_basis.currentText() == "bouts"
+        bouts feature toggles). Covers State-based and the new (non-legacy)
+        Feature-based pipeline; legacy Feature-based is handled entirely by
+        _apply_clustering_family_mode."""
+        is_state_based = self.combo_clustering_family.currentData() == "state_based"
+        is_bouts = is_state_based and self._basis() == "bouts"
         is_leiden = self.combo_clustering_method.currentText() == "leiden"
 
+        self._n_clusters_frame.setVisible(not is_leiden)
         self._leiden_frame.setVisible(is_leiden)
         self._dtw_linkage_frame.setVisible(not is_leiden and not is_bouts)
         self._bouts_linkage_frame.setVisible(not is_leiden and is_bouts)
@@ -4467,23 +7864,223 @@ class TrackClassificationSubTab(QWidget):
         # regardless of is_bouts. Parallel/save-distance-matrix are DTW-distance-matrix
         # specific and bouts' own feature toggles are bouts-only.
         self._dtw_technical_frame.setVisible(not is_bouts)
+        self._dtw_umap_frame.setVisible(not is_bouts)
+        self._dtw_features_frame.setVisible(self._track_input_is_features())
         self._bouts_frame.setVisible(is_bouts)
 
-        if not self.chk_use_original.isChecked():
-            self.btn_run_track.setText(
-                "▶ Run Bout/Proportion Clustering" if is_bouts else "▶ Run Track Clustering"
-            )
+        self.btn_run_track.setText(
+            "▶ Run Bout/Proportion Clustering" if is_bouts else "▶ Run Track Clustering"
+        )
 
-    def _apply_original_mode(self, checked: bool):
-        """Update visibility of UI sections for original vs dtaidistance/bouts mode."""
-        self.chk_use_original_top.setVisible(checked)
-        self.adv1.setVisible(not checked)
-        self._basis_method_frame.setVisible(not checked)
-        self._umap_frame.setVisible(checked)
-        if checked:
-            self.btn_run_track.setText("▶ Run Original BEHAV3D DTW")
-        else:
+    def _shows_feature_selector(self, family: Optional[str] = None) -> bool:
+        """Whether the Trajectory Features selector is the active input for
+        clustering: Feature-based mode, and not legacy-with-exact-settings (which
+        uses a fixed, hardcoded feature set instead of the selector)."""
+        family = family if family is not None else self.combo_clustering_family.currentData()
+        is_feature_based = family == "feature_based"
+        is_legacy = is_feature_based and self.chk_run_legacy_behav3d.isChecked()
+        exact_settings = self.chk_use_exact_original_settings.isChecked()
+        return is_feature_based and not (is_legacy and exact_settings)
+
+    def _tracklet_displacement_feature_names(self):
+        names = []
+        if self.traj_feature_selector.chk_tracklet_net_disp.isChecked():
+            names.append("net_displacement_tracklet")
+        if self.traj_feature_selector.chk_tracklet_net_disp_sq.isChecked():
+            names.append("net_displacement_tracklet_squared")
+        return names
+
+    def _update_track_config_summary(self):
+        """Mirror StateClassificationSubTab._update_config_summary: show which
+        features (and preprocessing) feed feature-based trajectory clustering,
+        so the choices made in Trajectory Features are visible at a glance."""
+        if not self._shows_feature_selector():
+            self.traj_config_summary_label.hide()
+            return
+        if self.chk_use_state_features_preset.isChecked() and self._behavioral_states_available():
+            cont_cols, binary_cols = self._state_model_feature_columns()
+            lines = [
+                "Using the behavioral-state model's own features AND its exact "
+                "saved scaling (reuses the HMM preprocessing) -- capping/"
+                "log-scale/window/smoothing settings below do not apply.",
+                f"Continuous features ({len(cont_cols)}): {', '.join(sorted(cont_cols)) or '—'}",
+                f"Binary features ({len(binary_cols)}): {', '.join(sorted(binary_cols)) or '—'}",
+            ]
+            self.traj_config_summary_label.setText("\n".join(lines))
+            self.traj_config_summary_label.show()
+            return
+        p = self.traj_feature_selector.params()
+        lo = p["lower_quantile_cap"]
+        hi = p["upper_quantile_cap"]
+        capping = (
+            f"lower={lo if lo is not None else 0.0:.2f}, upper={hi if hi is not None else 1.0:.2f}"
+            if (lo is not None or hi is not None) else "none"
+        )
+        lines = [
+            f"Timepoint features ({len(p['features'])}): {', '.join(sorted(p['features'])) or '—'}",
+            f"Binary features ({len(p['binary_features'])}): {', '.join(sorted(p['binary_features'])) or '—'}",
+            f"Window features: {', '.join(p['additional_window_features']) or '—'}  |  "
+            f"Window size: {p['window_features_window']}",
+            f"Full-tracklet features: {', '.join(self._tracklet_displacement_feature_names()) or '—'}",
+            f"Smoothing window: {p['feature_smoothing_window']}",
+            f"Log-scaled: {', '.join(sorted(p['log_scale_features'])) or '—'}",
+            f"Quantile capping: {capping}",
+            f"Start offset: {p['start_offset']}",
+        ]
+        self.traj_config_summary_label.setText("\n".join(lines))
+        self.traj_config_summary_label.show()
+
+    def _apply_clustering_family_mode(self, family: str):
+        """Update visibility of UI sections for State-based vs Feature-based mode,
+        and (within Feature-based) the new DTW+Agglomerative/Leiden pipeline vs.
+        the legacy DTW+UMAP+KMeans one (Advanced Configuration's "Advanced: run
+        legacy BEHAV3D algorithm" toggle)."""
+        is_feature_based = family == "feature_based"
+        is_legacy = is_feature_based and self.chk_run_legacy_behav3d.isChecked()
+        shows_feature_selector = self._shows_feature_selector(family)
+        states_available = self._behavioral_states_available()
+        show_state_preset = shows_feature_selector and states_available
+
+        self._basis_row.setVisible(not is_feature_based)
+        self._method_row.setVisible(not is_legacy)
+        self._basis_method_frame.setVisible(not is_legacy)
+
+        # Don't leave the preset silently "checked but hidden and pointing at
+        # nothing" once its prerequisite disappears (cell type switched, states
+        # cleared) -- mirrors the force-lock/reset precedent already applied to
+        # combo_clustering_family in _check_prerequisites. Not blockSignals'd:
+        # the toggle handler's side effects (unlock the feature selector, hide
+        # its label) are wanted here.
+        if shows_feature_selector and not states_available and self.chk_use_state_features_preset.isChecked():
+            self.chk_use_state_features_preset.setChecked(False)
+
+        self._state_features_preset_frame.setVisible(show_state_preset)
+        self._traj_features_section.setVisible(shows_feature_selector)
+
+        # Full-tracklet net displacement needs position_x/y/z, which the
+        # state-features preset's saved h5ad doesn't retain -- keep it in sync
+        # with the preset, same force-reset precedent as above.
+        if show_state_preset and self.chk_use_state_features_preset.isChecked():
+            self.traj_feature_selector.setEnabled(False)
+            self.traj_feature_selector.chk_tracklet_net_disp.setChecked(False)
+            self.traj_feature_selector.chk_tracklet_net_disp_sq.setChecked(False)
+        elif shows_feature_selector:
+            self.traj_feature_selector.setEnabled(True)
+
+        self._feature_based_sep.setVisible(is_feature_based)
+        self._feature_based_frame.setVisible(is_feature_based)
+        self._legacy_settings_frame.setVisible(is_legacy)
+
+        if shows_feature_selector:
+            if not self._last_selector_populated_ct_matches():
+                self._populate_trajectory_feature_selector()
+            if show_state_preset and self.chk_use_state_features_preset.isChecked():
+                self._apply_state_features_preset()
+
+        if is_legacy:
+            self._n_clusters_frame.setVisible(True)
+            for frame in (
+                self._dtw_linkage_frame, self._bouts_linkage_frame, self._leiden_frame,
+                self._bouts_frame, self._dtw_technical_frame, self._dtw_umap_frame,
+                self._dtw_features_frame,
+            ):
+                frame.setVisible(False)
+            self.btn_run_track.setText("▶ Run Feature-based BEHAV3D Clustering")
+        elif is_feature_based:
+            self.btn_run_track.setText("▶ Run Track Clustering")
             self._apply_clustering_controls_mode()
+        else:
+            self._apply_track_input_mode()
+
+        self._update_track_config_summary()
+
+    def _basis(self) -> str:
+        """Basis code for State-based clustering: 'dtw' or 'bouts'."""
+        return self.combo_trajectory_basis.currentText() or "dtw"
+
+    def _set_basis(self, code: str) -> None:
+        if code in ("dtw", "bouts"):
+            self.combo_trajectory_basis.setCurrentText(code)
+
+    @staticmethod
+    def _saved_basis_code(cfg: dict):
+        """State-based Basis value from a saved config (pre-merge 'features only'
+        source configs are migrated separately, onto clustering_family/
+        run_legacy_behav3d, in _populate_track_settings). The removed 'dtw
+        features' Basis -- now covered by Feature-based's 'Use features used in
+        behavioral state clustering' checkbox -- resolves to 'dtw' for backward
+        compatibility with older saved configs."""
+        if not cfg:
+            return None
+        basis = cfg.get("trajectory_basis")
+        if basis == "dtw features":
+            return "dtw"
+        return basis if basis in ("dtw", "bouts") else None
+
+    def _track_input_is_features(self) -> bool:
+        """Whether the Trajectory Features selector feeds clustering directly:
+        Feature-based mode, new (non-legacy) pipeline."""
+        return (
+            self.combo_clustering_family.currentData() == "feature_based"
+            and not self.chk_run_legacy_behav3d.isChecked()
+        )
+
+    def _apply_track_input_mode(self, *_):
+        """State-based mode: refresh basis/method-dependent visibility and the
+        max trajectory size hint."""
+        self._apply_clustering_controls_mode()
+        self._apply_max_trajectory_size(self._cell_type())
+
+    def _last_selector_populated_ct_matches(self) -> bool:
+        return getattr(self, "_selector_ct", None) == self._cell_type()
+
+    def _populate_trajectory_feature_selector(self):
+        ct = self._cell_type()
+        out = self._out_dir()
+        if not ct or not out:
+            return
+        from behav3d.analysis.behavior.state.utils import _resolve_positions_csv_path
+        try:
+            csv_path = _resolve_positions_csv_path(output_dir=str(out), cell_type=ct)
+        except Exception:
+            csv_path = None
+        cfg = (
+            getattr(self.metadata_loader, "behav3d_parameters", {})
+            .get("track_classification", {}).get(ct, {}).get("trajectory_features", {})
+        )
+        md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
+        try:
+            self.traj_feature_selector.populate(csv_path, metadata=md, cfg=cfg)
+        except Exception as exc:
+            self._log(f"⚠ Could not list trajectory features: {exc}")
+        self._selector_ct = ct
+
+    def _model_has_states(self) -> bool:
+        """Whether the loaded trajectory model was built on behavioral states."""
+        if self._track_adata is None:
+            return False
+        meta = self._track_adata.uns.get("dtai_trajectory_clustering", {}) or {}
+        return bool(meta.get("has_behavioral_states", True))
+
+    def _per_timepoint_adata_path(self, ct: str, adata_tracks=None) -> Optional[Path]:
+        """Per-timepoint h5ad the trajectories were built from: the behavioral-state
+        file, or the features-only trajectory-features file."""
+        adata_tracks = adata_tracks if adata_tracks is not None else self._track_adata
+        if adata_tracks is not None:
+            meta = adata_tracks.uns.get("dtai_trajectory_clustering", {}) or {}
+            src = meta.get("source_adata_full_path")
+            if src and Path(str(src)).exists():
+                return Path(str(src))
+        state = self._state_adata_path(ct) if ct else None
+        if state and state.exists():
+            return state
+        out = self._out_dir()
+        if out and ct:
+            from behav3d.analysis.behavior.track.trajectory_features import trajectory_feature_adata_path
+            feat = trajectory_feature_adata_path(str(out), ct)
+            if feat.exists():
+                return feat
+        return state
 
     def _show_original_dtw_disclaimer(self):
         """Warn the user that the original BEHAV3D DTW pipeline requires equal-length tracks."""
@@ -4544,7 +8141,8 @@ class TrackClassificationSubTab(QWidget):
         return {
             "behavioral_trajectory_size": int(self.spin_traj_size.value()),
             "n_clusters":                 int(self.spin_n_clusters.value()),
-            "trajectory_basis":           self.combo_trajectory_basis.currentText(),
+            "trajectory_basis":           self._basis(),
+            "trajectory_features":        self.traj_feature_selector.params(),
             "linkage":                    self.combo_linkage.currentText(),
             "clustering_method":          self.combo_clustering_method.currentText(),
             "leiden_n_neighbors":         int(self.spin_leiden_neighbors.value()),
@@ -4559,15 +8157,23 @@ class TrackClassificationSubTab(QWidget):
             "bouts_log_bout_length":      self.chk_bouts_log_bout_length.isChecked(),
             "bouts_block_scaling":        self.chk_bouts_block_scaling.isChecked(),
             "bouts_drop_redundant":       self.chk_bouts_drop_redundant.isChecked(),
-            "bouts_plot_exemplars":       self.chk_bouts_plot_exemplars.isChecked(),
             "trajectory_trim_mode":       self.combo_trim.currentText(),
             "split_long_tracks":          self.chk_split_long_tracks.isChecked(),
+            "include_tracklet_net_displacement": self.traj_feature_selector.chk_tracklet_net_disp.isChecked(),
+            "include_tracklet_net_displacement_squared": self.traj_feature_selector.chk_tracklet_net_disp_sq.isChecked(),
             "parallel":                   self.chk_parallel.isChecked(),
             "save_distance_matrix":       self.chk_save_dist.isChecked(),
             "random_state":               int(self.spin_seed.value()),
-            "use_original":               self.chk_use_original.isChecked(),
+            "clustering_family":          self.combo_clustering_family.currentData(),
+            "run_legacy_behav3d":         self.chk_run_legacy_behav3d.isChecked(),
+            "use_state_features_preset":  self.chk_use_state_features_preset.isChecked(),
+            "use_exact_original_settings": self.chk_use_exact_original_settings.isChecked(),
             "umap_n_neighbors":           int(self.spin_umap_neighbors.value()),
             "umap_min_dist":              float(self.spin_umap_min_dist.value()),
+            "dtw_umap_n_neighbors":       int(self.spin_dtw_umap_neighbors.value()),
+            "dtw_umap_min_dist":          float(self.spin_dtw_umap_min_dist.value()),
+            "dtw_umap_spread":            float(self.spin_dtw_umap_spread.value()),
+            "binary_feature_weight":      float(self.spin_binary_weight.value()),
             "rf_n_estimators":            int(self.spin_track_n_est.value()),
             "rf_max_depth":               int(self.spin_track_max_depth.value()),
             "rf_test_size_pct":           float(self.spin_track_test_pct.value()),
@@ -4592,8 +8198,16 @@ class TrackClassificationSubTab(QWidget):
             self.spin_traj_size.setValue(int(cfg["behavioral_trajectory_size"]))
         if "n_clusters" in cfg:
             self.spin_n_clusters.setValue(int(cfg["n_clusters"]))
-        if "trajectory_basis" in cfg:
-            self.combo_trajectory_basis.setCurrentText(cfg["trajectory_basis"])
+        raw_saved_basis = cfg.get("trajectory_basis")
+        saved_basis = self._saved_basis_code(cfg)
+        if saved_basis:
+            self._set_basis(saved_basis)
+            if raw_saved_basis == "dtw features":
+                self._log(
+                    "ℹ Saved config used the removed 'dtw features' Basis; falling back to "
+                    "'dtw'. To reproduce it, switch to Feature-based and check 'Use features "
+                    "used in behavioral state clustering' instead."
+                )
         if "linkage" in cfg:
             self.combo_linkage.setCurrentText(cfg["linkage"])
         if "clustering_method" in cfg:
@@ -4622,13 +8236,15 @@ class TrackClassificationSubTab(QWidget):
             self.chk_bouts_block_scaling.setChecked(bool(cfg["bouts_block_scaling"]))
         if "bouts_drop_redundant" in cfg:
             self.chk_bouts_drop_redundant.setChecked(bool(cfg["bouts_drop_redundant"]))
-        if "bouts_plot_exemplars" in cfg:
-            self.chk_bouts_plot_exemplars.setChecked(bool(cfg["bouts_plot_exemplars"]))
         self._apply_clustering_controls_mode()
         if "trajectory_trim_mode" in cfg:
             self.combo_trim.setCurrentText(cfg["trajectory_trim_mode"])
         if "split_long_tracks" in cfg:
             self.chk_split_long_tracks.setChecked(bool(cfg["split_long_tracks"]))
+        if "include_tracklet_net_displacement" in cfg:
+            self.traj_feature_selector.chk_tracklet_net_disp.setChecked(bool(cfg["include_tracklet_net_displacement"]))
+        if "include_tracklet_net_displacement_squared" in cfg:
+            self.traj_feature_selector.chk_tracklet_net_disp_sq.setChecked(bool(cfg["include_tracklet_net_displacement_squared"]))
         if "parallel" in cfg:
             self.chk_parallel.setChecked(bool(cfg["parallel"]))
         if "save_distance_matrix" in cfg:
@@ -4639,6 +8255,15 @@ class TrackClassificationSubTab(QWidget):
             self.spin_umap_neighbors.setValue(int(cfg["umap_n_neighbors"]))
         if "umap_min_dist" in cfg:
             self.spin_umap_min_dist.setValue(float(cfg["umap_min_dist"]))
+        # Spread first: it caps min_dist's maximum.
+        if "dtw_umap_spread" in cfg:
+            self.spin_dtw_umap_spread.setValue(float(cfg["dtw_umap_spread"]))
+        if "dtw_umap_n_neighbors" in cfg:
+            self.spin_dtw_umap_neighbors.setValue(int(cfg["dtw_umap_n_neighbors"]))
+        if "dtw_umap_min_dist" in cfg:
+            self.spin_dtw_umap_min_dist.setValue(float(cfg["dtw_umap_min_dist"]))
+        if "binary_feature_weight" in cfg:
+            self.spin_binary_weight.setValue(float(cfg["binary_feature_weight"]))
         if "rf_n_estimators" in cfg:
             self.spin_track_n_est.setValue(int(cfg["rf_n_estimators"]))
         if "rf_max_depth" in cfg:
@@ -4653,13 +8278,57 @@ class TrackClassificationSubTab(QWidget):
             self.combo_track_max_features.setCurrentText(cfg["rf_max_features"])
         if "rf_n_jobs" in cfg:
             self.spin_track_n_jobs.setValue(int(cfg["rf_n_jobs"]))
-        if "use_original" in cfg:
-            val = bool(cfg["use_original"])
-            for chk in (self.chk_use_original, self.chk_use_original_top):
-                chk.blockSignals(True)
-                chk.setChecked(val)
-                chk.blockSignals(False)
-            self._apply_original_mode(val)
+
+        if "use_exact_original_settings" in cfg:
+            self.chk_use_exact_original_settings.blockSignals(True)
+            self.chk_use_exact_original_settings.setChecked(bool(cfg["use_exact_original_settings"]))
+            self.chk_use_exact_original_settings.blockSignals(False)
+
+        raw_family = cfg.get("clustering_family")
+        if raw_family not in ("state_based", "feature_based") and "use_original" in cfg:
+            # Migrate configs saved before the clustering_family dropdown existed,
+            # when there was only a single "use original BEHAV3D" boolean toggle.
+            raw_family = "feature_based" if bool(cfg["use_original"]) else "state_based"
+            if raw_family == "feature_based":
+                self.chk_use_exact_original_settings.setChecked(True)
+
+        # Migrate configs saved before "Trajectories from" and "Trajectory
+        # clustering method" were merged into a single clustering_family control.
+        raw_basis = cfg.get("trajectory_basis")
+        was_features_only = raw_basis == "features only" or cfg.get("trajectory_input") == "features"
+        if raw_family == "feature_based":
+            # Pre-merge, any Feature-based selection always meant the legacy
+            # DTW+UMAP+KMeans algorithm.
+            family = "feature_based"
+            run_legacy = True
+        elif raw_family == "state_based" and was_features_only:
+            # Pre-merge "state_based" + "Trajectories from: Features only" always
+            # meant the new DTW+Agglomerative/Leiden pipeline on raw features.
+            family = "feature_based"
+            run_legacy = False
+        else:
+            family = raw_family
+            run_legacy = None
+        if "run_legacy_behav3d" in cfg:
+            # New-format config: explicit value takes precedence over the migration guess.
+            run_legacy = bool(cfg["run_legacy_behav3d"])
+        if run_legacy is not None:
+            self.chk_run_legacy_behav3d.blockSignals(True)
+            self.chk_run_legacy_behav3d.setChecked(run_legacy)
+            self.chk_run_legacy_behav3d.blockSignals(False)
+
+        if "use_state_features_preset" in cfg:
+            self.chk_use_state_features_preset.blockSignals(True)
+            self.chk_use_state_features_preset.setChecked(bool(cfg["use_state_features_preset"]))
+            self.chk_use_state_features_preset.blockSignals(False)
+
+        if family in ("state_based", "feature_based"):
+            self.combo_clustering_family.blockSignals(True)
+            self.combo_clustering_family.setCurrentIndex(
+                self.combo_clustering_family.findData(family)
+            )
+            self.combo_clustering_family.blockSignals(False)
+            self._apply_clustering_family_mode(family)
 
     # ── Metadata / reload ────────────────────────────────────────────────
 
@@ -4675,6 +8344,7 @@ class TrackClassificationSubTab(QWidget):
     def _reload(self):
         self._update_timepoint_time_labels()
         ct = self._cell_type()
+        self._queue_report_settings_restore(ct)
         if not ct:
             self._track_adata = None
             self._track_adata_load_error = None
@@ -4696,34 +8366,51 @@ class TrackClassificationSubTab(QWidget):
             self.le_apply_states_path.setText(str(states_path))
             self.le_pretrained_states_path.setText(str(states_path))
 
+        self._selector_ct = None
         self._populate_track_settings(ct)
-        self._apply_max_trajectory_size(ct)
         self._check_prerequisites()
+        if self._track_input_is_features() and not self._last_selector_populated_ct_matches():
+            self._populate_trajectory_feature_selector()
+        self._apply_max_trajectory_size(ct)
         self._update_view_buttons()
         self._update_bp_buttons()
 
-        # Reset adata so buttons reflect "not yet loaded" state immediately.
-        self._track_adata = None
-        self._track_adata_load_error = None
+        # The track h5ad can be multi-GB; re-reading it on every refresh (cell
+        # type change, tab entry) is what made revisits slow. Keep the loaded copy
+        # while the file on disk is the same version (a run that rewrites it
+        # changes mtime/size, so it still reloads); otherwise reset it so buttons
+        # reflect the "not yet loaded" state immediately.
+        have_file = bool(path and path.exists())
+        key = _file_key(path) if have_file else None
+        reuse = (
+            self._track_adata is not None and key is not None and key == self._track_adata_key
+        )
+        if not reuse:
+            self._track_adata = None
+            self._track_adata_key = None
+            self._track_adata_load_error = None
         self._refresh_buttons()
 
-        if not path or not path.exists():
+        if not have_file:
+            self._preload_loader.invalidate()
+            return
+        if reuse:
             return
 
         # ── Slow async phase (background thread) ──────────────────────────
-        # Skip if a previous preload is still in flight (e.g. rapid tab switches).
-        if self._preload_bg.is_running():
-            return
-
+        # A newer request supersedes an in-flight one (see _LatestOnlyLoader), so
+        # rapid cell-type / tab switches can never deliver the wrong file.
         def _load():
             import h5py
-            import anndata as ad
-            if not h5py.is_hdf5(str(path)):
-                raise ValueError(f"Not a valid HDF5 file: {path.name}")
-            return ad.read_h5ad(str(path))
+            from behav3d.core.h5_access import h5_access, read_h5ad_locked
+            with h5_access():
+                if not h5py.is_hdf5(str(path)):
+                    raise ValueError(f"Not a valid HDF5 file: {path.name}")
+                return read_h5ad_locked(path)
 
         def _on_done(result):
             self._track_adata = result
+            self._track_adata_key = key
             self._refresh_buttons()
             self._sync_track_cluster_combo(result)
 
@@ -4732,11 +8419,8 @@ class TrackClassificationSubTab(QWidget):
             self._track_adata_load_error = err
             self._refresh_buttons()
 
-        self._preload_bg.run(
-            fn=_load,
-            inject_progress=False,
-            on_done=_on_done,
-            on_failed=_on_failed,
+        self._preload_loader.request(
+            path, _load, _on_done, _on_failed, desc=f"Loading track classification ({ct})…"
         )
 
     def _autofill_paths(self, ct: str):
@@ -4765,11 +8449,14 @@ class TrackClassificationSubTab(QWidget):
         return Path(str(od)).expanduser() if od else None
 
     def _track_adata_path(self, ct: str) -> Optional[Path]:
-        from behav3d.analysis.behavior.track.utils import get_dtaidistance_track_trajectories_filename
+        from behav3d.analysis.behavior.track.utils import (
+            _peek_track_outfolder,
+            get_dtaidistance_track_trajectories_filename,
+        )
         out = self._out_dir()
         if not out:
             return None
-        d = out / "analysis" / ct / "behavorial_trajectories"
+        d = _peek_track_outfolder(out, ct)
         canonical = d / get_dtaidistance_track_trajectories_filename(ct)
         if canonical.exists():
             return canonical
@@ -4779,12 +8466,18 @@ class TrackClassificationSubTab(QWidget):
         return None
 
     def _track_diagnostics_qc_dirs(self, traj_dir: Optional[Path]) -> list:
-        """Both possible diagnostics output folders: dtaidistance's shared
-        quality_control/, and the original-BEHAV3D method's own
-        original_behav3d/ folder (root — Create Diagnostics writes there)."""
+        """All possible diagnostics output folders: the shared clustering/
+        folder (dtaidistance and bouts diagnostics both write here),
+        clustering/raw/ (bouts clustering/diagnostics report+heatmap PDFs),
+        the legacy quality_control/ folder (older dtaidistance runs, before
+        diagnostics moved into clustering/), and the original-BEHAV3D
+        method's own original_behav3d/ folder (root — Create Diagnostics
+        writes there)."""
         if not traj_dir:
             return []
         return [
+            traj_dir / "clustering",
+            traj_dir / "clustering" / "raw",
             traj_dir / "quality_control",
             traj_dir / "original_behav3d",
         ]
@@ -4808,18 +8501,15 @@ class TrackClassificationSubTab(QWidget):
         self.combo_track_color_by.blockSignals(False)
 
     def _track_classifier_path(self, ct: str) -> Optional[Path]:
-        out = self._out_dir()
-        if not out:
-            return None
-        return out / "analysis" / ct / "behavorial_trajectories" / f"classifier_{ct}.pkl"
-
-    def _track_applied_path(self, ct: str) -> Optional[Path]:
+        from behav3d.analysis.behavior.track.utils import (
+            _peek_track_outfolder,
+            get_track_classifier_filename,
+        )
         out = self._out_dir()
         if not out:
             return None
         return (
-            out / "analysis" / ct / "behavorial_trajectories"
-            / f"BEHAV3D_{ct}_track_clusters.csv"
+            _peek_track_outfolder(out, ct) / "classification" / get_track_classifier_filename(ct)
         )
 
     def _state_adata_path(self, ct: str) -> Optional[Path]:
@@ -4840,6 +8530,10 @@ class TrackClassificationSubTab(QWidget):
         return "" if txt.startswith("—") else txt
 
     def _log(self, msg: str):
+        from behav3d.napari._background_runner import redispatch_to_gui_thread
+
+        if redispatch_to_gui_thread(self._log, msg):
+            return
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         formatted = f"[{ts}] {msg}"
         self.log_edit.append(formatted)
@@ -4850,9 +8544,26 @@ class TrackClassificationSubTab(QWidget):
     def _refresh_buttons(self):
         has_adata = self._track_adata is not None
         self.btn_rename_track.setEnabled(has_adata)
-        self.btn_train_track.setEnabled(has_adata)
-        self.btn_apply_track.setEnabled(has_adata)
+        ct_now = self._cell_type()
+        state_path = self._state_adata_path(ct_now) if ct_now else None
+        has_state_file = bool(state_path and state_path.exists())
+        # The track classifier is trained on state-derived track features.
+        state_model = has_adata and self._model_has_states()
+        self.btn_train_track.setEnabled(state_model)
+        self.btn_apply_track.setEnabled(state_model)
+        # Exemplar PDFs draw each track's behavioral-state bar.
+        self.btn_exemplars.setEnabled(has_adata and has_state_file)
         self.btn_track_proportions.setEnabled(has_adata)
+        self.btn_feature_heatmap.setEnabled(has_adata)
+        # Checks the file, not the (slow, async) loaded adata, so the entry
+        # unlocks as soon as a clustering result is on disk.
+        track_path = self._track_adata_path(ct_now) if ct_now else None
+        has_trajectory = bool(track_path and track_path.exists())
+        self._plots_entry_btn.setEnabled(has_trajectory)
+        self._plots_entry_btn.setToolTip(
+            "" if has_trajectory
+            else "Run State Trajectory clustering first to generate analysis and plots."
+        )
         if has_adata:
             self.rename_track_status.setText(
                 f"✅ Track adata loaded: {self._track_adata.n_obs} rows."
@@ -4865,6 +8576,119 @@ class TrackClassificationSubTab(QWidget):
             self.rename_track_status.setText("ℹ Run clustering first to enable renaming.")
         self._refresh_track_proportion_group_cols()
         self._refresh_contact_columns()
+        self._refresh_feature_heatmap_features()
+        self._apply_pending_report_settings()
+
+    def _set_feature_heatmap_picked(self, picked):
+        """Set the "Selected features" list (in ``picked``'s order - the plot's row
+        order) and put every other candidate back into "Available features", which
+        stays alphabetical for browsing."""
+        picked = [c for c in dict.fromkeys(picked) if c in self._feature_heatmap_candidates]
+        picked_set = set(picked)
+        self.list_feature_heatmap_picked.clear()
+        self.list_feature_heatmap_picked.addItems(picked)
+        self.list_feature_heatmap_available.clear()
+        self.list_feature_heatmap_available.addItems(
+            [c for c in self._feature_heatmap_candidates if c not in picked_set]
+        )
+        _fit_list_widget_height(self.list_feature_heatmap_available, max_rows=10)
+        _fit_list_widget_height(self.list_feature_heatmap_picked, max_rows=10)
+        self._update_feature_heatmap_summary()
+
+    def _feature_heatmap_picked_items(self):
+        return _list_widget_items(self.list_feature_heatmap_picked)
+
+    def _restore_feature_heatmap_picked(self, features) -> bool:
+        if not self._feature_heatmap_candidates:
+            return False
+        self._set_feature_heatmap_picked([str(f) for f in features or []])
+        return True
+
+    def _feature_heatmap_add_selected(self):
+        chosen = [
+            self.list_feature_heatmap_available.item(i).text()
+            for i in range(self.list_feature_heatmap_available.count())
+            if self.list_feature_heatmap_available.item(i).isSelected()
+        ]
+        if chosen:
+            self._set_feature_heatmap_picked(_list_widget_items(self.list_feature_heatmap_picked) + chosen)
+
+    def _feature_heatmap_remove_selected(self):
+        remove = {
+            self.list_feature_heatmap_picked.item(i).text()
+            for i in range(self.list_feature_heatmap_picked.count())
+            if self.list_feature_heatmap_picked.item(i).isSelected()
+        }
+        if remove:
+            self._set_feature_heatmap_picked(
+                [c for c in _list_widget_items(self.list_feature_heatmap_picked) if c not in remove]
+            )
+
+    def _refresh_feature_heatmap_features(self):
+        """Fill the feature-heatmap available/selected lists (the clustering's own
+        features preselected); keeps the user's picked list and its order when
+        nothing changed on disk."""
+        ct = self._cell_type()
+        out = self._out_dir()
+        if not ct or not out or self._track_adata is None:
+            self._feature_heatmap_candidates = []
+            self._feature_heatmap_cache_key = None
+            self._set_feature_heatmap_picked([])
+            return
+        from behav3d.analysis.behavior.state.utils import _resolve_positions_csv_path
+        from behav3d.analysis.behavior.track.utils import _default_behavioral_states_path
+        mtimes = []
+        for resolve in (
+            lambda: _resolve_positions_csv_path(output_dir=str(out), cell_type=ct),
+            lambda: _default_behavioral_states_path(str(out), ct),
+        ):
+            try:
+                p = resolve()
+                mtimes.append(p.stat().st_mtime if p.exists() else None)
+            except Exception:
+                mtimes.append(None)
+        key = (str(out), ct, id(self._track_adata), tuple(mtimes))
+        if key == self._feature_heatmap_cache_key:
+            return
+        from behav3d.analysis.behavior.track.visualization.plots.feature_heatmap import (
+            list_track_feature_candidates,
+        )
+        try:
+            candidates, defaults = list_track_feature_candidates(
+                str(out), ct, track_adata=self._track_adata
+            )
+        except Exception as exc:
+            self._log(f"⚠ Could not list features for the heatmap: {exc}")
+            candidates, defaults = [], []
+        previous_picked = _list_widget_items(self.list_feature_heatmap_picked)
+        keep_previous = self._feature_heatmap_cache_key is not None and key[:3] == self._feature_heatmap_cache_key[:3]
+        self._feature_heatmap_cache_key = key
+        # Available stays alphabetical for easy browsing; Selected keeps the model's
+        # own feature order, since that order is the heatmap's plot row order and the
+        # user re-arranges it by dragging.
+        self._feature_heatmap_candidates = sorted(candidates)
+        self._feature_heatmap_defaults = list(defaults)
+        candidate_set = set(self._feature_heatmap_candidates)
+        picked = (
+            [c for c in previous_picked if c in candidate_set]
+            if keep_previous and previous_picked else list(defaults)
+        )
+        self._set_feature_heatmap_picked(picked)
+
+    def _select_feature_heatmap_defaults(self):
+        self._set_feature_heatmap_picked(self._feature_heatmap_defaults)
+
+    def _update_feature_heatmap_summary(self):
+        """Show which features are currently picked for the Feature Heatmap,
+        mirroring config_summary_label / traj_config_summary_label."""
+        if not self._feature_heatmap_candidates:
+            self.feature_heatmap_summary_label.hide()
+            return
+        selected = sorted(_list_widget_items(self.list_feature_heatmap_picked))
+        self.feature_heatmap_summary_label.setText(
+            f"Selected features ({len(selected)}): {', '.join(selected) or '—'}"
+        )
+        self.feature_heatmap_summary_label.show()
 
     def _track_proportion_candidate_columns(self):
         cols = []
@@ -4886,19 +8710,13 @@ class TrackClassificationSubTab(QWidget):
 
     def _refresh_track_proportion_group_cols(self):
         candidate_cols = self._track_proportion_candidate_columns()
-        self.list_track_proportion_group_cols.clear()
-        for col in candidate_cols:
-            self.list_track_proportion_group_cols.addItem(col)
+        _refill_list_keep_selection(self.list_track_proportion_group_cols, candidate_cols)
         _fit_list_widget_height(self.list_track_proportion_group_cols)
 
-        self.list_contact_group_cols.clear()
-        for col in candidate_cols:
-            self.list_contact_group_cols.addItem(col)
+        _refill_list_keep_selection(self.list_contact_group_cols, candidate_cols)
         _fit_list_widget_height(self.list_contact_group_cols)
 
-        self.list_track_comparison_group_cols.clear()
-        for col in candidate_cols:
-            self.list_track_comparison_group_cols.addItem(col)
+        _refill_list_keep_selection(self.list_track_comparison_group_cols, candidate_cols)
         _fit_list_widget_height(self.list_track_comparison_group_cols)
 
         for combo in (
@@ -4929,18 +8747,16 @@ class TrackClassificationSubTab(QWidget):
         self._sync_track_comparison_group_y_text()
         self._refresh_track_comparison_group_levels()
 
-        # Pairing column for the paired contact-duration test: "sample_name" is always offered
+        # Pairing column(s) for the paired contact-duration test: "sample_name" is always offered
         # first (the common case, matching a typical R paired-t-test workflow) even though it's
-        # not itself one of the condition-like candidate_cols above.
+        # not itself one of the condition-like candidate_cols above, and is pre-selected by
+        # default so a fresh list behaves like the old single-select combo box did.
         pairing_options = ["sample_name"] + [c for c in candidate_cols if c != "sample_name"]
-        prev_pairing = self.combo_duration_pairing_col.currentText()
-        self.combo_duration_pairing_col.blockSignals(True)
-        self.combo_duration_pairing_col.clear()
-        self.combo_duration_pairing_col.addItems(pairing_options)
-        self.combo_duration_pairing_col.setCurrentText(
-            prev_pairing if prev_pairing in pairing_options else "sample_name"
-        )
-        self.combo_duration_pairing_col.blockSignals(False)
+        _refill_list_keep_selection(self.list_duration_pairing_cols, pairing_options)
+        _fit_list_widget_height(self.list_duration_pairing_cols)
+        if not self.list_duration_pairing_cols.selectedItems():
+            for item in self.list_duration_pairing_cols.findItems("sample_name", Qt.MatchExactly):
+                item.setSelected(True)
 
     def _on_track_proportion_group_x_changed(self, _text):
         self._refresh_track_proportion_group_x_levels()
@@ -5141,10 +8957,17 @@ class TrackClassificationSubTab(QWidget):
         else:
             self.label_target_class_warning.hide()
         contact_cols_present = self.combo_contact_col.count() > 0
-        self.btn_contact_analysis.setEnabled(
+        contact_base_ready = (
             contact_cols_present
             and self._track_adata is not None
             and not (use_target and not available)
+        )
+        self.btn_contact_rate.setEnabled(contact_base_ready)
+        self.btn_contact_composition.setEnabled(contact_base_ready)
+        self.btn_contact_condition_comparison.setEnabled(contact_base_ready)
+        self.btn_run_all_contact.setEnabled(contact_base_ready)
+        self.btn_contact_cluster_heatmap.setEnabled(
+            contact_cols_present and self._track_adata is not None
         )
         # Duration-by-class comparison is meaningless without a target classification to split by.
         self.btn_duration_comparison.setEnabled(
@@ -5156,7 +8979,32 @@ class TrackClassificationSubTab(QWidget):
 
     def _on_duration_test_mode_changed(self, *_args):
         is_paired = self.combo_duration_test_mode.currentData() == "paired"
-        self.combo_duration_pairing_col.setVisible(is_paired)
+        self.label_duration_pairing_cols.setVisible(is_paired)
+        self.list_duration_pairing_cols.setVisible(is_paired)
+
+    def _on_long_contact_unit_changed(self, *_args):
+        unit = self.combo_long_contact_unit.currentData()
+        spin = self.spin_long_contact_threshold
+        if unit == "percent":
+            spin.setRange(0.0, 100.0)
+            spin.setDecimals(1)
+            spin.setSingleStep(5.0)
+            spin.setSuffix(" %")
+        elif unit == "seconds":
+            spin.setRange(0.0, 100000.0)
+            spin.setDecimals(1)
+            spin.setSingleStep(5.0)
+            spin.setSuffix(" s")
+        elif unit == "hours":
+            spin.setRange(0.0, 1000.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.5)
+            spin.setSuffix(" h")
+        else:  # minutes
+            spin.setRange(0.0, 10000.0)
+            spin.setDecimals(1)
+            spin.setSingleStep(1.0)
+            spin.setSuffix(" min")
 
     def _refresh_contact_columns(self):
         import pandas as pd
@@ -5179,11 +9027,20 @@ class TrackClassificationSubTab(QWidget):
         self.combo_contact_col.blockSignals(False)
         self.combo_contact_col.setEnabled(len(contact_cols) > 0)
         self._sync_contact_target_class_controls()
+
+        prev_type_selection = {item.text() for item in self.list_contact_type_compare_cols.selectedItems()}
+        self.list_contact_type_compare_cols.blockSignals(True)
+        self.list_contact_type_compare_cols.clear()
+        self.list_contact_type_compare_cols.addItems(contact_cols)
+        for i in range(self.list_contact_type_compare_cols.count()):
+            item = self.list_contact_type_compare_cols.item(i)
+            if item.text() in prev_type_selection:
+                item.setSelected(True)
+        self.list_contact_type_compare_cols.blockSignals(False)
+        self.btn_contact_type_comparison.setEnabled(len(contact_cols) >= 2 and self._track_adata is not None)
+
         state_adata_path = self._state_adata_path(ct) if ct else None
         has_states = bool(state_adata_path and state_adata_path.exists())
-        self.btn_contact_state_shift.setEnabled(
-            len(contact_cols) > 0 and self._track_adata is not None and has_states
-        )
         self.btn_track_contact_overview.setEnabled(
             len(contact_cols) > 0 and self._track_adata is not None and has_states
         )
@@ -5192,25 +9049,22 @@ class TrackClassificationSubTab(QWidget):
         ct = self._cell_type()
         if not ct:
             for btn in (
-                self.btn_view_track, self.btn_view_train_track,
-                self.btn_view_apply_track, self.btn_view_exemplars,
+                self.btn_view_exemplars,
                 self.btn_view_diagnostics, self.btn_view_track_proportions,
-                self.btn_view_window_transitions,
-                self.btn_view_track_condition_comparison, self.btn_view_contact_analysis,
-                self.btn_view_contact_state_shift, self.btn_view_track_contact_overview,
+                self.btn_view_feature_heatmap, self.btn_view_window_transitions,
+                self.btn_view_transition_analysis, self.btn_view_track_condition_comparison,
+                self.btn_view_contact_rate, self.btn_view_contact_composition,
+                self.btn_view_contact_condition_comparison,
+                self.btn_view_contact_type_comparison, self.btn_view_track_contact_overview,
+                self.btn_view_duration_comparison, self.btn_view_contact_cluster_heatmap,
             ):
                 btn.setEnabled(False)
             return
-        adata_path = self._track_adata_path(ct)
-        self.btn_view_track.setEnabled(bool(adata_path and adata_path.exists()))
-        clf_path = self._track_classifier_path(ct)
-        self.btn_view_train_track.setEnabled(bool(clf_path and clf_path.exists()))
-        app_path = self._track_applied_path(ct)
-        self.btn_view_apply_track.setEnabled(bool(app_path and app_path.exists()))
         out = self._out_dir()
-        traj_dir = (out / "analysis" / ct / "behavorial_trajectories") if out else None
+        from behav3d.analysis.behavior.track.utils import _peek_track_outfolder
+        traj_dir = _peek_track_outfolder(out, ct) if out else None
         self.btn_view_exemplars.setEnabled(
-            bool(traj_dir and any(traj_dir.glob("exemplar_tracks*.pdf")))
+            bool(traj_dir and any((traj_dir / "example_tracks").glob("**/*.pdf")))
         )
         qc_dirs = self._track_diagnostics_qc_dirs(traj_dir)
         self.btn_view_diagnostics.setEnabled(
@@ -5224,12 +9078,24 @@ class TrackClassificationSubTab(QWidget):
                 and any(proportions_dir.glob("*.pdf"))
             )
         )
+        feature_heatmap_dir = traj_dir / "feature_heatmaps" if traj_dir else None
+        self.btn_view_feature_heatmap.setEnabled(
+            bool(feature_heatmap_dir and any(feature_heatmap_dir.glob("*.pdf")))
+        )
         window_transitions_dir = traj_dir / "window_transitions" if traj_dir else None
         self.btn_view_window_transitions.setEnabled(
             bool(
                 window_transitions_dir
                 and window_transitions_dir.exists()
                 and any(window_transitions_dir.glob("*.pdf"))
+            )
+        )
+        transition_analysis_dir = traj_dir / "transition_analysis" if traj_dir else None
+        self.btn_view_transition_analysis.setEnabled(
+            bool(
+                transition_analysis_dir
+                and transition_analysis_dir.exists()
+                and any(transition_analysis_dir.glob("*.pdf"))
             )
         )
         comparisons_dir = traj_dir / "behavior_comparisons" if traj_dir else None
@@ -5241,32 +9107,53 @@ class TrackClassificationSubTab(QWidget):
             )
         )
         contact_dir = traj_dir / "contact_analysis" if traj_dir else None
-        self.btn_view_contact_analysis.setEnabled(
+        self.btn_view_contact_rate.setEnabled(
             bool(
                 contact_dir
                 and contact_dir.exists()
-                and any(contact_dir.glob("*/*.pdf"))
+                and any(contact_dir.glob("contact_rate/*/contact_rate.pdf"))
             )
         )
-        self.btn_view_contact_state_shift.setEnabled(
+        self.btn_view_contact_composition.setEnabled(
             bool(
                 contact_dir
                 and contact_dir.exists()
-                and any(contact_dir.glob("*/contact_state_shift.pdf"))
+                and any(contact_dir.glob("contact_composition/*/contact_composition.pdf"))
+            )
+        )
+        self.btn_view_contact_condition_comparison.setEnabled(
+            bool(
+                contact_dir
+                and contact_dir.exists()
+                and any(contact_dir.glob("contact_condition_comparison/*/condition_comparison_*.pdf"))
+            )
+        )
+        self.btn_view_contact_type_comparison.setEnabled(
+            bool(
+                contact_dir
+                and contact_dir.exists()
+                and any(contact_dir.glob("contact_type_comparison/*/contact_type_comparison.pdf"))
             )
         )
         self.btn_view_track_contact_overview.setEnabled(
             bool(
                 contact_dir
                 and contact_dir.exists()
-                and any(contact_dir.glob("*/track_contact_overview.pdf"))
+                and any(contact_dir.glob("contact_track_overview/*/track_contact_overview.pdf"))
             )
         )
         self.btn_view_duration_comparison.setEnabled(
             bool(
                 contact_dir
                 and contact_dir.exists()
-                and any(contact_dir.glob("*/contact_duration_comparison.pdf"))
+                and any(contact_dir.glob("contact_duration_comparison/*/contact_duration_comparison.pdf"))
+            )
+        )
+        self.btn_view_contact_cluster_heatmap.setEnabled(
+            bool(
+                contact_dir
+                and contact_dir.exists()
+                and any(contact_dir.glob("contact_cluster_heatmap/*/contact_cluster_heatmap.pdf"))
             )
         )
 
@@ -5275,33 +9162,111 @@ class TrackClassificationSubTab(QWidget):
         track_path = self._track_adata_path(ct) if ct else None
         state_path = self._state_adata_path(ct) if ct else None
         has_track = bool(track_path and track_path.exists())
-        has_state = bool(state_path and state_path.exists())
-        self.btn_show_track_bp.setEnabled(has_track and has_state)
-        self.btn_export_track_bp.setEnabled(has_track and has_state)
+        # Timepoints/positions come from the state file, or - for trajectories built
+        # directly from features - from the trajectory-features file.
+        tp_path = self._per_timepoint_adata_path(ct) if ct else state_path
+        has_timepoints = bool(tp_path and tp_path.exists())
+        self.btn_show_track_bp.setEnabled(has_track and has_timepoints)
+        self.btn_export_track_bp.setEnabled(has_track and has_timepoints)
 
     # ── Click handlers ───────────────────────────────────────────────────
 
     def _on_run_cluster(self):
-        """Dispatch to original or dtaidistance based on current mode."""
-        if self.chk_use_original.isChecked():
+        """Dispatch based on the selected trajectory clustering method."""
+        if (self.combo_clustering_family.currentData() == "feature_based"
+                and self.chk_run_legacy_behav3d.isChecked()):
             self._on_run_original()
         else:
             self._on_run_track()
 
     def _on_run_track(self):
+        if refuse_if_busy(self, "starting track clustering"):
+            return
         ct = self._cell_type()
         if not ct:
             QMessageBox.warning(self, "No cell type", "Select a cell type first.")
             return
-        if self._bg.is_running():
-            QMessageBox.warning(self, "Busy", "Another operation is running.")
-            return
         self._log(f"▶ Running track clustering (dtaidistance) for '{ct}'…")
         self._dispatch_track_cluster(ct)
 
+    def _dtw_umap_params(self) -> dict:
+        """QC UMAP settings for the DTW basis (Advanced Configuration)."""
+        return {
+            "umap_n_neighbors": int(self.spin_dtw_umap_neighbors.value()),
+            "umap_min_dist": float(self.spin_dtw_umap_min_dist.value()),
+            "umap_spread": float(self.spin_dtw_umap_spread.value()),
+        }
+
     def _dispatch_track_cluster(self, ct: str, extra_callbacks=None):
         out = self._out_dir()
-        is_bouts = self.combo_trajectory_basis.currentText() == "bouts"
+        features_only = self._track_input_is_features()
+        # combo_trajectory_basis only matters in State-based mode; guard against a
+        # stale "bouts" selection left over from a previous State-based session
+        # while Feature-based is now selected.
+        is_bouts = not features_only and self._basis() == "bouts"
+        # When checked (and usable), Feature-based clusters directly on the saved
+        # behavioral-state h5ad with its exact HMM preprocessing -- numerically
+        # identical to the removed State-based "dtw features" Basis -- instead of
+        # building a fresh adata from the Trajectory Features selector.
+        # _behavioral_states_available() re-checks defensively even though
+        # _apply_clustering_family_mode already force-unchecks/hides when state
+        # adata disappears.
+        use_state_preset = (
+            features_only
+            and self.chk_use_state_features_preset.isChecked()
+            and self._behavioral_states_available()
+        )
+        feature_build_params = None
+        if features_only and not use_state_preset and self.traj_feature_selector.is_populating():
+            msg = (
+                "The trajectory feature list is still being scanned in the background. "
+                "Please try again in a moment."
+            )
+            if extra_callbacks and extra_callbacks.get("on_failed"):
+                extra_callbacks["on_failed"](msg)
+            else:
+                QMessageBox.information(self, "Still loading", msg)
+            return
+        if features_only and not use_state_preset:
+            feature_build_params = self.traj_feature_selector.params()
+            # Full-tracklet net displacement is additive on top of this base selection --
+            # build_trajectory_feature_adata itself still needs at least one timepoint/
+            # window/binary feature to build adata.X from, so it doesn't count here.
+            if not (feature_build_params["features"] or feature_build_params["additional_window_features"]
+                    or feature_build_params["binary_features"]):
+                msg = "Select at least one trajectory feature."
+                if extra_callbacks and extra_callbacks.get("on_failed"):
+                    extra_callbacks["on_failed"](msg)
+                else:
+                    QMessageBox.warning(self, "No features", msg)
+                return
+        elif use_state_preset:
+            cont_cols, binary_cols = self._state_model_feature_columns()
+            if not cont_cols and not binary_cols:
+                msg = (
+                    "No behavioral-state feature set found for this cell type. Run "
+                    "State Classification first, or uncheck 'Use features used in "
+                    "behavioral state clustering'."
+                )
+                if extra_callbacks and extra_callbacks.get("on_failed"):
+                    extra_callbacks["on_failed"](msg)
+                else:
+                    QMessageBox.warning(self, "No behavioral-state features", msg)
+                return
+
+        # Full-tracklet net displacement needs position_x/y/z, which only the
+        # freshly-built trajectory-feature adata retains (not the state-features
+        # preset's saved behavioral-states h5ad) -- see run_categorical_
+        # dtaidistance_trajectory_clustering's own ValueError guard for the case
+        # this doesn't catch (e.g. a stale saved config).
+        include_tracklet_disp = (
+            features_only and not use_state_preset
+            and self.traj_feature_selector.chk_tracklet_net_disp.isChecked()
+        )
+        include_tracklet_disp_sq = (
+            features_only and not use_state_preset
+            and self.traj_feature_selector.chk_tracklet_net_disp_sq.isChecked()
+        )
 
         if is_bouts:
             params = {
@@ -5328,11 +9293,7 @@ class TrackClassificationSubTab(QWidget):
                 "leiden_resolution": float(self.spin_leiden_resolution.value()),
                 "cluster_key": "ClusterID",
                 "plot_results": True,
-                "plot_exemplars": self.chk_bouts_plot_exemplars.isChecked(),
                 "random_state": int(self.spin_seed.value()),
-                # Share the DTW basis's output folder so both bases' diagnostics/exemplar
-                # PDFs and the canonical model .h5ad land in the same place on disk.
-                "output_subdir_name": "behavorial_trajectories",
             }
         else:
             params = {
@@ -5345,6 +9306,11 @@ class TrackClassificationSubTab(QWidget):
                 "clustering_method": self.combo_clustering_method.currentText(),
                 "leiden_n_neighbors": int(self.spin_leiden_neighbors.value()),
                 "leiden_resolution": float(self.spin_leiden_resolution.value()),
+                **self._dtw_umap_params(),
+                "sequence_source": "features" if features_only else "states",
+                "binary_feature_weight": float(self.spin_binary_weight.value()),
+                "include_tracklet_net_displacement": include_tracklet_disp,
+                "include_tracklet_net_displacement_squared": include_tracklet_disp_sq,
                 "trajectory_trim_mode": self.combo_trim.currentText(),
                 "split_long_tracks": self.chk_split_long_tracks.isChecked(),
                 "parallel": self.chk_parallel.isChecked(),
@@ -5356,11 +9322,17 @@ class TrackClassificationSubTab(QWidget):
         on_fail_ext = extra_callbacks.get("on_failed") if extra_callbacks else None
 
         def _run(**kw):
-            _traj_dir = out / "analysis" / ct / "behavorial_trajectories"
-            if _traj_dir.exists():
-                rmtree_ignore_missing(_traj_dir)
+            from behav3d.analysis.behavior.track.utils import _peek_track_outfolder
+            _existing_traj_dir = _peek_track_outfolder(out, ct)
+            if _existing_traj_dir.exists():
+                rmtree_ignore_missing(_existing_traj_dir)
+            # Re-resolve after clearing: with neither the canonical nor legacy
+            # folder left on disk, this always lands on the canonical name,
+            # matching what run_state_based_analysis/run_categorical_dtaidistance_
+            # trajectory_clustering will independently resolve to below.
+            _traj_dir = _peek_track_outfolder(out, ct)
             if is_bouts:
-                from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+                from behav3d.core.state_columns import FULL_STATE_COL
                 from behav3d.analysis.behavior.track.bouts import run_state_based_analysis
                 from behav3d.analysis.behavior.track.utils import (
                     get_dtaidistance_track_trajectories_filename,
@@ -5371,11 +9343,29 @@ class TrackClassificationSubTab(QWidget):
                 # unchanged regardless of which basis produced the model.
                 model_path = _traj_dir / get_dtaidistance_track_trajectories_filename(ct)
                 model_path.parent.mkdir(parents=True, exist_ok=True)
-                result.write(model_path, compression="gzip")
+                from behav3d.core.h5_access import prepare_adata_for_write
+                prepare_adata_for_write(result).write(model_path, compression="gzip")
                 return result
             from behav3d.analysis.behavior.track.state_dtw import (
                 run_categorical_dtaidistance_trajectory_clustering,
             )
+            if features_only and not use_state_preset:
+                # Build the per-timepoint feature file from the track-features CSV
+                # (no behavioral states) and cluster on it.
+                from behav3d.analysis.behavior.track.trajectory_features import (
+                    build_trajectory_feature_adata,
+                    trajectory_feature_adata_path,
+                )
+                build_trajectory_feature_adata(str(out), ct, **feature_build_params, verbose=True)
+                return run_categorical_dtaidistance_trajectory_clustering(
+                    **params,
+                    adata_full_path=str(trajectory_feature_adata_path(str(out), ct)),
+                    verbose=True,
+                )
+            # Plain State-based, and Feature-based with the state-features preset
+            # checked: no adata_full_path override, so this defaults to the
+            # behavioral-states h5ad -- sequence_source="features" then reuses the
+            # state model's exact saved scaler via resolve_state_feature_matrix.
             return run_categorical_dtaidistance_trajectory_clustering(**params, verbose=True)
 
         def _done(r):
@@ -5391,11 +9381,15 @@ class TrackClassificationSubTab(QWidget):
             self._reload()
             self._notify_results()
 
-            # The auto exemplar-overview step below relies on save_dtaidistance_exemplar_overview /
-            # save_dtaidistance_medoid_overview, which need a DTW pairwise distance matrix — not
-            # applicable to a bouts-derived model. The bouts pipeline already writes its own
-            # diagnostics/exemplar PDFs inline (via plot_results/plot_exemplars above).
-            if is_bouts:
+            # Only a lightweight exemplar/medoid overview grid is auto-generated here
+            # (into clustering/raw, alongside the diagnostics PDF) - the full
+            # per-cluster/per-example exemplar PDFs (example_tracks/) are expensive
+            # and stay manual-only, via the "Create exemplar PDFs" button.
+            # Exemplar/medoid overviews draw state bars: nothing to show without states.
+            has_states = bool(
+                (r.uns.get("dtai_trajectory_clustering", {}) or {}).get("has_behavioral_states", True)
+            ) if not is_bouts else True
+            if not has_states:
                 if on_done_ext:
                     on_done_ext(r)
                 return
@@ -5406,13 +9400,31 @@ class TrackClassificationSubTab(QWidget):
             _log = self._log
 
             def _run_overview(**kw):
+                from behav3d.analysis.behavior.track.utils import _resolve_track_paths
+                _method = (_track_adata.uns.get("dtai_trajectory_clustering", {}) or {}).get("method")
+                _raw_dir = _resolve_track_paths(str(out), ct).clustering_outfolder / "raw"
+                _raw_dir.mkdir(parents=True, exist_ok=True)
+                if _method == "bouts_feature_clustering":
+                    # Bouts has no medoid-overview equivalent (its adata.X is a
+                    # per-track feature matrix, not a pairwise DTW distance
+                    # matrix); just the exemplar overview grid.
+                    from behav3d.analysis.behavior.track.bouts import (
+                        save_bouts_exemplar_overview,
+                    )
+                    return save_bouts_exemplar_overview(
+                        _track_adata,
+                        output_dir=str(out),
+                        cell_type=ct,
+                        n_per_cluster=_n_per,
+                        seed=_seed,
+                        outfolder=_raw_dir,
+                        verbose=True,
+                    )
                 from behav3d.analysis.behavior.track.state_dtw import (
+                    FEATURE_ONLY_METHODS,
                     save_dtaidistance_exemplar_overview,
                     save_dtaidistance_medoid_overview,
                 )
-                from behav3d.analysis.behavior.track.utils import _resolve_dtaidistance_paths
-                _raw_dir = _resolve_dtaidistance_paths(str(out), ct)["quality_control_outfolder"] / "raw"
-                _raw_dir.mkdir(parents=True, exist_ok=True)
                 _result = save_dtaidistance_exemplar_overview(
                     _track_adata,
                     output_dir=str(out),
@@ -5422,36 +9434,58 @@ class TrackClassificationSubTab(QWidget):
                     outfolder=_raw_dir,
                     verbose=True,
                 )
-                try:
-                    save_dtaidistance_medoid_overview(
-                        _track_adata,
-                        output_dir=str(out),
-                        cell_type=ct,
-                        outfolder=_raw_dir,
-                        verbose=True,
-                    )
-                except Exception as _exc:
-                    _log(f"⚠ Could not generate medoid overview: {_exc}")
+                # Medoid selection needs a precomputed pairwise DTW distance matrix,
+                # structurally unavailable for feature-based clustering.
+                if _method not in FEATURE_ONLY_METHODS:
+                    try:
+                        save_dtaidistance_medoid_overview(
+                            _track_adata,
+                            output_dir=str(out),
+                            cell_type=ct,
+                            outfolder=_raw_dir,
+                            verbose=True,
+                        )
+                    except Exception as _exc:
+                        _log(f"⚠ Could not generate medoid overview: {_exc}")
                 return _result
+
+            # The Processing Queue is told "done" only once the overview has also
+            # finished (or failed -- the clustering itself succeeded, so a failed
+            # overview must not stop the queue). Signalling immediately let the
+            # queue start its next step while this overview was still running on
+            # the same BackgroundOperation.
+            def _notify_queue():
+                if on_done_ext:
+                    on_done_ext(r)
 
             def _overview_done(_):
                 _log("✅ Exemplar overview done.")
                 QTimer.singleShot(0, self._update_view_buttons)
+                _notify_queue()
+
+            def _overview_failed(e):
+                self._log(f"⚠ Exemplar overview failed: {e}")
+                _notify_queue()
 
             def _start_overview():
-                self._bg.run(
-                    fn=_run_overview,
-                    desc=f"Exemplar overview ({ct})…",
-                    progress_row=self.progress_row,
-                    buttons=[],
-                    viewer=self.viewer,
-                    inject_progress=False,
-                    on_done=_overview_done,
-                    on_failed=lambda e: self._log(f"⚠ Exemplar overview failed: {e}"),
-                )
+                try:
+                    self._bg.run(
+                        fn=_run_overview,
+                        desc=f"Exemplar overview ({ct})…",
+                        progress_row=self.progress_row,
+                        buttons=[],
+                        viewer=self.viewer,
+                        inject_progress=False,
+                        on_done=_overview_done,
+                        on_failed=_overview_failed,
+                        # Deliberate continuation of the clustering run that just
+                        # finished, not a fresh user action.
+                        chained=True,
+                    )
+                except Exception as exc:
+                    traceback.print_exc()
+                    _overview_failed(exc)
             QTimer.singleShot(0, _start_overview)
-            if on_done_ext:
-                on_done_ext(r)
 
         def _fail(e):
             self._log(f"❌ Track clustering failed: {e}")
@@ -5485,26 +9519,81 @@ class TrackClassificationSubTab(QWidget):
         self._dispatch_track_cluster(ct, extra_callbacks=extra_callbacks)
 
     def _on_run_original(self):
+        if refuse_if_busy(self, "starting the original BEHAV3D clustering"):
+            return
         ct = self._cell_type()
         if not ct:
             QMessageBox.warning(self, "No cell type", "Select a cell type first.")
             return
-        if self._bg.is_running():
-            QMessageBox.warning(self, "Busy", "Another operation is running.")
+
+        exact_settings = self.chk_use_exact_original_settings.isChecked()
+        feature_params = None
+        if not exact_settings and self.traj_feature_selector.is_populating():
+            QMessageBox.information(
+                self, "Still loading",
+                "The trajectory feature list is still being scanned in the background. "
+                "Please try again in a moment.",
+            )
             return
+        if not exact_settings:
+            feature_params = self.traj_feature_selector.params()
+            if not (feature_params["features"] or feature_params["additional_window_features"]
+                    or feature_params["binary_features"]):
+                QMessageBox.warning(
+                    self, "No features selected",
+                    "Select at least one feature in Trajectory Features, "
+                    "or check 'Use exact original BEHAV3D settings'."
+                )
+                return
+
         out = self._out_dir()
-        self._log(f"▶ Running original BEHAV3D feature-based DTW for '{ct}'…")
+        self._log(f"▶ Running feature-based BEHAV3D DTW for '{ct}'…")
         n_clust = int(self.spin_n_clusters.value())
         traj_size = int(self.spin_traj_size.value())
         n_neigh = int(self.spin_umap_neighbors.value())
         min_dist = float(self.spin_umap_min_dist.value())
 
-        def _run(**kw):
-            import shutil
-            _traj_dir = out / "analysis" / ct / "behavorial_trajectories"
+        def _cluster(**kw):
+            from behav3d.analysis.behavior.track.utils import (
+                _peek_track_outfolder,
+                _resolve_track_paths,
+            )
+            _traj_dir = _peek_track_outfolder(out, ct)
             if _traj_dir.exists():
                 rmtree_ignore_missing(_traj_dir)
             from behav3d.analysis.behavior.track.feature_dtw import run_tcell_analysis
+            # Resolve the legacy method's raw-output staging dir (relative to
+            # analysis/<cell_type>/) through the shared resolver, so it lands
+            # under the canonical "behavioral_trajectories" folder — or its
+            # legacy "behavorial_trajectories" spelling if this is an older
+            # project that still uses it.
+            _paths = _resolve_track_paths(str(out) if out else "", ct)
+            _original_subdir_name = str(
+                (_paths.original_behav3d_outfolder / "raw").relative_to(_paths.analysis_outdir)
+            )
+            if exact_settings:
+                # contact_cols left as None → the preset auto-detects every raw
+                # `*_contact` column (each organoid and each other cell type) and
+                # uses each as its own scaled DTW feature.
+                return run_tcell_analysis(
+                    output_dir=str(out) if out else "",
+                    cell_type=ct,
+                    nr_of_clusters=n_clust,
+                    min_track_length=traj_size,
+                    max_track_length=traj_size,
+                    umap_n_neighbors=n_neigh,
+                    umap_minimal_distance=min_dist,
+                    feature_scaling_preset="original_behav3d",
+                    output_subdir_name=_original_subdir_name,
+                )
+            # Custom feature selection (from the shared Trajectory Features
+            # selector): continuous picks (Timepoint + Window tabs) get
+            # z-normalized the same way the preset's kinematic features do;
+            # binary picks (Binary tab: contact, active-killing, death,
+            # invasiveness) are used as raw 0/1 values, matching how the preset
+            # itself treats contact columns.
+            continuous_cols = feature_params["features"] + feature_params["additional_window_features"]
+            binary_cols = feature_params["binary_features"]
             return run_tcell_analysis(
                 output_dir=str(out) if out else "",
                 cell_type=ct,
@@ -5513,30 +9602,42 @@ class TrackClassificationSubTab(QWidget):
                 max_track_length=traj_size,
                 umap_n_neighbors=n_neigh,
                 umap_minimal_distance=min_dist,
-                feature_scaling_preset="original_behav3d",
-                output_subdir_name="behavorial_trajectories/original_behav3d/raw",
+                feature_scaling_preset=None,
+                columns_to_use=continuous_cols + binary_cols,
+                columns_to_normalize=continuous_cols,
+                output_subdir_name=_original_subdir_name,
             )
 
-        def _done(_):
+        def _run(**kw):
+            res = _cluster(**kw)
+            # Building the h5ad is file I/O; keep it off the GUI thread.
             from behav3d.analysis.behavior.track.feature_dtw import _create_original_behav3d_adata
+            adata_error = None
             try:
                 _create_original_behav3d_adata(str(out), ct)
             except Exception as e:
-                self._log(f"⚠ Could not create h5ad from original BEHAV3D results: {e}")
-            self._log(f"✅ Original BEHAV3D clustering done for '{ct}'.")
+                adata_error = str(e)
+            return {"result": res, "adata_error": adata_error}
+
+        def _done(r):
+            if isinstance(r, dict) and r.get("adata_error"):
+                self._log(
+                    f"⚠ Could not create h5ad from feature-based BEHAV3D results: {r['adata_error']}"
+                )
+            self._log(f"✅ Feature-based BEHAV3D clustering done for '{ct}'.")
             self._persist_track_cfg(ct)
             self._reload()
             self._notify_results()
 
         self._bg.run(
             fn=_run,
-            desc=f"Original BEHAV3D DTW ({ct})…",
+            desc=f"Feature-based BEHAV3D DTW ({ct})…",
             progress_row=self.progress_row,
             buttons=[self.btn_run_track],
             viewer=self.viewer,
             inject_progress=False,
             on_done=_done,
-            on_failed=lambda e: self._log(f"❌ Original BEHAV3D failed: {e}"),
+            on_failed=lambda e: self._log(f"❌ Feature-based BEHAV3D failed: {e}"),
         )
 
     def _on_rename_track(self):
@@ -5562,7 +9663,11 @@ class TrackClassificationSubTab(QWidget):
                 self._regenerate_track_reports_after_rename(ct)
 
     def _regenerate_track_reports_after_rename(self, ct: str):
-        """Re-run diagnostics + proportion plots so plots reflect the just-renamed labels/colors."""
+        """Re-run diagnostics plus a lightweight exemplar/medoid overview grid so plots
+        reflect the just-renamed labels/colors. Deliberately does NOT regenerate the
+        behavior-proportions plot or the full per-cluster/per-example exemplar PDFs
+        (example_tracks/) - those are expensive and remain manual-only, via their
+        dedicated buttons."""
         if self._track_adata is None or self._bg.is_running():
             return
         out = self._out_dir()
@@ -5577,22 +9682,30 @@ class TrackClassificationSubTab(QWidget):
             return
 
         def _run(**kw):
-            from behav3d.analysis.behavior.track.state_dtw import save_dtaidistance_diagnostics
+            from behav3d.analysis.behavior.track.state_dtw import (
+                FEATURE_ONLY_METHODS,
+                save_dtaidistance_diagnostics,
+                save_dtaidistance_exemplar_overview,
+                save_dtaidistance_medoid_overview,
+            )
             from behav3d.analysis.behavior.track.visualization.plots.reports import (
                 generate_track_clustering_report_pdfs,
-                save_track_class_proportions_by_sample_plot,
             )
-            from behav3d.analysis.behavior.track.utils import _resolve_dtaidistance_paths
+            from behav3d.analysis.behavior.track.utils import _resolve_track_paths
             from behav3d.napari._rename_dialog import _track_cluster_col
             cluster_col = _track_cluster_col(track_adata) or "ClusterID"
-            paths = _resolve_dtaidistance_paths(str(out) if out else "", ct)
+            paths = _resolve_track_paths(str(out) if out else "", ct)
             if method == "bouts_feature_clustering":
                 # adata.X is a per-track feature matrix here, not a pairwise DTW
                 # distance matrix - regenerate via the same generator bouts.py
                 # itself uses at clustering time instead of the DTW-only path.
+                # Deliberately write to clustering_outfolder itself, not its
+                # "raw" subfolder - "raw" is reserved for the diagnostics PDF
+                # a full clustering rerun writes, and a rename must not
+                # overwrite that.
                 diag = generate_track_clustering_report_pdfs(
                     adata_tracks=track_adata,
-                    outfolder=paths["clustering_outfolder"],
+                    outfolder=paths.clustering_outfolder,
                     cluster_key=cluster_col,
                     verbose=True,
                 )
@@ -5603,33 +9716,52 @@ class TrackClassificationSubTab(QWidget):
                     cell_type=ct,
                     verbose=True,
                 )
-            prop = save_track_class_proportions_by_sample_plot(
-                track_adata,
-                paths["behavior_proportions_outfolder"],
-                sample_col="sample_name",
-                class_col=cluster_col,
-                verbose=True,
-            )
-            result = {"diagnostics": diag, "proportions": prop}
-            if "trajectory_window_id" in track_adata.obs.columns:
-                # Only meaningful when 'Divide long tracks' was used - most runs
-                # don't have this column, so skip silently rather than erroring
-                # the whole refresh for the common case. A real failure here is
-                # caught locally so it doesn't take down the reports above,
-                # which already succeeded by this point.
-                try:
-                    from behav3d.analysis.behavior.track.visualization.plots.window_transitions import (
-                        save_window_transition_report,
+            result = {"diagnostics": diag}
+            # Note: the Sankey (window transitions) and transition-analysis (circular
+            # diagram + heatmap) reports, the behavior-proportions plot, and the full
+            # per-cluster/per-example exemplar PDFs are intentionally NOT regenerated
+            # here - they're expensive and a rename shouldn't trigger them
+            # automatically. Use the dedicated "Window Transitions" / "Track
+            # Transition Report" / "Track proportions" / "Exemplar PDFs" buttons
+            # instead.
+            # Refresh the lightweight exemplar/medoid overview grid too, so it
+            # reflects the just-renamed cluster labels/colors rather than staying
+            # stale - caught locally so a failure here doesn't take down the
+            # reports above, which already succeeded by this point.
+            try:
+                if method == "bouts_feature_clustering":
+                    # Reuse the same plotting/saving logic bouts.py runs right
+                    # after clustering, instead of the DTW-only reload path
+                    # below - keeps renamed-cluster output looking the same as
+                    # the original (just with the new labels).
+                    from behav3d.analysis.behavior.track.bouts import (
+                        save_bouts_exemplar_overview,
                     )
-                    result["window_transitions"] = save_window_transition_report(
+                    result["exemplar_overview"] = save_bouts_exemplar_overview(
                         track_adata,
                         output_dir=str(out) if out else "",
                         cell_type=ct,
-                        cluster_key=cluster_col,
+                        verbose=True,
+                    )
+                else:
+                    result["exemplar_overview"] = save_dtaidistance_exemplar_overview(
+                        track_adata,
+                        output_dir=str(out) if out else "",
+                        cell_type=ct,
+                        verbose=True,
+                    )
+            except Exception as exc:
+                result["exemplar_overview_error"] = str(exc)
+            if method not in FEATURE_ONLY_METHODS:
+                try:
+                    result["medoid_overview"] = save_dtaidistance_medoid_overview(
+                        track_adata,
+                        output_dir=str(out) if out else "",
+                        cell_type=ct,
                         verbose=True,
                     )
                 except Exception as exc:
-                    result["window_transitions_error"] = str(exc)
+                    result["medoid_overview_error"] = str(exc)
             return result
 
         self._bg.run(
@@ -5974,7 +10106,10 @@ class TrackClassificationSubTab(QWidget):
             from matplotlib.backends.backend_pdf import PdfPages
             import matplotlib.pyplot as plt
             import anndata as _ad
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
+            from behav3d.core.state_columns import (
+                FULL_STATE_COL,
+                resolve_full_state_col,
+            )
             from behav3d.napari._rename_dialog import _track_cluster_col
 
             cluster_col = _track_cluster_col(track_adata) or "ClusterID"
@@ -5982,14 +10117,14 @@ class TrackClassificationSubTab(QWidget):
             if state_adata_path is None or not state_adata_path.exists():
                 raise FileNotFoundError(
                     f"Behavioral states h5ad not found at {state_adata_path}. "
-                    "Run State Classification first."
+                    "Run State Clustering first."
                 )
-            full_adata = _ad.read_h5ad(str(state_adata_path))
+            full_adata = _read_h5ad_shared(str(state_adata_path))
+            state_key = resolve_full_state_col(full_adata) or FULL_STATE_COL
 
             out_path = _Path(out) if out else _Path(".")
-            exemplar_root = (
-                out_path / "analysis" / ct / "behavorial_trajectories" / "example_tracks"
-            )
+            from behav3d.analysis.behavior.track.utils import _resolve_track_paths
+            exemplar_root = _resolve_track_paths(str(out) if out else "", ct).example_tracks_outfolder
             exemplar_root.mkdir(parents=True, exist_ok=True)
             results = {}
 
@@ -6001,7 +10136,7 @@ class TrackClassificationSubTab(QWidget):
                     sample_key="sample_name",
                     track_key="TrackID",
                     time_key="position_t",
-                    state_key=FULL_STATE_COL,
+                    state_key=state_key,
                     cluster_key=cluster_col,
                     tmin_key="position_t_min",
                     tmax_key="position_t_max",
@@ -6020,7 +10155,7 @@ class TrackClassificationSubTab(QWidget):
                     sample_key="sample_name",
                     track_key="TrackID",
                     time_key="position_t",
-                    state_key=FULL_STATE_COL,
+                    state_key=state_key,
                     cluster_key=cluster_col,
                     tmin_key="position_t_min",
                     tmax_key="position_t_max",
@@ -6038,7 +10173,7 @@ class TrackClassificationSubTab(QWidget):
                     sample_key="sample_name",
                     track_key="TrackID",
                     time_key="position_t",
-                    state_key=FULL_STATE_COL,
+                    state_key=state_key,
                     cluster_key=cluster_col,
                     tmin_key="position_t_min",
                     tmax_key="position_t_max",
@@ -6057,7 +10192,7 @@ class TrackClassificationSubTab(QWidget):
                     sample_key="sample_name",
                     track_key="TrackID",
                     time_key="position_t",
-                    state_key=FULL_STATE_COL,
+                    state_key=state_key,
                     cluster_key=cluster_col,
                     tmin_key="position_t_min",
                     tmax_key="position_t_max",
@@ -6067,6 +10202,7 @@ class TrackClassificationSubTab(QWidget):
 
             return results
 
+        self._persist_report_settings(ct, "exemplars")
         self._bg.run(
             fn=_run,
             desc=f"Exemplar PDFs ({ct})…",
@@ -6095,9 +10231,13 @@ class TrackClassificationSubTab(QWidget):
         out = self._out_dir()
         self._log(f"▶ Creating diagnostics for '{ct}'…")
         track_adata = self._track_adata
+        # Read on the main thread; lets the user re-draw the QC UMAP with new
+        # settings without re-running the clustering.
+        umap_params = {**self._dtw_umap_params(), "random_state": int(self.spin_seed.value())}
 
         def _run(**kw):
             from behav3d.analysis.behavior.track.state_dtw import (
+                FEATURE_ONLY_METHODS,
                 save_dtaidistance_diagnostics,
                 save_dtaidistance_exemplar_overview,
                 save_dtaidistance_medoid_overview,
@@ -6107,28 +10247,32 @@ class TrackClassificationSubTab(QWidget):
                 from behav3d.analysis.behavior.track.feature_dtw import (
                     _save_feature_dtw_quality_control,
                 )
-                from behav3d.analysis.behavior.track.utils import _resolve_dtaidistance_paths
+                from behav3d.analysis.behavior.track.utils import _resolve_track_paths
                 result = _save_feature_dtw_quality_control(
                     output_dir=str(out) if out else "",
                     cell_type=ct,
-                    proportions_outfolder=_resolve_dtaidistance_paths(
+                    proportions_outfolder=_resolve_track_paths(
                         str(out) if out else "", ct
-                    )["behavior_proportions_outfolder"],
+                    ).behavior_proportions_outfolder,
                 )
             elif method == "bouts_feature_clustering":
                 # adata.X is a per-track feature matrix here, not a pairwise DTW
                 # distance matrix - regenerate via the same generator bouts.py
                 # itself uses at clustering time instead of the DTW-only path.
+                # Deliberately write to clustering_outfolder itself, not its
+                # "raw" subfolder - "raw" is reserved for the diagnostics PDF
+                # a full clustering rerun writes, and a manual regeneration
+                # here must not overwrite that.
                 from behav3d.analysis.behavior.track.visualization.plots.reports import (
                     generate_track_clustering_report_pdfs,
                 )
-                from behav3d.analysis.behavior.track.utils import _resolve_dtaidistance_paths
+                from behav3d.analysis.behavior.track.utils import _resolve_track_paths
                 from behav3d.napari._rename_dialog import _track_cluster_col
-                paths = _resolve_dtaidistance_paths(str(out) if out else "", ct)
+                paths = _resolve_track_paths(str(out) if out else "", ct)
                 cluster_col = _track_cluster_col(track_adata) or "ClusterID"
                 result = generate_track_clustering_report_pdfs(
                     adata_tracks=track_adata,
-                    outfolder=paths["clustering_outfolder"],
+                    outfolder=paths.clustering_outfolder,
                     cluster_key=cluster_col,
                     verbose=True,
                 )
@@ -6137,26 +10281,59 @@ class TrackClassificationSubTab(QWidget):
                     adata_tracks=track_adata,
                     output_dir=str(out) if out else "",
                     cell_type=ct,
+                    **umap_params,
                     verbose=True,
                 )
-            try:
-                save_dtaidistance_exemplar_overview(
-                    track_adata,
-                    output_dir=str(out) if out else "",
-                    cell_type=ct,
-                    verbose=True,
-                )
-            except Exception as _exc:
-                print(f"[BEHAV3D] Could not generate exemplar overview: {_exc}")
-            try:
-                save_dtaidistance_medoid_overview(
-                    track_adata,
-                    output_dir=str(out) if out else "",
-                    cell_type=ct,
-                    verbose=True,
-                )
-            except Exception as _exc:
-                print(f"[BEHAV3D] Could not generate medoid overview: {_exc}")
+            # Exemplar overview needs a state_col/behavioral-states linkage to
+            # reconstruct per-timepoint tracks - not applicable to the
+            # "Original BEHAV3D" feature-DTW method, which clusters raw
+            # per-frame kinematic/contact features with no such concept.
+            # _save_feature_dtw_quality_control above is that method's
+            # complete diagnostics/QC output. Exemplar/medoid overviews also
+            # draw state bars, so a state-free DTW model (sequence_source
+            # "features only") skips them too - bouts always has states.
+            has_states = bool(
+                (track_adata.uns.get("dtai_trajectory_clustering", {}) or {}).get("has_behavioral_states", True)
+            )
+            if method != "original_behav3d_feature_dtw" and has_states:
+                try:
+                    if method == "bouts_feature_clustering":
+                        # Reuse the same plotting/saving logic bouts.py runs
+                        # right after clustering, instead of the DTW-only
+                        # reload path below.
+                        from behav3d.analysis.behavior.track.bouts import (
+                            save_bouts_exemplar_overview,
+                        )
+                        save_bouts_exemplar_overview(
+                            track_adata,
+                            output_dir=str(out) if out else "",
+                            cell_type=ct,
+                            verbose=True,
+                        )
+                    else:
+                        save_dtaidistance_exemplar_overview(
+                            track_adata,
+                            output_dir=str(out) if out else "",
+                            cell_type=ct,
+                            verbose=True,
+                        )
+                except Exception as _exc:
+                    print(f"[BEHAV3D] Could not generate exemplar overview: {_exc}")
+            # Medoid overview requires a precomputed pairwise DTW distance
+            # matrix to pick a per-cluster medoid - structurally unavailable
+            # for feature-based clustering methods (bouts and Original
+            # BEHAV3D), so re-running clustering can never produce it for
+            # these; skip instead of always failing with a misleading message.
+            if method not in FEATURE_ONLY_METHODS and has_states:
+                try:
+                    save_dtaidistance_medoid_overview(
+                        track_adata,
+                        output_dir=str(out) if out else "",
+                        cell_type=ct,
+                        verbose=True,
+                    )
+                except Exception as _exc:
+                    print(f"[BEHAV3D] Could not generate medoid overview: {_exc}")
             return result
 
         self._bg.run(
@@ -6192,6 +10369,7 @@ class TrackClassificationSubTab(QWidget):
         out = self._out_dir()
         self._log(f"▶ Creating track proportion plots for '{ct}'…")
         track_adata = self._track_adata
+        time_bin_size = int(self.spin_track_composition_time_bin.value())
         selected_cols = [item.text() for item in self.list_track_proportion_group_cols.selectedItems()]
         group_x = self.combo_track_proportion_group_x.currentText()
         group_x = None if group_x in ("", "(none)") else group_x
@@ -6226,14 +10404,14 @@ class TrackClassificationSubTab(QWidget):
         md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
 
         def _run(**kw):
-            from behav3d.analysis.behavior.track.utils import _resolve_dtaidistance_paths
+            from behav3d.analysis.behavior.track.utils import _resolve_track_paths
             from behav3d.analysis.behavior.track.visualization.plots.reports import (
                 save_track_class_proportions_by_sample_plot,
             )
             from behav3d.core.metadata import merge_condition_columns_into_obs
             from behav3d.napari._rename_dialog import _track_cluster_col
             cluster_col = _track_cluster_col(track_adata) or "ClusterID"
-            prop_dir = _resolve_dtaidistance_paths(str(out) if out else "", ct)["behavior_proportions_outfolder"]
+            prop_dir = _resolve_track_paths(str(out) if out else "", ct).behavior_proportions_outfolder
             all_cols = selected_cols + [c for c in (group_x, group_y) if c]
             cols_to_merge = [c for c in all_cols if c not in track_adata.obs.columns]
             if cols_to_merge and md is not None:
@@ -6248,9 +10426,11 @@ class TrackClassificationSubTab(QWidget):
                 group_y=group_y,
                 group_x_levels_map=group_x_levels_map,
                 group_y_levels_map=group_y_levels_map,
+                time_bin_size=time_bin_size,
                 verbose=True,
             )
 
+        self._persist_report_settings(ct, "track_composition")
         self._bg.run(
             fn=_run,
             desc=f"Track proportion plots ({ct})…",
@@ -6266,7 +10446,57 @@ class TrackClassificationSubTab(QWidget):
             on_failed=lambda e: self._log(f"❌ Track proportion plots failed: {e}"),
         )
 
-    def _on_window_transitions(self):
+    def _on_feature_heatmap(self):
+        ct = self._cell_type()
+        if not ct:
+            return
+        if self._track_adata is None:
+            QMessageBox.warning(self, "No data", "Run track clustering first.")
+            return
+        if self._bg.is_running():
+            QMessageBox.warning(self, "Busy", "Another operation is running.")
+            return
+        features = _list_widget_items(self.list_feature_heatmap_picked)
+        if not features:
+            QMessageBox.warning(self, "No features", "Add at least one feature to the heatmap.")
+            return
+        out = self._out_dir()
+        track_adata = self._track_adata
+        scaling = "zscore" if self.combo_feature_heatmap_scaling.currentText() == "z-score" else "minmax"
+        self._log(f"▶ Creating feature heatmap for '{ct}' ({len(features)} features, {scaling})…")
+
+        def _run(**kw):
+            from behav3d.analysis.behavior.track.visualization.plots.feature_heatmap import (
+                save_track_feature_heatmap,
+            )
+            from behav3d.napari._rename_dialog import _track_cluster_col
+            return save_track_feature_heatmap(
+                track_adata,
+                str(out) if out else "",
+                ct,
+                features,
+                cluster_key=_track_cluster_col(track_adata) or "ClusterID",
+                scaling=scaling,
+                verbose=True,
+            )
+
+        self._persist_report_settings(ct, "feature_heatmap")
+        self._bg.run(
+            fn=_run,
+            desc=f"Feature heatmap ({ct})…",
+            progress_row=self.progress_row,
+            buttons=[self.btn_feature_heatmap],
+            viewer=self.viewer,
+            inject_progress=False,
+            on_done=lambda r: (
+                self._log(f"✅ Feature heatmap done for '{ct}': {r.get('feature_heatmap_pdf')}"),
+                self._update_view_buttons(),
+                self._notify_results(),
+            ),
+            on_failed=lambda e: self._log(f"❌ Feature heatmap failed: {e}"),
+        )
+
+    def _on_transition_analysis(self):
         ct = self._cell_type()
         if not ct:
             return
@@ -6277,43 +10507,87 @@ class TrackClassificationSubTab(QWidget):
             QMessageBox.warning(
                 self, "No sub-track windows",
                 "This report needs tracks split into windows. Enable 'Divide long "
-                "tracks' in Step 1's Advanced Configuration and re-run track clustering.",
+                "tracks' in the Track clustering section's Advanced Configuration and "
+                "re-run track clustering.",
+            )
+            return
+        include_transition_matrix = self.chk_transanalysis_include_matrix.isChecked()
+        include_circular_diagram = self.chk_transanalysis_include_circular.isChecked()
+        circular_include_self_transitions = self.chk_transanalysis_include_self.isChecked()
+        include_circular_diagram_per_cluster = self.chk_transanalysis_include_per_cluster.isChecked()
+        include_window_sankey = self.chk_transanalysis_include_window_sankey.isChecked()
+        include_pooled = (
+            include_transition_matrix or include_circular_diagram
+            or include_circular_diagram_per_cluster
+        )
+        if not (include_pooled or include_window_sankey):
+            QMessageBox.warning(
+                self, "Nothing selected",
+                "Select at least one page to include in the Track Transition Report.",
             )
             return
         if self._bg.is_running():
             QMessageBox.warning(self, "Busy", "Another operation is running.")
             return
         out = self._out_dir()
-        self._log(f"▶ Creating window transition Sankey for '{ct}'…")
+        self._log(f"▶ Creating transition analysis for '{ct}'…")
         track_adata = self._track_adata
 
+        min_prob_to_draw = self.spin_transanalysis_min_prob.value() / 100.0
+        emphasis_gamma = self.spin_transanalysis_gamma.value()
+        label_style = (
+            "legend" if self.combo_transanalysis_label_style.currentIndex() == 1 else "on_node"
+        )
+
         def _run(**kw):
-            from behav3d.analysis.behavior.track.visualization.plots.window_transitions import (
-                save_window_transition_report,
-            )
             from behav3d.napari._rename_dialog import _track_cluster_col
             cluster_col = _track_cluster_col(track_adata) or "ClusterID"
-            return save_window_transition_report(
-                track_adata,
-                output_dir=str(out) if out else "",
-                cell_type=ct,
-                cluster_key=cluster_col,
-                verbose=True,
-            )
+            results = {}
+            if include_pooled:
+                from behav3d.analysis.behavior.track.visualization.plots.transition_analysis import (
+                    save_window_cluster_transition_analysis,
+                )
+                results["transition_analysis"] = save_window_cluster_transition_analysis(
+                    track_adata,
+                    output_dir=str(out) if out else "",
+                    cell_type=ct,
+                    cluster_key=cluster_col,
+                    min_prob_to_draw=min_prob_to_draw,
+                    emphasis_gamma=emphasis_gamma,
+                    label_style=label_style,
+                    include_transition_matrix=include_transition_matrix,
+                    include_circular_diagram=include_circular_diagram,
+                    circular_include_self_transitions=circular_include_self_transitions,
+                    include_circular_diagram_per_cluster=include_circular_diagram_per_cluster,
+                    verbose=True,
+                )
+            if include_window_sankey:
+                from behav3d.analysis.behavior.track.visualization.plots.window_transitions import (
+                    save_window_transition_report,
+                )
+                results["window_transitions"] = save_window_transition_report(
+                    track_adata,
+                    output_dir=str(out) if out else "",
+                    cell_type=ct,
+                    cluster_key=cluster_col,
+                    verbose=True,
+                )
+            return results
 
+        self._persist_report_settings(ct, "transition")
         self._bg.run(
             fn=_run,
-            desc=f"Window transition Sankey ({ct})…",
+            desc=f"Transition analysis ({ct})…",
             progress_row=self.progress_row,
-            buttons=[self.btn_window_transitions],
+            buttons=[self.btn_transition_analysis],
             viewer=self.viewer,
             inject_progress=False,
             on_done=lambda r: (
-                self._log(f"✅ Window transition Sankey done for '{ct}'."),
+                self._log(f"✅ Transition analysis done for '{ct}'."),
                 self._update_view_buttons(),
                 self._notify_results(),
             ),
-            on_failed=lambda e: self._log(f"❌ Window transition Sankey failed: {e}"),
+            on_failed=lambda e: self._log(f"❌ Transition analysis failed: {e}"),
         )
 
     def _on_track_condition_comparison(self):
@@ -6365,18 +10639,20 @@ class TrackClassificationSubTab(QWidget):
         md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
 
         def _run(**kw):
-            from behav3d.analysis.behavior.track.utils import _resolve_dtaidistance_paths
+            from behav3d.analysis.behavior.track.utils import _resolve_track_paths
             from behav3d.analysis.behavior.track.visualization.plots.reports import (
                 save_track_condition_comparison_report,
             )
             from behav3d.core.metadata import merge_condition_columns_into_obs
+            from behav3d.core.utils import minutes_per_frame_from_metadata
             from behav3d.napari._rename_dialog import _track_cluster_col
             cluster_col = _track_cluster_col(track_adata) or "ClusterID"
-            comparison_dir = _resolve_dtaidistance_paths(str(out) if out else "", ct)["behavior_comparisons_outfolder"]
+            comparison_dir = _resolve_track_paths(str(out) if out else "", ct).behavior_comparisons_outfolder
             all_cols = [condition_col] + group_cols + [c for c in (group_x,) if c]
             cols_to_merge = [c for c in all_cols if c not in track_adata.obs.columns]
             if cols_to_merge and md is not None:
                 merge_condition_columns_into_obs(track_adata, md, cols_to_merge)
+            minutes_per_frame, minutes_valid = minutes_per_frame_from_metadata(md)
             return save_track_condition_comparison_report(
                 track_adata,
                 comparison_dir,
@@ -6387,9 +10663,12 @@ class TrackClassificationSubTab(QWidget):
                 group_x=group_x,
                 group_x_levels_map=group_x_levels_map,
                 condition_groups=condition_groups,
+                include_over_time=True,
+                minutes_per_frame=minutes_per_frame if minutes_valid else None,
                 verbose=True,
             )
 
+        self._persist_report_settings(ct, "condition_comparison")
         self._bg.run(
             fn=_run,
             desc=f"Track condition comparison ({ct})…",
@@ -6405,106 +10684,75 @@ class TrackClassificationSubTab(QWidget):
             on_failed=lambda e: self._log(f"❌ Track condition comparison failed: {e}"),
         )
 
-    def _on_contact_analysis(self):
+    def _contact_warn_or_skip(self, chain_next, title, message):
+        """Report a validation problem: a blocking dialog for a direct button click, or a log
+        line + immediate continuation when running as part of the "Run All" chain."""
+        if callable(chain_next):
+            self._log(f"⏭ Skipping {title}: {message}")
+            chain_next()
+        else:
+            QMessageBox.warning(self, title, message)
+
+    def _on_contact_rate_report(self, chain_next: Optional[Callable[[], None]] = None):
         ct = self._cell_type()
         if not ct:
+            if callable(chain_next):
+                chain_next()
             return
         if self._track_adata is None:
-            QMessageBox.warning(self, "No data", "Run track clustering first.")
+            self._contact_warn_or_skip(chain_next, "No data", "Run track clustering first.")
             return
         if self._bg.is_running():
-            QMessageBox.warning(self, "Busy", "Another operation is running.")
+            self._contact_warn_or_skip(chain_next, "Busy", "Another operation is running.")
             return
         contact_col = self.combo_contact_col.currentText()
         if not contact_col:
-            QMessageBox.warning(self, "Missing selection", "Select a contact column to group tracks by.")
+            self._contact_warn_or_skip(chain_next, "Missing selection", "Select a contact column to group tracks by.")
             return
         min_bout_length = int(self.spin_contact_min_bout.value())
         csv_path = self._track_features_csv_path(ct)
         if not csv_path or not csv_path.exists():
-            QMessageBox.warning(self, "No data", "Track-features CSV not found. Run feature extraction first.")
+            self._contact_warn_or_skip(chain_next, "No data", "Track-features CSV not found. Run feature extraction first.")
             return
         use_target_class = self.chk_use_target_class.isChecked()
         target_available, target_warning = self._target_class_availability()
         if use_target_class and not target_available:
-            QMessageBox.warning(self, "Target classification unavailable", target_warning)
+            self._contact_warn_or_skip(chain_next, "Target classification unavailable", target_warning)
             return
         target_ct = self._contact_target_cell_type() if use_target_class else None
         target_source = self.combo_target_class_source.currentData() if use_target_class else None
         target_state_choice = self.combo_target_state_col.currentText()
         out = self._out_dir()
-        self._log(f"▶ Running contact-vs-no-contact analysis for '{ct}'…")
+        self._log(f"▶ Creating contact rate report for '{ct}'…")
         track_adata = self._track_adata
-        selected_extra_cols = [item.text() for item in self.list_contact_group_cols.selectedItems()]
-        group_x = self.combo_contact_group_x.currentText()
-        group_x = None if group_x in ("", "(none)") else group_x
-        group_y = self.combo_contact_group_y.currentText()
-        group_y = None if group_y in ("", "(none)") else group_y
-        group_x_levels_map = None
-        if self.chk_contact_group_x_conditions.isChecked():
-            if not group_x or not self.group_selector_contact_x.is_configured():
-                QMessageBox.warning(
-                    self, "Missing selection",
-                    "Move at least one Group X level into each group, or untick "
-                    "\"Group conditions\" under Group in X.",
-                )
-                return
-            left = self.group_selector_contact_x.left_items()
-            right = self.group_selector_contact_x.right_items()
-            group_x_levels_map = {lvl: "+".join(left) for lvl in left}
-            group_x_levels_map.update({lvl: "+".join(right) for lvl in right})
-        group_y_levels_map = None
-        if self.chk_contact_group_y_conditions.isChecked():
-            if not group_y or not self.group_selector_contact_y.is_configured():
-                QMessageBox.warning(
-                    self, "Missing selection",
-                    "Move at least one Group Y level into each group, or untick "
-                    "\"Group conditions\" under Group in Y.",
-                )
-                return
-            left = self.group_selector_contact_y.left_items()
-            right = self.group_selector_contact_y.right_items()
-            group_y_levels_map = {lvl: "+".join(left) for lvl in left}
-            group_y_levels_map.update({lvl: "+".join(right) for lvl in right})
-        md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
 
         def _run(**kw):
             import pandas as pd
             import anndata as ad
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
             from behav3d.analysis.behavior.track.contact_grouping import (
                 touching_column_name,
                 build_target_class_lookup_from_state_adata,
                 build_target_class_lookup_from_track_adata,
             )
-            from behav3d.analysis.behavior.track.utils import _resolve_dtaidistance_paths
+            from behav3d.analysis.behavior.track.utils import _resolve_track_paths
             from behav3d.analysis.behavior.track.visualization.plots.reports import (
-                save_track_contact_group_analysis,
+                save_track_contact_rate_report,
             )
-            from behav3d.core.metadata import merge_condition_columns_into_obs
-            from behav3d.napari._rename_dialog import _track_cluster_col
-            cluster_col = _track_cluster_col(track_adata) or "ClusterID"
             df_timepoints = pd.read_csv(csv_path)
-            contact_dir = _resolve_dtaidistance_paths(str(out) if out else "", ct)["outfolder"]
-            all_extra_cols = selected_extra_cols + [c for c in (group_x, group_y) if c]
-            cols_to_merge = [c for c in all_extra_cols if c not in track_adata.obs.columns]
-            if cols_to_merge and md is not None:
-                merge_condition_columns_into_obs(track_adata, md, cols_to_merge)
+            contact_dir = _resolve_track_paths(str(out) if out else "", ct).outfolder
 
             target_class_kwargs = {}
             if use_target_class:
                 touching_col = touching_column_name(target_ct)
                 if target_source == "track":
-                    adata_target = ad.read_h5ad(str(self._track_adata_path(target_ct)))
+                    adata_target = _read_h5ad_shared(str(self._track_adata_path(target_ct)))
                     target_class_lookup = build_target_class_lookup_from_track_adata(
                         adata_target, class_col="ClusterID",
                     )
                     time_varying = False
                 else:
-                    adata_target = ad.read_h5ad(str(self._state_adata_path(target_ct)))
-                    state_col = (
-                        FULL_STATE_COL if target_state_choice == "full_behavioral_cluster" else target_state_choice
-                    )
+                    adata_target = _read_h5ad_shared(str(self._state_adata_path(target_ct)))
+                    state_col = _resolve_ui_state_col(adata_target, target_state_choice)
                     target_class_lookup = build_target_class_lookup_from_state_adata(
                         adata_target, state_col=state_col,
                     )
@@ -6516,13 +10764,164 @@ class TrackClassificationSubTab(QWidget):
                     target_cell_type_label=target_ct,
                 )
 
-            return save_track_contact_group_analysis(
+            return save_track_contact_rate_report(
                 track_adata,
                 df_timepoints,
                 contact_dir,
                 contact_col=contact_col,
                 min_bout_length=min_bout_length,
                 sample_col="sample_name",
+                verbose=True,
+                **target_class_kwargs,
+            )
+
+        def _done(r):
+            self._log(f"✅ Contact rate report done for '{ct}'.")
+            self._update_view_buttons()
+            self._notify_results()
+            if callable(chain_next):
+                chain_next()
+
+        def _failed(e):
+            self._log(f"❌ Contact rate report failed: {e}")
+            if callable(chain_next):
+                chain_next()
+
+        self._persist_report_settings(ct, "contact")
+        self._bg.run(
+            fn=_run,
+            desc=f"Contact rate report ({ct})…",
+            progress_row=self.progress_row,
+            buttons=[self.btn_contact_rate],
+            viewer=self.viewer,
+            inject_progress=False,
+            on_done=_done,
+            on_failed=_failed,
+        )
+
+    def _on_contact_composition_report(self, chain_next: Optional[Callable[[], None]] = None):
+        ct = self._cell_type()
+        if not ct:
+            if callable(chain_next):
+                chain_next()
+            return
+        if self._track_adata is None:
+            self._contact_warn_or_skip(chain_next, "No data", "Run track clustering first.")
+            return
+        if self._bg.is_running():
+            self._contact_warn_or_skip(chain_next, "Busy", "Another operation is running.")
+            return
+        contact_col = self.combo_contact_col.currentText()
+        if not contact_col:
+            self._contact_warn_or_skip(chain_next, "Missing selection", "Select a contact column to group tracks by.")
+            return
+        min_bout_length = int(self.spin_contact_min_bout.value())
+        csv_path = self._track_features_csv_path(ct)
+        if not csv_path or not csv_path.exists():
+            self._contact_warn_or_skip(chain_next, "No data", "Track-features CSV not found. Run feature extraction first.")
+            return
+        use_target_class = self.chk_use_target_class.isChecked()
+        target_available, target_warning = self._target_class_availability()
+        if use_target_class and not target_available:
+            self._contact_warn_or_skip(chain_next, "Target classification unavailable", target_warning)
+            return
+        target_ct = self._contact_target_cell_type() if use_target_class else None
+        target_source = self.combo_target_class_source.currentData() if use_target_class else None
+        target_state_choice = self.combo_target_state_col.currentText()
+        selected_extra_cols = [item.text() for item in self.list_contact_group_cols.selectedItems()]
+        group_x = self.combo_contact_group_x.currentText()
+        group_x = None if group_x in ("", "(none)") else group_x
+        group_y = self.combo_contact_group_y.currentText()
+        group_y = None if group_y in ("", "(none)") else group_y
+        if not selected_extra_cols and not group_x and not group_y:
+            self._contact_warn_or_skip(
+                chain_next, "Missing selection",
+                "Set a Group in X/Y or select at least one Group-per-page column — the "
+                "composition grid needs something to facet by.",
+            )
+            return
+        group_x_levels_map = None
+        if self.chk_contact_group_x_conditions.isChecked():
+            if not group_x or not self.group_selector_contact_x.is_configured():
+                self._contact_warn_or_skip(
+                    chain_next, "Missing selection",
+                    "Move at least one Group X level into each group, or untick "
+                    "\"Group conditions\" under Group in X.",
+                )
+                return
+            left = self.group_selector_contact_x.left_items()
+            right = self.group_selector_contact_x.right_items()
+            group_x_levels_map = {lvl: "+".join(left) for lvl in left}
+            group_x_levels_map.update({lvl: "+".join(right) for lvl in right})
+        group_y_levels_map = None
+        if self.chk_contact_group_y_conditions.isChecked():
+            if not group_y or not self.group_selector_contact_y.is_configured():
+                self._contact_warn_or_skip(
+                    chain_next, "Missing selection",
+                    "Move at least one Group Y level into each group, or untick "
+                    "\"Group conditions\" under Group in Y.",
+                )
+                return
+            left = self.group_selector_contact_y.left_items()
+            right = self.group_selector_contact_y.right_items()
+            group_y_levels_map = {lvl: "+".join(left) for lvl in left}
+            group_y_levels_map.update({lvl: "+".join(right) for lvl in right})
+        md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
+        out = self._out_dir()
+        self._log(f"▶ Creating contact composition grid for '{ct}'…")
+        track_adata = self._track_adata
+
+        def _run(**kw):
+            import pandas as pd
+            import anndata as ad
+            from behav3d.analysis.behavior.track.contact_grouping import (
+                touching_column_name,
+                build_target_class_lookup_from_state_adata,
+                build_target_class_lookup_from_track_adata,
+            )
+            from behav3d.analysis.behavior.track.utils import _resolve_track_paths
+            from behav3d.analysis.behavior.track.visualization.plots.reports import (
+                save_track_contact_composition_report,
+            )
+            from behav3d.core.metadata import merge_condition_columns_into_obs
+            from behav3d.napari._rename_dialog import _track_cluster_col
+            cluster_col = _track_cluster_col(track_adata) or "ClusterID"
+            df_timepoints = pd.read_csv(csv_path)
+            contact_dir = _resolve_track_paths(str(out) if out else "", ct).outfolder
+            all_extra_cols = selected_extra_cols + [c for c in (group_x, group_y) if c]
+            cols_to_merge = [c for c in all_extra_cols if c not in track_adata.obs.columns]
+            if cols_to_merge and md is not None:
+                merge_condition_columns_into_obs(track_adata, md, cols_to_merge)
+
+            target_class_kwargs = {}
+            if use_target_class:
+                touching_col = touching_column_name(target_ct)
+                if target_source == "track":
+                    adata_target = _read_h5ad_shared(str(self._track_adata_path(target_ct)))
+                    target_class_lookup = build_target_class_lookup_from_track_adata(
+                        adata_target, class_col="ClusterID",
+                    )
+                    time_varying = False
+                else:
+                    adata_target = _read_h5ad_shared(str(self._state_adata_path(target_ct)))
+                    state_col = _resolve_ui_state_col(adata_target, target_state_choice)
+                    target_class_lookup = build_target_class_lookup_from_state_adata(
+                        adata_target, state_col=state_col,
+                    )
+                    time_varying = True
+                target_class_kwargs = dict(
+                    target_class_lookup=target_class_lookup,
+                    touching_col=touching_col,
+                    time_varying=time_varying,
+                    target_cell_type_label=target_ct,
+                )
+
+            return save_track_contact_composition_report(
+                track_adata,
+                df_timepoints,
+                contact_dir,
+                contact_col=contact_col,
+                min_bout_length=min_bout_length,
                 class_col=cluster_col,
                 extra_group_cols=selected_extra_cols or None,
                 group_x=group_x,
@@ -6533,99 +10932,378 @@ class TrackClassificationSubTab(QWidget):
                 **target_class_kwargs,
             )
 
+        def _done(r):
+            self._log(f"✅ Contact composition grid done for '{ct}'.")
+            self._update_view_buttons()
+            self._notify_results()
+            if callable(chain_next):
+                chain_next()
+
+        def _failed(e):
+            self._log(f"❌ Contact composition grid failed: {e}")
+            if callable(chain_next):
+                chain_next()
+
+        self._persist_report_settings(ct, "contact")
         self._bg.run(
             fn=_run,
-            desc=f"Contact-vs-no-contact analysis ({ct})…",
+            desc=f"Contact composition grid ({ct})…",
             progress_row=self.progress_row,
-            buttons=[self.btn_contact_analysis],
+            buttons=[self.btn_contact_composition],
             viewer=self.viewer,
             inject_progress=False,
-            on_done=lambda r: (
-                self._log(f"✅ Contact-vs-no-contact analysis done for '{ct}'."),
-                self._update_view_buttons(),
-                self._notify_results(),
-            ),
-            on_failed=lambda e: self._log(f"❌ Contact-vs-no-contact analysis failed: {e}"),
+            on_done=_done,
+            on_failed=_failed,
         )
 
-    def _on_duration_comparison(self):
+    def _on_contact_condition_comparison(self, chain_next: Optional[Callable[[], None]] = None):
         ct = self._cell_type()
         if not ct:
+            if callable(chain_next):
+                chain_next()
             return
         if self._track_adata is None:
-            QMessageBox.warning(self, "No data", "Run track clustering first.")
+            self._contact_warn_or_skip(chain_next, "No data", "Run track clustering first.")
             return
         if self._bg.is_running():
-            QMessageBox.warning(self, "Busy", "Another operation is running.")
+            self._contact_warn_or_skip(chain_next, "Busy", "Another operation is running.")
             return
         contact_col = self.combo_contact_col.currentText()
         if not contact_col:
-            QMessageBox.warning(self, "Missing selection", "Select a contact column to group tracks by.")
+            self._contact_warn_or_skip(chain_next, "Missing selection", "Select a contact column to group tracks by.")
+            return
+        min_bout_length = int(self.spin_contact_min_bout.value())
+        csv_path = self._track_features_csv_path(ct)
+        if not csv_path or not csv_path.exists():
+            self._contact_warn_or_skip(chain_next, "No data", "Track-features CSV not found. Run feature extraction first.")
+            return
+        use_target_class = self.chk_use_target_class.isChecked()
+        target_available, target_warning = self._target_class_availability()
+        if use_target_class and not target_available:
+            self._contact_warn_or_skip(chain_next, "Target classification unavailable", target_warning)
+            return
+        target_ct = self._contact_target_cell_type() if use_target_class else None
+        target_source = self.combo_target_class_source.currentData() if use_target_class else None
+        target_state_choice = self.combo_target_state_col.currentText()
+        selected_extra_cols = [item.text() for item in self.list_contact_group_cols.selectedItems()]
+        group_x = self.combo_contact_group_x.currentText()
+        group_x = None if group_x in ("", "(none)") else group_x
+        group_y = self.combo_contact_group_y.currentText()
+        group_y = None if group_y in ("", "(none)") else group_y
+        group_x_levels_map = None
+        if self.chk_contact_group_x_conditions.isChecked():
+            if not group_x or not self.group_selector_contact_x.is_configured():
+                self._contact_warn_or_skip(
+                    chain_next, "Missing selection",
+                    "Move at least one Group X level into each group, or untick "
+                    "\"Group conditions\" under Group in X.",
+                )
+                return
+            left = self.group_selector_contact_x.left_items()
+            right = self.group_selector_contact_x.right_items()
+            group_x_levels_map = {lvl: "+".join(left) for lvl in left}
+            group_x_levels_map.update({lvl: "+".join(right) for lvl in right})
+        group_y_levels_map = None
+        if self.chk_contact_group_y_conditions.isChecked():
+            if not group_y or not self.group_selector_contact_y.is_configured():
+                self._contact_warn_or_skip(
+                    chain_next, "Missing selection",
+                    "Move at least one Group Y level into each group, or untick "
+                    "\"Group conditions\" under Group in Y.",
+                )
+                return
+            left = self.group_selector_contact_y.left_items()
+            right = self.group_selector_contact_y.right_items()
+            group_y_levels_map = {lvl: "+".join(left) for lvl in left}
+            group_y_levels_map.update({lvl: "+".join(right) for lvl in right})
+        md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
+        out = self._out_dir()
+        self._log(f"▶ Creating contact condition comparison for '{ct}'…")
+        track_adata = self._track_adata
+
+        def _run(**kw):
+            import pandas as pd
+            import anndata as ad
+            from behav3d.analysis.behavior.track.contact_grouping import (
+                touching_column_name,
+                build_target_class_lookup_from_state_adata,
+                build_target_class_lookup_from_track_adata,
+                compute_track_contact_features,
+                merge_track_contact_features_into_obs,
+                compute_track_contact_target_class_features,
+                merge_track_target_class_group_into_obs,
+                _contact_group_col_name,
+                _contact_target_class_group_col_name,
+            )
+            from behav3d.analysis.behavior.track.utils import _resolve_track_paths
+            from behav3d.analysis.behavior.track.visualization.plots.reports import (
+                save_track_condition_comparison_report,
+            )
+            from behav3d.analysis.behavior.utils import _contact_analysis_dir
+            from behav3d.core.metadata import merge_condition_columns_into_obs
+            from behav3d.napari._rename_dialog import _track_cluster_col
+            cluster_col = _track_cluster_col(track_adata) or "ClusterID"
+            df_timepoints = pd.read_csv(csv_path)
+            # Same layout as the other contact reports:
+            # contact_analysis/contact_condition_comparison/{contact_col}/ (+ csv/ subfolder).
+            contact_dir = _contact_analysis_dir(
+                _resolve_track_paths(str(out) if out else "", ct).outfolder,
+                "contact_condition_comparison", contact_col,
+            )
+            csv_dir = contact_dir / "csv"
+            all_extra_cols = selected_extra_cols + [c for c in (group_x, group_y) if c]
+            cols_to_merge = [c for c in all_extra_cols if c not in track_adata.obs.columns]
+            if cols_to_merge and md is not None:
+                merge_condition_columns_into_obs(track_adata, md, cols_to_merge)
+
+            contact_features = compute_track_contact_features(
+                df_timepoints, track_adata, contact_col=contact_col, min_bout_length=min_bout_length, verbose=True,
+            )
+            merge_track_contact_features_into_obs(
+                track_adata, contact_features, contact_col=contact_col, min_bout_length=min_bout_length,
+            )
+            group_col = _contact_group_col_name(contact_col)
+
+            comparison_kwargs = dict(
+                sample_col="sample_name",
+                class_col=cluster_col,
+                group_x=group_x,
+                group_y=group_y,
+                group_x_levels_map=group_x_levels_map,
+                group_y_levels_map=group_y_levels_map,
+                group_cols=selected_extra_cols or None,
+                verbose=True,
+                csv_dir=csv_dir,
+            )
+            result = {
+                "contact_vs_no_contact": save_track_condition_comparison_report(
+                    track_adata, contact_dir, condition_col=group_col, **comparison_kwargs,
+                ),
+            }
+
+            if use_target_class:
+                touching_col = touching_column_name(target_ct)
+                if target_source == "track":
+                    adata_target = _read_h5ad_shared(str(self._track_adata_path(target_ct)))
+                    target_class_lookup = build_target_class_lookup_from_track_adata(
+                        adata_target, class_col="ClusterID",
+                    )
+                    time_varying = False
+                else:
+                    adata_target = _read_h5ad_shared(str(self._state_adata_path(target_ct)))
+                    state_col = _resolve_ui_state_col(adata_target, target_state_choice)
+                    target_class_lookup = build_target_class_lookup_from_state_adata(
+                        adata_target, state_col=state_col,
+                    )
+                    time_varying = True
+                _long_target_df, target_group_df = compute_track_contact_target_class_features(
+                    df_timepoints, track_adata, target_class_lookup,
+                    contact_col=contact_col, touching_col=touching_col, time_varying=time_varying,
+                    contact_group_col=group_col, verbose=True,
+                )
+                merge_track_target_class_group_into_obs(track_adata, target_group_df, contact_col=contact_col)
+                target_group_col = _contact_target_class_group_col_name(contact_col)
+                result["by_target_class"] = save_track_condition_comparison_report(
+                    track_adata, contact_dir, condition_col=target_group_col, **comparison_kwargs,
+                )
+
+            return result
+
+        def _done(r):
+            self._log(f"✅ Contact condition comparison done for '{ct}'.")
+            self._update_view_buttons()
+            self._notify_results()
+            if callable(chain_next):
+                chain_next()
+
+        def _failed(e):
+            self._log(f"❌ Contact condition comparison failed: {e}")
+            if callable(chain_next):
+                chain_next()
+
+        self._persist_report_settings(ct, "contact")
+        self._bg.run(
+            fn=_run,
+            desc=f"Contact condition comparison ({ct})…",
+            progress_row=self.progress_row,
+            buttons=[self.btn_contact_condition_comparison],
+            viewer=self.viewer,
+            inject_progress=False,
+            on_done=_done,
+            on_failed=_failed,
+        )
+
+    def _on_contact_cluster_heatmap(self, chain_next: Optional[Callable[[], None]] = None):
+        ct = self._cell_type()
+        if not ct:
+            if callable(chain_next):
+                chain_next()
+            return
+        if self._track_adata is None:
+            self._contact_warn_or_skip(chain_next, "No data", "Run track clustering first.")
+            return
+        if self._bg.is_running():
+            self._contact_warn_or_skip(chain_next, "Busy", "Another operation is running.")
+            return
+        contact_col = self.combo_contact_col.currentText()
+        if not contact_col:
+            self._contact_warn_or_skip(chain_next, "Missing selection", "Select a contact column to group tracks by.")
+            return
+        min_bout_length = int(self.spin_contact_min_bout.value())
+        csv_path = self._track_features_csv_path(ct)
+        if not csv_path or not csv_path.exists():
+            self._contact_warn_or_skip(chain_next, "No data", "Track-features CSV not found. Run feature extraction first.")
+            return
+        out = self._out_dir()
+        self._log(f"▶ Running contact cluster heatmap for '{ct}'…")
+        track_adata = self._track_adata
+        md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
+
+        def _run(**kw):
+            import pandas as pd
+            from behav3d.analysis.behavior.track.utils import _resolve_track_paths
+            from behav3d.analysis.behavior.track.visualization.plots.contact_cluster_heatmap import (
+                save_track_contact_cluster_heatmap,
+            )
+            from behav3d.core.utils import minutes_per_frame_from_metadata
+            from behav3d.napari._rename_dialog import _track_cluster_col
+            cluster_col = _track_cluster_col(track_adata) or "ClusterID"
+            df_timepoints = pd.read_csv(csv_path)
+            contact_dir = _resolve_track_paths(str(out) if out else "", ct).outfolder
+            minutes_per_frame, minutes_valid = minutes_per_frame_from_metadata(md)
+
+            return save_track_contact_cluster_heatmap(
+                track_adata,
+                df_timepoints,
+                contact_dir,
+                contact_col=contact_col,
+                min_bout_length=min_bout_length,
+                class_col=cluster_col,
+                minutes_per_frame=minutes_per_frame if minutes_valid else None,
+                verbose=True,
+            )
+
+        def _done(r):
+            self._log(f"✅ Contact cluster heatmap done for '{ct}'.")
+            self._update_view_buttons()
+            self._notify_results()
+            if callable(chain_next):
+                chain_next()
+
+        def _failed(e):
+            self._log(f"❌ Contact cluster heatmap failed: {e}")
+            if callable(chain_next):
+                chain_next()
+
+        self._persist_report_settings(ct, "contact")
+        self._bg.run(
+            fn=_run,
+            desc=f"Contact cluster heatmap ({ct})…",
+            progress_row=self.progress_row,
+            buttons=[self.btn_contact_cluster_heatmap],
+            viewer=self.viewer,
+            inject_progress=False,
+            on_done=_done,
+            on_failed=_failed,
+        )
+
+    def _on_duration_comparison(self, chain_next: Optional[Callable[[], None]] = None):
+        ct = self._cell_type()
+        if not ct:
+            if callable(chain_next):
+                chain_next()
+            return
+        if self._track_adata is None:
+            self._contact_warn_or_skip(chain_next, "No data", "Run track clustering first.")
+            return
+        if self._bg.is_running():
+            self._contact_warn_or_skip(chain_next, "Busy", "Another operation is running.")
+            return
+        contact_col = self.combo_contact_col.currentText()
+        if not contact_col:
+            self._contact_warn_or_skip(chain_next, "Missing selection", "Select a contact column to group tracks by.")
             return
         if not self.chk_use_target_class.isChecked():
-            QMessageBox.warning(
-                self, "Target classification required",
+            self._contact_warn_or_skip(
+                chain_next, "Target classification required",
                 "Enable \"Use contact cell classification\" to compare durations by class.",
             )
             return
         target_available, target_warning = self._target_class_availability()
         if not target_available:
-            QMessageBox.warning(self, "Target classification unavailable", target_warning)
+            self._contact_warn_or_skip(chain_next, "Target classification unavailable", target_warning)
             return
         min_bout_length = int(self.spin_contact_min_bout.value())
         csv_path = self._track_features_csv_path(ct)
         if not csv_path or not csv_path.exists():
-            QMessageBox.warning(self, "No data", "Track-features CSV not found. Run feature extraction first.")
+            self._contact_warn_or_skip(chain_next, "No data", "Track-features CSV not found. Run feature extraction first.")
             return
         test_mode = self.combo_duration_test_mode.currentData()
-        pairing_col = None
+        pairing_cols = []
         if test_mode == "paired":
-            pairing_col = self.combo_duration_pairing_col.currentText().strip()
-            if not pairing_col:
-                QMessageBox.warning(self, "Missing selection", "Select a pairing column for the paired t-test.")
+            pairing_cols = [item.text() for item in self.list_duration_pairing_cols.selectedItems()]
+            if not pairing_cols:
+                self._contact_warn_or_skip(
+                    chain_next, "Missing selection", "Select at least one pairing column for the paired t-test.",
+                )
                 return
+        from behav3d.core.utils import minutes_per_frame_from_metadata
+        long_contact_threshold_raw = self.spin_long_contact_threshold.value()
+        long_contact_unit = self.combo_long_contact_unit.currentData()
+        long_contact_threshold = float(long_contact_threshold_raw) if long_contact_threshold_raw > 0 else None
+        md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
+        minutes_per_frame, minutes_valid = minutes_per_frame_from_metadata(md)
+        if long_contact_threshold is not None and long_contact_unit != "percent" and not minutes_valid:
+            self._contact_warn_or_skip(
+                chain_next, "Time metadata required",
+                f"Long contact threshold in {long_contact_unit} requires time metadata "
+                f"(time_interval/time_unit) — add it, or switch the unit to 'Percent of time "
+                f"window'.",
+            )
+            return
         comparisons_per_page = int(self.spin_duration_comparisons_per_page.value())
+        selected_extra_cols = [item.text() for item in self.list_contact_group_cols.selectedItems()]
         target_ct = self._contact_target_cell_type()
         target_source = self.combo_target_class_source.currentData()
         target_state_choice = self.combo_target_state_col.currentText()
         out = self._out_dir()
         self._log(f"▶ Running contact duration comparison for '{ct}'…")
         track_adata = self._track_adata
-        md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
 
         def _run(**kw):
             import pandas as pd
             import anndata as ad
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
             from behav3d.analysis.behavior.track.contact_grouping import (
                 touching_column_name,
                 build_target_class_lookup_from_state_adata,
                 build_target_class_lookup_from_track_adata,
             )
-            from behav3d.analysis.behavior.track.utils import _resolve_dtaidistance_paths
+            from behav3d.analysis.behavior.track.utils import _resolve_track_paths
             from behav3d.analysis.behavior.track.visualization.plots.contact_duration_report import (
                 save_track_contact_duration_comparison,
             )
             from behav3d.core.metadata import merge_condition_columns_into_obs
             from behav3d.core.utils import minutes_per_frame_from_metadata
             df_timepoints = pd.read_csv(csv_path)
-            contact_dir = _resolve_dtaidistance_paths(str(out) if out else "", ct)["outfolder"]
+            contact_dir = _resolve_track_paths(str(out) if out else "", ct).outfolder
 
-            if pairing_col and pairing_col not in track_adata.obs.columns and md is not None:
-                merge_condition_columns_into_obs(track_adata, md, [pairing_col])
+            cols_to_merge = [
+                c for c in pairing_cols + selected_extra_cols
+                if c not in track_adata.obs.columns
+            ]
+            if cols_to_merge and md is not None:
+                merge_condition_columns_into_obs(track_adata, md, cols_to_merge)
 
             touching_col = touching_column_name(target_ct)
             if target_source == "track":
-                adata_target = ad.read_h5ad(str(self._track_adata_path(target_ct)))
+                adata_target = _read_h5ad_shared(str(self._track_adata_path(target_ct)))
                 target_class_lookup = build_target_class_lookup_from_track_adata(
                     adata_target, class_col="ClusterID",
                 )
                 time_varying = False
             else:
-                adata_target = ad.read_h5ad(str(self._state_adata_path(target_ct)))
-                state_col = (
-                    FULL_STATE_COL if target_state_choice == "full_behavioral_cluster" else target_state_choice
-                )
+                adata_target = _read_h5ad_shared(str(self._state_adata_path(target_ct)))
+                state_col = _resolve_ui_state_col(adata_target, target_state_choice)
                 target_class_lookup = build_target_class_lookup_from_state_adata(
                     adata_target, state_col=state_col,
                 )
@@ -6644,12 +11322,28 @@ class TrackClassificationSubTab(QWidget):
                 time_varying=time_varying,
                 target_cell_type_label=target_ct,
                 test_mode=test_mode,
-                pairing_col=pairing_col,
+                pairing_col=pairing_cols or None,
                 minutes_per_frame=minutes_per_frame if minutes_valid else None,
+                long_contact_threshold=long_contact_threshold,
+                long_contact_unit=long_contact_unit,
                 comparisons_per_page=comparisons_per_page,
+                group_cols=selected_extra_cols or None,
                 verbose=True,
             )
 
+        def _done(r):
+            self._log(f"✅ Contact duration comparison done for '{ct}' ({r.get('n_comparisons')} comparisons).")
+            self._update_view_buttons()
+            self._notify_results()
+            if callable(chain_next):
+                chain_next()
+
+        def _failed(e):
+            self._log(f"❌ Contact duration comparison failed: {e}")
+            if callable(chain_next):
+                chain_next()
+
+        self._persist_report_settings(ct, "contact", "contact_duration")
         self._bg.run(
             fn=_run,
             desc=f"Contact duration comparison ({ct})…",
@@ -6657,111 +11351,107 @@ class TrackClassificationSubTab(QWidget):
             buttons=[self.btn_duration_comparison],
             viewer=self.viewer,
             inject_progress=False,
-            on_done=lambda r: (
-                self._log(f"✅ Contact duration comparison done for '{ct}' ({r.get('n_comparisons')} comparisons)."),
-                self._update_view_buttons(),
-                self._notify_results(),
-            ),
-            on_failed=lambda e: self._log(f"❌ Contact duration comparison failed: {e}"),
+            on_done=_done,
+            on_failed=_failed,
         )
 
-    def _on_contact_state_shift_analysis(self):
+    def _on_contact_type_comparison(self, chain_next: Optional[Callable[[], None]] = None):
         ct = self._cell_type()
         if not ct:
+            if callable(chain_next):
+                chain_next()
             return
         if self._track_adata is None:
-            QMessageBox.warning(self, "No data", "Run track clustering first.")
+            self._contact_warn_or_skip(chain_next, "No data", "Run track clustering first.")
             return
         if self._bg.is_running():
-            QMessageBox.warning(self, "Busy", "Another operation is running.")
+            self._contact_warn_or_skip(chain_next, "Busy", "Another operation is running.")
             return
-        contact_col = self.combo_contact_col.currentText()
-        if not contact_col:
-            QMessageBox.warning(self, "Missing selection", "Select a contact column to analyze.")
-            return
-        state_adata_path = self._state_adata_path(ct)
-        if not state_adata_path or not state_adata_path.exists():
-            QMessageBox.warning(
-                self, "No data",
-                "Behavioral states h5ad not found. Run State Classification first.",
+        contact_cols = [item.text() for item in self.list_contact_type_compare_cols.selectedItems()]
+        if len(contact_cols) < 2:
+            self._contact_warn_or_skip(
+                chain_next, "Missing selection", "Select at least 2 contact columns to compare.",
             )
             return
+        min_bout_length = int(self.spin_contact_min_bout.value())
         csv_path = self._track_features_csv_path(ct)
         if not csv_path or not csv_path.exists():
-            QMessageBox.warning(self, "No data", "Track-features CSV not found. Run feature extraction first.")
+            self._contact_warn_or_skip(chain_next, "No data", "Track-features CSV not found. Run feature extraction first.")
             return
-        min_bout_length = int(self.spin_contact_min_bout.value())
-        window_mode = self.combo_contact_shift_window_mode.currentText().lower()
-        fixed_window_length = int(self.spin_contact_shift_window_length.value())
-        state_col_choice = self.combo_contact_shift_state_col.currentText()
         out = self._out_dir()
         track_adata = self._track_adata
-        self._log(f"▶ Running contact state-shift analysis for '{ct}'…")
+        self._log(f"▶ Running contact type comparison for '{ct}'…")
 
         def _run(**kw):
             import pandas as pd
-            import anndata as _ad
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
-            from behav3d.analysis.behavior.track.utils import _resolve_dtaidistance_paths
-            from behav3d.analysis.behavior.track.visualization.plots.contact_state_shift_report import (
-                save_track_contact_state_shift_report,
+            from behav3d.analysis.behavior.track.utils import _resolve_track_paths
+            from behav3d.analysis.behavior.track.visualization.plots.contact_type_report import (
+                save_track_contact_type_comparison,
             )
-            state_col = FULL_STATE_COL if state_col_choice == "full_behavioral_cluster" else state_col_choice
-            full_adata = _ad.read_h5ad(str(state_adata_path))
+            from behav3d.napari._rename_dialog import _track_cluster_col
+            cluster_col = _track_cluster_col(track_adata) or "ClusterID"
             df_timepoints = pd.read_csv(csv_path)
-            contact_dir = _resolve_dtaidistance_paths(str(out) if out else "", ct)["outfolder"]
-            return save_track_contact_state_shift_report(
+            contact_dir = _resolve_track_paths(str(out) if out else "", ct).outfolder
+            return save_track_contact_type_comparison(
                 track_adata,
                 df_timepoints,
-                full_adata,
                 contact_dir,
-                contact_col=contact_col,
+                contact_cols=contact_cols,
                 min_bout_length=min_bout_length,
-                state_col=state_col,
-                window_mode=window_mode,
-                fixed_window_length=fixed_window_length,
+                class_col=cluster_col,
                 verbose=True,
             )
 
+        def _done(r):
+            self._log(f"✅ Contact type comparison done for '{ct}'.")
+            self._update_view_buttons()
+            self._notify_results()
+            if callable(chain_next):
+                chain_next()
+
+        def _failed(e):
+            self._log(f"❌ Contact type comparison failed: {e}")
+            if callable(chain_next):
+                chain_next()
+
+        self._persist_report_settings(ct, "contact", "contact_type_comparison")
         self._bg.run(
             fn=_run,
-            desc=f"Contact state-shift analysis ({ct})…",
+            desc=f"Contact type comparison ({ct})…",
             progress_row=self.progress_row,
-            buttons=[self.btn_contact_state_shift],
+            buttons=[self.btn_contact_type_comparison],
             viewer=self.viewer,
             inject_progress=False,
-            on_done=lambda r: (
-                self._log(f"✅ Contact state-shift analysis done for '{ct}'."),
-                self._update_view_buttons(),
-                self._notify_results(),
-            ),
-            on_failed=lambda e: self._log(f"❌ Contact state-shift analysis failed: {e}"),
+            on_done=_done,
+            on_failed=_failed,
         )
 
-    def _on_track_contact_overview(self):
+    def _on_track_contact_overview(self, chain_next: Optional[Callable[[], None]] = None):
         ct = self._cell_type()
         if not ct:
+            if callable(chain_next):
+                chain_next()
             return
         if self._track_adata is None:
-            QMessageBox.warning(self, "No data", "Run track clustering first.")
+            self._contact_warn_or_skip(chain_next, "No data", "Run track clustering first.")
             return
         if self._bg.is_running():
-            QMessageBox.warning(self, "Busy", "Another operation is running.")
+            self._contact_warn_or_skip(chain_next, "Busy", "Another operation is running.")
             return
         contact_col = self.combo_contact_col.currentText()
         if not contact_col:
-            QMessageBox.warning(self, "Missing selection", "Select a contact column to analyze.")
+            self._contact_warn_or_skip(chain_next, "Missing selection", "Select a contact column to analyze.")
             return
         state_adata_path = self._state_adata_path(ct)
         if not state_adata_path or not state_adata_path.exists():
-            QMessageBox.warning(
-                self, "No data",
-                "Behavioral states h5ad not found. Run State Classification first.",
+            self._contact_warn_or_skip(
+                chain_next, "No data",
+                "Behavioral states h5ad not found. Run State Clustering first.",
             )
             return
         csv_path = self._track_features_csv_path(ct)
         if not csv_path or not csv_path.exists():
-            QMessageBox.warning(self, "No data", "Track-features CSV not found. Run feature extraction first.")
+            self._contact_warn_or_skip(chain_next, "No data", "Track-features CSV not found. Run feature extraction first.")
             return
         min_bout_length = int(self.spin_contact_min_bout.value())
         state_col_choice = self.combo_contact_shift_state_col.currentText()
@@ -6773,15 +11463,14 @@ class TrackClassificationSubTab(QWidget):
         def _run(**kw):
             import pandas as pd
             import anndata as _ad
-            from behav3d.analysis.behavior.state.classification import FULL_STATE_COL
-            from behav3d.analysis.behavior.track.utils import _resolve_dtaidistance_paths
-            from behav3d.analysis.behavior.track.visualization.plots.contact_state_shift_report import (
+            from behav3d.analysis.behavior.track.utils import _resolve_track_paths
+            from behav3d.analysis.behavior.track.visualization.plots.track_contact_overview_report import (
                 save_track_contact_overview_report,
             )
-            state_col = FULL_STATE_COL if state_col_choice == "full_behavioral_cluster" else state_col_choice
-            full_adata = _ad.read_h5ad(str(state_adata_path))
+            full_adata = _read_h5ad_shared(str(state_adata_path))
+            state_col = _resolve_ui_state_col(full_adata, state_col_choice)
             df_timepoints = pd.read_csv(csv_path)
-            contact_dir = _resolve_dtaidistance_paths(str(out) if out else "", ct)["outfolder"]
+            contact_dir = _resolve_track_paths(str(out) if out else "", ct).outfolder
             return save_track_contact_overview_report(
                 track_adata,
                 df_timepoints,
@@ -6794,6 +11483,19 @@ class TrackClassificationSubTab(QWidget):
                 verbose=True,
             )
 
+        def _done(r):
+            self._log(f"✅ Track contact overview done for '{ct}'.")
+            self._update_view_buttons()
+            self._notify_results()
+            if callable(chain_next):
+                chain_next()
+
+        def _failed(e):
+            self._log(f"❌ Track contact overview failed: {e}")
+            if callable(chain_next):
+                chain_next()
+
+        self._persist_report_settings(ct, "contact", "contact_overview")
         self._bg.run(
             fn=_run,
             desc=f"Track contact overview ({ct})…",
@@ -6801,13 +11503,31 @@ class TrackClassificationSubTab(QWidget):
             buttons=[self.btn_track_contact_overview],
             viewer=self.viewer,
             inject_progress=False,
-            on_done=lambda r: (
-                self._log(f"✅ Track contact overview done for '{ct}'."),
-                self._update_view_buttons(),
-                self._notify_results(),
-            ),
-            on_failed=lambda e: self._log(f"❌ Track contact overview failed: {e}"),
+            on_done=_done,
+            on_failed=_failed,
         )
+
+    def _on_run_all_contact_analyses(self):
+        if refuse_if_busy(self, "starting the contact analyses"):
+            return
+        steps = [
+            self._on_contact_rate_report,
+            self._on_contact_composition_report,
+            self._on_contact_condition_comparison,
+            self._on_contact_cluster_heatmap,
+            self._on_duration_comparison,
+            self._on_contact_type_comparison,
+            self._on_track_contact_overview,
+        ]
+        self._log("▶▶ Running all contact analyses…")
+
+        def _run_step(index: int):
+            if index >= len(steps):
+                self._log("✅ Run all contact analyses complete.")
+                return
+            steps[index](chain_next=lambda: _run_step(index + 1))
+
+        _run_step(0)
 
     # ── Backprojection ───────────────────────────────────────────────────
 
@@ -6908,12 +11628,13 @@ class TrackClassificationSubTab(QWidget):
             QMessageBox.warning(self, "No track adata", "Run Track Clustering first.")
             return
         opacity = self.spin_track_opacity.value() / 100.0
-        state_adata_path = self._state_adata_path(ct)
+        # States file, or the trajectory-features file for features-only models.
+        state_adata_path = self._per_timepoint_adata_path(ct)
         if not state_adata_path or not state_adata_path.exists():
             QMessageBox.warning(
-                self, "State Classification Required",
-                f"Full state adata not found at:\n{state_adata_path}\n\n"
-                "Run State Classification first."
+                self, "Per-timepoint data missing",
+                f"Per-timepoint data not found at:\n{state_adata_path}\n\n"
+                "Run State Classification or Track Clustering first."
             )
             return
         self._log(f"▶ Loading track backprojection for '{ct}' / sample '{sample}'…")
@@ -6943,10 +11664,11 @@ class TrackClassificationSubTab(QWidget):
             out_dir = self._out_dir()
             if not out_dir:
                 raise ValueError("No output directory set.")
-            adata_tracks = sc.read_h5ad(str(track_path))
+            adata_tracks = _read_h5ad_shared(str(track_path))
             self._sync_track_cluster_combo(adata_tracks)
             color_by = self.combo_track_color_by.currentText()
-            adata_full = sc.read_h5ad(str(state_adata_path))
+            state_adata_path = self._per_timepoint_adata_path(ct, adata_tracks) or state_adata_path
+            adata_full = _read_h5ad_shared(str(state_adata_path))
             cluster_col = color_by if color_by else "ClusterID"
             output_col = "track_behavioral_cluster"
             obs_samples = adata_tracks.obs["sample_name"].astype(str)
@@ -6997,7 +11719,7 @@ class TrackClassificationSubTab(QWidget):
             self._teardown_track_bp_preview()
             stop_dim_playback(self.viewer)
             disconnect_all_preview_dims_listeners(self.viewer)
-            self.viewer.layers.clear()
+            clear_viewer_layers(self.viewer)
             saved_channels = (
                 getattr(self.metadata_loader, "behav3d_parameters", {})
                 .get("viewer_display", {})
@@ -7022,7 +11744,9 @@ class TrackClassificationSubTab(QWidget):
             self._track_bp_preview = {
                 "tracked_path": Path(tracked_path),
                 "code_lookup": cluster_code_lookup,
-                "layer_name": "behavioral_state_class",
+                # Coloured by trajectory cluster (the 'Color by' column), not by
+                # behavioral state.
+                "layer_name": "track_cluster_class",
                 "opacity": opacity,
                 "code_colors": code_colors,
             }
@@ -7059,27 +11783,39 @@ class TrackClassificationSubTab(QWidget):
                     self._log(f"⚠️ Could not add trajectory layers: {exc}")
 
             mapping_text = _build_state_mapping_text(label_map, code_colors)
-            _add_mapping_dock_widget(
+            close_backprojection_legend_docks(self.viewer)
+            track_mapping_dock = _add_mapping_dock_widget(
                 self.viewer,
                 mapping_text=mapping_text,
                 label_map=label_map,
                 code_colors=code_colors,
                 title="Track Cluster Mapping",
             )
-            _add_track_statebar_click_dock(
-                self.viewer,
-                sample_name=sample_name,
-                adata_full=adata_full,
-                adata_tracks=adata_tracks,
-                cluster_col=cluster_col,
-                title="Track State Bar",
-            )
+            if track_mapping_dock is not None:
+                track_mapping_dock.widget()._behav3d_backprojection_legend_dock = True
+            from behav3d.core.state_columns import resolve_full_state_col
+            resolved_full_state_col = resolve_full_state_col(adata_full)
+            if resolved_full_state_col is not None:
+                statebar_widget = _add_track_statebar_click_dock(
+                    self.viewer,
+                    sample_name=sample_name,
+                    adata_full=adata_full,
+                    adata_tracks=adata_tracks,
+                    cluster_col=cluster_col,
+                    state_col=resolved_full_state_col,
+                    clickable_layer_name="track_cluster_class",
+                    title="Track State Bar",
+                )
+                if statebar_widget is not None:
+                    statebar_widget._behav3d_backprojection_legend_dock = True
             self._log("✅ Track backprojection loaded (current timepoint; updates as you scrub).")
         except Exception as e:
             traceback.print_exc()
             self._log(f"❌ Backprojection failed: {e}")
 
     def _on_export_track_bp(self):
+        if refuse_if_busy(self, "exporting the track backprojection"):
+            return
         ct = self._cell_type()
         sample = self._sample()
         if not ct:
@@ -7089,13 +11825,35 @@ class TrackClassificationSubTab(QWidget):
         if not track_path or not track_path.exists():
             QMessageBox.warning(self, "No track adata", "Run Track Clustering first.")
             return
-        if self._bg.is_running():
-            QMessageBox.warning(self, "Busy", "Another operation is running.")
-            return
-        import scanpy as sc
-        adata_tracks = sc.read_h5ad(str(track_path))
-        self._sync_track_cluster_combo(adata_tracks)
-        color_by = self.combo_track_color_by.currentText()
+
+        # Stage 1 (worker): import scanpy and read the track h5ad, which used to
+        # block the GUI thread. Stage 2 starts from the GUI thread once the
+        # "Color by" combo has been synced from the loaded adata.
+        def _read(**kw):
+            import scanpy as sc  # noqa: F401  (preload; slow first import)
+            return _read_h5ad_shared(str(track_path))
+
+        def _loaded(adata_tracks):
+            self._sync_track_cluster_combo(adata_tracks)
+            color_by = self.combo_track_color_by.currentText()
+            QTimer.singleShot(
+                0,
+                lambda: self._run_track_bp_export(ct, sample, adata_tracks, color_by),
+            )
+
+        self._bg.run(
+            fn=_read,
+            desc=f"Loading track data ({ct})…",
+            progress_row=self.progress_row,
+            buttons=[self.btn_export_track_bp, self.btn_show_track_bp],
+            viewer=self.viewer,
+            inject_progress=False,
+            indeterminate=True,
+            on_done=_loaded,
+            on_failed=lambda e: self._log(f"❌ Export failed: {e}"),
+        )
+
+    def _run_track_bp_export(self, ct, sample, adata_tracks, color_by):
         out = self._out_dir()
         logger = ThreadSafeLogger(self._log)
         self._log(f"▶ Exporting track backprojection for '{ct}'…")
@@ -7104,13 +11862,13 @@ class TrackClassificationSubTab(QWidget):
             from behav3d.analysis.behavior.track.visualization.backprojection import (
                 export_track_cluster_backprojection as _track_bp_export,
             )
-            state_adata_path = self._state_adata_path(ct)
+            state_adata_path = self._per_timepoint_adata_path(ct, adata_tracks)
             if not state_adata_path or not state_adata_path.exists():
                 raise FileNotFoundError(
-                    f"Full state adata not found at '{state_adata_path}'. "
-                    "Run State Classification first."
+                    f"Per-timepoint data not found at '{state_adata_path}'. "
+                    "Run State Classification or Track Clustering first."
                 )
-            adata_full = sc.read_h5ad(str(state_adata_path))
+            adata_full = _read_h5ad_shared(str(state_adata_path))
             cluster_col = color_by if color_by else "ClusterID"
             sample_name = sample if sample else None
             logger("▶ Writing track backprojection zarrs…")
@@ -7134,30 +11892,20 @@ class TrackClassificationSubTab(QWidget):
             inject_progress=False,
             on_done=lambda r: _log_backprojection_manifest(self._log, r),
             on_failed=lambda e: self._log(f"❌ Export failed: {e}"),
+            chained=True,
         )
 
     # ── View helpers ─────────────────────────────────────────────────────
 
-    def _on_view(self, kind: str):
+    def _on_view(self, kind: str, btn: Optional[QPushButton] = None):
         ct = self._cell_type()
         if not ct:
             return
         out = self._out_dir()
-        traj_dir = (out / "analysis" / ct / "behavorial_trajectories") if out else None
+        from behav3d.analysis.behavior.track.utils import _peek_track_outfolder
+        traj_dir = _peek_track_outfolder(out, ct) if out else None
         candidates = []
-        if kind == "track_adata":
-            p = self._track_adata_path(ct)
-            if p:
-                candidates = [(f"Track adata ({ct})", p)]
-        elif kind == "track_classifier":
-            p = self._track_classifier_path(ct)
-            if p:
-                candidates = [(f"Track classifier ({ct})", p)]
-        elif kind == "track_applied":
-            p = self._track_applied_path(ct)
-            if p:
-                candidates = [(f"Track clusters CSV ({ct})", p)]
-        elif kind == "track_exemplars" and traj_dir:
+        if kind == "track_exemplars" and traj_dir:
             exemplar_dir = traj_dir / "example_tracks"
             candidates = [
                 (f.relative_to(exemplar_dir).as_posix(), f)
@@ -7175,6 +11923,8 @@ class TrackClassificationSubTab(QWidget):
                 (f.stem, f)
                 for f in sorted(proportions_dir.glob("*.pdf"))
             ]
+        elif kind == "feature_heatmap" and traj_dir:
+            candidates = [(f.stem, f) for f in sorted((traj_dir / "feature_heatmaps").glob("*.pdf"))]
         elif kind == "window_transitions" and traj_dir:
             wt_dir = traj_dir / "window_transitions"
             candidates = [(f.stem, f) for f in sorted(wt_dir.glob("*.pdf"))]
@@ -7182,35 +11932,56 @@ class TrackClassificationSubTab(QWidget):
                 (f"per-sample/{f.stem}", f)
                 for f in sorted(wt_dir.glob("sankey_pdf_pages/*.pdf"))
             ]
+        elif kind == "transition_analysis" and traj_dir:
+            ta_dir = traj_dir / "transition_analysis"
+            candidates = [(f.stem, f) for f in sorted(ta_dir.glob("*.pdf"))]
         elif kind == "track_condition_comparison" and traj_dir:
             comparisons_dir = traj_dir / "behavior_comparisons"
             candidates = [
                 (f.stem.replace("condition_comparison_", ""), f)
                 for f in sorted(comparisons_dir.glob("condition_comparison_*.pdf"))
             ]
-        elif kind == "contact_analysis" and traj_dir:
-            contact_dir = traj_dir / "contact_analysis"
-            candidates = [
-                (f"{f.parent.name}/{f.stem}", f)
-                for f in sorted(contact_dir.glob("*/*.pdf"))
-            ]
-        elif kind == "contact_state_shift" and traj_dir:
+        elif kind == "contact_rate" and traj_dir:
             contact_dir = traj_dir / "contact_analysis"
             candidates = [
                 (f.parent.name, f)
-                for f in sorted(contact_dir.glob("*/contact_state_shift.pdf"))
+                for f in sorted(contact_dir.glob("contact_rate/*/contact_rate.pdf"))
+            ]
+        elif kind == "contact_composition" and traj_dir:
+            contact_dir = traj_dir / "contact_analysis"
+            candidates = [
+                (f.parent.name, f)
+                for f in sorted(contact_dir.glob("contact_composition/*/contact_composition.pdf"))
+            ]
+        elif kind == "contact_condition_comparison" and traj_dir:
+            contact_dir = traj_dir / "contact_analysis"
+            candidates = [
+                (f"{f.parent.name}/{f.stem}", f)
+                for f in sorted(contact_dir.glob("contact_condition_comparison/*/condition_comparison_*.pdf"))
+            ]
+        elif kind == "contact_cluster_heatmap" and traj_dir:
+            contact_dir = traj_dir / "contact_analysis"
+            candidates = [
+                (f.parent.name, f)
+                for f in sorted(contact_dir.glob("contact_cluster_heatmap/*/contact_cluster_heatmap.pdf"))
+            ]
+        elif kind == "contact_type_comparison" and traj_dir:
+            contact_dir = traj_dir / "contact_analysis"
+            candidates = [
+                (f.parent.name, f)
+                for f in sorted(contact_dir.glob("contact_type_comparison/*/contact_type_comparison.pdf"))
             ]
         elif kind == "track_contact_overview" and traj_dir:
             contact_dir = traj_dir / "contact_analysis"
             candidates = [
                 (f.parent.name, f)
-                for f in sorted(contact_dir.glob("*/track_contact_overview.pdf"))
+                for f in sorted(contact_dir.glob("contact_track_overview/*/track_contact_overview.pdf"))
             ]
         elif kind == "contact_duration" and traj_dir:
             contact_dir = traj_dir / "contact_analysis"
             candidates = [
                 (f.parent.name, f)
-                for f in sorted(contact_dir.glob("*/contact_duration_comparison.pdf"))
+                for f in sorted(contact_dir.glob("contact_duration_comparison/*/contact_duration_comparison.pdf"))
             ]
 
         existing = [(lbl, p) for lbl, p in candidates if p and p.exists()]
@@ -7223,7 +11994,10 @@ class TrackClassificationSubTab(QWidget):
             for lbl, path in existing:
                 act = menu.addAction(f"👁  {lbl}")
                 act.triggered.connect(lambda _=False, _p=path: self._open_result(_p))
-            menu.exec_()
+            if btn is not None:
+                menu.exec_(btn.mapToGlobal(btn.rect().bottomLeft()))
+            else:
+                menu.exec_()
 
     def _open_result(self, path: Path):
         if not path.suffix.lower() == ".pdf":
@@ -7269,6 +12043,12 @@ class SingleCellTab(QWidget):
         super().__init__(parent)
         self.viewer = viewer
         self.metadata_loader = metadata_loader
+        # Dedicated instance for the data-consistency check dispatched from
+        # `_refresh_data_consistency_warning` — kept separate from the
+        # sub-tabs' own `_preload_bg`/`_colscan_bg` so it doesn't collide
+        # with them on `BackgroundOperation`'s one-job-at-a-time guard.
+        self._consistency_bg = BackgroundOperation(self, silent=True, notify=True)
+        self._last_consistency_key = None
 
         self._init_ui()
 
@@ -7298,6 +12078,11 @@ class SingleCellTab(QWidget):
         self.cell_type_combo.setToolTip("Immune and other cell types only (non-multicolor).")
         self.cell_type_combo.currentTextChanged.connect(self._on_cell_type_changed)
         hdr_lay.addWidget(self.cell_type_combo)
+        # Changing the cell type reloads every sub-tab (h5ad / CSV reads); refuse it
+        # while background work is running.
+        self._cell_type_busy_guard = install_busy_guard(
+            self.cell_type_combo, owner=self, what="changing the cell type"
+        )
         hdr_lay.addStretch()
 
         self.status_lbl = QLabel("Load metadata to begin.")
@@ -7314,7 +12099,6 @@ class SingleCellTab(QWidget):
         )
         self.data_consistency_warning_label.hide()
         outer.addWidget(self.data_consistency_warning_label)
-        self._consistency_bg = BackgroundOperation(self)
 
         # ── Guided overview + isolated settings pages ────────────────────
         from behav3d.napari._guided import GuidedPanel, make_back_header
@@ -7384,6 +12168,8 @@ class SingleCellTab(QWidget):
     # ── Guided overview / focused settings ──────────────────────────────────
     def _on_guided_start(self, analysis_id: str):
         """Start from a Guided card: show only that analysis's settings."""
+        if warn_if_busy(self, "opening this analysis"):
+            return
         from behav3d.napari.analysis_guided_copy import (
             BEHAVIORAL_STATE, STATE_TRAJECTORY,
         )
@@ -7400,6 +12186,7 @@ class SingleCellTab(QWidget):
 
     def _on_inner_tab_changed(self, index: int):
         """Auto-fill path fields when switching to Track Classification tab."""
+        close_backprojection_legend_docks(self.viewer)
         if index == 1:  # Track Classification
             self.track_tab._autofill_paths(self._current_cell_type())
             # Re-check prerequisites too: a behavioral-states h5ad may have been
@@ -7408,7 +12195,8 @@ class SingleCellTab(QWidget):
             # refresh the "states not found" warning/lock state.
             self.track_tab._check_prerequisites()
             self.track_tab._apply_max_trajectory_size(self._current_cell_type())
-            if self.track_tab.chk_use_original.isChecked():
+            if (self.track_tab.combo_clustering_family.currentData() == "feature_based"
+                    and self.track_tab.chk_run_legacy_behav3d.isChecked()):
                 self.track_tab._show_original_dtw_disclaimer()
 
     # ── Metadata update ──────────────────────────────────────────────────
@@ -7480,67 +12268,76 @@ class SingleCellTab(QWidget):
         super().showEvent(event)
         self._refresh_data_consistency_warning()
 
-    def _refresh_data_consistency_warning(self):
-        """Cheap background check: do the filtered track-features CSV and the
-        track/behavioral-states h5ad(s) for the current cell type still describe
-        the same tracks?
-
-        Only reads the two ID columns from the CSV (not the full file) and the
-        ``.obs`` table from each h5ad in ``backed="r"`` mode (not the full
-        AnnData, so no X matrix is loaded) — this is far cheaper than the
-        full contact/no-contact analysis pipeline and safe to run on every tab
-        entry. Runs off the Qt thread so it never blocks tab switching; if a
-        previous check is still in flight, this call is skipped (a subsequent
-        trigger — e.g. the next tab visit — will pick it up).
-        """
+    def _consistency_check_inputs(self):
+        """Return ``(ct, csv_path, h5ad_sources, groupby_cols, key)`` for the
+        current selection, or ``None`` if the prerequisites for the check
+        aren't met. ``key`` folds in each source's mtime, so it changes
+        whenever the underlying files do. Used both to decide whether a
+        (re)check is needed and, in the background-scan completion
+        callbacks, to detect whether the user has since moved on to a
+        different cell type/selection."""
         ct = self._current_cell_type()
         out = self._out_dir()
-        self.data_consistency_warning_label.hide()
         if not ct or not out:
-            return
+            return None
 
         csv_path = self.track_tab._track_features_csv_path(ct)
         if not csv_path or not csv_path.exists():
-            return
+            return None
         h5ad_sources = [
             ("track classification h5ad", self.track_tab._track_adata_path(ct)),
             ("behavioral states h5ad", self.track_tab._state_adata_path(ct)),
         ]
         h5ad_sources = [(label, p) for label, p in h5ad_sources if p and p.exists()]
         if not h5ad_sources:
-            return
-
-        if self._consistency_bg.is_running():
-            return
+            return None
 
         groupby_cols = ["sample_name", "TrackID"]
 
-        def _key_set(df):
-            from behav3d.analysis.behavior.track.contact_grouping import _normalize_id_column
-            d = df[groupby_cols].copy()
-            for col in groupby_cols:
-                d[col] = _normalize_id_column(d[col])
-            return set(map(tuple, d.drop_duplicates().to_numpy()))
+        def _mtime(p):
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return None
 
-        def _check():
-            import pandas as pd
-            import anndata as ad
+        key = (
+            ct, str(csv_path), _mtime(csv_path),
+            tuple((label, str(p), _mtime(p)) for label, p in h5ad_sources),
+        )
+        return ct, csv_path, h5ad_sources, groupby_cols, key
 
-            csv_keys = _key_set(pd.read_csv(csv_path, usecols=groupby_cols))
-            mismatches = []
-            for label, path in h5ad_sources:
-                adata = ad.read_h5ad(str(path), backed="r")
-                try:
-                    h5ad_keys = _key_set(adata.obs[groupby_cols])
-                finally:
-                    if getattr(adata, "isbacked", False):
-                        adata.file.close()
-                missing = h5ad_keys - csv_keys
-                if missing:
-                    mismatches.append((label, len(missing)))
-            return mismatches
+    def _refresh_data_consistency_warning(self):
+        """Do the filtered track-features CSV and the track/behavioral-states
+        h5ad(s) for the current cell type still describe the same tracks?
 
-        def _on_done(mismatches):
+        The full-CSV + full-h5ad-obs comparison (``_check_data_consistency``)
+        is dispatched via ``self._consistency_bg`` (a ``BackgroundOperation``,
+        same pattern as ``_colscan_bg`` elsewhere in this module) so it
+        doesn't block the Qt main thread. An mtime-based staleness key
+        (``self._last_consistency_key``) skips re-running the check when
+        nothing on disk has changed since the last run, which also collapses
+        the back-to-back ``showEvent``/``_on_metadata_updated`` triggers that
+        a single tab click can produce into a single actual scan.
+        """
+        inputs = self._consistency_check_inputs()
+        if inputs is None:
+            self.data_consistency_warning_label.hide()
+            return
+        ct, csv_path, h5ad_sources, groupby_cols, key = inputs
+
+        if key == self._last_consistency_key:
+            return
+        if self._consistency_bg.is_running():
+            return
+
+        def _on_check_done(mismatches):
+            current = self._consistency_check_inputs()
+            if current is None or current[4] != key:
+                # Stale — the user moved on to a different cell type/selection
+                # while this scan was running. Re-trigger for what's current.
+                self._refresh_data_consistency_warning()
+                return
+            self._last_consistency_key = key
             if not mismatches:
                 self.data_consistency_warning_label.hide()
                 return
@@ -7552,13 +12349,20 @@ class SingleCellTab(QWidget):
             )
             self.data_consistency_warning_label.show()
 
-        def _on_failed(err):
+        def _on_check_failed(err):
             print(f"[BEHAV3D] Data-consistency check failed: {err}")
+            # Remember the failure for this exact set of files too: otherwise a
+            # check that cannot succeed (e.g. an obs column is missing) re-reads
+            # the whole CSV and h5ad on every tab show / metadata update.
+            current = self._consistency_check_inputs()
+            if current is not None and current[4] == key:
+                self._last_consistency_key = key
 
         self._consistency_bg.run(
-            fn=_check,
-            desc="Checking data consistency…",
+            fn=_check_data_consistency,
+            args=(csv_path, h5ad_sources, groupby_cols),
+            desc=f"Checking track data consistency ({ct})…",
             inject_progress=False,
-            on_done=_on_done,
-            on_failed=_on_failed,
+            on_done=_on_check_done,
+            on_failed=_on_check_failed,
         )

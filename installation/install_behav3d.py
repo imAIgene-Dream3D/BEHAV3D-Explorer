@@ -42,6 +42,10 @@ CUDA_VERSION = "cu128"  # Default CUDA version for PyTorch
 # Global variable that will be set from command line args
 ENV_NAME = DEFAULT_ENV_NAME
 
+# Set by check_windows_long_paths(): when True, package operations use conda instead
+# of mamba to keep package-cache paths under Windows' 260-character limit.
+PREFER_CONDA = False
+
 # Miniforge download URLs (more reliable than Miniconda for conda-forge)
 MINIFORGE_URLS = {
     "Windows": "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Windows-x86_64.exe",
@@ -347,11 +351,115 @@ def get_gpu_info():
     return info
 
 # =============================================================================
+# WINDOWS LONG PATH SUPPORT
+# =============================================================================
+
+LONG_PATHS_REG_KEY = r"SYSTEM\CurrentControlSet\Control\FileSystem"
+
+def windows_long_paths_enabled():
+    """Return True if Windows long path support (LongPathsEnabled=1) is on."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, LONG_PATHS_REG_KEY) as key:
+            value, _ = winreg.QueryValueEx(key, "LongPathsEnabled")
+        return value == 1
+    except OSError:
+        return False  # value absent = Windows default (disabled)
+
+def enable_windows_long_paths():
+    """Set LongPathsEnabled=1 through an elevated reg.exe (Windows shows a UAC prompt)."""
+    reg_args = f"add HKLM\\{LONG_PATHS_REG_KEY} /v LongPathsEnabled /t REG_DWORD /d 1 /f"
+    ps_cmd = f"Start-Process -FilePath reg.exe -ArgumentList '{reg_args}' -Verb RunAs -Wait -WindowStyle Hidden"
+    # Declining the UAC prompt makes Start-Process fail; the re-read below reports it.
+    subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], check=False)
+    return windows_long_paths_enabled()
+
+def check_windows_long_paths():
+    """Make sure package extraction won't hit Windows' 260-character path limit.
+
+    mamba 2.x unpacks packages into a per-channel cache folder
+    (pkgs\\https\\conda.anaconda.org\\conda-forge\\noarch\\...), which adds ~44 characters
+    to every path. With long paths disabled (the Windows default), packages with deep
+    file trees (jupyterlab, debugpy, referencing) fail with "extraction failed" /
+    "remove_all: The directory is not empty". conda keeps the flat pkgs\\ layout, so it
+    is the fallback when long paths cannot be enabled. No-op on macOS/Linux.
+    """
+    global PREFER_CONDA
+
+    if get_platform() != "Windows":
+        return True
+
+    print_header("WINDOWS LONG PATH SUPPORT")
+    if windows_long_paths_enabled():
+        print_success("Windows long path support is enabled")
+        return True
+
+    print_warning("Windows long path support is disabled (Windows default).")
+    print_info("Some packages contain file paths longer than Windows' 260-character limit")
+    print_info("once unpacked into mamba's package cache, which makes the installation fail.")
+    print()
+    print("Options:")
+    print("  [1] Enable long path support now (recommended; asks for administrator permission)")
+    print("  [2] Continue without it (uses conda instead of mamba; slower, but avoids long paths)")
+    print("  [3] Cancel installation")
+    print()
+    try:
+        response = input("Choose an option [1/2/3] (default 1): ").strip() or "1"
+    except (EOFError, KeyboardInterrupt):
+        response = "2"
+
+    if response == "3":
+        print_info("Installation cancelled by user.")
+        return False
+
+    if response == "1":
+        print_step("Enabling Windows long path support (accept the administrator prompt)...")
+        if enable_windows_long_paths():
+            print_success("Windows long path support enabled")
+            return True
+        print_warning("Could not enable long path support (permission denied or prompt declined).")
+    elif response != "2":
+        print_warning(f"Invalid option '{response}'. Continuing without long path support.")
+
+    conda_exe = find_conda_executable()
+    if conda_exe:
+        PREFER_CONDA = True
+        print_info(f"Using conda for package operations: {conda_exe}")
+    else:
+        print_warning("conda not found; continuing with the current package manager.")
+        print_info("If extraction fails, enable long paths (as administrator) with:")
+        print_info(f'  reg add "HKLM\\{LONG_PATHS_REG_KEY}" /v LongPathsEnabled /t REG_DWORD /d 1 /f')
+    return True
+
+# =============================================================================
 # ENVIRONMENT CREATION
 # =============================================================================
 
+def find_conda_executable():
+    """Find conda itself (not mamba/micromamba), e.g. the conda.bat next to Miniforge's mamba.bat."""
+    path = shutil.which("conda")
+    if path:
+        return path
+    conda_name = "conda.bat" if get_platform() == "Windows" else "conda"
+    mamba_path = shutil.which("mamba") or find_conda()
+    if mamba_path and Path(mamba_path).stem.lower() == "mamba":
+        sibling = Path(mamba_path).with_name(conda_name)
+        if sibling.exists():
+            return str(sibling)
+    for base in ("miniforge3", "mambaforge", "miniconda3", "anaconda3"):
+        candidate = Path.home() / base / "condabin" / conda_name
+        if candidate.exists():
+            return str(candidate)
+    return None
+
 def get_package_manager():
     """Get the best available package manager (prefers mamba > micromamba > conda)."""
+    # Long paths disabled on Windows: use conda (see check_windows_long_paths)
+    if PREFER_CONDA:
+        conda_exe = find_conda_executable()
+        if conda_exe:
+            return conda_exe
+
     # Check for mamba first (fastest)
     mamba_path = shutil.which("mamba")
     if mamba_path:
@@ -367,14 +475,27 @@ def get_package_manager():
     return conda_path if conda_path else None
 
 def check_env_exists(conda_path, env_name):
-    """Check if conda environment exists."""
+    """Check if conda environment exists (exact name match, not substring)."""
     try:
         # Use best available package manager
         pkg_mgr = get_package_manager()
         if not pkg_mgr:
             pkg_mgr = conda_path
         result = run_command(f'"{pkg_mgr}" env list', capture=True)
-        return env_name in result
+        if not result:
+            return False
+        # Only match the name column: a substring test would report e.g.
+        # 'behav3d_napari_test' as if 'behav3d' existed.
+        for line in result.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            # Nameless (--prefix) envs list only a path; those aren't
+            # addressable with -n, so skip them.
+            if len(parts) >= 2 and parts[0] == env_name:
+                return True
+        return False
     except:
         return False
 
@@ -688,6 +809,63 @@ def fix_freetype_windows(conda_path: str) -> None:
         print_warning(f"FreeType fix: could not copy DLL ({exc})")
 
 
+def fix_icu_for_pyqt6_windows(conda_path: str) -> None:
+    """Make PyQt6 importable on Windows conda environments (ICU DLL clash).
+
+    conda-forge's ``icu`` package ships *unversioned* copies (``icuuc.dll``,
+    ``icuin.dll``, ...) of its versioned libraries (``icuuc78.dll``, ...) in
+    ``Library/bin``, and conda's Python puts that folder on the DLL search path
+    ahead of System32. Qt6 binaries from PyPI (PyQt6 / PySide6) import the *bare*
+    name ``icuuc.dll`` expecting Windows' built-in ICU; they get conda's full ICU,
+    whose exports differ, and ``import PyQt6.QtCore`` fails with
+    "DLL load failed ... The specified procedure could not be found" (WinError 127)
+    - i.e. napari cannot start at all.
+
+    Everything conda-built links against the *versioned* names, so the unversioned
+    copies are moved into ``Library/bin/_icu_unversioned_disabled`` (not deleted).
+    Only done when PyQt6 is installed and the versioned DLLs are present.
+    No-op on macOS/Linux.
+    """
+    if platform.system() != "Windows":
+        return
+
+    try:
+        run_prefix = get_conda_run_prefix(conda_path, ENV_NAME)
+        result = run_command(
+            f'{run_prefix} python -c "import sys; print(sys.prefix)"', capture=True,
+        )
+        if not result:
+            return
+        env_prefix = Path(result.strip().splitlines()[-1])
+    except Exception as exc:
+        print_warning(f"ICU fix: could not find env prefix ({exc})")
+        return
+
+    if not (env_prefix / "Lib" / "site-packages" / "PyQt6").exists():
+        return  # PyQt5/PySide builds are not affected
+
+    print_step("Applying Windows ICU DLL fix for PyQt6...")
+    bin_dir = env_prefix / "Library" / "bin"
+    disabled = bin_dir / "_icu_unversioned_disabled"
+    moved = []
+    for stem in ("icuuc", "icuin", "icuio", "icutu", "icudt", "icutest"):
+        bare = bin_dir / f"{stem}.dll"
+        # Only move an unversioned copy when a versioned sibling exists, so nothing
+        # that actually needs the library can be left without it.
+        has_versioned = any(bin_dir.glob(f"{stem}[0-9]*.dll"))
+        if bare.exists() and has_versioned:
+            try:
+                disabled.mkdir(exist_ok=True)
+                shutil.move(str(bare), str(disabled / bare.name))
+                moved.append(bare.name)
+            except Exception as exc:
+                print_warning(f"ICU fix: could not move {bare.name} ({exc})")
+    if moved:
+        print_success(f"ICU fix applied: moved {', '.join(moved)} to {disabled.name}")
+    else:
+        print_info("ICU fix: nothing to do.")
+
+
 # =============================================================================
 # VERIFICATION
 # =============================================================================
@@ -705,6 +883,7 @@ def verify_installation(conda_path):
         ("CUDA Available", 'python -c "import torch; print(f\'CUDA: {torch.cuda.is_available()}\')"'),
         ("Cellpose", 'python -c "from importlib.metadata import version; print(f\'Cellpose {version(\\\"cellpose\\\")}\')"'),
         ("ConvPaint", 'python -c "from importlib.metadata import version; print(f\'ConvPaint {version(\\\"napari-convpaint\\\")}\')"'),
+        ("Qt binding", 'python -c "import qtpy; print(qtpy.API_NAME, qtpy.QT_VERSION)"'),
         ("Napari", 'python -c "import napari; print(f\'Napari {napari.__version__}\')"'),
         ("BEHAV3D Plugin", 'python -c "from behav3d.napari._widget import BEHAV3DWidget; print(\'Plugin OK\')"'),
     ]
@@ -985,7 +1164,11 @@ Examples:
         else:
             print_error("Conda/Miniforge is required for BEHAV3D installation.")
             return 1
-    
+
+    # Windows: avoid the 260-character path limit during package extraction
+    if not check_windows_long_paths():
+        return 0
+
     # Check if environment exists
     env_exists = check_env_exists(conda_path, ENV_NAME)
     
@@ -1124,6 +1307,7 @@ Examples:
     # Fix FreeType DLL name mismatch on Windows
     print_header("PLATFORM FIXES")
     fix_freetype_windows(conda_path)
+    fix_icu_for_pyqt6_windows(conda_path)
 
     # Verify installation
     print_header("VERIFICATION")

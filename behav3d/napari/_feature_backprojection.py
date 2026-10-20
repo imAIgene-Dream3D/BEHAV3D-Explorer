@@ -36,8 +36,10 @@ from qtpy.QtWidgets import (
 from behav3d.core.qt_help import make_help_row
 from behav3d.core.metadata import resolve_metadata_csv_path
 from behav3d.napari._analysis import _detect_cell_types
+from behav3d.napari._background_runner import BackgroundOperation
 from behav3d.napari._single_cell import _bp_add_raw_channels
 from behav3d.napari._preview_dims import (
+    clear_viewer_layers,
     disconnect_all_preview_dims_listeners,
     register_preview_dims_listener,
     stop_dim_playback,
@@ -53,6 +55,33 @@ _FEATURE_BP_EXCLUDED_COLUMNS = {
 _FEATURE_LAYER_PREFIX = "[Feature BP]"
 
 
+# Rows read to learn which columns are numeric. The full track-features CSV can
+# be several GB, and listing its columns must not mean loading all of it.
+_DTYPE_SAMPLE_ROWS = 5000
+
+
+def _read_numeric_feature_columns(csv_path: Path) -> list:
+    """Names of the numeric, selectable feature columns of the track-features
+    CSV, judged from its first rows. Run off the Qt main thread via
+    ``BackgroundOperation``."""
+    sample = pd.read_csv(csv_path, nrows=_DTYPE_SAMPLE_ROWS)
+    return sorted(
+        c for c in sample.columns
+        if c not in _FEATURE_BP_EXCLUDED_COLUMNS and pd.api.types.is_numeric_dtype(sample[c])
+    )
+
+
+def _read_feature_frame(csv_path: Path, feature_col: str) -> pd.DataFrame:
+    """Only the columns the preview needs (sample / track ids, time and the one
+    chosen feature) -- not the whole CSV. Run off the Qt main thread."""
+    header = list(pd.read_csv(csv_path, nrows=0).columns)
+    wanted = [
+        c for c in ("sample_name", "TrackID", "original_TrackID", "position_t", feature_col)
+        if c in header
+    ]
+    return pd.read_csv(csv_path, usecols=list(dict.fromkeys(wanted)), low_memory=False)
+
+
 class FeatureBackprojectionTab(QWidget):
     """Pick a cell type + numeric feature, preview it backprojected for
     whichever timepoint the viewer is currently showing."""
@@ -62,9 +91,21 @@ class FeatureBackprojectionTab(QWidget):
         self.viewer = viewer
         self.metadata_loader = metadata_loader
 
+        # Selectable numeric columns of the cell type's track-features CSV (cheap,
+        # read from its first rows), and -- only once Show is clicked -- the few
+        # columns the preview needs for the chosen feature.
+        self._feature_cols: Optional[list] = None
+        # (cell_type, csv path, mtime) the column list was read for
+        self._feature_cols_key: Optional[tuple] = None
         self._df_features: Optional[pd.DataFrame] = None
+        self._df_frame_key: Optional[tuple] = None
         self._df_features_csv_path: Optional[Path] = None
         self._df_features_cell_type: Optional[str] = None
+        self._df_features_mtime: Optional[float] = None
+
+        self._features_bg = BackgroundOperation(self, silent=True, notify=True)
+        self._frame_bg = BackgroundOperation(self, silent=True, notify=True)
+        self._pending_show_after_load = False
 
         self._tracked_path: Optional[Path] = None
         self._sample: Optional[str] = None
@@ -226,38 +267,108 @@ class FeatureBackprojectionTab(QWidget):
         self._teardown_preview()
         cell_type = self.combo_cell_type.currentText()
         self._load_features_for_cell_type(cell_type)
-        self._populate_feature_combo()
 
     def _on_sample_changed(self, *_):
         self._teardown_preview()
 
     def _load_features_for_cell_type(self, cell_type: str):
-        self._df_features = None
-        self._df_features_csv_path = None
+        """(Re)load the selectable feature list for ``cell_type``, off the Qt main
+        thread. Only the list of numeric columns is read here (from the first
+        rows of the CSV): the values themselves are loaded when Show is clicked,
+        and only for the chosen feature. This is called on every Analysis refresh
+        via ``_on_metadata_updated`` and the CSV can be several GB."""
         self._df_features_cell_type = cell_type
         if not cell_type:
+            self._feature_cols = None
+            self._feature_cols_key = None
+            self._df_features = None
+            self._df_features_csv_path = None
+            self._df_features_mtime = None
+            self._populate_feature_combo()
             return
+
         csv_path = self._feature_csv_path(cell_type)
         self._df_features_csv_path = csv_path
         if csv_path is None or not csv_path.exists():
-            return
-        try:
-            self._df_features = pd.read_csv(csv_path, low_memory=False)
-        except Exception:
-            traceback.print_exc()
+            self._feature_cols = None
+            self._feature_cols_key = None
             self._df_features = None
+            self._df_features_mtime = None
+            self._populate_feature_combo()
+            return
+
+        try:
+            mtime = csv_path.stat().st_mtime
+        except OSError:
+            mtime = None
+        if (
+            self._feature_cols is not None
+            and self._feature_cols_key == (cell_type, str(csv_path), mtime)
+        ):
+            # Already listed and unchanged since the last load — skip the re-read.
+            self._df_features_mtime = mtime
+            self._populate_feature_combo()
+            return
+
+        if self._features_bg.is_running():
+            return
+
+        self._feature_cols = None
+        self._feature_cols_key = None
+        self.combo_feature.blockSignals(True)
+        self.combo_feature.clear()
+        self.combo_feature.blockSignals(False)
+        self.combo_feature.setEnabled(False)
+        self.btn_show.setEnabled(False)
+        self.status_label.setStyleSheet("color:#888;font-size:11px;")
+        self.status_label.setText("Loading feature list…")
+
+        self._features_bg.run(
+            fn=_read_numeric_feature_columns,
+            args=(csv_path,),
+            desc=f"Listing features ({cell_type})…",
+            inject_progress=False,
+            on_done=lambda cols: self._on_features_loaded(cell_type, csv_path, mtime, cols),
+            on_failed=lambda err: self._on_features_load_failed(cell_type, csv_path, err),
+        )
+
+    def _on_features_loaded(self, cell_type, csv_path, mtime, cols):
+        if cell_type != self.combo_cell_type.currentText() or csv_path != self._feature_csv_path(cell_type):
+            # The user has moved on to a different cell type since this scan
+            # was dispatched — discard the result and load whatever's current.
+            self._load_features_for_cell_type(self.combo_cell_type.currentText())
+            return
+
+        self._feature_cols = list(cols)
+        self._feature_cols_key = (cell_type, str(csv_path), mtime)
+        self._df_features_mtime = mtime
+        self._populate_feature_combo()
+
+        if self._pending_show_after_load:
+            self._pending_show_after_load = False
+            self._on_show_clicked()
+
+    def _on_features_load_failed(self, cell_type, csv_path, err):
+        traceback.print_exc()
+        if cell_type != self.combo_cell_type.currentText() or csv_path != self._feature_csv_path(cell_type):
+            self._pending_show_after_load = False
+            self._load_features_for_cell_type(self.combo_cell_type.currentText())
+            return
+
+        self._feature_cols = None
+        self._feature_cols_key = None
+        self._df_features = None
+        self._df_features_mtime = None
+        self._pending_show_after_load = False
+        self._populate_feature_combo()
 
     def _populate_feature_combo(self):
         prev = self.combo_feature.currentText()
         self.combo_feature.blockSignals(True)
         self.combo_feature.clear()
         numeric_cols = []
-        if self._df_features is not None:
-            numeric_cols = sorted(
-                c for c in self._df_features.columns
-                if c not in _FEATURE_BP_EXCLUDED_COLUMNS
-                and pd.api.types.is_numeric_dtype(self._df_features[c])
-            )
+        if self._feature_cols is not None:
+            numeric_cols = list(self._feature_cols)
             self.combo_feature.addItems(numeric_cols)
             if prev in numeric_cols:
                 self.combo_feature.setCurrentText(prev)
@@ -276,10 +387,46 @@ class FeatureBackprojectionTab(QWidget):
                 f"No track-features CSV found for this cell type "
                 f"(expected at {self._df_features_csv_path}). Run Feature Extraction first."
             )
-        elif self._df_features is None:
+        elif self._feature_cols is None:
             self.status_label.setText("Could not read the track-features CSV.")
         else:
             self.status_label.setText("No numeric feature columns found in the track-features CSV.")
+
+    def _load_frame_then_show(self, cell_type: str, feature_col: str, frame_key: tuple):
+        """Read the few columns the preview needs for ``feature_col`` in the
+        background, then continue with ``_on_show_clicked``."""
+        csv_path = self._df_features_csv_path
+        if csv_path is None or self._frame_bg.is_running():
+            return
+        self._pending_show_after_load = True
+        self.btn_show.setEnabled(False)
+        self.status_label.setStyleSheet("color:#888;font-size:11px;")
+        self.status_label.setText("Loading feature values…")
+
+        def _done(df):
+            self._df_features = df
+            self._df_frame_key = frame_key
+            self.btn_show.setEnabled(self.combo_sample.count() > 0)
+            if self._pending_show_after_load:
+                self._pending_show_after_load = False
+                self._on_show_clicked()
+
+        def _failed(err):
+            self._pending_show_after_load = False
+            self._df_features = None
+            self._df_frame_key = None
+            self.btn_show.setEnabled(self.combo_sample.count() > 0)
+            self.status_label.setStyleSheet("color:#c66;font-size:11px;")
+            self.status_label.setText(f"Could not read feature values: {err}")
+
+        self._frame_bg.run(
+            fn=_read_feature_frame,
+            args=(csv_path, feature_col),
+            desc=f"Loading '{feature_col}' values ({cell_type})…",
+            inject_progress=False,
+            on_done=_done,
+            on_failed=_failed,
+        )
 
     # ── preview lifecycle ────────────────────────────────────────────────
     def _current_viewer_frame(self) -> int:
@@ -349,16 +496,39 @@ class FeatureBackprojectionTab(QWidget):
             self.status_label.setText("No metadata loaded.")
             return
 
-        if self._df_features is None or self._df_features_cell_type != cell_type:
-            self._load_features_for_cell_type(cell_type)
-        if self._df_features is None:
-            self.status_label.setText(
-                f"No track-features CSV found for '{cell_type}'. Run Feature Extraction first."
+        def _listed_for(ct):
+            return (
+                self._feature_cols is not None
+                and self._feature_cols_key is not None
+                and self._feature_cols_key[0] == ct
             )
+
+        if not _listed_for(cell_type):
+            self._load_features_for_cell_type(cell_type)
+            if not _listed_for(cell_type):
+                if self._features_bg.is_running():
+                    self.btn_show.setEnabled(False)
+                    self.status_label.setStyleSheet("color:#888;font-size:11px;")
+                    self.status_label.setText("Loading feature list… will continue automatically.")
+                    self._pending_show_after_load = True
+                else:
+                    self.status_label.setText(
+                        f"No track-features CSV found for '{cell_type}'. Run Feature Extraction first."
+                    )
+                return
+        if feature_col not in self._feature_cols:
+            self.status_label.setText(
+                f"Feature '{feature_col}' not found in {self._df_features_csv_path.name}."
+            )
+            return
+
+        frame_key = (cell_type, self._feature_cols_key[1:], feature_col)
+        if self._df_features is None or self._df_frame_key != frame_key:
+            self._load_frame_then_show(cell_type, feature_col, frame_key)
             return
         if feature_col not in self._df_features.columns:
             self.status_label.setText(
-                f"Feature '{feature_col}' not found in {self._df_features_csv_path.name}."
+                f"Feature '{feature_col}' could not be read from {self._df_features_csv_path.name}."
             )
             return
 
@@ -392,7 +562,7 @@ class FeatureBackprojectionTab(QWidget):
         self._teardown_preview()
         stop_dim_playback(self.viewer)
         disconnect_all_preview_dims_listeners(self.viewer)
-        self.viewer.layers.clear()
+        clear_viewer_layers(self.viewer)
 
         try:
             raw_img = load_image(raw_path)

@@ -44,7 +44,7 @@ from behav3d.analysis.behavior.track.visualization.plots.feature_dtw import (
 from behav3d.analysis.behavior.general.visualization.plots.proportion_bars import (
     hash_stable_label_color_map,
 )
-from behav3d.analysis.behavior.track.utils import _resolve_dtaidistance_paths
+from behav3d.analysis.behavior.track.utils import _resolve_track_paths
 from behav3d.analysis.behavior.track.visualization.plots.exemplar_track_per_cluster import (
     save_exemplar_statebar_backprojection_pdf,
     save_exemplar_statebar_backprojection_video_per_cluster,
@@ -52,6 +52,7 @@ from behav3d.analysis.behavior.track.visualization.plots.exemplar_track_per_clus
 from behav3d.analysis.organoid_analysis import (
     run_organoid_analysis,
     plot_multi_organoid_death_dynamics,
+    is_output_stale,
     run_organoid_morphology_dead_analysis
 )
 from behav3d.analysis.filtering import filter_tracks, preview_track_length_before_filtering
@@ -969,6 +970,60 @@ class TrackFilterPanel:
         params = self.metadata_loader.behav3d_parameters
         cfg = params.setdefault("track_filtering", {}).setdefault(self.cell_type, {})
         
+        # Absolute timepoint window, applied before every other filter.
+        # GLOBAL: stored once in its own top-level block and mirrored across
+        # every cell type's panel. It cannot be per cell type because
+        # cross-cell-type analyses join on 'position_t' and silently produce
+        # wrong denominators or fabricated data when two cell types cover
+        # different spans.
+        time_range = params.setdefault(
+            "timepoint_range", {"enabled": False, "start": 0, "end": 0}
+        )
+        _unit = cfg.get('time_type', 'frames')
+        self.en_time_range = widgets.Checkbox(description="Restrict analysis to a timepoint range (applies to ALL cell types)", value=bool(time_range.get("enabled", False)), indent=False)
+        self.t_range_start = widgets.IntText(description=f"Start timepoint ({_unit})", value=int(time_range.get("start", 0) or 0), style={'description_width': '180px'})
+        self.t_range_end = widgets.IntText(description=f"End timepoint ({_unit})", value=int(time_range.get("end", 0) or 0), style={'description_width': '180px'})
+
+        # The two "first timepoint" filters key on each track's first frame of
+        # the ORIGINAL movie, which a window normally cuts away. This opt-in
+        # re-points them at the window instead. Per cell type, unlike the
+        # window itself.
+        self.first_tp_from_range = widgets.Checkbox(
+            description="Enable first-timepoint filters, measured at the start of this range",
+            value=bool(cfg.get("first_timepoint_from_range", False)),
+            indent=False,
+        )
+        self.range_note = widgets.HTML(
+            '<div style="font-size:12px;color:#555;padding:2px 0;">'
+            'Timepoint numbering is never rewritten: results keep the original '
+            'timepoints, so plots of a 56&#8211;78 window read 56&#8211;78, not 1&#8211;23.'
+            '</div>'
+        )
+        self.row_time_range = widgets.VBox(
+            [widgets.HBox([self.t_range_start, self.t_range_end]),
+             self.first_tp_from_range, self.range_note],
+            layout=widgets.Layout(display=(None if self.en_time_range.value else "none")),
+        )
+
+        # Register with the shared loader so an edit in one cell type's panel
+        # reaches the others; the window is one setting, not one per panel.
+        if not hasattr(self.metadata_loader, "_filter_panels"):
+            self.metadata_loader._filter_panels = []
+        self.metadata_loader._filter_panels.append(self)
+
+        def _on_range_changed(change):
+            self.row_time_range.layout.display = (
+                None if self.en_time_range.value else "none"
+            )
+            self._sync_first_timepoint_filters()
+            self._broadcast_time_range()
+        self.en_time_range.observe(_on_range_changed, names="value")
+        self.t_range_start.observe(lambda c: self._broadcast_time_range(), names="value")
+        self.t_range_end.observe(lambda c: self._broadcast_time_range(), names="value")
+        self.first_tp_from_range.observe(
+            lambda c: self._sync_first_timepoint_filters(), names="value"
+        )
+
         self.exp_duration = widgets.IntText(description=f"Max timepoints ({cfg.get('time_type','frames')})", value=int(cfg.get("exp_duration", 350)), style={'description_width': '180px'})
         self.en_exp_duration = widgets.Checkbox(description="Trim down full time series", value=bool(cfg.get("exp_duration_enabled", True)), indent=False)
         self.row_exp = widgets.HBox([self.exp_duration], layout=widgets.Layout(display=(None if self.en_exp_duration.value else "none")))
@@ -1001,11 +1056,15 @@ class TrackFilterPanel:
         self.filter_t0_dead = widgets.Checkbox(description="Filter tracks that are dead at first timepoint", value=bool(cfg.get("filter_t0_dead", False)), indent=False)
         if not self.has_dead: self.filter_t0_dead.layout.display = "none"
         
+        self._sync_first_timepoint_filters()
+
         # --- Time unit toggle (available for ALL cell types) ---
         self.time_type = widgets.ToggleButtons(options=["frames", "hours"], value=cfg.get("time_type", "frames"))
         def _on_time_unit_change(change):
             if change['name'] == 'value':
                 u = change['new']
+                self.t_range_start.description = f"Start timepoint ({u})"
+                self.t_range_end.description = f"End timepoint ({u})"
                 self.exp_duration.description = f"Max timepoints ({u})"
                 self.min_track_length.description = f"Minimal length ({u})"
                 self.max_track_length.description = f"Maximal length ({u})"
@@ -1039,6 +1098,7 @@ class TrackFilterPanel:
             self._qc_hint,
             widgets.HBox([self.btn_preview_lengths, self.spinner_html]),
             self.out_preview,
+            self.en_time_range, self.row_time_range,
             self.en_exp_duration, self.row_exp,
             self.en_min_length, self.row_min,
             self.en_max_length, self.row_max,
@@ -1051,8 +1111,41 @@ class TrackFilterPanel:
         self.ui = widgets.VBox(ui_elements)
 
     def _lock(self, locked):
-        w_list = [self.en_exp_duration, self.exp_duration, self.en_min_length, self.min_track_length, self.en_max_length, self.max_track_length, self.en_min_size, self.min_size_val, self.filter_t0_dead, self.time_type, self.btn_run, self.btn_preview_lengths]
+        w_list = [self.en_time_range, self.t_range_start, self.t_range_end, self.first_tp_from_range, self.en_exp_duration, self.exp_duration, self.en_min_length, self.min_track_length, self.en_max_length, self.max_track_length, self.en_min_size, self.min_size_val, self.filter_t0_dead, self.time_type, self.btn_run, self.btn_preview_lengths]
         for w in w_list: w.disabled = locked
+
+    def _sync_first_timepoint_filters(self):
+        """Enable/disable the two 'first timepoint' filters for the window.
+
+        With a window active, 'relative_time == 1' points at a frame the
+        window cut away, so both filters would silently skip every track
+        that started earlier. They are therefore disabled and switched off
+        unless the user opts in to measuring them at the start of the range.
+        """
+        ranged = bool(self.en_time_range.value)
+        self.first_tp_from_range.layout.display = None if ranged else "none"
+        usable = (not ranged) or bool(self.first_tp_from_range.value)
+        for w in (self.en_min_size, self.filter_t0_dead):
+            w.disabled = not usable
+            if not usable and w.value:
+                w.value = False
+
+    def _broadcast_time_range(self):
+        """Mirror this panel's (global) window onto every sibling panel."""
+        loader = self.metadata_loader
+        if getattr(loader, "_syncing_range", False):
+            return
+        loader._syncing_range = True
+        try:
+            for panel in getattr(loader, "_filter_panels", []):
+                if panel is self:
+                    continue
+                panel.en_time_range.value = self.en_time_range.value
+                panel.t_range_start.value = self.t_range_start.value
+                panel.t_range_end.value = self.t_range_end.value
+                panel._sync_first_timepoint_filters()
+        finally:
+            loader._syncing_range = False
 
     def _get_advanced_features_path(self):
         from behav3d.features.advanced_timepoint_features import find_advanced_features_csv
@@ -1083,7 +1176,15 @@ class TrackFilterPanel:
         with self.out_run:
             try:
                 cfg = self.metadata_loader.behav3d_parameters["track_filtering"][self.cell_type]
+                # The window is global, so it lives in its own top-level
+                # block rather than being duplicated per cell type.
+                self.metadata_loader.behav3d_parameters["timepoint_range"] = {
+                    "enabled": bool(self.en_time_range.value),
+                    "start": int(self.t_range_start.value),
+                    "end": int(self.t_range_end.value),
+                }
                 cfg.update({
+                    "first_timepoint_from_range": bool(self.first_tp_from_range.value),
                     "exp_duration_enabled": self.en_exp_duration.value,
                     "exp_duration": int(self.exp_duration.value),
                     "min_length_enabled": self.en_min_length.value,
@@ -1100,9 +1201,18 @@ class TrackFilterPanel:
 
                 adv_path = self._get_advanced_features_path()
                 df_input_path = str(adv_path) if adv_path is not None else None
+                if self.en_time_range.value and int(self.t_range_end.value) <= int(self.t_range_start.value):
+                    raise ValueError(
+                        f"End timepoint ({self.t_range_end.value}) must be greater "
+                        f"than start ({self.t_range_start.value})."
+                    )
+
                 filter_tracks(
                     metadata=self.metadata_loader.metadata,
                     output_dir=self.output_dir,
+                    t_range_start=(int(self.t_range_start.value) if self.en_time_range.value else None),
+                    t_range_end=(int(self.t_range_end.value) if self.en_time_range.value else None),
+                    first_timepoint_from_range=bool(self.first_tp_from_range.value),
                     exp_duration=(int(self.exp_duration.value) if self.en_exp_duration.value else None),
                     min_track_length=(int(self.min_track_length.value) if self.en_min_length.value else None),
                     max_track_length=(int(self.max_track_length.value) if self.en_max_length.value else None),
@@ -1156,7 +1266,8 @@ class ActiveKillingPanel:
         self.death_signal_dd = widgets.Dropdown(options=["percentage_dead_mask", "mean_dead_dye", "nr_dead_mask_pixels"], value=self._cfg.get("death_signal_column", "percentage_dead_mask"), description="Death signal:", style={'description_width': '150px'}, layout=widgets.Layout(width="300px"))
         self.killing_threshold = widgets.FloatText(description="Killing threshold:", value=float(self._cfg.get("killing_threshold_multiplier", 1.5)), style={'description_width': '150px'}, layout=widgets.Layout(width="220px"))
         self.min_contact_duration = widgets.IntText(description="Min contact duration:", value=int(self._cfg.get("min_contact_duration", 1)), style={'description_width': '150px'}, layout=widgets.Layout(width="220px"))
-        
+        self.contact_column_dd = widgets.Dropdown(options=["contact", "contact_on_distance"], value=self._cfg.get("contact_column", "contact"), description="Contact column:", style={'description_width': '150px'}, layout=widgets.Layout(width="300px"))
+
         # Absolute threshold option
         self.use_absolute_threshold = widgets.Checkbox(description="Use absolute threshold", value=bool(self._cfg.get("use_absolute_threshold", False)), indent=False, layout=widgets.Layout(width="200px"))
         self.absolute_threshold = widgets.FloatText(description="Absolute threshold:", value=float(self._cfg.get("absolute_killing_threshold", 0.0) or 0.0), style={'description_width': '150px'}, layout=widgets.Layout(width="220px"), disabled=not self._cfg.get("use_absolute_threshold", False))
@@ -1203,6 +1314,7 @@ class ActiveKillingPanel:
             self.immune_dd, self.target_dd, self.validation_html, widgets.HTML("<hr>"),
             widgets.HBox([self.observation_window, widgets.HTML('<span style="color:#666;font-size:12px;">timepoints after contact</span>'), widgets.HTML("&nbsp;&nbsp;&nbsp;"), self.killing_threshold, widgets.HTML('<span style="color:#666;font-size:12px;">× organoid\'s own signal at contact start</span>')], layout=widgets.Layout(align_items="center")),
             widgets.HBox([self.min_contact_duration, widgets.HTML('<span style="color:#666;font-size:12px;">timepoints</span>'), widgets.HTML("&nbsp;&nbsp;&nbsp;"), self.death_signal_dd], layout=widgets.Layout(align_items="center")),
+            widgets.HBox([self.contact_column_dd, widgets.HTML('<span style="color:#666;font-size:12px;">"contact" = pixel adjacency; "contact_on_distance" = respects the Contact Threshold (µm) set in Feature Extraction</span>')], layout=widgets.Layout(align_items="center")),
             widgets.HBox([self.use_absolute_threshold, self.absolute_threshold, widgets.HTML('<span style="color:#666;font-size:12px;">death signal increase (bypasses multiplier)</span>')], layout=widgets.Layout(align_items="center")),
             self.absolute_hint_html,
             widgets.HTML("<hr>"),
@@ -1328,6 +1440,7 @@ class ActiveKillingPanel:
                 self._cfg["death_signal_column"] = self.death_signal_dd.value
                 self._cfg["killing_threshold_multiplier"] = self.killing_threshold.value
                 self._cfg["min_contact_duration"] = self.min_contact_duration.value
+                self._cfg["contact_column"] = self.contact_column_dd.value
                 self._cfg["use_absolute_threshold"] = self.use_absolute_threshold.value
                 self._cfg["absolute_killing_threshold"] = self.absolute_threshold.value
                 self._cfg["save_results"] = self.save_results.value
@@ -1357,6 +1470,7 @@ class ActiveKillingPanel:
                         death_signal_column=self.death_signal_dd.value,
                         killing_threshold_multiplier=float(self.killing_threshold.value),
                         min_contact_duration=int(self.min_contact_duration.value),
+                        contact_column=self.contact_column_dd.value,
                         absolute_killing_threshold=abs_thresh,
                         save_results=bool(self.save_results.value),
                         output_subfolder=subfolder
@@ -2548,6 +2662,19 @@ class DeathDynamicsPanel:
             except Exception:
                 pass
 
+        # Existing results silently outlive a re-run of Filtering, so say when
+        # the PDF on disk is older than the CSV it was built from.
+        self.stale_html = widgets.HTML("")
+        if self.has_death_features and is_output_stale(
+            Path(self.output_dir, "analysis", self.cell_type, "results",
+                 f"combined_general_{self.cell_type}_dynamics_analysis.pdf"),
+            [p],
+        ):
+            self.stale_html.value = (
+                '<div style="color:#b00;">&#9888; Existing results are older than the '
+                'filtered track features - re-run to refresh them.</div>'
+            )
+
         self.btn_run = widgets.Button(
             description=f"Run {cell_type} death dynamics",
             button_style="warning",
@@ -2589,6 +2716,7 @@ class DeathDynamicsPanel:
         else:
             self.ui = widgets.VBox([
                 widgets.HTML(f'<b>{self.cell_type} Death Dynamics</b>'),
+                self.stale_html,
                 widgets.HTML('Group plots by condition column(s) (hold Ctrl/Cmd to select multiple):'),
                 self.select_group_cols,
                 widgets.HBox([self.btn_run, self.spinner_html]),
@@ -2626,13 +2754,15 @@ class MultiOrganoidDeathDynamicsPanel:
         self.organoid_types = organoid_types  # List of organoid type names
         self.output_dir = str(Path(self.metadata_loader.output_dir).expanduser())
         
-        # Check which organoid types have death dynamics data available
+        # Readiness is decided by the filtered track features, because that is
+        # what plot_multi_organoid_death_dynamics actually reads. Gating on
+        # combined_general_*.csv let a months-old file enable the run.
         self.available_data = {}
         for org_type in self.organoid_types:
-            csv_path = Path(self.output_dir, "analysis", org_type, "results", f"combined_general_{org_type}_dynamics_analysis.csv")
+            csv_path = self._filtered_csv_path(org_type)
             if csv_path.exists():
                 self.available_data[org_type] = csv_path
-        
+
         self.btn_refresh = widgets.Button(description="🔄 Refresh", button_style="info", layout=widgets.Layout(width="100px"))
         self.btn_refresh.on_click(self._on_refresh_clicked)
         self.btn_run = widgets.Button(description="Run Death Comparison Plot", button_style="warning", layout=widgets.Layout(width="250px"))
@@ -2661,21 +2791,37 @@ class MultiOrganoidDeathDynamicsPanel:
             self.out,
         ])
     
+    def _filtered_csv_path(self, org_type):
+        """The file the comparison actually reads."""
+        return Path(
+            self.output_dir, "analysis", org_type, "track_features",
+            f"BEHAV3D_{org_type}_combined_track_features_filtered.csv",
+        )
+
     def _refresh_status(self):
-        """Check which organoid types have death dynamics data available."""
+        """Check which organoid types have usable filtered track features."""
         self.available_data = {}
         for org_type in self.organoid_types:
-            csv_path = Path(self.output_dir, "analysis", org_type, "results", f"combined_general_{org_type}_dynamics_analysis.csv")
+            csv_path = self._filtered_csv_path(org_type)
             if csv_path.exists():
                 self.available_data[org_type] = csv_path
-        
+
         if len(self.available_data) < 1:
             missing = [ot for ot in self.organoid_types if ot not in self.available_data]
-            self.status_html.value = f'<div style="color:#b00;">Waiting for death dynamics data from: {", ".join(missing)}</div>'
+            self.status_html.value = f'<div style="color:#b00;">Waiting for filtered track features from: {", ".join(missing)}</div>'
             self.btn_run.disabled = True
         else:
             self.status_html.value = f'<div style="color:#080;">Ready: {", ".join(self.available_data.keys())}</div>'
             self.btn_run.disabled = False
+            pdf_path = Path(
+                self.output_dir, "analysis", "multi_organoid_comparison",
+                "multi_organoid_death_dynamics_comparison.pdf",
+            )
+            if is_output_stale(pdf_path, self.available_data.values()):
+                self.status_html.value += (
+                    '<div style="color:#b00;">&#9888; Existing comparison is older than the '
+                    'filtered track features - re-run to refresh it.</div>'
+                )
     
     def _on_refresh_clicked(self, *_):
         self._refresh_status()
@@ -3831,7 +3977,7 @@ class MotileCellAnalysisPanel:
         return Path(self.output_dir, "analysis", self.cell_type, "timepoint_feature_dtw")
 
     def _feature_dtw_behavior_proportions_outdir(self):
-        return _resolve_dtaidistance_paths(self.output_dir, self.cell_type)["behavior_proportions_outfolder"]
+        return _resolve_track_paths(self.output_dir, self.cell_type).behavior_proportions_outfolder
 
     def _snapshot_feature_dtw_before_renaming(self):
         outdir = self._feature_dtw_outdir()

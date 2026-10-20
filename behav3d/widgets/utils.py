@@ -23,13 +23,13 @@ from behav3d.core.metadata import (
     multicolor_base_name,
     load_behav3d_metadata,
 )
-from behav3d.io.formats.zarr import save_as_zarr
 from behav3d.io.images import (
     convert_label_file_to_zarr,
     convert_raw_file_to_zarr,
     get_image_dimension_order,
     get_image_shape,
     load_image,
+    normalize_label_zarr,
 )
 from behav3d.preprocessing.tracking import convert_tracked_image_to_csv
 
@@ -61,6 +61,17 @@ class Debouncer:
 CONFIG_PATH = Path("behav3d_config.yml")
 
 _DEFAULT_CONFIG = {
+    # Provenance block written by the zarr conversion step (original
+    # dimensions, the applied timepoint cut, resulting dimensions).
+    # Kept first so it stays at the top of behav3d_parameters.yml:
+    # every loader merges the file onto this dict and dumps it with
+    # sort_keys=False, so key order here is the file's key order.
+    "zarr_conversion": {},
+    # Global analysis timepoint window (see behav3d.io.parameters).
+    # Deliberately NOT inside "track_filtering": that dict is keyed by
+    # cell type and iterated as such, and the window must be identical
+    # for every cell type or cross-cell-type analyses break silently.
+    "timepoint_range": {"enabled": False, "start": 0, "end": 0},
     "seed": 42,
     "paths": {
         "metadata_csv": "",
@@ -276,6 +287,7 @@ _DEFAULT_CONFIG = {
     },
     "track_filtering": {
         "immune": {
+            "first_timepoint_from_range": False,
             "exp_duration": 24.0,
             "exp_duration_enabled": False,
             "min_track_length": 0,
@@ -284,6 +296,7 @@ _DEFAULT_CONFIG = {
             "max_track_length_enabled": True,
         },
         "organoid": {
+            "first_timepoint_from_range": False,
             "exp_duration_enabled": False,
             "exp_duration": 24.0,
             "min_track_length_enabled": False,
@@ -292,6 +305,7 @@ _DEFAULT_CONFIG = {
             "max_track_length": 999999,
         },
         "other": {
+            "first_timepoint_from_range": False,
             "exp_duration": 24.0,
             "exp_duration_enabled": False,
             "min_track_length": 0,
@@ -385,8 +399,10 @@ _DEFAULT_CONFIG = {
     "active_killing": {
         "observation_window": 5,
         "death_signal_column": "percentage_dead_mask",
+        "persistent_death_signal": True,
         "killing_threshold_multiplier": 1.5,
         "min_contact_duration": 1,
+        "contact_column": "contact",
         "use_absolute_threshold": False,
         "absolute_killing_threshold": None,
         "save_results": True,
@@ -1294,18 +1310,10 @@ class ExternalImageImporter(widgets.VBox):
 
                 # dtype check for label images (segmentation/tracking)
                 # Prefer uint16 (standard for pipeline), fall back to int32
-                # for very large label sets (>65535 objects).
+                # for very large label sets (>65535 objects); negative labels
+                # are remapped to new IDs instead of wrapping around.
                 if self._is_label_image:
-                    arr = load_image(zarr_path)
-                    max_val = int(np.max(np.asarray(arr)))
-                    if arr.dtype == np.uint16:
-                        pass  # Already correct
-                    elif max_val <= np.iinfo(np.uint16).max:
-                        print(f"  Casting from {arr.dtype} to uint16 (max value {max_val} fits)")
-                        save_as_zarr(np.asarray(arr).astype(np.uint16), zarr_path)
-                    elif arr.dtype != np.int32:
-                        print(f"  Casting from {arr.dtype} to int32 (max value {max_val} exceeds uint16)")
-                        save_as_zarr(np.asarray(arr).astype(np.int32), zarr_path)
+                    normalize_label_zarr(zarr_path)
 
                 self.last_zarr_path = str(zarr_path)
                 if self._on_converted:

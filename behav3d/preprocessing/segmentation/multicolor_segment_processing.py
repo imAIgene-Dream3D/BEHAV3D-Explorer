@@ -310,14 +310,23 @@ def _apply_group_resolution(volumes, processed_volumes, group_nodes, erosion_pix
         sizes = {node: int(mask.sum()) for node, mask in node_masks.items()}
         winner = max(sizes, key=lambda node: (sizes[node], -node[0], -node[1]))
 
+        # Erosion is only used as a seed test for whether a loser's exclusive
+        # remainder is substantial enough to survive as its own segment, not
+        # as the shape that gets kept (size filtering happens later, on the
+        # full remainder, via the module-level min_size/max_size pass).
         assignments = {winner: node_masks[winner]}
         for node, mask in node_masks.items():
             if node == winner:
                 continue
-            cleaned = mask & ~shared_voxels
-            cleaned = _erode_candidate(cleaned, erosion_pixels)
-            if np.any(cleaned):
-                assignments[node] = cleaned
+            exclusive = mask & ~shared_voxels
+            seed = _erode_candidate(exclusive, erosion_pixels)
+            if np.any(seed):
+                assignments[node] = exclusive
+            # else: too thin to stand on its own. These voxels were never
+            # part of the winner's mask (exclusive already excludes all
+            # shared_voxels), so handing them to the winner would transfer
+            # voxels between channels -- exactly what this function's
+            # contract above says it must not do. Drop them instead.
 
     for image_idx in sorted({node[0] for node in group_nodes}):
         processed_volumes[image_idx][full_union] = 0

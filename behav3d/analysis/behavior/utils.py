@@ -38,6 +38,17 @@ def _resolve_output_dir(output_dir):
     return output_dir_path
 
 
+def _contact_analysis_dir(out_dir, report_type, subfolder):
+    """{out_dir}/contact_analysis/{report_type}/{subfolder}, created if missing.
+    `subfolder` is the contact_col for single-column reports, or a '_vs_'-joined sorted
+    combination of contact_cols for the multi-column comparison report (no special
+    characters, so the folder name stays filesystem-safe).
+    """
+    path = Path(out_dir) / "contact_analysis" / str(report_type) / str(subfolder)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def _mixed_label_sort_key(value):
     text = str(value)
     if re.fullmatch(r"-?\d+", text):
@@ -50,6 +61,15 @@ def _natural_sort_key(value):
     'contact_2' sorts before 'contact_10' (unlike plain lexicographic comparison)."""
     parts = re.split(r"(\d+)", str(value))
     return [int(p) if p.isdigit() else p.lower() for p in parts]
+
+
+def _categorical_natural_sorted(values):
+    """Build a pandas Categorical whose categories are ordered via
+    _mixed_label_sort_key (numeric-looking labels sort numerically, e.g. '2' before
+    '10') instead of pandas' default plain lexicographic category order."""
+    series = pd.Series(values).astype(str)
+    categories = sorted(series.unique(), key=_mixed_label_sort_key)
+    return pd.Categorical(series, categories=categories)
 
 
 def _sanitize_filename_token(value, fallback="value"):

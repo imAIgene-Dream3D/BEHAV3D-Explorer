@@ -221,7 +221,9 @@ def _install_result_dock(viewer, path: Path) -> None:
     # Remove the previous instance if any (we tag the widget so we can
     # find it without storing a reference on the napari viewer).
     try:
-        for dock in list(viewer.window._dock_widgets.values()):  # type: ignore[attr-defined]
+        from behav3d.napari._preview_dims import get_dock_wrappers
+
+        for dock in get_dock_wrappers(viewer):
             inner = dock.widget()
             if getattr(inner, "_behav3d_results_dock", False):
                 viewer.window.remove_dock_widget(dock)

@@ -43,12 +43,16 @@ from behav3d.core.metadata import (
     detect_immune_cell_types_from_metadata,
     detect_other_cell_types_from_metadata,
     is_multicolor_celltype,
+    multicolor_base_name,
+    multicolor_sources_for_base,
 )
 from behav3d.core.qt_help import reset_scroll_on_page_change
 from behav3d.napari._preview_dims import (
+    clear_viewer_layers,
     disconnect_all_preview_dims_listeners,
     stop_dim_playback,
 )
+from behav3d.napari._track_colors import sync_tracks_colors_to_labels
 # Channel colormaps (cycled if there are many channels)
 _CHANNEL_COLORS = ["cyan", "yellow", "green", "red", "blue", "magenta"]
 # Label colormaps per cell-type category
@@ -143,7 +147,7 @@ class _FlowLayout(QLayout):
         return None
 
     def expandingDirections(self):
-        return Qt.Orientations(Qt.Orientation(0))
+        return Qt.Orientation(0)
 
     def hasHeightForWidth(self) -> bool:
         return True
@@ -311,11 +315,36 @@ class VisualizationTab(QWidget):
         # ------------------------------------------------------------------
         self._editor = None  # active TrackedSegmentEditor instance (or None)
         self._editor_dock = None  # napari dock holding the editor (notebook only)
+        self._current_sample_name = None  # last sample loaded into the viewer
+        self._current_row = None  # metadata row for the loaded sample
 
         self.edition_grp = QGroupBox("Manual Edition")
         edit_lay = QVBoxLayout(self.edition_grp)
         edit_lay.setContentsMargins(6, 4, 6, 4)
         edit_lay.setSpacing(4)
+
+        # Edit target — only relevant for multicolor cell types, which are
+        # tracked per channel and merged.  The user chooses whether to correct
+        # the merged output or the independent per-channel tracks; only one is
+        # editable at a time.
+        self.edit_target_row = QWidget()
+        _etr = QHBoxLayout(self.edit_target_row)
+        _etr.setContentsMargins(0, 0, 0, 0)
+        _etr.addWidget(QLabel("Edit target:"))
+        self.edit_target_combo = QComboBox()
+        self.edit_target_combo.addItems(["Merged (combined)", "Independent channels"])
+        self.edit_target_combo.setToolTip(
+            "Multicolor cell types are tracked per channel and combined into a\n"
+            "'_merged' output.  Choose which to correct:\n"
+            "  • Merged (combined) — edit the merged result directly.\n"
+            "  • Independent channels — edit each channel, then click\n"
+            "    'Rebuild merged' to regenerate the merged output from them.\n"
+            "Only one target is editable at a time."
+        )
+        self.edit_target_combo.currentIndexChanged.connect(self._on_edit_target_changed)
+        _etr.addWidget(self.edit_target_combo, stretch=1)
+        edit_lay.addWidget(self.edit_target_row)
+        self.edit_target_row.setVisible(False)
 
         ct_row = QHBoxLayout()
         ct_row.addWidget(QLabel("Tracked segments:"))
@@ -329,6 +358,18 @@ class VisualizationTab(QWidget):
         self._style_edit_toggle(checked=False)
         self.edit_toggle_btn.toggled.connect(self._on_edit_toggle)
         edit_lay.addWidget(self.edit_toggle_btn)
+
+        # Rebuild the merged multicolor output from the (edited) independent
+        # channels.  Only shown when editing independent channels.
+        self.rebuild_merged_btn = QPushButton("🔁  Rebuild merged")
+        self.rebuild_merged_btn.setToolTip(
+            "Regenerate the '_merged' output from the independent channels.\n"
+            "Runs an overlap check first; if two channels claim the same voxel\n"
+            "the existing merged output is kept and the conflict is reported."
+        )
+        self.rebuild_merged_btn.clicked.connect(self._on_rebuild_merged)
+        edit_lay.addWidget(self.rebuild_merged_btn)
+        self.rebuild_merged_btn.setVisible(False)
 
         # Slot reserved for the inline TrackedSegmentEditor; populated on
         # demand and torn down when editing stops.
@@ -364,6 +405,10 @@ class VisualizationTab(QWidget):
     # Helpers
     # ------------------------------------------------------------------
     def _log(self, msg: str):
+        from behav3d.napari._background_runner import redispatch_to_gui_thread
+
+        if redispatch_to_gui_thread(self._log, msg):
+            return
         self.log.append(msg)
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
 
@@ -383,6 +428,18 @@ class VisualizationTab(QWidget):
     # Load dataset into napari
     # ------------------------------------------------------------------
     def _on_load_dataset(self):
+        from behav3d.napari._background_runner import warn_if_busy
+
+        if warn_if_busy(self, "loading the dataset"):
+            return
+        # Always read the loader's current frame rather than the copy handed
+        # over by the last ``metadata_loaded`` emission: a Segmentation or
+        # Tracking run updates ``data_prep.metadata`` in place and may jump
+        # straight here, so the cached copy can be one run out of date.
+        live_md = getattr(self.data_prep, "metadata", None)
+        if live_md is not None and live_md is not self._metadata:
+            self._metadata = live_md
+
         if self._metadata is None:
             self.info_label.setText("⚠️  No metadata loaded.")
             return
@@ -396,6 +453,8 @@ class VisualizationTab(QWidget):
             self.info_label.setText(f"⚠️  Sample '{sample_name}' not found in metadata.")
             return
         row = row.iloc[0]
+        self._current_sample_name = sample_name
+        self._current_row = row
 
         # Reset toggles to default before loading
         self.toggle_raw.setChecked(True)
@@ -412,7 +471,7 @@ class VisualizationTab(QWidget):
         # those firing reentrantly mid-clear() is what desyncs napari's own
         # vispy canvas bookkeeping and raises a KeyError.
         disconnect_all_preview_dims_listeners(self.viewer)
-        self.viewer.layers.clear()
+        clear_viewer_layers(self.viewer)
 
         output_dir = self.data_prep.output_dir or ""
 
@@ -747,6 +806,15 @@ class VisualizationTab(QWidget):
                     visible=False,
                 )
                 self._log(f"    + Tracks layer: {layer_name}")
+
+                # Color each track the same as its cell's tracked-segments
+                # label, instead of napari's default track_id gradient.
+                seg_layer_name = f"{sample_name} – {name} tracked segments"
+                if seg_layer_name in self.viewer.layers:
+                    sync_tracks_colors_to_labels(
+                        self.viewer.layers[layer_name],
+                        self.viewer.layers[seg_layer_name],
+                    )
             except Exception as e:
                 self._log(f"    ⚠️ Could not load tracks for {name}: {e}")
 
@@ -815,14 +883,36 @@ class VisualizationTab(QWidget):
             except Exception as e:
                 self._log(f"    ⚠️ Could not load tracked segments for {name}: {e}")
 
+    @staticmethod
+    def _layer_cell_type(name: str, suffix: str) -> str | None:
+        """Return the cell-type part of ``"sample – celltype <suffix>"``.
+
+        ``None`` when the layer name does not follow that pattern.
+        """
+        if not name.endswith(suffix):
+            return None
+        body = name[: -len(suffix)].rstrip()
+        if " – " not in body:
+            return None
+        return body.rsplit(" – ", 1)[1].strip()
+
     def _on_toggle_layer_group(self, state, group_type):
-        """Batch show/hide layers based on their name suffix/pattern."""
+        """Batch show/hide layers based on their name suffix/pattern.
+
+        Per-channel multicolor layers are loaded hidden on purpose (there is
+        one per channel, so showing them all at once buries the merged
+        result).  They still follow the switch *downwards*: flipping a group
+        off hides them along with everything else, but flipping it back on
+        only restores the non-multicolor layers, leaving the multicolor ones
+        for the user to enable individually in napari's layer list.
+        """
         visible = bool(state)
-        
+
         for layer in self.viewer.layers:
             name = layer.name
             match = False
-            
+            multicolor = False
+
             if group_type == "raw":
                 # Raw images usually: "sample_name – Ch0"
                 if " – Ch" in name:
@@ -833,23 +923,23 @@ class VisualizationTab(QWidget):
                     match = True
             elif group_type == "tracked_segments":
                 # Tracked segments: "sample_name – celltype tracked segments"
-                if name.endswith(" tracked segments"):
-                    body = name[:-17].rstrip()
-                    if " – " in body:
-                        ct_name = body.rsplit(" – ", 1)[1].strip()
-                        if not is_multicolor_celltype(ct_name):
-                            match = True
+                ct_name = self._layer_cell_type(name, " tracked segments")
+                if ct_name is not None:
+                    match = True
+                    multicolor = is_multicolor_celltype(ct_name)
             elif group_type == "tracks":
                 # Tracks: "sample_name – celltype tracks"
-                if name.endswith(" tracks"):
-                    body = name[:-7].rstrip()
-                    if " – " in body:
-                        ct_name = body.rsplit(" – ", 1)[1].strip()
-                        if not is_multicolor_celltype(ct_name):
-                            match = True
-                    
-            if match:
-                layer.visible = visible
+                ct_name = self._layer_cell_type(name, " tracks")
+                if ct_name is not None:
+                    match = True
+                    multicolor = is_multicolor_celltype(ct_name)
+
+            if not match:
+                continue
+            if multicolor and visible:
+                # Hide-only: never auto-show a per-channel multicolor layer.
+                continue
+            layer.visible = visible
 
     # ------------------------------------------------------------------
     # Manual Edition section
@@ -866,7 +956,27 @@ class VisualizationTab(QWidget):
                 "background-color:#28a745; color:white; font-weight:bold; padding:6px;"
             )
 
+    def _editing_independent(self) -> bool:
+        """True when the edit-target selector is on 'Independent channels'."""
+        return self.edit_target_combo.currentIndex() == 1
+
+    def _sample_has_multicolor(self, row) -> bool:
+        if row is None:
+            return False
+        return any(
+            is_multicolor_celltype(ct)
+            for ct in self._detect_cell_type_columns(row)
+        )
+
     def _tracked_layer_names(self) -> list[str]:
+        """Editable tracked-segments layers for the current edit target.
+
+        Merged mode lists everything except per-channel multicolor layers
+        (the historic behaviour); independent mode lists *only* the
+        per-channel multicolor layers.  This is what blocks the non-selected
+        class from being opened in the editor.
+        """
+        independent = self._editing_independent()
         names = []
         for layer in self.viewer.layers:
             name = layer.name
@@ -874,12 +984,24 @@ class VisualizationTab(QWidget):
                 body = name[:-17].rstrip()
                 if " – " in body:
                     ct_name = body.rsplit(" – ", 1)[1].strip()
-                    if not is_multicolor_celltype(ct_name):
+                    if is_multicolor_celltype(ct_name) == independent:
                         names.append(name)
         return names
 
     def _refresh_edition_panel(self) -> None:
         """Show the Manual Edition group iff a tracked-segments layer exists."""
+        has_mc = self._sample_has_multicolor(self._current_row)
+        # A sample without multicolor channels can only edit merged/plain
+        # layers; force the selector back so a stuck 'Independent' choice does
+        # not hide every editable layer.
+        if not has_mc and self.edit_target_combo.currentIndex() != 0:
+            self.edit_target_combo.blockSignals(True)
+            self.edit_target_combo.setCurrentIndex(0)
+            self.edit_target_combo.blockSignals(False)
+        self.edit_target_row.setVisible(has_mc)
+        self.rebuild_merged_btn.setVisible(has_mc and self._editing_independent())
+        self._apply_edit_target_visibility()
+
         names = self._tracked_layer_names()
         # If we changed sample while editing, force-close the editor.
         if self._editor is not None and self._editor.layer_name not in names:
@@ -892,6 +1014,35 @@ class VisualizationTab(QWidget):
             self.edit_combo.setCurrentText(prev)
         self.edit_combo.blockSignals(False)
         self.edition_grp.setVisible(bool(names))
+
+    def _apply_edit_target_visibility(self) -> None:
+        """Show the tracked-segments layers that match the current edit target.
+
+        Independent mode reveals the per-channel multicolor layers and hides
+        the '_merged' layer; merged mode does the reverse.  Plain (non-
+        multicolor) cell types are left untouched.
+        """
+        independent = self._editing_independent()
+        for layer in self.viewer.layers:
+            name = layer.name
+            if not (isinstance(name, str) and name.endswith(" tracked segments")):
+                continue
+            body = name[:-17].rstrip()
+            if " – " not in body:
+                continue
+            ct_name = body.rsplit(" – ", 1)[1].strip()
+            if is_multicolor_celltype(ct_name):
+                layer.visible = independent
+            elif ct_name.endswith("_merged"):
+                layer.visible = not independent
+
+    def _on_edit_target_changed(self, *_args) -> None:
+        # Switching target mid-edit would leave a half-open editor bound to a
+        # now-hidden layer; close it first.
+        if self._editor is not None:
+            self.edit_toggle_btn.setChecked(False)
+        # _refresh_edition_panel re-applies layer visibility for the new target.
+        self._refresh_edition_panel()
 
     def _on_edit_toggle(self, checked: bool) -> None:
         if checked:
@@ -952,7 +1103,7 @@ class VisualizationTab(QWidget):
         stop_dim_playback(self.viewer)
         self._display_save_timer.stop()
         disconnect_all_preview_dims_listeners(self.viewer)
-        self.viewer.layers.clear()
+        clear_viewer_layers(self.viewer)
         saved_channels = (
             self.data_prep.behav3d_parameters
             .get("viewer_display", {})
@@ -1035,6 +1186,168 @@ class VisualizationTab(QWidget):
         self._log("  Editing stopped. Reloading visualizer...")
         self._on_load_dataset()
         return True
+
+    # ------------------------------------------------------------------
+    # Rebuild merged multicolor output from the independent channels
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _format_overlap_report(merged_name: str, records: list, max_lines: int = 12) -> str:
+        lines = [
+            f"❌ Cannot rebuild '{merged_name}' — overlapping voxels found.",
+            "   Existing merged output kept unchanged. Fix in the editor, then rebuild:",
+        ]
+        for rec in records[:max_lines]:
+            lines.append(
+                f"   • sample '{rec['sample_name']}', t={rec['timepoint']}: "
+                f"{rec['channel_a']} ↔ {rec['channel_b']} — {rec['voxel_count']} voxel(s)"
+            )
+        if len(records) > max_lines:
+            lines.append(f"   … and {len(records) - max_lines} more overlap(s).")
+        return "\n".join(lines)
+
+    def _warn_stale_features(self, bases: list) -> None:
+        """Popup + log when rebuilt merged types already have extracted features."""
+        out_dir = Path(self.data_prep.output_dir or "")
+        stale = []
+        for base in bases:
+            ct = f"{base}_merged"
+            feat = (
+                out_dir / "analysis" / ct / "track_features"
+                / f"BEHAV3D_{ct}_combined_track_features.csv"
+            )
+            if feat.exists():
+                stale.append(ct)
+        if not stale:
+            return
+        names = ", ".join(stale)
+        self._log(f"  ⚠️ Stale features for {names} — re-run feature extraction.")
+        QMessageBox.warning(
+            self,
+            "Feature results are now stale",
+            "The merged output was rebuilt, so its TrackIDs changed.\n\n"
+            f"Existing feature results for {names} are now out of date and must "
+            "be re-extracted before analysis.",
+        )
+
+    def _on_rebuild_merged(self) -> None:
+        from qtpy.QtWidgets import QApplication
+        from behav3d.preprocessing.tracking.multicolor_tracking_processing import (
+            check_multicolor_tracked_overlap,
+            combine_multicolor_tracked_outputs,
+        )
+
+        if self._editor is not None:
+            QMessageBox.information(
+                self,
+                "Stop editing first",
+                "Please stop editing (save or discard your changes) before "
+                "rebuilding the merged output.",
+            )
+            return
+        if self._current_row is None:
+            return
+
+        metadata = self.data_prep.metadata
+        if metadata is None:
+            metadata = self._metadata
+        if metadata is None:
+            return
+        output_dir = str(self.data_prep.output_dir or "")
+        if not output_dir:
+            QMessageBox.warning(
+                self, "No output directory",
+                "Cannot rebuild — the output directory is not set.",
+            )
+            return
+
+        bases = sorted({
+            multicolor_base_name(ct)
+            for ct in self._detect_cell_type_columns(self._current_row)
+            if is_multicolor_celltype(ct)
+        })
+        if not bases:
+            QMessageBox.information(
+                self, "Nothing to rebuild",
+                "This sample has no multicolor channels.",
+            )
+            return
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self.rebuild_merged_btn.setEnabled(False)
+        rebuilt: list[str] = []
+        blocked: list[tuple] = []
+        try:
+            for base in bases:
+                sources = multicolor_sources_for_base(metadata, base)
+                if len(sources) < 2:
+                    self._log(
+                        f"  ⏭ Skipping '{base}': fewer than 2 channels detected."
+                    )
+                    continue
+                merged_name = f"{base}_merged"
+                self._log(
+                    f"  🔎 Checking overlaps for '{base}' "
+                    f"({', '.join(sources)})…"
+                )
+                records = check_multicolor_tracked_overlap(
+                    metadata, output_dir, sources
+                )
+                if records:
+                    blocked.append((merged_name, records))
+                    self._log(self._format_overlap_report(merged_name, records))
+                    continue
+                self._log(f"  🔁 Rebuilding '{merged_name}'…")
+                metadata = combine_multicolor_tracked_outputs(
+                    metadata=metadata,
+                    output_dir=output_dir,
+                    source_cell_types=sources,
+                    combined_cell_type=merged_name,
+                    overwrite=True,
+                )
+                rebuilt.append(base)
+        except Exception as exc:
+            traceback.print_exc()
+            QApplication.restoreOverrideCursor()
+            self.rebuild_merged_btn.setEnabled(True)
+            QMessageBox.critical(
+                self, "Rebuild failed",
+                f"Rebuilding the merged output failed:\n{exc}",
+            )
+            return
+
+        if rebuilt:
+            self.data_prep.metadata = metadata
+            self._metadata = metadata
+            csv_path = (
+                (self.data_prep.behav3d_parameters or {})
+                .get("paths", {})
+                .get("metadata_csv")
+            )
+            if csv_path:
+                try:
+                    metadata.to_csv(csv_path, sep=",", index=False)
+                except Exception as exc:
+                    self._log(f"  ⚠️ Could not write metadata CSV: {exc}")
+            # Reload the current sample so the refreshed merged layer is shown.
+            self._on_load_dataset()
+            self._log(f"  ✅ Rebuilt merged for: {', '.join(rebuilt)}")
+
+        QApplication.restoreOverrideCursor()
+        self.rebuild_merged_btn.setEnabled(True)
+
+        if blocked:
+            msg = "\n\n".join(
+                self._format_overlap_report(name, records)
+                for name, records in blocked
+            )
+            QMessageBox.warning(
+                self,
+                "Overlap — merged not rebuilt",
+                "Some channels overlap, so their merged output was left "
+                "unchanged:\n\n" + msg,
+            )
+        if rebuilt:
+            self._warn_stale_features(rebuilt)
 
     def request_tab_exit(self) -> bool:
         """Return False to veto leaving the Visualization tab while edits

@@ -12,7 +12,7 @@ import btrack
 import btrack.io
 
 from behav3d.io.images import _ensure_zarr, load_image, get_filepath_stem
-from behav3d.preprocessing.tracking import convert_segments_to_tracks
+from behav3d.preprocessing.tracking import convert_segments_to_tracks, prepare_tracking_sample
 
 # ---------------------------------------------------------------------------
 # Resolve config presets to bundled JSON paths
@@ -652,6 +652,7 @@ def run_btracking(
     overwrite=False,
     log_callback=None,
     progress_cb=None,
+    plan=None,
     **kwargs,
 ):
     """Run btrack (Bayesian tracking) on all samples for a given cell type.
@@ -697,6 +698,9 @@ def run_btracking(
         Called as ``progress_cb(current, total, label)`` from inside the
         per-sample loop so a GUI can drive a progress bar.  ``None`` is a
         no-op (default).  Notebook callers omit this kwarg.
+    plan : behav3d.core.run_plan.RunPlan, optional
+        Per-(sample, cell type) skip / run / overwrite choices; supersedes
+        ``overwrite`` when given.
     """
     _log = log_callback or print
 
@@ -747,9 +751,18 @@ def run_btracking(
         element_size_y = sample["pixel_distance_xy"]
         element_size_z = sample["pixel_distance_z"]
 
-        if (not tracked_csv_outpath.exists()
-                or not tracked_img_outpath.exists()
-                or overwrite):
+        if prepare_tracking_sample(
+                sample_name=sample_name,
+                cell_type=cell_type,
+                tracked_img_outpath=tracked_img_outpath,
+                tracked_csv_outpath=tracked_csv_outpath,
+                segments_path=segments_path,
+                element_size_x=element_size_x,
+                element_size_y=element_size_y,
+                element_size_z=element_size_z,
+                overwrite=overwrite,
+                plan=plan,
+                log=_log):
             btrack_image(
                 segments_path=segments_path,
                 raw_image_path=raw_image_path,
@@ -771,9 +784,6 @@ def run_btracking(
                 use_visual_features=use_visual_features,
                 return_trackimg=return_trackimg,
             )
-        else:
-            _log("Tracking already exists... Provide overwrite=True to "
-                 "overwrite... Loading existing tracking data")
 
         # Update metadata with prefixed column names
         if (segments_col is not None

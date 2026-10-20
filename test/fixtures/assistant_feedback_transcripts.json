@@ -52,6 +52,9 @@
       "probability map + watershed is the default",
       "seed threshold is the main splitting lever",
       "mask threshold defines the foreground contour",
+      "mask threshold 0.5",
+      "seed threshold 0.8",
+      "not threshold recommendations",
       "annotate more background",
       "excludes objects",
       "never merges"
@@ -85,10 +88,10 @@
   {
     "id": "tracking_method_choice",
     "step": "tracking",
-    "user": "Help choose between Fragmentation Tracking, Bounded Propagation, Reporter Propagation and btrack.",
+    "user": "Help choose between Fragmentation Propagation, Bounded Propagation, Reporter Propagation and btrack.",
     "required": [
       "fast and slow are acquisition-dependent measurements",
-      "fragmentation tracking for spatially overlapping",
+      "fragmentation propagation for spatially overlapping",
       "bounded propagation when overlapping or touching",
       "reporter propagation only when both conditions hold",
       "use btrack when moving objects no longer overlap",
@@ -206,10 +209,9 @@
       "complete is a reasonable comparison",
       "single linkage performs poorly",
       "original behav3d feature-based mode is deprecated",
-      "categorical dtw supports contact analysis",
-      "contact state-shift analysis",
-      "requires behavioral state results"
-    ]
+      "categorical dtw supports contact analysis"
+    ],
+    "forbidden": ["state-shift"]
   },
   {
     "id": "death_preview",
@@ -284,10 +286,12 @@
       "behavioral state",
       "state trajectory",
       "contact analysis",
-      "contact state-shift analysis",
       "backprojection"
     ],
-    "forbidden": ["contact-based comparison plots are currently known to produce empty output"]
+    "forbidden": [
+      "contact-based comparison plots are currently known to produce empty output",
+      "state-shift"
+    ]
   },
   {
     "id": "metadata_does_not_own_channel_mapping",

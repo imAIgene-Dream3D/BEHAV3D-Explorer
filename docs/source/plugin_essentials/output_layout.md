@@ -30,7 +30,7 @@ You pick it once, in **Data Preparation → Output Directory**. Every other tab 
     │   ├── results/                                # organoid-type dynamics analyses
     │   ├── interaction_analysis/                   # immune ↔ organoid contact analyses
     │   ├── behavioral_states/                      # state classification (.h5ad) + backprojection/ subfolder (state-labelled zarrs)
-    │   └── behavorial_trajectories/                 # track classification (DTW) results
+    │   └── behavioral_trajectories/                 # track classification results (DTW, bouts, and legacy methods share this folder)
     └── multi_organoid_comparison/                  # multi-organoid death-dynamics comparisons
     
 ```
@@ -94,7 +94,7 @@ Backprojection exports and Track Classification outputs are also written under e
 The Visualization tab and downstream steps **never re-derive** paths from raw metadata, they always look under `output_dir/...` using the conventions above. As a result:
 
 - If you delete a `*_tracked.zarr`, the Visualization tab will not show tracked segments for that sample, even though the raw metadata is unchanged.
-- If you move the output directory between runs, change it in Data Preparation; tabs will then look in the new place.
+- If you move the output directory, point Data Preparation at the new location and press **Load Metadata**: the absolute paths in `metadata.csv` are re-linked to the new folder automatically. To move a project to another drive or computer quickly and safely, see [Moving Projects](moving_projects).
 - The Processing Queue's dependency checker uses this exact path scheme to decide whether a step's inputs are missing.
 
 ## Single source of truth

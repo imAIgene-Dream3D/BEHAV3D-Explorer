@@ -4,12 +4,10 @@ import pandas as pd
 from behav3d.features.state_descriptive_features import rle_encode
 from behav3d.analysis.behavior.track.contact_grouping import (
     _normalize_id_column,
-    _assert_tracks_covered_by_csv,
     _assert_tracks_have_window_data,
     _missing_keys,
 )
 
-_WINDOW_COL = "trajectory_window_id"
 BEFORE_LABEL = "before"
 AFTER_LABEL = "after"
 
@@ -46,7 +44,7 @@ def _sample_null_reference_relative_positions(n, *, reference_relative_positions
 
 def compute_contact_bout_windows(
     df_timepoints,
-    adata_tracks,
+    adata_states,
     *,
     contact_col,
     min_bout_length,
@@ -58,24 +56,29 @@ def compute_contact_bout_windows(
     null_seed=0,
     verbose=False,
 ):
-    """Per classified track, locate the before/after windows flanking its first sufficiently long
-    contact bout (or, for tracks with no qualifying bout, a timing-matched synthetic reference
-    split point), for use in a before-vs-after behavioral-state-shift comparison.
+    """Per state-classified track, locate the before/after windows flanking its first
+    sufficiently long contact bout (or, for tracks with no qualifying bout, a timing-matched
+    synthetic reference split point), for use in a before-vs-after behavioral-state-shift
+    comparison.
 
-    ``min_bout_length`` is the same threshold already used by
-    ``contact_grouping.compute_track_contact_features`` for the contact/no_contact grouping — it
-    is passed through here (not re-derived) so both analyses agree on what counts as "a real
-    contact bout" for a given run.
+    Unlike a track-DTW classification (which restricts to a *classified window* that may be a
+    trimmed subset of the track), this needs no track-DTW classification at all: each track's
+    window bounds are simply its own full timepoint span in ``df_timepoints`` (min/max of
+    ``time_col``), and ``adata_states.obs`` is only used to know which ``(sample_name, TrackID)``
+    pairs are in scope (i.e. state-classified).
 
-    For each track (restricted to its classified window ``[position_t_min, position_t_max]``, same
-    convention as ``compute_track_contact_features``):
+    ``min_bout_length`` is the same threshold ``contact_grouping.compute_track_contact_features``
+    uses for the contact/no_contact grouping — it is passed through here (not re-derived) so both
+    analyses agree on what counts as "a real contact bout" for a given run.
+
+    For each state-classified track:
 
     - If it has a bout of ``contact_col`` truthy values >= ``min_bout_length`` timepoints long, the
       *first* such bout's ``(start_t, end_t)`` is used (via ``_first_qualifying_bout_bounds``) and
       the track is labeled ``"contact"``.
     - Otherwise the track is labeled ``"no_contact"`` and given a synthetic zero-length reference
       point ``bout_start_t == bout_end_t == t_ref`` (flagged ``is_null_reference=True``), where
-      ``t_ref``'s relative position within the track's window is drawn from the empirical
+      ``t_ref``'s relative position within the track's span is drawn from the empirical
       distribution of real bout-start relative positions observed elsewhere in this run (seeded by
       ``null_seed`` for reproducibility) — a timing-matched null rather than e.g. always the track
       midpoint, so any track-wide temporal trend unrelated to contact doesn't bias the comparison.
@@ -86,17 +89,14 @@ def compute_contact_bout_windows(
       ``after = (bout_end_t, min(position_t_max, bout_end_t + fixed_window_length)]``.
     - "full": ``before = [position_t_min, bout_start_t)``, ``after = (bout_end_t, position_t_max]``.
 
-    Timepoint counts in each window are counted against timepoints actually present in
-    ``df_timepoints`` for that track (not the theoretical span, so sparse/missing frames are
-    handled correctly). Tracks where either window ends up with fewer than
-    ``min_window_timepoints`` timepoints are marked ``excluded=True`` with an
-    ``excluded_reason`` in {"before_too_short", "after_too_short", "both_too_short"}.
+    Tracks where either window ends up with fewer than ``min_window_timepoints`` timepoints are
+    marked ``excluded=True`` with an ``excluded_reason`` in {"before_too_short", "after_too_short",
+    "both_too_short"}.
 
-    Returns a DataFrame indexed by ``groupby_cols`` (+ ``trajectory_window_id`` when present in
-    ``adata_tracks.obs``) with columns: ``contact_group``, ``bout_start_t``, ``bout_end_t``,
-    ``is_null_reference``, ``before_start_t``, ``before_end_t``, ``after_start_t``,
-    ``after_end_t``, ``before_n_timepoints``, ``after_n_timepoints``, ``excluded``,
-    ``excluded_reason``.
+    Returns a DataFrame indexed by ``groupby_cols`` with columns: ``contact_group``,
+    ``bout_start_t``, ``bout_end_t``, ``is_null_reference``, ``before_start_t``, ``before_end_t``,
+    ``after_start_t``, ``after_end_t``, ``before_n_timepoints``, ``after_n_timepoints``,
+    ``excluded``, ``excluded_reason``.
     """
     groupby_cols = [str(c) for c in list(groupby_cols)]
     time_col = str(time_col)
@@ -107,24 +107,18 @@ def compute_contact_bout_windows(
         raise ValueError(f"window_mode must be 'fixed' or 'full', got {window_mode!r}.")
     fixed_window_length = int(fixed_window_length)
     min_window_timepoints = int(min_window_timepoints)
-
-    has_window_col = _WINDOW_COL in adata_tracks.obs.columns and _WINDOW_COL not in groupby_cols
-    key_cols = groupby_cols + ([_WINDOW_COL] if has_window_col else [])
+    key_cols = groupby_cols
 
     missing = [c for c in groupby_cols + [time_col, contact_col] if c not in df_timepoints.columns]
     if missing:
         raise KeyError(f"Missing required columns in df_timepoints: {missing}")
-
-    required_obs_cols = key_cols + ["position_t_min", "position_t_max"]
-    missing_obs = [c for c in required_obs_cols if c not in adata_tracks.obs.columns]
+    missing_obs = [c for c in groupby_cols if c not in adata_states.obs.columns]
     if missing_obs:
-        raise KeyError(f"Missing required columns in adata_tracks.obs: {missing_obs}")
+        raise KeyError(f"Missing required columns in adata_states.obs: {missing_obs}")
 
-    windows = adata_tracks.obs[required_obs_cols].drop_duplicates(subset=key_cols).copy()
+    classified_tracks = adata_states.obs[groupby_cols].drop_duplicates(subset=key_cols).copy()
     for col in groupby_cols:
-        windows[col] = _normalize_id_column(windows[col])
-    if has_window_col:
-        windows[_WINDOW_COL] = windows[_WINDOW_COL].astype(str)
+        classified_tracks[col] = _normalize_id_column(classified_tracks[col])
 
     df = df_timepoints[groupby_cols + [time_col, contact_col]].copy()
     for col in groupby_cols:
@@ -132,14 +126,21 @@ def compute_contact_bout_windows(
     df[contact_col] = pd.to_numeric(df[contact_col], errors="coerce").fillna(0).astype(bool)
     df[time_col] = pd.to_numeric(df[time_col], errors="coerce")
 
-    matched = windows.merge(df, on=groupby_cols, how="inner")
-    matched = matched[
-        (matched[time_col] >= matched["position_t_min"]) & (matched[time_col] <= matched["position_t_max"])
-    ]
+    span = (
+        df.groupby(key_cols, sort=False, observed=True)[time_col]
+        .agg(position_t_min="min", position_t_max="max")
+        .reset_index()
+    )
+    windows = classified_tracks.merge(span, on=key_cols, how="left")
+
+    # position_t_min/max were derived from df itself, so every row of df for a classified track
+    # always satisfies [position_t_min, position_t_max] trivially -- no time-based filtering is
+    # needed here (unlike the track-DTW-classified-window case this replaces).
+    matched = windows.merge(df, on=key_cols, how="inner")
 
     _assert_tracks_have_window_data(
         windows, matched, key_cols=key_cols,
-        h5ad_label="adata_tracks.obs (track classification h5ad)",
+        h5ad_label="adata_states.obs (behavioral states h5ad)",
     )
 
     rows = []
@@ -264,9 +265,8 @@ def compute_contact_bout_windows(
     return out.set_index(key_cols)
 
 
-def compute_track_state_shift_features(
+def compute_state_shift_features(
     df_timepoints,
-    adata_tracks,
     adata_states,
     *,
     contact_col,
@@ -307,7 +307,7 @@ def compute_track_state_shift_features(
 
     track_windows = compute_contact_bout_windows(
         df_timepoints,
-        adata_tracks,
+        adata_states,
         contact_col=contact_col,
         min_bout_length=min_bout_length,
         window_mode=window_mode,
@@ -324,33 +324,8 @@ def compute_track_state_shift_features(
         states[col] = _normalize_id_column(states[col])
     states[time_col] = pd.to_numeric(states[time_col], errors="coerce").round()
 
-    csv_keys_df = df_timepoints[groupby_cols].copy()
-    for col in groupby_cols:
-        csv_keys_df[col] = _normalize_id_column(csv_keys_df[col])
-    _assert_tracks_covered_by_csv(
-        states, csv_keys_df, groupby_cols=groupby_cols,
-        h5ad_label="adata_states.obs (behavioral states h5ad)",
-    )
-
     usable = track_windows[~track_windows["excluded"]].reset_index()
-    key_cols = [c for c in usable.columns if c in groupby_cols or c == _WINDOW_COL]
-    join_cols = [c for c in key_cols if c != _WINDOW_COL]
-
-    # Every non-excluded track must have *some* per-timepoint data in adata_states.obs — checked
-    # at track-existence granularity only (not full before/after coverage), since HMM feature-NaN
-    # trimming near track boundaries can legitimately drop individual state timepoints even on
-    # fully in-sync data.
-    missing_from_states = _missing_keys(usable[join_cols], states, join_cols)
-    if missing_from_states:
-        example = sorted(missing_from_states)[:10]
-        raise ValueError(
-            f"{len(missing_from_states)} classified, non-excluded track(s) have no matching "
-            f"timepoints at all in adata_states.obs (behavioral states h5ad) (matched on "
-            f"{join_cols}). This means the behavioral-states h5ad no longer matches the current "
-            f"filtered data — re-run State Classification to regenerate it from the current "
-            f"filtered CSV before running this analysis. Missing example track key(s) (first 10, "
-            f"{join_cols}): {example}"
-        )
+    join_cols = groupby_cols
 
     merged = states.merge(usable, on=join_cols, how="inner", suffixes=("", "_window"))
 

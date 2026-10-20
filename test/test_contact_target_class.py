@@ -88,7 +88,7 @@ def _build_target_states_adata():
             "sample_name": ["s1"] * (2 * _N_TIMEPOINTS),
             "TrackID": [100] * _N_TIMEPOINTS + [101] * _N_TIMEPOINTS,
             "position_t": list(range(_N_TIMEPOINTS)) * 2,
-            "behavioral_state": ["round"] * _N_TIMEPOINTS + ["elongated"] * _N_TIMEPOINTS,
+            "full_behavioral_state": ["round"] * _N_TIMEPOINTS + ["elongated"] * _N_TIMEPOINTS,
         }
     )
     return ad.AnnData(X=np.zeros((len(obs), 1)), obs=obs)
@@ -128,7 +128,7 @@ def test_target_class_group_bucketing(time_varying):
 
     if time_varying:
         adata_states = _build_target_states_adata()
-        lookup = build_target_class_lookup_from_state_adata(adata_states, state_col="behavioral_state")
+        lookup = build_target_class_lookup_from_state_adata(adata_states, state_col="full_behavioral_state")
     else:
         adata_target_tracks = _build_target_track_classification_adata()
         lookup = build_target_class_lookup_from_track_adata(adata_target_tracks, class_col="ClusterID")
@@ -170,7 +170,7 @@ def test_missing_touching_column_raises_clear_error():
     _run_overall_contact_grouping(adata_tracks, df_timepoints)
 
     adata_states = _build_target_states_adata()
-    lookup = build_target_class_lookup_from_state_adata(adata_states, state_col="behavioral_state")
+    lookup = build_target_class_lookup_from_state_adata(adata_states, state_col="full_behavioral_state")
 
     with pytest.raises(KeyError, match="touching_macros"):
         compute_track_contact_target_class_features(

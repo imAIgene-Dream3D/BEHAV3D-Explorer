@@ -18,6 +18,7 @@ Public surface
 """
 from __future__ import annotations
 
+import os
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -42,6 +43,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from behav3d.napari._background_runner import BackgroundOperation
 from behav3d.napari._pdf_view import (
     open_externally,
     open_image_in_napari,
@@ -59,29 +61,37 @@ from behav3d.napari._results_catalog import (
 
 
 # ---------------------------------------------------------------------------
-# Per-tick scan cache
+# Cheap "did anything change on disk?" stamp
 # ---------------------------------------------------------------------------
-# Every top-level tab (Filtering, Feature Extraction, Analysis) embeds its
-# own ResultsPanel, but all of them point at the same output directory and
-# refresh in response to the same events (metadata_loaded, job-finished
-# callbacks) — so a single event can trigger scan_outputs() back-to-back for
-# the exact same directory. scan_outputs() walks the whole analysis/ tree
-# twice (os.walk + rglob("*.zarr")), so that's wasted disk I/O repeated per
-# panel. Memoize per output_dir for the rest of the current Qt event-loop
-# tick only (cleared via a zero-delay QTimer): simultaneous refreshes share
-# one real scan, while any later refresh (e.g. after a background job
-# writes new files) always re-scans, so results can never go stale.
-_scan_cache: dict[str, list[ResultFile]] = {}
+_STAMP_MAX_DEPTH = 6
 
 
-def _scan_outputs_coalesced(output_dir: Path) -> list[ResultFile]:
-    key = str(output_dir)
-    if key in _scan_cache:
-        return _scan_cache[key]
-    results = scan_outputs(output_dir)
-    _scan_cache[key] = results
-    QTimer.singleShot(0, lambda: _scan_cache.pop(key, None))
-    return results
+def outputs_stamp(out_dir: Path) -> tuple:
+    """Modification times of ``out_dir/analysis`` and its sub-directories.
+
+    Creating, renaming or deleting a result file bumps its parent directory's
+    mtime, so comparing two stamps tells :meth:`ResultsPanel.refresh_if_stale`
+    whether a full (file-by-file) rescan is worth doing. Only directories are
+    stat-ed (``.zarr`` stores are not entered), so this costs a few ``scandir``
+    calls instead of the per-file classification of ``scan_outputs``.
+    """
+    root = Path(out_dir) / "analysis"
+    stamp = []
+    stack = [(str(root), 0)]
+    while stack:
+        path, depth = stack.pop()
+        try:
+            stamp.append((path, os.stat(path).st_mtime_ns))
+            if depth >= _STAMP_MAX_DEPTH:
+                continue
+            with os.scandir(path) as it:
+                for entry in it:
+                    if entry.is_dir(follow_symlinks=False) and not entry.name.endswith(".zarr"):
+                        stack.append((entry.path, depth + 1))
+        except OSError:
+            continue
+    stamp.sort()
+    return tuple(stamp)
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +179,7 @@ class ResultsPanel(QWidget):
     """Tree view of every file produced under ``output_dir/analysis/``.
 
     Grouped by analysis stage (Filtering, Feature Extraction,
-    Analysis → Death Dynamics / Single Cell) and then by cell type.
+    Analysis → Population Dynamics / Single Cell) and then by cell type.
     Each leaf carries a tooltip from
     :data:`behav3d.napari._results_catalog.FILE_CATALOG`.
 
@@ -183,12 +193,23 @@ class ResultsPanel(QWidget):
         self.viewer = viewer
         self.metadata_loader = metadata_loader
         self._collapsed = False
+        # scan_outputs() walks the whole analysis/ tree (os.walk, pruning
+        # .zarr stores) and can take seconds on a large or network-mounted
+        # output directory, so it runs off the Qt main thread. The last
+        # scan's raw file list is cached so the "Show non-viewable"
+        # checkbox can re-filter/re-render without a fresh disk walk.
+        self._scan_bg = BackgroundOperation(self, silent=True)
+        self._last_scan_out_dir: Optional[Path] = None
+        self._last_scan_files: Optional[list[ResultFile]] = None
+        # outputs_stamp() taken when the last scan started (see refresh_if_stale)
+        self._scan_stamp: Optional[tuple] = None
+        self._pending_stamp: Optional[tuple] = None
         self._init_ui()
 
         if metadata_loader is not None and hasattr(
             metadata_loader, "metadata_loaded"
         ):
-            metadata_loader.metadata_loaded.connect(self.refresh)
+            metadata_loader.metadata_loaded.connect(self.refresh_if_stale)
 
         self.refresh()
 
@@ -227,7 +248,7 @@ class ResultsPanel(QWidget):
             "Include CSV / HTML / JSON / Zarr entries. When unchecked, "
             "only PDFs and images are listed."
         )
-        self.chk_show_extras.toggled.connect(self.refresh)
+        self.chk_show_extras.toggled.connect(self._on_show_extras_toggled)
         header.addWidget(self.chk_show_extras)
 
         header.addStretch(1)
@@ -385,11 +406,33 @@ class ResultsPanel(QWidget):
         return None
 
     # ── Public API ─────────────────────────────────────────────────────
-    def refresh(self):
-        """Re-scan the output directory and rebuild the tree."""
-        self.tree.clear()
+    def refresh_if_stale(self):
+        """Like :meth:`refresh`, but does nothing when nothing under
+        ``analysis/`` changed since the last completed scan -- used by tab and
+        sub-tab switches so merely looking at the panel does not clear and
+        rebuild a (possibly huge) tree every time."""
         out_dir = self._output_dir()
+        if (
+            out_dir is not None
+            and self._last_scan_files is not None
+            and self._last_scan_out_dir == out_dir
+            and self._scan_stamp is not None
+            and outputs_stamp(out_dir) == self._scan_stamp
+        ):
+            return
+        if self._scan_bg.is_running():
+            return  # the scan already in flight will deliver fresh results
+        self.refresh()
+
+    def refresh(self):
+        """Re-scan the output directory (in the background) and rebuild the
+        tree once the scan completes."""
+        out_dir = self._output_dir()
+        self.tree.clear()
         if out_dir is None:
+            self._last_scan_out_dir = None
+            self._last_scan_files = None
+            self._scan_stamp = None
             placeholder = QTreeWidgetItem(
                 self.tree,
                 ["⚠ No output directory configured"],
@@ -400,7 +443,54 @@ class ResultsPanel(QWidget):
             placeholder.setFlags(placeholder.flags() & ~Qt.ItemIsSelectable)
             return
 
-        files = _scan_outputs_coalesced(out_dir)
+        scanning = QTreeWidgetItem(self.tree, ["Scanning output directory…"])
+        scanning.setFlags(scanning.flags() & ~Qt.ItemIsSelectable)
+
+        if self._scan_bg.is_running():
+            # A scan for this panel is already in flight (e.g. rapid tab
+            # switches) -- its on_done will rebuild the tree with fresh
+            # results, so starting a second walk here would be redundant.
+            return
+
+        # Stamp *before* scanning: anything written while the scan runs makes
+        # the next refresh_if_stale() see a difference and rescan.
+        self._pending_stamp = outputs_stamp(out_dir)
+        self._scan_bg.run(
+            fn=scan_outputs,
+            args=(out_dir,),
+            inject_progress=False,
+            on_done=lambda files: self._on_scan_done(out_dir, files),
+            on_failed=self._on_scan_failed,
+        )
+
+    def _on_scan_done(self, out_dir: Path, files: list):
+        self._last_scan_out_dir = out_dir
+        self._last_scan_files = files
+        self._scan_stamp = self._pending_stamp
+        self._build_tree(out_dir, files)
+
+    def _on_scan_failed(self, err: str):
+        self.tree.clear()
+        error_item = QTreeWidgetItem(
+            self.tree, [f"⚠ Could not scan outputs: {err}"]
+        )
+        error_item.setFlags(error_item.flags() & ~Qt.ItemIsSelectable)
+
+    def _on_show_extras_toggled(self, *_):
+        """Re-filter/re-render from the last scan instead of re-walking
+        disk -- the checkbox only changes which already-scanned files are
+        shown."""
+        if (
+            self._last_scan_files is not None
+            and self._last_scan_out_dir == self._output_dir()
+        ):
+            self._build_tree(self._last_scan_out_dir, self._last_scan_files)
+        else:
+            self.refresh()
+
+    def _build_tree(self, out_dir: Path, files: list):
+        """Rebuild the tree widget from an already-scanned file list."""
+        self.tree.clear()
         if not self.chk_show_extras.isChecked():
             files = [f for f in files if f.is_viewable]
         if not files:
@@ -415,7 +505,7 @@ class ResultsPanel(QWidget):
         # Top-level categories in deterministic order. ``Analysis`` is the
         # only one with subcategories.
         category_order = ["filtering", "feature_extraction", "analysis"]
-        subcategory_order = ["death_dynamics", "single_cell", None]
+        subcategory_order = ["population_dynamics", "single_cell", None]
 
         tree = group_by_tree(files)
         for cat in category_order:
@@ -458,7 +548,7 @@ class ResultsPanel(QWidget):
         self.metadata_loader = loader
         if loader is not None and hasattr(loader, "metadata_loaded"):
             try:
-                loader.metadata_loaded.connect(self.refresh)
+                loader.metadata_loaded.connect(self.refresh_if_stale)
             except Exception:
                 pass
         self.refresh()
@@ -489,8 +579,8 @@ class ResultsPanel(QWidget):
         return ""
 
     def _subcategory_tooltip(self, sub: Optional[str]) -> str:
-        if sub == "death_dynamics":
-            return ("Death-dynamics outputs: per-organoid analyses, "
+        if sub == "population_dynamics":
+            return ("Population-dynamics outputs: death dynamics, invasiveness, "
                     "interaction analyses, multi-organoid comparisons, "
                     "morpho-dead clustering.")
         if sub == "single_cell":

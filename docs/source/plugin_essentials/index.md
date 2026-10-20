@@ -7,6 +7,7 @@ Some parts of the BEHAV3D EXPLORER plugin do not belong to a single pipeline ste
 | [Visualization](visualization) | The Visualization tab, how to load any sample (raw, segments, tracks) into napari layers. Used after every step to inspect outputs. |
 | [Processing Queue](processing_queue) | The 🛒 panel at the bottom of the dock widget. Batches steps from segmentation / tracking / feature extraction / filtering and runs them sequentially across all samples. |
 | [Output Directory & File Layout](output_layout) | The canonical folder tree that every tab writes to. Where to find segments, tracks, features, analysis results on disk. |
+| [Moving Projects](moving_projects) | Pack a project into a few verified archives to move it to another drive or computer, and how paths are re-linked after a move. |
 
 ```{toctree}
 :hidden:
@@ -15,4 +16,5 @@ Some parts of the BEHAV3D EXPLORER plugin do not belong to a single pipeline ste
 visualization
 processing_queue
 output_layout
+moving_projects
 ```

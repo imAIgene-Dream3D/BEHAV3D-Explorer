@@ -28,9 +28,10 @@ from qtpy.QtWidgets import (
     QDoubleSpinBox, QSpinBox, QGroupBox, QMessageBox, QScrollArea,
     QComboBox, QToolTip, QSplitter, QListWidget
 )
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, QTimer
 from qtpy.QtGui import QCursor
 
+from behav3d.core.run_plan import RunPlan, Status, scan_feature_items
 from behav3d.core.qt_help import HelpButton, make_help_row, reset_scroll_on_page_change
 from behav3d.napari._analysis import CollapsibleSection
 from behav3d.napari._units import UnitGroupManager
@@ -42,8 +43,10 @@ from behav3d.napari._background_runner import (
     BackgroundOperation,
     ProgressBarRow,
     fire_extra_callback,
+    refuse_if_busy,
 )
 from behav3d.napari._preview_dims import (
+    clear_viewer_layers,
     disconnect_all_preview_dims_listeners,
     register_preview_dims_listener,
     unregister_preview_dims_listener,
@@ -54,6 +57,10 @@ _CHANNEL_COLORS = ["cyan", "yellow", "green", "red", "blue", "magenta"]
 
 # Prefix used for all temporary preview layers so they can be cleaned up easily
 _PREVIEW_PREFIX = "[Preview]"
+
+# Quiet period (ms) after the last death-threshold edit before the live
+# dead/alive preview is recomputed (see ``_thr_preview_timer``).
+THRESHOLD_PREVIEW_DELAY_MS = 800
 
 # The Dead/Alive preview overlay is a single shared napari layer (one
 # "[Preview] Dead/Alive" layer for the whole viewer, even when several
@@ -110,28 +117,46 @@ def _find_main_widget(start):
     return w
 
 
-def _notify_post_extraction(source_widget):
+def _notify_post_extraction(source_widget, death_only: bool = False):
     """Show a 'Run Filtering before Analysis' reminder after extraction.
 
     Honours a session-level opt-out flag stored on the top ``BEHAV3DWidget``
     (``_skip_filter_reminder``). The reminder is never raised during queued
     or non-interactive runs (those should call this only from the
     interactive paths).
+
+    ``death_only=True`` is used after a death re-run: only the combined CSV
+    was rewritten, while every analysis (death dynamics included) reads the
+    *filtered* CSV, which keeps the old classification until Filtering is
+    re-run. That stale state is silent, so this variant ignores the session
+    opt-out and does not offer one.
     """
     main = _find_main_widget(source_widget)
     if main is None:
         return
-    if getattr(main, "_skip_filter_reminder", False):
+    if not death_only and getattr(main, "_skip_filter_reminder", False):
         return
 
     box = QMessageBox(source_widget)
-    box.setWindowTitle("Feature Extraction Complete")
-    box.setIcon(QMessageBox.Information)
-    box.setText(
-        "Feature extraction is complete.\n\n"
-        "Remember to run Filtering before any Analysis step \u2014 "
-        "analysis reads the filtered track-features CSV."
-    )
+    if death_only:
+        box.setWindowTitle("Death Re-run Complete \u2014 Re-run Filtering")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(
+            "Death classification was updated in the combined track-features "
+            "CSV only.\n\n"
+            "Analyses (death dynamics, interactions, ...) read the FILTERED "
+            "CSV, which still holds the previous classification. Run "
+            "Filtering again before any Analysis step, otherwise the "
+            "results will not reflect the new threshold."
+        )
+    else:
+        box.setWindowTitle("Feature Extraction Complete")
+        box.setIcon(QMessageBox.Information)
+        box.setText(
+            "Feature extraction is complete.\n\n"
+            "Remember to run Filtering before any Analysis step \u2014 "
+            "analysis reads the filtered track-features CSV."
+        )
 
     btn_run = box.addButton("Run Filtering with current setup", QMessageBox.AcceptRole)
     btn_goto = box.addButton("Go to Filtering tab", QMessageBox.ActionRole)
@@ -139,7 +164,8 @@ def _notify_post_extraction(source_widget):
     box.setDefaultButton(btn_ok)
 
     optout = QCheckBox("Don't remind me this session")
-    box.setCheckBox(optout)
+    if not death_only:
+        box.setCheckBox(optout)
 
     box.exec_()
     if optout.isChecked():
@@ -727,6 +753,14 @@ class CellTypeFeaturePanel(QWidget):
         self._is_organoid = is_organoid
         self._threshold_getter = threshold_getter  # kept for backward compat
         self._preview_connected = False
+        # Restart-debounce for the live dead/alive preview: typing "40" over
+        # "50" or stepping with the arrows fires valueChanged for every
+        # intermediate value, and each recompute is expensive. Wait until the
+        # value has been stable for THRESHOLD_PREVIEW_DELAY_MS.
+        self._thr_preview_timer = QTimer(self)
+        self._thr_preview_timer.setSingleShot(True)
+        self._thr_preview_timer.setInterval(THRESHOLD_PREVIEW_DELAY_MS)
+        self._thr_preview_timer.timeout.connect(self._apply_pending_threshold_preview)
         # Background-execution infrastructure.
         self.tab_progress_row = tab_progress_row
         self._bg = BackgroundOperation(self)
@@ -768,7 +802,7 @@ class CellTypeFeaturePanel(QWidget):
         md = metadata_loader.metadata
         self._has_dead = False
         if md is not None:
-            self._has_dead = (
+            self._has_dead = bool(
                 "dead_channel" in md.columns and md["dead_channel"].notna().any()
             )
 
@@ -1258,8 +1292,9 @@ class CellTypeFeaturePanel(QWidget):
         """Disconnect all preview callbacks and reset cached preview state.
 
         Does NOT remove layers — the caller handles that via
-        ``self.viewer.layers.clear()``.
+        ``clear_viewer_layers(self.viewer)``.
         """
+        self._thr_preview_timer.stop()
         self._disconnect_preview_dead_hover()
         self._disconnect_preview_dims()
         self._preview_seg_t = None
@@ -1743,7 +1778,19 @@ class CellTypeFeaturePanel(QWidget):
             )
 
     def _on_rerun_death_clicked(self):
+        """Re-classify death in the background (CSV read/write is slow).
+
+        Everything touching widgets is snapshotted here on the GUI thread; the
+        worker only reads/writes the combined CSVs, and the YAML persist,
+        logging summary and reminder dialog happen in ``on_done``.
+        """
         from behav3d.features.timepoint_features import rerun_death_classification
+
+        if self._bg.is_running():
+            self.log("⚠️ A feature-extraction run is already in progress for this panel.")
+            return
+        if refuse_if_busy(self, "re-running death classification", bg=self._bg):
+            return
 
         new_thr = self._get_threshold()
         if new_thr <= 0:
@@ -1776,7 +1823,10 @@ class CellTypeFeaturePanel(QWidget):
                     panels_by_type.setdefault(self.cell_type, self)
                     targets = list(panels_by_type.keys())
 
-        ran_any = False
+        # \u2500\u2500 GUI thread: snapshot everything the worker needs \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        out_dir = str(Path(self.metadata_loader.output_dir).expanduser())
+        fraction = self._threshold_as_fraction(new_thr)
+        jobs: list = []  # (cell_type, propagate)
         for ct in targets:
             panel = panels_by_type[ct]
             if not panel._has_combined_csv():
@@ -1785,34 +1835,74 @@ class CellTypeFeaturePanel(QWidget):
                     "run full feature extraction first."
                 )
                 continue
-            try:
-                rerun_death_classification(
-                    output_dir=str(Path(self.metadata_loader.output_dir).expanduser()),
-                    cell_type=ct,
-                    new_threshold=self._threshold_as_fraction(new_thr),
-                    propagate=bool(panel.check_propagate_dead.isChecked()),
-                )
-                panel._persist()
+            jobs.append((ct, bool(panel.check_propagate_dead.isChecked())))
+        if not jobs:
+            return
+
+        def _do_rerun(progress_cb=None):
+            done, errors = [], {}
+            for ct, propagate in jobs:
+                try:
+                    rerun_death_classification(
+                        output_dir=out_dir,
+                        cell_type=ct,
+                        new_threshold=fraction,
+                        propagate=propagate,
+                    )
+                    done.append(ct)
+                except Exception as e:
+                    traceback.print_exc()
+                    errors[ct] = str(e)
+            return done, errors
+
+        def _on_done(result):
+            done, errors = result
+            # Persist only after a successful rewrite so the YAML /
+            # "threshold changed" state never claims a CSV that is stale.
+            for ct in done:
+                try:
+                    panels_by_type[ct]._persist()
+                except Exception as e:
+                    traceback.print_exc()
+                    self.log(f"Error saving death threshold for {ct}: {e}")
                 self.log(
                     f"\u2705 Re-ran death classification for {ct} "
                     f"with threshold={new_thr}%."
                 )
-                ran_any = True
-            except Exception as e:
-                traceback.print_exc()
-                self.log(f"Error during death re-run for {ct}: {e}")
+            for ct, err in errors.items():
+                self.log(f"Error during death re-run for {ct}: {err}")
+            self._refresh_rerun_death_button()
+            if done:
+                _notify_post_extraction(self, death_only=True)
+                notify_results_changed(self)
 
-        if ran_any:
-            _notify_post_extraction(self)
+        def _on_failed(err: str):
+            self.log(f"Error during death re-run: {err}")
+            self._refresh_rerun_death_button()
+            notify_results_changed(self)
+
+        self._bg.run(
+            fn=_do_rerun,
+            desc=f"Death re-run \u2014 {', '.join(ct for ct, _ in jobs)}\u2026",
+            progress_row=self.tab_progress_row,
+            buttons=[self.btn_rerun_death, self.btn_run],
+            viewer=self.viewer,
+            on_done=_on_done,
+            on_failed=_on_failed,
+            inject_progress=False,
+            indeterminate=True,
+        )
 
     def _run_feature_extraction_for(self, cell_type: str, overwrite: bool = False,
-                                    params: dict = None, progress_cb=None):
+                                    params: dict = None, progress_cb=None, plan=None):
         """Run feature extraction for a single cell type.
 
         ``params`` is an optional Qt-thread-safe snapshot from
         :meth:`_collect_params`; when supplied the widget values are not
         re-read (required when called from a background worker).
-        ``progress_cb`` is forwarded to ``run_feature_extraction``.
+        ``progress_cb`` is forwarded to ``run_feature_extraction``; ``plan``
+        (a :class:`~behav3d.core.run_plan.RunPlan`) sets per-sample skip / run /
+        overwrite and supersedes ``overwrite``.
         """
         from behav3d.features.timepoint_features import run_feature_extraction
 
@@ -1831,6 +1921,7 @@ class CellTypeFeaturePanel(QWidget):
             n_workers=int(params["n_workers"]),
             overwrite=overwrite,
             progress_cb=progress_cb,
+            plan=plan,
         )
 
     def _run_death_only_for(self, cell_type: str, params: dict = None):
@@ -1861,16 +1952,6 @@ class CellTypeFeaturePanel(QWidget):
             propagate=propagate,
         )
 
-    def _check_existing_features(self, cell_types: list) -> list:
-        warnings = []
-        out_dir = Path(self.metadata_loader.output_dir)
-        for ct in cell_types:
-            feat_dir = out_dir / "analysis" / ct / "track_features"
-            combined = feat_dir / f"BEHAV3D_{ct}_combined_track_features.csv"
-            if combined.exists():
-                warnings.append(f"{ct} feature data ({combined.name})")
-        return warnings
-
     # ── Click handler ────────────────────────────────────────────────────────
     def _on_run_clicked(self, interactive=True):
         """Background-execute feature extraction for this cell type.
@@ -1879,21 +1960,32 @@ class CellTypeFeaturePanel(QWidget):
         The death-only re-run path uses indeterminate progress because
         ``rerun_death_classification`` has no top-level sample loop.
         """
-        from behav3d.napari._overwrite_prompt import prompt_overwrite_single
+        from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
         from qtpy.QtWidgets import QMessageBox as _QMB
 
         if self._bg.is_running():
             self.log("⚠️ A feature-extraction run is already in progress for this panel.")
             return
+        # Refuse before any skip/overwrite prompt (the queue passes
+        # interactive=False and is dispatched while "busy").
+        if interactive and refuse_if_busy(
+            self, "starting feature extraction", bg=self._bg
+        ):
+            return
 
         self.log(f"Running feature extraction for: {self.cell_type}")
 
-        overwrite = False
         death_only = False
-        existing = self._check_existing_features([self.cell_type])
+        md = self.metadata_loader.metadata
+        out_dir = self.metadata_loader.output_dir
+        items = (
+            scan_feature_items(md, Path(out_dir), [self.cell_type])
+            if md is not None and out_dir else []
+        )
+        plan = RunPlan.skip_existing(items)
         threshold_changed = self._threshold_changed()
 
-        if existing:
+        if plan_needs_prompt(items):
             if interactive:
                 extra = None
                 if threshold_changed:
@@ -1904,21 +1996,26 @@ class CellTypeFeaturePanel(QWidget):
                             _QMB.ActionRole,
                         ),
                     ]
-                choice = prompt_overwrite_single(
+                choice, plan = prompt_run_plan(
                     self,
-                    "Overwrite Existing Features?",
-                    existing,
+                    "Existing Feature Data",
+                    items,
                     extra_buttons=extra,
                 )
-                if choice == "cancel" or choice == "skip":
+                if choice == "cancel":
                     self.log(f"Feature extraction for {self.cell_type} cancelled.")
                     return
                 if choice == "death_only":
                     death_only = True
-                else:
-                    overwrite = True
             else:
-                overwrite = True
+                plan = RunPlan.overwrite_all(items)
+
+        if not death_only and items and not plan.any_work():
+            self.log(
+                f"Feature extraction for {self.cell_type}: everything is already "
+                "complete — nothing to do."
+            )
+            return
 
         # Persist + snapshot widget state on the Qt thread.
         self._persist()
@@ -1931,7 +2028,7 @@ class CellTypeFeaturePanel(QWidget):
 
             def _on_done(_r):
                 self.log(f"\u2705 {cell_type} death re-run finished.")
-                _notify_post_extraction(self)
+                _notify_post_extraction(self, death_only=True)
                 notify_results_changed(self)
 
             def _on_failed(err: str):
@@ -1953,7 +2050,7 @@ class CellTypeFeaturePanel(QWidget):
 
         def _do_extraction(progress_cb=None):
             return self._run_feature_extraction_for(
-                cell_type, overwrite=overwrite,
+                cell_type, overwrite=False, plan=plan,
                 params=params_snapshot, progress_cb=progress_cb,
             )
 
@@ -2157,7 +2254,7 @@ class CellTypeFeaturePanel(QWidget):
             from behav3d.napari._visualization import _is_addable_layer_data
             from behav3d.napari._preview_dims import stop_dim_playback
             stop_dim_playback(self.viewer)
-            self.viewer.layers.clear()
+            clear_viewer_layers(self.viewer)
 
             # Raw channels
             if raw_dask is not None:
@@ -2305,7 +2402,16 @@ class CellTypeFeaturePanel(QWidget):
 
 
     def _on_threshold_spin_changed(self, value):
+        """Schedule a live overlay update (non-organoid panels).
+
+        Restarts the debounce timer; the recompute runs once the value has
+        been stable for ``THRESHOLD_PREVIEW_DELAY_MS``.
+        """
+        self._thr_preview_timer.start()
+
+    def _apply_pending_threshold_preview(self):
         """Live-update the overlay (current frame only) for non-organoid panels."""
+        value = self.spin_dead_threshold.value()
         viewer = self.viewer
         if (
             viewer is None
@@ -2770,7 +2876,54 @@ class ActiveKillingPanel(QWidget):
                 "Default: 1 (all contacts are included).",
             ),
         )
+
+        self.contact_column_combo = QComboBox()
+        self.contact_column_combo.addItems(["contact", "contact_on_distance"])
+        self.contact_column_combo.setCurrentText(
+            self._saved_cfg.get("contact_column", "contact")
+        )
+        self.contact_column_combo.setMaximumWidth(220)
+        self.contact_column_combo.currentTextChanged.connect(lambda _: self._validate())
+        params_form.addRow(
+            "Contact column:",
+            make_help_row(
+                self.contact_column_combo,
+                "Contact Column",
+                "Which per-target-type column decides when a contact event starts/ends:\n\n"
+                "  contact              - pixel/mask adjacency (segments within ~1.73 px).\n"
+                "                         Ignores the Contact Threshold set in Feature\n"
+                "                         Extraction. This is the original behavior.\n"
+                "  contact_on_distance  - real (µm) distance-based contact, using the\n"
+                "                         Contact Threshold configured in Feature\n"
+                "                         Extraction. Matches the distance-based matching\n"
+                "                         already used to identify which target was touched.\n\n"
+                "Only affects the contact-event gate (start/end/duration); which touched\n"
+                "target is evaluated for killing is unaffected by this setting.",
+            ),
+        )
         layout.addWidget(params_group)
+
+        # ── Advanced Configuration ───────────────────────────────────────────
+        adv_killing_section = CollapsibleSection("⚙ Advanced Configuration", expanded=False)
+        self.check_persistent_death_signal = QCheckBox("Persistent death signal (running max)")
+        self.check_persistent_death_signal.setChecked(
+            bool(self._saved_cfg.get("persistent_death_signal", True))
+        )
+        adv_killing_row = make_help_row(
+            self.check_persistent_death_signal,
+            "Persistent Death Signal",
+            "ON (default): each target's death signal is read as a running maximum\n"
+            "over its own track before measuring the increase used for the killing\n"
+            "decision -- e.g. raw values 0,10,20,200,150,100,200,200,250 are read as\n"
+            "0,10,20,200,200,200,200,200,250.\n\n"
+            "Segmentation is sometimes unstable: a target's dead-mask segment can be\n"
+            "included/excluded from frame to frame, making the raw death signal dip\n"
+            "and rise instead of monotonically increasing as the cell actually dies.\n"
+            "This prevents that flicker from being misread as the target un-dying.\n\n"
+            "OFF: use the raw, possibly non-monotonic signal as-is.",
+        )
+        adv_killing_section.addLayout(adv_killing_row)
+        layout.addWidget(adv_killing_section)
 
         # ── Viewer preview ─────────────────────────────────────────────────
         viewer_group = QGroupBox("Viewer Preview — Top Active Killers")
@@ -2978,6 +3131,29 @@ class ActiveKillingPanel(QWidget):
             self.btn_run.setEnabled(False)
             if hasattr(self, "btn_queue"):
                 self.btn_queue.setEnabled(self._queue_callback is not None and False)
+            return
+
+        contact_column = self.contact_column_combo.currentText()
+        expected_cols = {f"{t}_{contact_column}" for t in targets}
+        try:
+            header_cols = set(pd.read_csv(csv, nrows=0).columns)
+        except Exception:
+            header_cols = None
+        if header_cols is not None and not (expected_cols & header_cols):
+            self.validation_label.setText(
+                f"\u26a0\ufe0f No '{contact_column}' column found for {', '.join(targets)} in "
+                f"{csv.name}.\n"
+                + (
+                    "Re-run Feature Extraction with the Contact Threshold enabled to produce "
+                    "'_contact_on_distance' columns, or switch Contact column back to 'contact'."
+                    if contact_column == "contact_on_distance" else
+                    "Re-run Feature Extraction to produce '_contact' columns."
+                )
+            )
+            self.validation_label.setStyleSheet("color: #E57373; font-size: 10px;")
+            self.btn_run.setEnabled(False)
+            if hasattr(self, "btn_queue"):
+                self.btn_queue.setEnabled(self._queue_callback is not None and False)
         else:
             self.validation_label.setText(f"\u2713 Ready  \u2014  using: {csv.name}")
             self.validation_label.setStyleSheet("color: #66BB6A; font-size: 10px;")
@@ -2989,12 +3165,21 @@ class ActiveKillingPanel(QWidget):
         return {
             "observation_window": int(self.spin_obs_window.value()),
             "death_signal_column": self.death_signal_combo.currentText(),
+            "persistent_death_signal": bool(self.check_persistent_death_signal.isChecked()),
             "killing_threshold_multiplier": float(self.spin_threshold_mult.value()),
+            # Persist the checkbox state alongside the value. ``_persist()``
+            # merges this dict into the saved config, and the checkbox is
+            # restored from ``use_absolute_threshold`` - so without this key a
+            # stale ``false`` would survive every save and silently switch a
+            # run configured for the absolute threshold back to the relative
+            # multiplier on the next reload.
+            "use_absolute_threshold": self.check_abs_threshold.isChecked(),
             "absolute_killing_threshold": (
                 float(self.spin_abs_threshold.value())
                 if self.check_abs_threshold.isChecked() else None
             ),
             "min_contact_duration": int(self.spin_min_contact.value()),
+            "contact_column": self.contact_column_combo.currentText(),
             "target_types": self._get_selected_targets()
         }
 
@@ -3033,6 +3218,25 @@ class ActiveKillingPanel(QWidget):
         self.immune_combo.blockSignals(False)
         self._validate()
 
+    def refresh_target_types(self, target_types: list):
+        """Update the target-type list when metadata is reloaded."""
+        previously_selected = {item.text() for item in self.target_list.selectedItems()}
+        self.target_types = list(target_types)
+        self.target_list.blockSignals(True)
+        self.target_list.clear()
+        if self.target_types:
+            self.target_list.addItems(self.target_types)
+            surviving = previously_selected & set(self.target_types)
+            for i in range(self.target_list.count()):
+                item = self.target_list.item(i)
+                item.setSelected(item.text() in surviving if surviving else True)
+            self.target_list.setEnabled(True)
+        else:
+            self.target_list.addItem("(no targets detected)")
+            self.target_list.setEnabled(False)
+        self.target_list.blockSignals(False)
+        self._validate()
+
     # ── Run ──────────────────────────────────────────────────────────────────
     def _on_run_clicked(self):
         """Run Active Killing Analysis in the background (indeterminate)."""
@@ -3041,6 +3245,8 @@ class ActiveKillingPanel(QWidget):
             return
         if self._bg.is_running():
             self.log("\u26a0\ufe0f An active killing run is already in progress.")
+            return
+        if refuse_if_busy(self, "starting Active Killing", bg=self._bg):
             return
 
         from behav3d.features.advanced_timepoint_features import run_active_killing_analysis
@@ -3057,7 +3263,9 @@ class ActiveKillingPanel(QWidget):
             f"\u25b6 Active Killing Analysis: {immune} vs {targets}  "
             f"(window={params['observation_window']}, "
             f"signal={params['death_signal_column']}, "
-            f"multiplier={params['killing_threshold_multiplier']})\u2026"
+            f"persistent_signal={params['persistent_death_signal']}, "
+            f"multiplier={params['killing_threshold_multiplier']}, "
+            f"contact_column={params['contact_column']})\u2026"
         )
 
         output_dir_str = str(self.metadata_loader.output_dir)
@@ -3071,9 +3279,11 @@ class ActiveKillingPanel(QWidget):
                     target_cell_types=t_list,
                     observation_window=params["observation_window"],
                     death_signal_column=params["death_signal_column"],
+                    persistent_death_signal=params["persistent_death_signal"],
                     killing_threshold_multiplier=params["killing_threshold_multiplier"],
                     absolute_killing_threshold=params.get("absolute_killing_threshold"),
                     min_contact_duration=params["min_contact_duration"],
+                    contact_column=params["contact_column"],
                     save_results=True,
                     output_subfolder=subfolder
                 )
@@ -3285,9 +3495,11 @@ class ActiveKillingPanel(QWidget):
                 f"▶ Active Killing Analysis: {immune} vs {targets}  "
                 f"(window={params['observation_window']}, "
                 f"signal={params['death_signal_column']}, "
-                f"multiplier={params['killing_threshold_multiplier']})…"
+                f"persistent_signal={params['persistent_death_signal']}, "
+                f"multiplier={params['killing_threshold_multiplier']}, "
+                f"contact_column={params['contact_column']})…"
             )
-            
+
             output_dir_str = str(self.metadata_loader.output_dir)
             df_killing, df_summary, stats = None, None, None
 
@@ -3299,9 +3511,11 @@ class ActiveKillingPanel(QWidget):
                     target_cell_types=t_list,
                     observation_window=params["observation_window"],
                     death_signal_column=params["death_signal_column"],
+                    persistent_death_signal=params["persistent_death_signal"],
                     killing_threshold_multiplier=params["killing_threshold_multiplier"],
                     absolute_killing_threshold=params.get("absolute_killing_threshold"),
                     min_contact_duration=params["min_contact_duration"],
+                    contact_column=params["contact_column"],
                     save_results=True,
                     output_subfolder=subfolder
                 )
@@ -3608,6 +3822,16 @@ class FeatureExtractionTab(QWidget):
         # Track which cell types are organoids (needed for sync)
         self._org_types: list = []
 
+        # Restart-debounce for the shared organoid threshold preview (the
+        # spinner sync itself stays immediate, only the recompute waits).
+        self._org_thr_source_ct: str | None = None
+        self._org_thr_preview_timer = QTimer(self)
+        self._org_thr_preview_timer.setSingleShot(True)
+        self._org_thr_preview_timer.setInterval(THRESHOLD_PREVIEW_DELAY_MS)
+        self._org_thr_preview_timer.timeout.connect(
+            self._apply_pending_org_threshold_preview
+        )
+
         # Shared preview cache for organoid panels (all org panels share same ref).
         # Per-frame caches are populated lazily as the user navigates timepoints.
         self._org_preview_cache: dict = {
@@ -3765,6 +3989,10 @@ class FeatureExtractionTab(QWidget):
 
     # ── Helpers ──────────────────────────────────────────────────────────────
     def _log(self, msg):
+        from behav3d.napari._background_runner import redispatch_to_gui_thread
+
+        if redispatch_to_gui_thread(self._log, msg):
+            return
         import datetime
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         self.log_box.append(f"[{ts}] {msg}")
@@ -3811,6 +4039,9 @@ class FeatureExtractionTab(QWidget):
                 return False
 
         # All guards passed — clean up preview state before leaving
+        self._org_thr_preview_timer.stop()
+        for panel in self.panels.values():
+            panel._thr_preview_timer.stop()
         self._disconnect_org_preview_dims()
         self._org_preview_cache.update({
             "seg_t": None,
@@ -3831,7 +4062,7 @@ class FeatureExtractionTab(QWidget):
         for panel in self.panels.values():
             panel._cleanup_preview()
         disconnect_all_preview_dims_listeners(self.viewer)
-        self.viewer.layers.clear()
+        clear_viewer_layers(self.viewer)
         self._log("Cleaned up viewer layers.")
 
         return True
@@ -3910,6 +4141,7 @@ class FeatureExtractionTab(QWidget):
                 self.active_killing_panel.metadata_loader = self.metadata_loader
                 self.active_killing_panel.viewer = self.viewer
                 self.active_killing_panel.refresh_immune_types(list(imm))
+                self.active_killing_panel.refresh_target_types(list(org) + list(oth))
             self.active_killing_panel.set_queue_callback(
                 self._queue_active_killing if self._queue_panel is not None else None
             )
@@ -4184,7 +4416,9 @@ class FeatureExtractionTab(QWidget):
         """Called by an organoid panel when its threshold spinner changes.
 
         1. Syncs all other organoid panels' spinners.
-        2. Triggers an on-demand single-frame Dead/Alive overlay refresh.
+        2. Schedules an on-demand single-frame Dead/Alive overlay refresh,
+           debounced so intermediate values (typing, arrow stepping) are
+           skipped.
         """
         for ct, panel in self.panels.items():
             if ct != source_ct and ct in self._org_types:
@@ -4193,6 +4427,15 @@ class FeatureExtractionTab(QWidget):
                     panel.spin_dead_threshold.setValue(value)
                     panel.spin_dead_threshold.blockSignals(False)
 
+        self._org_thr_source_ct = source_ct
+        self._org_thr_preview_timer.start()
+
+    def _apply_pending_org_threshold_preview(self):
+        """Debounce timeout: recompute the organoid preview for the current value."""
+        panel = self.panels.get(self._org_thr_source_ct)
+        if panel is None or panel.spin_dead_threshold is None:
+            return
+        value = float(panel.spin_dead_threshold.value())
         viewer = self.viewer
         cache = self._org_preview_cache
         if (
@@ -4200,14 +4443,14 @@ class FeatureExtractionTab(QWidget):
             and cache.get("seg_t") is not None
             and cache.get("dead_t") is not None
         ):
-            self._refresh_org_preview_for_current_frame(float(value))
+            self._refresh_org_preview_for_current_frame(value)
 
     def _on_run_batch_clicked(self):
         """User-triggered batch run — asynchronous."""
         self.run_batch_feature_extraction(interactive=True, block=False)
 
     def run_batch_feature_extraction(self, interactive=True, skip_existing=False,
-                                     block=True, extra_callbacks=None):
+                                     block=True, extra_callbacks=None, plan=None):
         """Run feature extraction for all cell types sequentially.
 
         ``block=True`` (default, queue) runs synchronously.  ``block=False``
@@ -4218,7 +4461,7 @@ class FeatureExtractionTab(QWidget):
         ``extra_callbacks`` is the queue's chaining hook
         (``{"on_done": cb, "on_failed": cb}``).
         """
-        from behav3d.napari._overwrite_prompt import prompt_overwrite_batch
+        from behav3d.napari._overwrite_prompt import plan_needs_prompt, prompt_run_plan
         from qtpy.QtWidgets import QMessageBox as _QMB
 
         if not self.panels:
@@ -4229,6 +4472,12 @@ class FeatureExtractionTab(QWidget):
         if not block and self._bg.is_running():
             self._log("⚠️ A batch feature-extraction run is already in progress.")
             fire_extra_callback(extra_callbacks, "on_failed", "already running")
+            return
+
+        if interactive and refuse_if_busy(
+            self, "starting batch feature extraction", bg=self._bg,
+            extra_callbacks=extra_callbacks,
+        ):
             return
 
         # Persist global organoid threshold before any panel runs
@@ -4243,26 +4492,23 @@ class FeatureExtractionTab(QWidget):
         self._log(f"Starting batch feature extraction for {total} cell type(s)…")
 
         all_cts = list(self.panels.keys())
-        existing = []
-        existing_cts = set()
         out_dir = Path(self.metadata_loader.output_dir)
-        for ct in all_cts:
-            feat_dir = out_dir / "analysis" / ct / "track_features"
-            combined = feat_dir / f"BEHAV3D_{ct}_combined_track_features.csv"
-            if combined.exists():
-                existing.append(f"{ct} feature data ({combined.name})")
-                existing_cts.add(ct)
+        md = self.metadata_loader.metadata
+        items = scan_feature_items(md, out_dir, all_cts) if md is not None else []
+        existing_cts = {it.cell_type for it in items if it.status is not Status.MISSING}
 
         changed_cts = [
             ct for ct in all_cts
             if ct in existing_cts and self.panels[ct]._threshold_changed()
         ]
 
-        skip_existing_flag = skip_existing
-        overwrite = not skip_existing
         death_only_cts: set[str] = set()
-        if existing:
-            if interactive:
+        if plan is None:
+            plan = (
+                RunPlan.skip_existing(items) if skip_existing
+                else RunPlan.overwrite_all(items)
+            )
+            if interactive and plan_needs_prompt(items):
                 extra = None
                 if changed_cts:
                     extra = [
@@ -4272,10 +4518,10 @@ class FeatureExtractionTab(QWidget):
                             _QMB.ActionRole,
                         ),
                     ]
-                choice = prompt_overwrite_batch(
+                choice, chosen = prompt_run_plan(
                     self,
-                    "Overwrite Existing Features?",
-                    existing,
+                    "Existing Feature Data",
+                    items,
                     extra_buttons=extra,
                 )
                 if choice == "cancel":
@@ -4284,13 +4530,8 @@ class FeatureExtractionTab(QWidget):
                     return
                 if choice == "death_only":
                     death_only_cts = set(changed_cts)
-                    skip_existing_flag = False
-                    overwrite = False
                 else:
-                    skip_existing_flag = choice == "skip"
-                    overwrite = not skip_existing_flag
-            else:
-                overwrite = True
+                    plan = chosen
 
         # Persist + snapshot every panel's Qt widget state on the Qt
         # thread — the worker must not read widgets.
@@ -4339,8 +4580,8 @@ class FeatureExtractionTab(QWidget):
                         except Exception:
                             pass
                     continue
-                if skip_existing_flag and ct in existing_cts:
-                    self._log(f"--- [{i + 1}/{total}] Skipping {ct} (existing data) ---")
+                if not plan.for_cell_type(ct).any_work():
+                    self._log(f"--- [{i + 1}/{total}] Skipping {ct} (already complete) ---")
                     if progress_cb is not None:
                         try:
                             progress_cb((i + 1) * SCALE, total * SCALE, step_label_prefix)
@@ -4350,7 +4591,8 @@ class FeatureExtractionTab(QWidget):
                 self._log(f"--- [{i + 1}/{total}] Feature extraction: {ct} ---")
                 panel._run_feature_extraction_for(
                     ct,
-                    overwrite=overwrite,
+                    overwrite=False,
+                    plan=plan,
                     params=panel_params[ct],
                     progress_cb=_make_step_cb(i, step_label_prefix),
                 )

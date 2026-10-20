@@ -23,7 +23,7 @@ def relabel_cluster_ids(
 
     is_missing = pd.isna(adata.obs[cluster_key])
     current = adata.obs[cluster_key].astype(str)
-    adata.obs[original_key] = current.where(~is_missing, pd.NA).copy()
+    adata.obs[original_key] = pd.Categorical(current.astype(object).where(~is_missing, None))
 
     if isinstance(mapping, dict):
         map_dict = {str(k): v for k, v in mapping.items()}

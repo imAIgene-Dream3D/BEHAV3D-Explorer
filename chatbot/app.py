@@ -162,14 +162,61 @@ def _normalized_user_message(messages: list[dict]) -> str:
     return " ".join(_latest_user_message(messages).lower().split())
 
 
+def _is_informational_analysis_request(messages: list[dict]) -> bool:
+    """Keep plot/result interpretation separate from UI operation intent."""
+    latest = _normalized_user_message(messages)
+    if not latest:
+        return False
+
+    explanation = bool(re.search(
+        r"\b(?:what|why|how|where)\b|"
+        r"\b(?:explain|meaning|mean|represent|interpret|understand|describe)\w*\b|"
+        r"\b(?:que|qué)\s+(?:es|significa|representa)\b|"
+        r"\b(?:como|cómo)\s+(?:se\s+)?interpret\w*\b|"
+        r"\b(?:explica|significado|interpretaci[oó]n)\w*\b",
+        latest,
+    ))
+    output_topic = bool(re.search(
+        r"\b(?:plots?|graphs?|figures?|charts?|results?|outputs?|dashboards?|"
+        r"legends?|axes?|curves?|heatmaps?|tables?|gr[aá]fic[ao]s?|resultados?|"
+        r"salidas?|figuras?|tablas?)\b",
+        latest,
+    ))
+    explicit_operation = bool(re.search(
+        r"\b(?:open|navigate|switch|run|execute|configure|setup|set up|apply)\b|"
+        r"\b(?:go|take)\s+(?:me\s+)?to\b|"
+        r"\b(?:abre|abrir|navega|ve|ll[eé]vame|ejecuta|ejecutar|configura|"
+        r"configurar)\b",
+        latest,
+    ))
+
+    # Questions remain informational even when they ask how to run/configure a
+    # module. Output nouns alone are informational unless paired with a direct
+    # operation such as "open" or "run".
+    return explanation or (output_topic and not explicit_operation)
+
+
+def _is_explicit_active_killing_operation(text: str) -> bool:
+    """Require an operation verb before starting deterministic setup state."""
+    normalized = " ".join(str(text or "").lower().split())
+    if "active killing" not in normalized and "actively killing" not in normalized:
+        return False
+    return bool(re.search(
+        r"\b(?:set up|setup|configure|start|run|execute|open|apply|"
+        r"analyze|analyse)\b",
+        normalized,
+    ))
+
+
 def _asks_general_analysis_question(messages: list[dict]) -> bool:
     """Recognize an analysis overview without stealing requests for one view."""
     latest = _normalized_user_message(messages)
     targeted = any(phrase in latest for phrase in (
-        "death dynamics", "interaction analysis", "invasiveness analysis",
-        "active killing", "behavioral state", "behavioural state",
+        "population dynamics", "death dynamics", "interaction analysis",
+        "invasiveness analysis", "active killing", "behavioral state",
+        "behavioural state",
         "state trajectory", "contact-based grouping", "contact based grouping",
-        "state-shift", "state shift", "backprojection",
+        "backprojection",
     ))
     if targeted:
         return False
@@ -222,11 +269,6 @@ def _analysis_intent_route(messages: list[dict]) -> str | None:
         return "interaction"
     if "invasiveness analysis" in latest:
         return "invasiveness"
-    if any(phrase in latest for phrase in (
-        "contact state-shift", "contact state shift", "state shift after contact",
-        "before and after contact", "before versus after contact",
-    )):
-        return "contact_state_shift"
     if any(phrase in latest for phrase in (
         "contact-based grouping", "contact based grouping",
         "behave differently while touching", "behavior while touching",
@@ -340,8 +382,7 @@ def analysis_intent_clarification(
         return (
             "Which contact question do you want to answer: **how many contacts occur "
             "and how groups compare** (Interaction Analysis), **whether behavior "
-            "differs while touching** (Contact-Based Grouping), **whether behavior "
-            "changes before versus after contact** (Contact State-Shift Analysis), or "
+            "differs while touching** (Contact-Based Grouping), or "
             "**the contact distance at which objects count as touching** (Feature Extraction)? "
             "Tell me which one and I will open it."
         )
@@ -769,9 +810,8 @@ def analysis_choice_summary(context: dict, messages: list[dict]) -> str | None:
             "signal state? Use **Interaction Analysis**.",
             "How much of one selected object's surface engages another? Use "
             "**Invasiveness Analysis** after extracting invasiveness features.",
-            "Do sustained-contact tracks occupy different trajectory clusters, or do "
-            "cell states change after contact? Use **Contact analysis** and "
-            "**Contact State-Shift Analysis** under State Trajectory.",
+            "Do sustained-contact tracks occupy different trajectory clusters? Use "
+            "**Contact analysis** under State Trajectory.",
         ])
     if all_populations:
         questions.append(
@@ -820,15 +860,13 @@ def analysis_choice_summary(context: dict, messages: list[dict]) -> str | None:
         "their proportions differ by condition. |\n"
         "| **Contact analysis** | Whether State Trajectory clusters differ "
         "between tracks with and without a sustained contact bout. |\n"
-        "| **Contact State-Shift Analysis** | Whether behavioral-state composition "
-        "changes before versus after contact, compared with matched no-contact tracks. |\n"
         "| **Backprojection** | Where state, trajectory, or killing labels occur in the "
         "original images for visual validation. |\n\n"
-        "Interaction and Invasiveness are in the **Death Dynamics** analysis tab. "
+        "Death Dynamics, Interaction and Invasiveness are in the **Population Dynamics** "
+        "analysis tab. "
         "State Trajectory also provides diagnostics, track-proportion plots, condition "
-        "comparisons, exemplar tracks, and the two contact analyses above. Contact-Based "
-        "Grouping requires contact features and Categorical DTW classification; Contact "
-        "State-Shift additionally requires Behavioral State results.\n\n"
+        "comparisons, exemplar tracks, and the contact analysis above. Contact-Based "
+        "Grouping requires contact features and Categorical DTW classification.\n\n"
         f"**{question_heading}**\n"
         f"{question_text}\n\n"
         "For a single-cell behavior question, the usual sequence is **Behavioral "
@@ -841,6 +879,8 @@ def analysis_choice_summary(context: dict, messages: list[dict]) -> str | None:
 
 def analysis_navigation_action(context: dict, messages: list[dict]) -> dict | None:
     """Open a named Analysis view directly and avoid generic-tab navigation loops."""
+    if _is_informational_analysis_request(messages):
+        return None
     latest = " ".join(_latest_user_message(messages).lower().split())
     previous = _previous_assistant_message(messages).lower()
     answering_clarification = (
@@ -857,6 +897,7 @@ def analysis_navigation_action(context: dict, messages: list[dict]) -> dict | No
 
     requested = None
     for phrases, view, label in (
+        (("population dynamics",), "population_dynamics", "Population Dynamics"),
         (("death dynamics",), "death_dynamics", "Death Dynamics"),
         (("interaction analysis", "contact counts", "contact comparison"),
          "interaction", "Interaction Analysis"),
@@ -867,8 +908,6 @@ def analysis_navigation_action(context: dict, messages: list[dict]) -> dict | No
         (("state trajectory", "trajectory analysis"), "state_trajectory", "State Trajectory"),
         (("contact-based grouping", "contact based grouping", "behavior differs while touching",
           "behaviour differs while touching"), "state_trajectory", "State Trajectory"),
-        (("contact state-shift", "contact state shift", "before versus after contact"),
-         "state_trajectory", "State Trajectory"),
     ):
         if any(phrase in latest for phrase in phrases):
             requested = (view, label)
@@ -892,7 +931,7 @@ def analysis_navigation_action(context: dict, messages: list[dict]) -> dict | No
     view, label = requested
     if (
         context.get("current_step") == "analysis"
-        and (context.get("analysis") or {}).get("view") == view
+        and (context.get("analysis") or {}).get("view") in {view, f"{view}_overview"}
     ):
         return {
             "text": f"You are already in **{label}**.",
@@ -1132,6 +1171,121 @@ def should_force_bulk_metadata(context: dict, user_message: str, tools: list[dic
     ]
     supplied_facts = sum(any(marker in text for marker in group) for group in fact_groups)
     return setup_intent and sample_count and supplied_facts >= 2
+
+
+def should_require_edit_action(
+    context: dict, user_message: str, tools: list[dict],
+) -> bool:
+    """Require a tool call for a concrete user-requested value correction."""
+    editable_tools = {
+        "set_ui_value", "fill_metadata_builder", "set_parameter",
+        "select_segmentation_method",
+    }
+    if not any(tool.get("name") in editable_tools for tool in tools):
+        return False
+    text = " ".join(str(user_message or "").lower().split())
+    if not re.search(r"\b(?:adjust|apply|change|correct|fill|fix|set|update)\b", text):
+        return False
+    if re.search(
+        r"\b(?:how|why|what)\b.{0,40}\b(?:adjust|apply|change|correct|fill|fix|set|update)\b",
+        text,
+    ):
+        return False
+    concrete_value = bool(
+        re.search(r"(?<![a-z])[-+]?\d+(?:\.\d+)?(?:\s*%|\b)", text)
+        or re.search(r"\b(?:true|false|yes|no|on|off|enable|disable|enabled|disabled)\b", text)
+        or re.search(r"(?:\bto\b|\bas\b|=)\s*(?:['\"]?)[a-z][\w .+/-]{0,40}", text)
+    )
+    return concrete_value
+
+
+_COUNT_WORDS = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+_COUNT_TOKEN = r"(?:\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten)"
+
+
+def _count_token_value(token: str) -> int | None:
+    normalized = str(token or "").strip().lower()
+    if normalized.isdigit():
+        return int(normalized)
+    return _COUNT_WORDS.get(normalized)
+
+
+def metadata_structure_correction_action(
+    context: dict, messages: list[dict],
+) -> dict | None:
+    """Propose one complete Metadata structure correction from a concrete count."""
+    builder = context.get("metadata_builder", {}) or {}
+    if not builder.get("sample_forms_created"):
+        return None
+    latest = " ".join(_latest_user_message(messages).lower().split())
+    edit_intent = bool(re.search(
+        r"\b(?:actually|adjust|change|correct|fix|set|should be|update)\b", latest,
+    ))
+    if not edit_intent:
+        return None
+
+    targets = (
+        (
+            "metadata.number_of_samples", "number of samples", "samples",
+            r"(?:number|count) of (?:samples|movies|fields of view)|(?:samples|movies|fields of view)",
+        ),
+        (
+            "metadata.number_of_organoid_types", "number of organoid types",
+            "organoid types",
+            r"(?:number|count) of organoid (?:cell )?(?:types|populations)|organoid (?:cell )?(?:types|populations)",
+        ),
+        (
+            "metadata.number_of_immune_types", "number of immune cell types",
+            "immune cell types",
+            r"(?:number|count) of immune (?:cell )?(?:types|populations)|immune (?:cell )?(?:types|populations)",
+        ),
+        (
+            "metadata.number_of_other_types", "number of other cell types",
+            "other cell types",
+            r"(?:number|count) of other (?:cell )?(?:types|populations)|other (?:cell )?(?:types|populations)",
+        ),
+    )
+    controls = _visible_control_map(context)
+    for control_id, label, short_label, target_pattern in targets:
+        if not re.search(target_pattern, latest):
+            continue
+        requested = None
+        for pattern in (
+            rf"\b(?:to|should be|set(?: it)? to|now)\s*({_COUNT_TOKEN})\b",
+            rf"\b({_COUNT_TOKEN})\s+(?:{target_pattern})\b",
+        ):
+            matches = re.findall(pattern, latest)
+            if matches:
+                requested = _count_token_value(matches[-1])
+                break
+        if requested is None:
+            return None
+        control = controls.get(control_id)
+        if control is None or not control.get("enabled", True):
+            return None
+        if control.get("value") == requested:
+            return {
+                "text": (
+                    f"The Metadata Builder already records **{requested} {short_label}**. "
+                    "No structural change is needed."
+                ),
+                "calls": [],
+            }
+        return {
+            "text": (
+                f"I am proposing **{label}: {requested}**. Applying this correction "
+                "will rebuild the dependent sample forms while preserving compatible "
+                "values already entered; review any newly added population rows afterward."
+            ),
+            "calls": [{
+                "name": "set_ui_value",
+                "arguments": {"control_id": control_id, "value": requested},
+            }],
+        }
+    return None
 
 
 def tracking_motion_question(context: dict, messages: list[dict]) -> str | None:
@@ -1823,34 +1977,54 @@ def tracking_radius_action(context: dict, messages: list[dict]) -> dict | None:
     text = latest.lower()
     if "maximum search radius" not in text:
         return None
+    displacement_match = re.search(
+        r"(\d+(?:\.\d+)?)\s*(?:µm|um|micromet(?:er|re)s?)\s*"
+        r"(?:/|per|between)\s*(?:consecutive\s*)?(?:frame|frames|timepoint|timepoints)\b",
+        text,
+    )
     speed_match = re.search(
         r"(\d+(?:\.\d+)?)\s*(?:µm|um|micromet(?:er|re)s?)\s*"
         r"(?:/|per)\s*(second|seconds|sec|s|minute|minutes|min|m)\b",
         text,
     )
-    if speed_match is None:
+    if displacement_match is None and speed_match is None:
         return None
-    speed = float(speed_match.group(1))
-    speed_unit = speed_match.group(2)
-    speed_per_minute = speed * 60 if speed_unit in {"second", "seconds", "sec", "s"} else speed
-
-    records = (context.get("metadata", {}) or {}).get("records", []) or []
-    record = next((item for item in records if item.get("time_interval") is not None), None)
-    if record is None:
-        return None
-    try:
-        interval = float(record["time_interval"])
-    except (TypeError, ValueError):
-        return None
-    interval_unit = str(record.get("time_unit") or "").strip().lower()
-    if interval_unit.startswith("s"):
-        interval_minutes = interval / 60
-    elif interval_unit.startswith("m"):
-        interval_minutes = interval
-    elif interval_unit.startswith("h"):
-        interval_minutes = interval * 60
+    if displacement_match is not None:
+        displacement = float(displacement_match.group(1))
+        calculation = f"At about {displacement:g} µm of movement per frame"
     else:
-        return None
+        speed = float(speed_match.group(1))
+        speed_unit = speed_match.group(2)
+        speed_per_minute = (
+            speed * 60
+            if speed_unit in {"second", "seconds", "sec", "s"}
+            else speed
+        )
+        records = (context.get("metadata", {}) or {}).get("records", []) or []
+        record = next((
+            item for item in records if item.get("time_interval") is not None
+        ), None)
+        if record is None:
+            return None
+        try:
+            interval = float(record["time_interval"])
+        except (TypeError, ValueError):
+            return None
+        interval_unit = str(record.get("time_unit") or "").strip().lower()
+        if interval_unit.startswith("s"):
+            interval_minutes = interval / 60
+        elif interval_unit.startswith("m"):
+            interval_minutes = interval
+        elif interval_unit.startswith("h"):
+            interval_minutes = interval * 60
+        else:
+            return None
+        displacement = speed_per_minute * interval_minutes
+        interval_label = f"{interval:g} {record.get('time_unit') or ''}".strip()
+        calculation = (
+            f"At {speed:g} µm per minute and {interval_label} between frames, "
+            f"the measured movement is about {displacement:g} µm per frame"
+        )
 
     controls = (context.get("ui_state", {}) or {}).get("controls", []) or []
     active = str(context.get("active_cell_type") or "")
@@ -1866,16 +2040,37 @@ def tracking_radius_action(context: dict, messages: list[dict]) -> dict | None:
     if control is None:
         return None
 
-    displacement = speed_per_minute * interval_minutes
     radius = round(displacement * 1.2, 1)
     radius = int(radius) if radius.is_integer() else radius
-    interval_label = f"{interval:g} {record.get('time_unit') or ''}".strip()
     cell_type = active or str(control.get("cell_type") or "the selected cells")
+    current = control.get("value")
+    comparison = ""
+    try:
+        current_number = float(current)
+        current_label = f"{current_number:g} {control.get('unit') or 'µm'}"
+        if current_number < displacement:
+            comparison = (
+                f" The current value of **{current_label}** is below the measured "
+                "one-frame displacement, so it is too small for these objects."
+            )
+        elif current_number > displacement * 1.25:
+            comparison = (
+                f" The current value of **{current_label}** is more permissive than "
+                "the measured displacement and this margin require."
+            )
+        else:
+            comparison = (
+                f" The current value of **{current_label}** is consistent with the "
+                "measurement-based range, but the calculation remains the basis for "
+                "the recommendation."
+            )
+    except (TypeError, ValueError):
+        pass
     return {
         "text": (
-            f"At {speed:g} µm per minute and {interval_label} between frames, "
-            f"{cell_type} moves about {displacement:g} µm per frame. With a 20% "
-            f"margin, I’ll set the maximum search radius to {radius:g} µm."
+            f"{calculation}. For **{cell_type}**, a 20% margin gives a maximum "
+            f"search radius of **{radius:g} µm**.{comparison} I am proposing that "
+            "calculated value for confirmation."
         ),
         "calls": [{
             "name": "set_ui_value",
@@ -2266,7 +2461,7 @@ def hmm_setup_guidance(context: dict, messages: list[dict]) -> str | None:
         f"**{timepoint}**; current window features: **{window}**.\n"
         "2. Keep binary groups separate from HMM training. Current binary groups: "
         f"**{binary}**.{state_text}\n"
-        "3. Run State Classification and inspect the feature heatmap, per-state "
+        "3. Run State Clustering and inspect the feature heatmap, per-state "
         "distributions, and example state bars.\n"
         "4. In Step 2, rename the primary states by biological meaning; reuse a name "
         "to merge redundant states.\n"
@@ -2613,22 +2808,20 @@ def _number_from_proposal(text: str, patterns: tuple[str, ...]) -> float | None:
 
 def _active_killing_anchor(messages: list[dict]) -> int | None:
     """Locate the start of the latest explicit Active Killing setup thread."""
-    candidates = []
     explicit_setups = []
     for index, message in enumerate(messages):
         if message.get("role") != "user":
             continue
         text = str(message.get("content") or "")
-        if _analysis_intent_route([{"role": "user", "content": text}]) == "active_killing":
-            candidates.append(index)
-            lowered = text.lower()
-            if any(term in lowered for term in (
-                "set up", "setup", "configure", "start a new active killing",
-            )):
-                explicit_setups.append(index)
-    if not candidates:
-        return None
-    return explicit_setups[-1] if explicit_setups else candidates[0]
+        turn = [{"role": "user", "content": text}]
+        if _is_informational_analysis_request(turn):
+            continue
+        if (
+            _analysis_intent_route(turn) == "active_killing"
+            and _is_explicit_active_killing_operation(text)
+        ):
+            explicit_setups.append(index)
+    return explicit_setups[-1] if explicit_setups else None
 
 
 def _active_killing_user_text(messages: list[dict]) -> str:
@@ -2960,6 +3153,8 @@ def active_killing_readiness_summary(
 
 def active_killing_action(context: dict, messages: list[dict]) -> dict | None:
     """Build an Active Killing proposal from natural setup language and history."""
+    if _is_informational_analysis_request(messages):
+        return None
     latest = _latest_user_message(messages)
     latest_lower = " ".join(latest.lower().split())
     if any(phrase in latest_lower for phrase in (
@@ -3210,6 +3405,22 @@ def equal_track_filter_summary(context: dict, messages: list[dict]) -> str | Non
     if not minimum_enabled or not maximum_enabled or minimum != maximum:
         return None
 
+    try:
+        both_zero = float(minimum) == 0 and float(maximum) == 0
+    except (TypeError, ValueError):
+        both_zero = False
+    if both_zero:
+        return (
+            "**Track-length values need calibration**\n\n"
+            "Both enabled controls are currently **0 timepoints**. A minimum of 0 "
+            "does not remove short tracks, while a common output length of 0 does "
+            "not define a usable analysis window. Matching values alone does not "
+            "make them suitable.\n\n"
+            "**Next action**\n"
+            "Inspect the track-length distribution, then choose the shortest track "
+            "duration that still answers the downstream analysis question."
+        )
+
     return (
         f"Both track-length controls are set to **{minimum} timepoints**, and that is "
         "valid. The minimum track length removes tracks shorter than that value; the "
@@ -3263,12 +3474,53 @@ def merged_probability_watershed_guidance(
     )
 
 
-def model_tool_policy(force_bulk: bool, has_tools: bool) -> tuple[object, dict | None]:
+def apoc_probability_threshold_defaults_guidance(
+    context: dict, messages: list[dict]
+) -> str | None:
+    """Keep APOC probability defaults distinct from classifier feature scales."""
+    if context.get("current_step") != "segmentation":
+        return None
+    latest = " ".join(_latest_user_message(messages).lower().split())
+    if not any(term in latest for term in ("mask threshold", "seed threshold")):
+        return None
+    asks_for_value = any(term in latest for term in (
+        "default", "recommend", "suggest", "starting", "start with",
+        "what value", "which value", "what should", "set them", "set these",
+        "0.3", "0.4", "0.5",
+    ))
+    if not asks_for_value:
+        return None
+    segmentation = context.get("segmentation") or {}
+    method = str(segmentation.get("method") or "")
+    controls = (context.get("ui_state") or {}).get("controls", []) or []
+    has_apoc_controls = any(
+        str(control.get("id") or "").startswith("segmentation.apoc.")
+        for control in controls
+    )
+    if "apoc" not in latest and "apoc" not in method.lower() and not has_apoc_controls:
+        return None
+    return (
+        "**APOC Probability Map + Watershed starting values**\n\n"
+        "- **Mask threshold: 0.5**\n"
+        "- **Seed threshold: 0.8**\n\n"
+        "These are the documented BEHAV3D defaults. The Seed threshold must remain "
+        "at least as high as the Mask threshold. Values such as **0.3** and **0.5** "
+        "also appear in APOC's classifier **feature-scale list (pixels)**; they are "
+        "not a recommended probability-threshold range. Start from the defaults, "
+        "inspect the instance preview, and then adjust one threshold at a time."
+    )
+
+
+def model_tool_policy(
+    force_bulk: bool, has_tools: bool, force_edit: bool = False,
+) -> tuple[object, dict | None]:
     """Return a DeepSeek-compatible tool choice and thinking override."""
     if force_bulk:
         # Only bulk_fill_metadata remains in the tool list for this path.
         # Requiring a tool prevents the model from asking about one ambiguous
         # field before it has proposed all known metadata values.
+        return "required", {"thinking": {"type": "disabled"}}
+    if force_edit and has_tools:
         return "required", {"thinking": {"type": "disabled"}}
     return ("auto" if has_tools else None), None
 
@@ -3426,6 +3678,14 @@ def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict])
         "- Treat exact numeric recommendations as unsupported unless they come from a deterministic "
         "calculation using live metadata, an explicit user measurement, or a documented current value. "
         "Label calculated values as starting points and do not invent typical ranges.\n"
+        "- Current values, schema defaults, and zero placeholders describe interface state; they are "
+        "not evidence that a setting is suitable. Derive every recommendation independently from "
+        "live metadata, documented method guidance, measured image behavior, and the researcher's "
+        "goal, then compare it with the current value. Never recommend, validate, or call a value "
+        "correct merely because it is already present or is the default. Interpret zero according "
+        "to the exact control: it may disable a feature, mean strict contact, request automatic "
+        "behavior, or be invalid. If the evidence needed to evaluate it is missing, ask one focused "
+        "question rather than endorsing it.\n"
         "- Base recommendations on measurable image and behavior properties, not biological names. "
         "Describe object size, shape stability, overlap, displacement per frame, density, touching/merging, "
         "and signal persistence first. A biological name may appear only as a clearly optional example; "
@@ -3458,6 +3718,10 @@ def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict])
         "result. Clearly distinguish 'configured', 'described in the reference', and 'result found'.\n"
         "- Separate informational, planning, execution, and troubleshooting requests. Missing "
         "prerequisites block execution only; they do not block explanations or planning.\n"
+        "- A module name inside a question about a plot, result, output, meaning, or interpretation is "
+        "topic context, not an operation request. Answer the question in place and emit no navigation or "
+        "configuration call. Open a module only when the researcher explicitly asks to open, navigate, "
+        "switch, run, or configure it; phrases such as 'show me what this means' remain informational.\n"
         "- Treat CURRENT LOG errors as evidence and offer hypotheses to check. Do not claim a cause "
         "without evidence. If the user reports a failed or stalled operation and CURRENT LOG has no "
         "explicit error, ask them to copy and paste the latest error lines from the on-screen Log; do "
@@ -3486,10 +3750,16 @@ def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict])
         "decision without calling the tool again.\n"
         "- An explicit request to fill, set, update, fix, or adjust available values is incomplete without "
         "the matching tool calls in that same response. Apply known shared values to every relevant sample "
-        "or exact cell type; do not narrate an action you have not called.\n"
+        "or exact cell type; do not narrate an action you have not called. A correction must include every "
+        "known dependent edit in the same turn. Never silently mutate a value: the client presents all "
+        "value edits for confirmation, including corrections to fields the assistant filled earlier.\n"
         "- bulk_fill_metadata is only for creating a new builder before metadata or sample forms exist. Once "
         "metadata is loaded or draft sample controls exist, use set_ui_value for the latest requested fields; "
         "never rebuild the form from values mentioned earlier in the conversation.\n"
+        "- When a Metadata structure correction changes the number of samples, population counts, names, "
+        "dead-channel inclusion, or Multicolor expansion, propose the structural value once. The client "
+        "rebuilds dependent sample forms and preserves compatible values already entered; do not leave the "
+        "old sample-form structure in place or ask the researcher to click Create Sample Forms manually.\n"
         "- When metadata is not loaded and the user provides a multi-field experiment description, call "
         "bulk_fill_metadata directly; that single action opens and builds the Metadata Builder, so do not "
         "call fill_metadata_builder with open_builder first. Include "
@@ -3555,6 +3825,11 @@ def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict])
         "lower-resolution or bleed-through live imaging and reusable trained models; ConvPaint is a "
         "fallback when APOC misses complex structures; retrained classic Cellpose is for heterogeneous "
         "data that justifies ground-truth masks.\n"
+        "- For APOC Probability Map + Watershed, the documented starting values are Mask threshold "
+        "0.5 and Seed threshold 0.8. Never present 0.3-0.5 as a generic threshold range. APOC also "
+        "offers 0.3 and 0.5 as classifier feature scales in pixels; explicitly distinguish those "
+        "feature scales from probability thresholds. Tune from the documented defaults using the "
+        "instance preview, and keep Seed threshold at least as high as Mask threshold.\n"
         "- IMAGE DIMENSIONS may reveal the number of channels, but neither image shape nor metadata says "
         "which cell signal is visible in each channel. Fluorophore names such as GFP/RFP are not needed: "
         "do not ask for them or include them in examples, and never infer target channels or absence of "
@@ -3616,7 +3891,7 @@ def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict])
         "that real motion or shape change invalidates it. Reporter flicker and static position are both "
         "required. If a flickering target moves, prefer a constitutive channel for tracking and extract the "
         "reporter as an intensity feature, or use permissive segmentation plus a moving-object tracker. "
-        "Do not suggest LAP or TrackPy unless there is a concrete, explainable reason to prefer one.\n"
+        "Do not suggest LapTrack or TrackPy unless there is a concrete, explainable reason to prefer one.\n"
         "- Before recommending a tracking distance, read Time interval and Time unit from every metadata "
         "record. Convert any stated speed to displacement per frame; for example, 60 um/min at 15 seconds "
         "per frame is 15 um/frame. Use the fastest plausible one-frame displacement plus a modest 10-25% "
@@ -3631,7 +3906,7 @@ def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict])
         "disabled defaults as recommendations. Change btrack Step size only for an out-of-memory error, "
         "lowering it to reduce RAM. For divisions enable branching; for objects entering or leaving the "
         "field of view retain initialization and termination hypotheses. If multiple distinguishable "
-        "multicellular-structure populations coexist, track them together with Fragmentation Tracking when "
+        "multicellular-structure populations coexist, track them together with Fragmentation Propagation when "
         "one shared overlap-based run is intended, while preserving origin labels.\n"
         "- In Feature Extraction, recommend Morphology only when shape is biologically relevant and Movement "
         "for motility. Read required_choices on every feature-group control before recommending a removal. "
@@ -3695,12 +3970,10 @@ def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict])
         "- For State Trajectory, Trajectory size cannot exceed the Filtering trim. Average linkage is the "
         "default, Complete is a reasonable comparison, and Single performs poorly. Original BEHAV3D mode is "
         "deprecated. Categorical DTW supports Contact analysis for sustained-contact versus no-contact "
-        "tracks and Contact State-Shift Analysis for before/after-contact state composition; the latter also "
-        "requires Behavioral State results. Do not claim these current contact analyses are unavailable or "
-        "known to produce empty output.\n"
+        "tracks. Do not claim this contact analysis is unavailable or known to produce empty output.\n"
         "- A general analysis-choice request must enumerate all relevant routes: Death Dynamics, Interaction "
         "Analysis, Invasiveness Analysis, Active Killing, Behavioral State, State Trajectory, Contact-Based "
-        "Grouping, Contact State-Shift Analysis, and Backprojection. Then use the loaded metadata "
+        "Grouping, and Backprojection. Then use the loaded metadata "
         "populations, lines/conditions, and dead-signal "
         "availability to propose concrete biological questions and a sensible sequence, while distinguishing "
         "configured prerequisites from results that actually exist. Do not navigate for this overview. When the "
@@ -3883,7 +4156,8 @@ def deterministic_turn_response(
     if clarification:
         return {"text": clarification, "calls": []}
     deterministic_action = (
-        metadata_absence_action(context, messages)
+        metadata_structure_correction_action(context, messages)
+        or metadata_absence_action(context, messages)
         or metadata_persistence_action(context, messages)
         or metadata_time_conversion_action(context, messages)
         or metadata_pixel_size_action(context, messages)
@@ -3922,6 +4196,7 @@ def deterministic_turn_response(
         or apoc_channel_selection_guidance(context, messages)
         or apoc_feature_grid_guidance(context, messages)
         or edt_direction_guidance(context, messages)
+        or apoc_probability_threshold_defaults_guidance(context, messages)
         or merged_probability_watershed_guidance(context, messages)
         or feature_threshold_guidance(context, messages)
         or equal_track_filter_summary(context, messages)
@@ -4137,6 +4412,7 @@ if modal is not None:
             force_bulk = should_force_bulk_metadata(context, user_msg, tools)
             if force_bulk:
                 tools = [tool for tool in tools if tool.get("name") == "bulk_fill_metadata"]
+            force_edit = should_require_edit_action(context, user_msg, tools)
 
             def event_stream():
                 content = ""
@@ -4181,7 +4457,7 @@ if modal is not None:
                 ]
                 oai_tools = to_openai_tools(tools, key_enum=control_ids)
                 tool_choice, thinking_override = model_tool_policy(
-                    force_bulk, bool(oai_tools)
+                    force_bulk, bool(oai_tools), force_edit
                 )
 
                 yield sse({

@@ -10,6 +10,7 @@ from .utils import (
 )
 from behav3d.core.metadata import (
     load_behav3d_metadata,
+    relink_metadata_csv,
     check_behav3d_metadata,
     detect_organoid_types_from_metadata,
     detect_immune_cell_types_from_metadata,
@@ -915,6 +916,8 @@ class MetadataLoader(widgets.VBox):
 
             self.metadata = load_behav3d_metadata(path)
             self.output_dir = self.output_dir_picker.value if self.output_dir_picker is not None else ""
+            if self.output_dir:
+                self.metadata, _ = relink_metadata_csv(self.metadata, path, self.output_dir)
             self.metadata_csv_path = str(path)
             
             self.behav3d_parameters_path = Path(self.output_dir, "behav3d_parameters.yml")

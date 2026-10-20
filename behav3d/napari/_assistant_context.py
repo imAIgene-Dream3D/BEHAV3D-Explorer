@@ -240,6 +240,7 @@ def _compact_experiment_config(config: dict) -> dict:
         item = {
             key: _json_value(settings[key])
             for key in (
+                "first_timepoint_from_range",
                 "exp_duration_enabled", "exp_duration", "min_length_enabled",
                 "min_track_length", "max_length_enabled", "max_track_length",
                 "split_long_tracks", "filter_min_size_t1", "min_size_t1",
@@ -251,6 +252,16 @@ def _compact_experiment_config(config: dict) -> dict:
             filtering_summary[str(cell_type)] = item
     if filtering_summary:
         summary["filtering"] = filtering_summary
+
+    # The analysis timepoint window is global (one block shared by every
+    # cell type), so it is summarised once rather than per cell type.
+    timepoint_range = config.get("timepoint_range")
+    if isinstance(timepoint_range, dict) and timepoint_range:
+        summary["timepoint_range"] = {
+            key: _json_value(timepoint_range[key])
+            for key in ("enabled", "start", "end")
+            if key in timepoint_range
+        }
 
     active_killing = config.get("active_killing")
     if not isinstance(active_killing, dict) and isinstance(filtering, dict):
@@ -304,7 +315,8 @@ def _compact_experiment_config(config: dict) -> dict:
                 if module == "state_classification" else
                 (
                     "behavioral_trajectory_size", "n_clusters", "linkage",
-                    "trajectory_trim_mode", "split_long_tracks", "use_original",
+                    "trajectory_trim_mode", "split_long_tracks", "clustering_family",
+                    "use_exact_original_settings", "feature_dtw_selected_columns",
                 )
             )
             by_cell_type = {}
@@ -1161,6 +1173,9 @@ def _feature_extraction_state(main_widget) -> dict:
                 getattr(active, "spin_threshold_mult", None)
             ),
             "minimum_contact_duration": minimum_contact,
+            "contact_column": _widget_value(
+                getattr(active, "contact_column_combo", None)
+            ),
             "setup_ready": not issues,
             "setup_issues": issues,
         },
@@ -1173,11 +1188,13 @@ def _analysis_state(main_widget) -> dict:
     if single is None:
         return {}
     outer_tabs = getattr(analysis, "inner_tabs", None)
-    outer_index = _safe(outer_tabs.currentIndex, 1) if outer_tabs is not None else 1
-    if outer_index != 1:
-        death_tab = getattr(analysis, "death_dynamics_tab", None)
-        focused = str(getattr(death_tab, "_focused_analysis_id", "") or "")
-        return {"view": focused or "death_dynamics"}
+    current = _safe(outer_tabs.currentWidget, single) if outer_tabs is not None else single
+    if current is not single:
+        pop_tab = getattr(analysis, "population_dynamics_tab", None)
+        if current is not pop_tab:
+            return {"view": "feature_backprojection"}
+        focused = str(getattr(pop_tab, "_focused_analysis_id", "") or "")
+        return {"view": focused or "population_dynamics_overview"}
     stack = getattr(single, "_stack", None)
     if stack is not None and _safe(stack.currentIndex, 0) == 0:
         view = "single_cell_overview"
@@ -1311,6 +1328,67 @@ def build_context(main_widget) -> dict:
     ctx["active_cell_type"] = _safe(lambda: active_cell_type(main_widget, step), None)
     ctx["required_params_at_default"] = _safe(
         lambda: _required_params_at_default(step, ctx["step_schema"], params), [])
+    return ctx
+
+
+# (output_dir, metadata csv) -> (checked_at, has_reference). The reference files
+# (README / YAML notes) are discovered with globs; the context bar only needs to
+# know whether any exist, so don't glob on every refresh.
+_EXPERIMENT_FLAG_CACHE: dict = {}
+_EXPERIMENT_FLAG_TTL_S = 60.0
+
+
+def _has_experiment_reference(output_dir: str, params: dict) -> bool:
+    key = (str(output_dir), str(((params or {}).get("paths") or {}).get("metadata_csv", "")))
+    import time
+    now = time.monotonic()
+    hit = _EXPERIMENT_FLAG_CACHE.get(key)
+    if hit is not None and now - hit[0] < _EXPERIMENT_FLAG_TTL_S:
+        return hit[1]
+    flag = bool(_safe(lambda: _experiment_reference_context(output_dir, params), None))
+    _EXPERIMENT_FLAG_CACHE[key] = (now, flag)
+    return flag
+
+
+def build_summary_context(main_widget) -> dict:
+    """The few fields ``context_summary_line`` shows, and nothing else.
+
+    ``build_context`` walks every sample's image path, scans the whole output
+    tree, globs for result files and enumerates every control in every tab. The
+    context bar refreshes on every tab switch and every metadata load, so using
+    it there froze big projects for seconds; the full context is only needed
+    when a message is actually sent."""
+    tabs = getattr(main_widget, "tabs", None)
+    tab_index = _safe(lambda: tabs.currentIndex(), 0) if tabs is not None else 0
+    tab_label = _safe(lambda: tabs.tabText(tab_index), "") if tabs is not None else ""
+    step = _TAB_INDEX_TO_STEP.get(tab_index, "general")
+
+    dp = getattr(main_widget, "data_prep_tab", None)
+    metadata = getattr(dp, "metadata", None) if dp is not None else None
+    output_dir = getattr(dp, "output_dir", "") if dp is not None else ""
+    params = getattr(dp, "behav3d_parameters", {}) if dp is not None else {}
+
+    loaded = metadata is not None and not bool(getattr(metadata, "empty", True))
+    queue_panel = getattr(main_widget, "queue_panel", None)
+    ctx = {
+        "current_step": step,
+        "current_tab_label": tab_label,
+        "metadata": {
+            "loaded": loaded,
+            "n_samples": int(len(metadata)) if loaded else 0,
+        },
+        "output_dir_set": bool(output_dir),
+        "queue": list(getattr(queue_panel, "_steps", None) or []),
+        "active_cell_type": _safe(lambda: active_cell_type(main_widget, step), None),
+    }
+    if output_dir and _has_experiment_reference(output_dir, params):
+        ctx["experiment_reference"] = True
+    if step == "segmentation":
+        seg = getattr(main_widget, "segmentation_tab", None)
+        combo = getattr(seg, "method_combo", None)
+        method = _safe(lambda: combo.currentText(), "") if combo is not None else ""
+        if method:
+            ctx["segmentation"] = {"method": method}
     return ctx
 
 

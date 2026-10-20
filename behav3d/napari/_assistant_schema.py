@@ -44,6 +44,7 @@ STEP_MAP = {
     "tracking_visualization": "visualization",
     "features": "feature_extraction",
     "track_filtering": "filtering",
+    "timepoint_range": "filtering",
     "analysis": "analysis",
     "backprojection": "analysis",
     "active_killing": "feature_extraction",
@@ -105,7 +106,7 @@ _DESCRIPTIONS: dict[str, str] = {
     "drop_2d_segments": "Remove flat single-slice fragments after Cellpose-SAM. Keep enabled unless real objects genuinely occupy one slice.",
     # tracking — general
     "track_organoids_together": "Track all organoids as a single merged object rather than individually.",
-    "method": "Tracking algorithm selected from measured behavior, not a biological name. Use Fragmentation Tracking (stored as 'propagation') for objects that overlap themselves between frames and may fragment; Bounded Propagation for overlapping or touching objects whose track IDs must remain within one connected region; btrack when objects lose frame-to-frame overlap; and Reporter Propagation only for static objects with intermittent fluorescence. LAP and TrackPy need a specific reason.",
+    "method": "Tracking algorithm selected from measured behavior, not a biological name. Use Fragmentation Propagation (stored as 'propagation') for objects that overlap themselves between frames and may fragment; Bounded Propagation for overlapping or touching objects whose track IDs must remain within one connected region; btrack when objects lose frame-to-frame overlap; and Reporter Propagation only for static objects with intermittent fluorescence. LapTrack and TrackPy need a specific reason.",
     "overwrite": "Re-run and overwrite existing outputs instead of skipping completed samples.",
     # tracking — trackpy
     "search_range_px": "Max distance (pixels) a cell may move between consecutive frames. Set just above the fastest expected displacement; too small drops links, too large makes spurious ones.",
@@ -113,11 +114,11 @@ _DESCRIPTIONS: dict[str, str] = {
     "adaptive_stop": "trackpy adaptive-search lower bound; linking subdivides the search range down to this value when ambiguous.",
     "adaptive_step": "Factor by which trackpy shrinks the search range on each adaptive subdivision (0–1).",
     # tracking — lap
-    "track_cost_px": "LAP frame-to-frame linking cost cutoff in pixels (akin to a max move distance).",
-    "gap_close_cost_px": "LAP cost cutoff for bridging gaps where a cell was briefly undetected.",
-    "gap_close_max_frames": "Maximum gap length (frames) LAP will bridge when gap-closing.",
-    "merging_cost_px": "LAP cost for allowing two tracks to merge (0 disables merging).",
-    "splitting_cost_px": "LAP cost for allowing a track to split (0 disables splitting).",
+    "track_cost_px": "LapTrack frame-to-frame linking cost cutoff in pixels (akin to a max move distance).",
+    "gap_close_cost_px": "LapTrack cost cutoff for bridging gaps where a cell was briefly undetected.",
+    "gap_close_max_frames": "Maximum gap length (frames) LapTrack will bridge when gap-closing.",
+    "merging_cost_px": "LapTrack cost for allowing two tracks to merge (0 disables merging).",
+    "splitting_cost_px": "LapTrack cost for allowing a track to split (0 disables splitting).",
     # tracking — overlap based
     "min_overlap_fraction": "Minimum overlap fraction required to associate detections. Interpret it only for the selected overlap-based method and calibrate it from a preview.",
     "segment_size_min": "Minimum segment volume retained by the selected overlap-based method. Derive it from object size and image sampling, then verify in a preview.",
@@ -137,6 +138,10 @@ _DESCRIPTIONS: dict[str, str] = {
     "features_choice": "Which feature groups to compute for this cell category: movement, intensity, contact, death, morphology.",
     "contact_threshold": "Distance within which two cells count as interacting. 0 requires strict mask touching; larger values count proximity. Changing it requires feature extraction to be run again.",
     # filtering
+    "enabled": "Whether to restrict the analysis to an absolute timepoint window before any other filter runs. Global: it applies to every cell type, because cross-cell-type analyses break silently when cell types cover different spans.",
+    "start": "First timepoint to keep (inclusive) when the timepoint-range restriction is enabled.",
+    "end": "Last timepoint to keep (inclusive) when the timepoint-range restriction is enabled.",
+    "first_timepoint_from_range": "Per cell type. When a timepoint range is active, measure the min-size and dead first-timepoint filters at each track's first timepoint inside the range instead of its first frame of the whole movie. While off, those two filters are disabled.",
     "exp_duration": "Total experiment duration (hours); used to convert frame counts to time.",
     "exp_duration_enabled": "Whether to apply the experiment-duration based filter.",
     "min_track_length": "Optionally discard tracks shorter than this many timepoints. State analysis supports unequal lengths, but removing short tracks can reduce noise and computation.",
@@ -153,6 +158,7 @@ _DESCRIPTIONS: dict[str, str] = {
     # active killing
     "observation_window": "Timepoints counted forward from contact in which a death-signal increase is assessed. Choose it from the expected biological delay and imaging cadence.",
     "death_signal_column": "Death or reporter signal. Dead-mask pixel count with an absolute threshold is the general default; percentage assumes comparable target sizes, and mean intensity suits diffuse reporters.",
+    "persistent_death_signal": "Reads each target's death signal as a running maximum over its track before scoring, so segmentation flicker (a dead-mask segment dropping in/out of frame) can't be misread as a target un-dying. Turn off only to inspect the raw, possibly non-monotonic signal.",
     "killing_threshold_multiplier": "Relative increase over the target's own baseline. Reserve it for a single target line or heterogeneous within-well baselines; it can bias comparisons across target lines.",
     "min_contact_duration": "Minimum effector-target contact timepoints required for active killing. Choose it from biological plausibility and acquisition cadence.",
     "absolute_killing_threshold": "Fixed signal increase used for active killing. Calibrate a dead-pixel threshold from cell diameter and XY pixel size, then validate visually.",

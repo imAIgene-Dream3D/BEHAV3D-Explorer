@@ -20,7 +20,12 @@ from qtpy.QtWidgets import (
 from qtpy.QtCore import Qt, Signal, Slot, QObject, QTimer
 from qtpy.QtGui import QFont
 
-from behav3d.napari._background_runner import ProgressBarRow
+from behav3d.napari._background_runner import (
+    ProgressBarRow,
+    queue_dispatch,
+    set_queue_active,
+    warn_if_busy,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -105,6 +110,20 @@ class StepType(Enum):
 _PER_CELL_TYPE_SEGMENT_STEPS = frozenset({
     StepType.CELLPOSE_SEGMENT,
     StepType.CELLPOSE_SAM_SEGMENT,
+})
+
+#: Steps whose existing outputs are planned per sample x cell type (see
+#: ``behav3d.core.run_plan``); every other step keeps the coarse check.
+_PLANNED_STEP_TYPES = frozenset({
+    StepType.SEGMENT,
+    StepType.CELLPOSE_SEGMENT,
+    StepType.CELLPOSE_SAM_SEGMENT,
+    StepType.DEAD_MASK,
+    StepType.APOC_SEGMENT,
+    StepType.CONVPAINT_SEGMENT,
+    StepType.TRACK,
+    StepType.FEATURE_EXTRACT,
+    StepType.FILTER,
 })
 
 
@@ -324,6 +343,7 @@ class ProcessingQueuePanel(QWidget):
         self._steps: List[QueueStep] = []
         self._step_rows: List[QueueStepRow] = []
         self._is_running = False
+        self._step_plans: Dict[int, Any] = {}
 
         self._init_ui()
 
@@ -937,8 +957,11 @@ class ProcessingQueuePanel(QWidget):
 
         return False
 
-    def _check_existing_data(self) -> List[str]:
-        """Return list of descriptions of data that will be overwritten."""
+    def _check_existing_data(self, exclude_types=frozenset()) -> List[str]:
+        """Return list of descriptions of data that will be overwritten.
+
+        Steps in ``exclude_types`` are skipped (they are planned item by item).
+        """
         warnings = []
         md = self.metadata_loader.metadata
         if md is None:
@@ -947,6 +970,8 @@ class ProcessingQueuePanel(QWidget):
         pc_dir = out_dir / "images" / "PixelClassification"
 
         for step in self._steps:
+            if step.step_type in exclude_types:
+                continue
             if step.step_type == StepType.TRAIN:
                 if pc_dir.exists():
                     jobllibs = list(pc_dir.glob("PixelClassifier_*.joblib"))
@@ -1095,15 +1120,160 @@ class ProcessingQueuePanel(QWidget):
                         break
 
             elif step.step_type == StepType.FILTER:
+                from behav3d.analysis.grouping import filtered_track_features_csv
+
                 analysis_dir = out_dir / "analysis"
                 if analysis_dir.exists():
                     for ct_dir in analysis_dir.iterdir():
-                        filt_csv = ct_dir / "track_features" / f"BEHAV3D_{ct_dir.name}_filtered_track_features.csv"
+                        # Canonical name written by filter_tracks; an earlier
+                        # spelling here never matched, so this warning never fired.
+                        filt_csv = filtered_track_features_csv(out_dir, ct_dir.name)
                         if filt_csv.exists():
                             warnings.append(f"Filtered data for {ct_dir.name}")
                             break
 
         return warnings
+
+    def _items_for_step(self, step: QueueStep, md, out_dir: Path):
+        """Per-item status for one planned step, or ``None`` if it cannot be listed."""
+        from behav3d.core.metadata import has_dead_channel
+        from behav3d.core.run_plan import (
+            scan_cell_type_files,
+            scan_feature_items,
+            scan_pixelclassifier_items,
+            scan_segmentation_items,
+        )
+
+        st = step.step_type
+        seg = self.segmentation_tab
+        params = step.params or {}
+        has_dead = has_dead_channel(md)
+        if st == StepType.SEGMENT:
+            return scan_pixelclassifier_items(
+                md, out_dir, list(seg.pixel_classifier_page.all_cell_types or [])
+            )
+        if st == StepType.CELLPOSE_SEGMENT:
+            ct = params.get("cell_type")
+            return scan_segmentation_items(md, out_dir, [ct]) if ct else None
+        if st == StepType.CELLPOSE_SAM_SEGMENT:
+            if params.get("all_cell_types"):
+                cts = list(seg.cellpose_sam_page.all_cell_types or [])
+            else:
+                cts = [params.get("cell_type")]
+            cts = [c for c in cts if c]
+            return scan_segmentation_items(md, out_dir, cts) if cts else None
+        if st == StepType.DEAD_MASK:
+            return scan_segmentation_items(md, out_dir, [], include_dead=True) if has_dead else None
+        if st in (StepType.APOC_SEGMENT, StepType.CONVPAINT_SEGMENT):
+            page = seg.apoc_page if st == StepType.APOC_SEGMENT else seg.convpaint_page
+            return scan_segmentation_items(
+                md, out_dir, list(page.all_cell_types or []),
+                include_mask=True, include_dead=has_dead,
+            )
+        if st == StepType.TRACK:
+            return self.tracking_tab.scan_plan_items() if self.tracking_tab is not None else None
+        if st == StepType.FEATURE_EXTRACT:
+            fe = self.feature_extraction_tab
+            return scan_feature_items(md, out_dir, list(fe.panels.keys())) if fe is not None else None
+        if st == StepType.FILTER:
+            from behav3d.analysis.grouping import filtered_track_features_csv
+
+            ft = self.filtering_tab
+            if ft is None:
+                return None
+            return scan_cell_type_files(
+                list(ft.panels.keys()), lambda ct: filtered_track_features_csv(out_dir, ct)
+            )
+        return None
+
+    def _collect_step_items(self) -> Dict[int, list]:
+        """``{step_index: [PlanItem, ...]}`` for every step that is planned item by item."""
+        md = self.metadata_loader.metadata
+        out_dir = self.metadata_loader.output_dir
+        result: Dict[int, list] = {}
+        if md is None or not out_dir:
+            return result
+        out_dir = Path(out_dir)
+        for idx, step in enumerate(self._steps):
+            if step.step_type not in _PLANNED_STEP_TYPES:
+                continue
+            try:
+                items = self._items_for_step(step, md, out_dir)
+            except Exception:
+                traceback.print_exc()  # a listing failure must never block the queue
+                items = None
+            if items is not None:
+                result[idx] = items
+        return result
+
+    def _build_step_plans(self, step_items: Dict[int, list], coarse: List[str]):
+        """Ask the user what to do about existing data; return ``(skip_existing, plans)``.
+
+        ``plans`` maps step index to a :class:`RunPlan` (empty when nothing existing
+        was found).  Returns ``None`` if the user cancels.
+        """
+        from behav3d.core.run_plan import Action, RunPlan, Status, cascade_plans
+        from behav3d.napari._overwrite_prompt import prompt_queue_plans
+
+        labels = {idx: f"{idx + 1}. {self._steps[idx].display_label}" for idx in step_items}
+        shown = [
+            (idx, labels[idx], [it for it in items if it.status is not Status.MISSING])
+            for idx, items in step_items.items()
+        ]
+        shown = [row for row in shown if row[2]]
+        if not shown:
+            skip = self._legacy_prompt(coarse)
+            return None if skip is None else (skip, {})
+
+        extra = ""
+        if coarse:
+            extra = "Also existing (handled by their own steps):\n" + "\n".join(
+                f"  • {w}" for w in coarse
+            )
+        choice, chosen = prompt_queue_plans(
+            self, "Existing Data", shown, extra_text=extra,
+        )
+        if choice == "cancel":
+            return None
+
+        plans: Dict[int, RunPlan] = {}
+        for idx, items in step_items.items():
+            visible_plan = chosen.get(idx)
+            actions = {}
+            for it in items:
+                if it.status is Status.MISSING or visible_plan is None:
+                    actions[it.key] = Action.RUN
+                else:
+                    actions[it.key] = visible_plan.action(it.sample, it.cell_type)
+            plans[idx] = RunPlan.custom(items, actions)
+
+        order = sorted(plans)
+        members = self.tracking_tab.plan_members() if self.tracking_tab is not None else {}
+        cascaded, notes = cascade_plans([plans[i] for i in order], members)
+        for note in notes:
+            print(f"  ↻ {note}", file=sys.stderr)
+        return (choice != "overwrite"), dict(zip(order, cascaded))
+
+    def _legacy_prompt(self, existing: List[str]):
+        """Overwrite All / Skip Existing / Cancel for steps that are not planned per item."""
+        if not existing:
+            return False
+        details = "\n".join(f"  • {w}" for w in existing)
+        box = QMessageBox(self)
+        box.setWindowTitle("Overwrite Existing Data?")
+        box.setText(
+            f"The following data already exists:\n\n{details}\n\n"
+            "What do you want to do?"
+        )
+        box.addButton("Overwrite All", QMessageBox.DestructiveRole)
+        btn_skip = box.addButton("Skip Existing", QMessageBox.AcceptRole)
+        btn_cancel = box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(btn_cancel)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked == btn_cancel:
+            return None
+        return clicked == btn_skip
 
     # ── Run queue (event-driven state machine) ─────────────────────────
     #
@@ -1124,6 +1294,10 @@ class ProcessingQueuePanel(QWidget):
         if not self._steps or self._is_running:
             return
 
+        # Don't start a queue on top of a manual run that is still going.
+        if warn_if_busy(self, "starting the queue"):
+            return
+
         if self.metadata_loader.metadata is None:
             QMessageBox.warning(self, "No Metadata", "Please load metadata first.")
             return
@@ -1142,28 +1316,16 @@ class ProcessingQueuePanel(QWidget):
             )
             return
 
-        existing = self._check_existing_data()
-        skip_existing = False
-        if existing:
-            details = "\n".join(f"  • {w}" for w in existing)
-            box = QMessageBox(self)
-            box.setWindowTitle("Overwrite Existing Data?")
-            box.setText(
-                f"The following data already exists:\n\n{details}\n\n"
-                "What do you want to do?"
-            )
-            btn_overwrite = box.addButton("Overwrite All", QMessageBox.DestructiveRole)
-            btn_skip = box.addButton("Skip Existing", QMessageBox.AcceptRole)
-            btn_cancel = box.addButton("Cancel", QMessageBox.RejectRole)
-            box.setDefaultButton(btn_cancel)
-            box.exec_()
-            clicked = box.clickedButton()
-            if clicked == btn_cancel:
-                return
-            skip_existing = (clicked == btn_skip)
+        step_items = self._collect_step_items()
+        coarse = self._check_existing_data(exclude_types=_PLANNED_STEP_TYPES)
+        planned = self._build_step_plans(step_items, coarse)
+        if planned is None:
+            return
+        skip_existing, self._step_plans = planned
 
         # ── UI lock ──
         self._is_running = True
+        set_queue_active(True)
         self._skip_existing = skip_existing
         self._queue_total_start = time.time()
         self._active_step_idx = -1
@@ -1223,7 +1385,10 @@ class ProcessingQueuePanel(QWidget):
         print(f"\n▶ [{idx + 1}/{total}] {step.display_label}...", file=sys.stderr)
 
         try:
-            widget = self._dispatch_step(step, self._skip_existing)
+            with queue_dispatch():
+                widget = self._dispatch_step(
+                    step, self._skip_existing, self._step_plans.get(idx),
+                )
         except Exception as e:  # dispatch itself failed (sync exception)
             traceback.print_exc()
             QTimer.singleShot(0, lambda err=str(e): self._step_failed(idx, err))
@@ -1365,6 +1530,8 @@ class ProcessingQueuePanel(QWidget):
         print(f"  🛒 Queue finished in {total_elapsed:.1f}s", file=sys.stderr)
         print(f"{'=' * 60}\n", file=sys.stderr)
 
+        if self._is_running:
+            set_queue_active(False)
         self._is_running = False
         self._active_step_idx = -1
         self._disconnect_active_progress()
@@ -1385,7 +1552,7 @@ class ProcessingQueuePanel(QWidget):
 
     # ── Step dispatcher ────────────────────────────────────────────────
 
-    def _dispatch_step(self, step: QueueStep, skip_existing: bool = False):
+    def _dispatch_step(self, step: QueueStep, skip_existing: bool = False, plan=None):
         """Dispatch ``step`` asynchronously; return the active widget.
 
         The returned widget exposes ``_bg.progress`` so the queue can
@@ -1397,25 +1564,25 @@ class ProcessingQueuePanel(QWidget):
         if step.step_type == StepType.TRAIN:
             return self._run_train(cbs)
         if step.step_type == StepType.SEGMENT:
-            return self._run_segment(skip_existing, cbs)
+            return self._run_segment(skip_existing, cbs, plan)
         if step.step_type == StepType.CELLPOSE_SEGMENT:
-            return self._run_cellpose_segment(step, skip_existing, cbs)
+            return self._run_cellpose_segment(step, skip_existing, cbs, plan)
         if step.step_type == StepType.CELLPOSE_SAM_SEGMENT:
-            return self._run_cellpose_sam_segment(step, skip_existing, cbs)
+            return self._run_cellpose_sam_segment(step, skip_existing, cbs, plan)
         if step.step_type == StepType.DEAD_MASK:
-            return self._run_dead_mask(skip_existing, cbs)
+            return self._run_dead_mask(skip_existing, cbs, plan)
         if step.step_type == StepType.TRACK:
-            return self._run_track(skip_existing, cbs)
+            return self._run_track(skip_existing, cbs, plan)
         if step.step_type == StepType.APOC_SEGMENT:
-            return self._run_apoc_segment(step, skip_existing, cbs)
+            return self._run_apoc_segment(step, skip_existing, cbs, plan)
         if step.step_type == StepType.CONVPAINT_SEGMENT:
-            return self._run_convpaint_segment(step, skip_existing, cbs)
+            return self._run_convpaint_segment(step, skip_existing, cbs, plan)
         if step.step_type == StepType.FEATURE_EXTRACT:
-            return self._run_feature_extract(skip_existing, cbs)
+            return self._run_feature_extract(skip_existing, cbs, plan)
         if step.step_type == StepType.ACTIVE_KILLING:
             return self._run_active_killing(step, skip_existing, cbs)
         if step.step_type == StepType.FILTER:
-            return self._run_filter(skip_existing, cbs)
+            return self._run_filter(skip_existing, cbs, plan)
         if step.step_type == StepType.DEATH_DYNAMICS:
             return self._run_death_dynamics(step, cbs)
         if step.step_type == StepType.MULTI_ORG_DEATH:
@@ -1444,7 +1611,7 @@ class ProcessingQueuePanel(QWidget):
     # ── Step runners (non-interactive) ─────────────────────────────────
 
     def _run_train(self, extra_callbacks):
-        """Run classifier training (synchronous; queue advances on return)."""
+        """Run classifier training (asynchronous; the queue advances when it finishes)."""
         parent = self.parent()
         while parent and not hasattr(parent, 'tabs'):
             parent = parent.parent()
@@ -1452,12 +1619,13 @@ class ProcessingQueuePanel(QWidget):
             parent.tabs.setCurrentIndex(2)  # Segmentation tab
 
         pc_widget = self.segmentation_tab.pixel_classifier_page
-        # ``run_train`` is intentionally synchronous; ``extra_callbacks``
-        # fires before the call returns so we don't double-emit.
+        # Training runs on the widget's BackgroundOperation; ``extra_callbacks``
+        # fires only once it has really finished or failed, so the next step
+        # (segmentation) cannot start while the classifier is still being written.
         pc_widget.run_train(interactive=False, extra_callbacks=extra_callbacks)
-        return None  # synchronous — body bar stays busy
+        return pc_widget  # lets the queue subscribe to the training progress
 
-    def _run_segment(self, skip_existing, extra_callbacks):
+    def _run_segment(self, skip_existing, extra_callbacks, plan=None):
         """Run batch segmentation asynchronously.
 
         Performs a pre-flight check: if any saved .joblib classifier has a
@@ -1479,7 +1647,7 @@ class ProcessingQueuePanel(QWidget):
             return pc
         pc.run_batch_segmentation(
             interactive=False, skip_existing=skip_existing, block=False,
-            extra_callbacks=extra_callbacks,
+            extra_callbacks=extra_callbacks, plan=plan,
         )
         return pc
 
@@ -1557,15 +1725,15 @@ class ProcessingQueuePanel(QWidget):
         except Exception:
             return None  # pre-flight errors must never block the user
 
-    def _run_track(self, skip_existing, extra_callbacks):
+    def _run_track(self, skip_existing, extra_callbacks, plan=None):
         """Run batch tracking asynchronously."""
         self.tracking_tab.run_batch_tracking(
             interactive=False, skip_existing=skip_existing, block=False,
-            extra_callbacks=extra_callbacks,
+            extra_callbacks=extra_callbacks, plan=plan,
         )
         return self.tracking_tab
 
-    def _run_feature_extract(self, skip_existing, extra_callbacks):
+    def _run_feature_extract(self, skip_existing, extra_callbacks, plan=None):
         """Run batch feature extraction asynchronously."""
         if self.feature_extraction_tab is None:
             QTimer.singleShot(
@@ -1575,7 +1743,7 @@ class ProcessingQueuePanel(QWidget):
             return None
         self.feature_extraction_tab.run_batch_feature_extraction(
             interactive=False, skip_existing=skip_existing, block=False,
-            extra_callbacks=extra_callbacks,
+            extra_callbacks=extra_callbacks, plan=plan,
         )
         return self.feature_extraction_tab
 
@@ -1604,18 +1772,18 @@ class ProcessingQueuePanel(QWidget):
             self._pending_active_killing_params = {}
         return None
 
-    def _run_cellpose_segment(self, step: QueueStep, skip_existing, extra_callbacks):
+    def _run_cellpose_segment(self, step: QueueStep, skip_existing, extra_callbacks, plan=None):
         """Run cellpose segmentation asynchronously."""
         cp = self.segmentation_tab.cellpose_page
         cp.run_batch_cellpose(
             interactive=False, skip_existing=skip_existing, block=False,
             cell_type_override=step.params.get("cell_type"),
             model_path_override=step.params.get("model_path"),
-            extra_callbacks=extra_callbacks,
+            extra_callbacks=extra_callbacks, plan=plan,
         )
         return cp
 
-    def _run_cellpose_sam_segment(self, step: QueueStep, skip_existing, extra_callbacks):
+    def _run_cellpose_sam_segment(self, step: QueueStep, skip_existing, extra_callbacks, plan=None):
         """Run Cellpose-SAM segmentation from a queued params snapshot.
 
         ``step.params`` is the dict produced by
@@ -1634,6 +1802,11 @@ class ProcessingQueuePanel(QWidget):
 
         # Torch device combo stores the device string as item data ("cuda:0"),
         # not as the display text ("GPU 0: NVIDIA ..."), so match on data.
+        # The device combo is populated lazily (torch import), so probe before
+        # matching -- otherwise ``findData`` misses against the seeded
+        # single-item combo and the step silently runs on the wrong device.
+        if hasattr(cp, "_ensure_torch_devices"):
+            cp._ensure_torch_devices()
         device = p.get("device")
         if device and hasattr(cp, "combo_gpu_device"):
             idx = cp.combo_gpu_device.findData(str(device))
@@ -1661,19 +1834,20 @@ class ProcessingQueuePanel(QWidget):
         cp.run_batch_cellpose_sam(
             interactive=False, skip_existing=skip_existing, block=False,
             cell_type_override=cell_type,
-            extra_callbacks=extra_callbacks,
+            extra_callbacks=extra_callbacks, plan=plan,
         )
         return cp
 
-    def _run_dead_mask(self, skip_existing, extra_callbacks):
+    def _run_dead_mask(self, skip_existing, extra_callbacks, plan=None):
         """Run Otsu dead mask segmentation asynchronously."""
         cp = self.segmentation_tab.cellpose_page
         cp.run_otsu_threshold(
             interactive=False, block=False, extra_callbacks=extra_callbacks,
+            skip_existing=skip_existing, plan=plan,
         )
         return cp
 
-    def _run_filter(self, skip_existing, extra_callbacks):
+    def _run_filter(self, skip_existing, extra_callbacks, plan=None):
         """Run batch filtering asynchronously."""
         if self.filtering_tab is None:
             QTimer.singleShot(
@@ -1683,71 +1857,71 @@ class ProcessingQueuePanel(QWidget):
             return None
         self.filtering_tab.run_batch_filtering(
             interactive=False, skip_existing=skip_existing, block=False,
-            extra_callbacks=extra_callbacks,
+            extra_callbacks=extra_callbacks, plan=plan,
         )
         return self.filtering_tab
 
-    def _require_death_dynamics_tab(self):
-        if self.analysis_tab is None or not hasattr(self.analysis_tab, "death_dynamics_tab"):
+    def _require_population_dynamics_tab(self):
+        if self.analysis_tab is None or not hasattr(self.analysis_tab, "population_dynamics_tab"):
             raise RuntimeError("Analysis tab not wired to queue.")
-        return self.analysis_tab.death_dynamics_tab
+        return self.analysis_tab.population_dynamics_tab
 
-    def _run_sync_analysis(self, fn, extra_callbacks):
-        """Run a synchronous analysis-tab call and fire ``extra_callbacks``.
+    def _run_async_analysis(self, dd, fn, desc, extra_callbacks):
+        """Start an analysis-tab job on its worker thread.
 
-        Wraps the existing ``death_dynamics_tab.run_*`` helpers so the
-        state machine sees the same on_done / on_failed flow as the
-        async batch methods.  These calls are synchronous on purpose —
-        napari will briefly freeze for the duration of each step, but
-        the queue still advances cleanly when ``fn`` returns.
+        Wraps the ``population_dynamics_tab.run_*_for`` helpers so the state
+        machine sees the same on_done / on_failed flow as the async batch
+        methods.  ``fn`` runs off the GUI thread, so it must be a closure
+        over values already snapshotted from widgets.  Returns ``dd`` so the
+        queue can subscribe to its ``_bg.progress`` signal.
         """
-        try:
-            result = fn()
-            if extra_callbacks and extra_callbacks.get("on_done") is not None:
-                extra_callbacks["on_done"](result)
-        except Exception as e:
-            traceback.print_exc()
-            if extra_callbacks and extra_callbacks.get("on_failed") is not None:
-                extra_callbacks["on_failed"](str(e))
+        dd.run_in_background(fn, desc=desc, extra_callbacks=extra_callbacks)
+        return dd
 
     def _run_death_dynamics(self, step: QueueStep, extra_callbacks):
-        dd = self._require_death_dynamics_tab()
+        dd = self._require_population_dynamics_tab()
         cell_types = step.params.get("cell_types") or []
-        self._run_sync_analysis(
-            lambda: dd.run_death_dynamics_for(cell_types, interactive=False),
+        group_cols = dd._selected_dd_group_cols()  # widget read: GUI thread
+        return self._run_async_analysis(
+            dd,
+            lambda: dd.run_death_dynamics_for(
+                cell_types, interactive=False, group_cols=group_cols,
+            ),
+            "Death Dynamics",
             extra_callbacks,
         )
-        return None
 
     def _run_multi_org_death(self, step: QueueStep, extra_callbacks):
-        dd = self._require_death_dynamics_tab()
+        dd = self._require_population_dynamics_tab()
         cell_types = step.params.get("cell_types") or []
-        self._run_sync_analysis(
+        return self._run_async_analysis(
+            dd,
             lambda: dd.run_multi_organoid_death_for(cell_types, interactive=False),
+            "Combined Death Dynamics",
             extra_callbacks,
         )
-        return None
 
     def _run_interaction(self, step: QueueStep, extra_callbacks):
-        dd = self._require_death_dynamics_tab()
+        dd = self._require_population_dynamics_tab()
         cell_types = step.params.get("cell_types") or []
         interaction_cts = step.params.get("interaction_cell_types") or []
         group_by_line_condition = bool(
             step.params.get("group_by_line_condition", False)
         )
-        self._run_sync_analysis(
+        return self._run_async_analysis(
+            dd,
             lambda: dd.run_interaction_for(
                 cell_types,
                 interaction_cts,
                 group_by_line_condition=group_by_line_condition,
                 interactive=False,
             ),
+            "Interaction Analysis",
             extra_callbacks,
         )
-        return None
 
     def _run_multi_org_interaction(self, step: QueueStep, extra_callbacks):
-        dd = self._require_death_dynamics_tab()
+        dd = self._require_population_dynamics_tab()
         cell_types = step.params.get("cell_types") or []
         interaction_cts = step.params.get("interaction_cell_types") or []
         time_window_min = float(step.params.get("time_window_min", 60.0))
@@ -1758,7 +1932,8 @@ class ProcessingQueuePanel(QWidget):
         analysis_period_t = step.params.get("analysis_period_t")
         if analysis_period_t is None:
             analysis_period_t = step.params.get("analysis_period_min")
-        self._run_sync_analysis(
+        return self._run_async_analysis(
+            dd,
             lambda: dd.run_multi_organoid_interaction_for(
                 cell_types,
                 interaction_cts,
@@ -1768,12 +1943,12 @@ class ProcessingQueuePanel(QWidget):
                 analysis_period_t=analysis_period_t,
                 interactive=False,
             ),
+            "Interaction Overview",
             extra_callbacks,
         )
-        return None
 
     def _run_invasiveness(self, step: QueueStep, extra_callbacks):
-        dd = self._require_death_dynamics_tab()
+        dd = self._require_population_dynamics_tab()
         # Prefer the multi-immune list; fall back to the legacy single field
         # for older queued steps.
         immune = step.params.get("immune_cell_types")
@@ -1788,7 +1963,8 @@ class ProcessingQueuePanel(QWidget):
         analysis_period_t = step.params.get("analysis_period_t")
         if analysis_period_t is None:
             analysis_period_t = step.params.get("analysis_period_min")
-        self._run_sync_analysis(
+        return self._run_async_analysis(
+            dd,
             lambda: dd.run_invasiveness_for(
                 immune,
                 targets,
@@ -1797,11 +1973,11 @@ class ProcessingQueuePanel(QWidget):
                 analysis_period_t=analysis_period_t,
                 interactive=False,
             ),
+            "Invasiveness Analysis",
             extra_callbacks,
         )
-        return None
 
-    def _run_apoc_segment(self, step: QueueStep, skip_existing, extra_callbacks):
+    def _run_apoc_segment(self, step: QueueStep, skip_existing, extra_callbacks, plan=None):
         """Run APOC GPU batch segmentation from a queued params snapshot.
 
         ``step.params`` is the dict produced by :meth:`APOCWidget.get_queue_params`.
@@ -1871,16 +2047,16 @@ class ProcessingQueuePanel(QWidget):
                     apoc_widget.spin_t_start.setValue(int(p.get("t_start", 0)))
                 if hasattr(apoc_widget, "spin_t_end"):
                     apoc_widget.spin_t_end.setValue(int(p.get("t_end", 100)))
-        if hasattr(apoc_widget, "check_overwrite"):
-            # skip_existing overrides any stored overwrite flag.
-            apoc_widget.check_overwrite.setChecked(not skip_existing)
-
+        # skip_existing is passed per call: writing it onto the widget used to
+        # leak into later GUI runs (e.g. a single-cell-type run recomputing
+        # outputs it had no reason to touch).
         apoc_widget._on_run_segmentation(
-            interactive=False, block=False, extra_callbacks=extra_callbacks,
+            interactive=False, block=False, extra_callbacks=extra_callbacks, plan=plan,
+            overwrite_existing=not skip_existing,
         )
         return apoc_widget
 
-    def _run_convpaint_segment(self, step: QueueStep, skip_existing, extra_callbacks):
+    def _run_convpaint_segment(self, step: QueueStep, skip_existing, extra_callbacks, plan=None):
         """Run ConvPaint batch segmentation from a queued params snapshot.
 
         ``step.params`` is the dict produced by :meth:`ConvPaintWidget.get_queue_params`.
@@ -1893,6 +2069,11 @@ class ProcessingQueuePanel(QWidget):
         tw = getattr(convpaint_widget, "_training_widget", None)
 
         # Torch device
+        # The device combo is populated lazily (torch import), so probe before
+        # matching -- otherwise ``findData`` misses against the seeded
+        # single-item combo and the step silently runs on the wrong device.
+        if hasattr(convpaint_widget, "_ensure_torch_devices"):
+            convpaint_widget._ensure_torch_devices()
         device = p.get("device")
         if device and hasattr(convpaint_widget, "combo_gpu_device"):
             idx = convpaint_widget.combo_gpu_device.findData(str(device))
@@ -1974,11 +2155,10 @@ class ProcessingQueuePanel(QWidget):
                     convpaint_widget.spin_t_start.setValue(int(p.get("t_start", 0)))
                 if hasattr(convpaint_widget, "spin_t_end"):
                     convpaint_widget.spin_t_end.setValue(int(p.get("t_end", 100)))
-        if hasattr(convpaint_widget, "check_overwrite"):
-            convpaint_widget.check_overwrite.setChecked(not skip_existing)
 
         convpaint_widget._on_run_segmentation(
-            interactive=False, block=False, extra_callbacks=extra_callbacks,
+            interactive=False, block=False, extra_callbacks=extra_callbacks, plan=plan,
+            overwrite_existing=not skip_existing,
         )
         return convpaint_widget
 

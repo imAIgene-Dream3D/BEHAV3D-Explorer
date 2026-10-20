@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import threading
 import traceback
 from copy import deepcopy
 from pathlib import Path
@@ -52,11 +53,13 @@ from qtpy.QtWidgets import (
 from behav3d.core.metadata import (
     load_behav3d_metadata,
     check_behav3d_metadata,
+    relink_metadata_csv,
     detect_organoid_types_from_metadata,
     detect_immune_cell_types_from_metadata,
     detect_other_cell_types_from_metadata,
 )
 from behav3d.core.qt_help import HelpButton
+from behav3d.napari._background_runner import begin_busy, end_busy, warn_if_busy
 
 # These are imported lazily by the conversion worker to keep startup fast.
 # from behav3d.preprocessing import convert_input_files_to_zarr
@@ -64,6 +67,17 @@ from behav3d.core.qt_help import HelpButton
 
 # Default config (mirrors widgets/utils.py _DEFAULT_CONFIG)
 _DEFAULT_CONFIG: dict = {
+    # Provenance block written by the zarr conversion step (original
+    # dimensions, the applied timepoint cut, resulting dimensions).
+    # Kept first so it stays at the top of behav3d_parameters.yml:
+    # every loader merges the file onto this dict and dumps it with
+    # sort_keys=False, so key order here is the file's key order.
+    "zarr_conversion": {},
+    # Global analysis timepoint window (see behav3d.io.parameters).
+    # Deliberately NOT inside "track_filtering": that dict is keyed by
+    # cell type and iterated as such, and the window must be identical
+    # for every cell type or cross-cell-type analyses break silently.
+    "timepoint_range": {"enabled": False, "start": 0, "end": 0},
     "seed": 42,
     "paths": {"metadata_csv": "", "output_dir": ""},
     "dim_order": {"default_apply_all": "TCZYX"},
@@ -161,6 +175,12 @@ class _MetadataLoadWorker(QThread):
     def run(self):
         try:
             metadata = load_behav3d_metadata(self.csv_path)
+            if self.out_dir:
+                # Paths in metadata.csv are absolute; re-link them when the
+                # project folder was copied or moved since they were written.
+                metadata, _ = relink_metadata_csv(
+                    metadata, self.csv_path, self.out_dir, log=self.progress.emit
+                )
             check_behav3d_metadata(metadata, func=False)
 
             behav3d_parameters = None
@@ -194,19 +214,26 @@ class _MetadataLoadWorker(QThread):
 # ═══════════════════════════════════════════════════════════════════════════
 class _ZarrWorker(QThread):
     progress = Signal(str)
-    # (success, message, updated_metadata_df_or_None, originals_map_or_None)
+    # (success, message, updated_metadata_df_or_None, originals_map_or_None,
+    #  sample_records_or_None)
     # originals_map is a list of dicts: {"sample": str, "original": str, "new_zarr": str}
-    finished = Signal(bool, str, object, object)
+    # sample_records maps sample_name -> a provenance record built by
+    # behav3d.io.parameters.make_zarr_sample_record
+    finished = Signal(bool, str, object, object, object)
 
     def __init__(self, output_dir: str, metadata: pd.DataFrame,
                  t_start: int = None, t_end: int = None,
-                 n_workers: int = 1, parent=None):
+                 n_workers: int = 1, originals: dict = None, parent=None):
         super().__init__(parent)
         self.output_dir = output_dir
         self.metadata = metadata
         self.t_start = t_start
         self.t_end = t_end
         self.n_workers = n_workers
+        # sample_name -> {"shape": [...], "order": "TCZYX"}, snapshotted from
+        # the Dimension Order table before conversion (so no extra disk I/O,
+        # and it still reflects the raw file once raw_image_path is rewritten).
+        self.originals = originals or {}
 
     def run(self):
         try:
@@ -245,11 +272,43 @@ class _ZarrWorker(QThread):
                     "new_zarr": new_zarr,
                 })
 
-            self.finished.emit(True, "✅ Zarr conversion complete!", updated_md, originals_map)
+            # Record what each image looked like before and after the cut, so
+            # the applied timepoint range stays recoverable even after the
+            # originals are deleted. The resulting shape is read back from the
+            # produced .zarr (a metadata-only read) rather than computed, so it
+            # reflects what is actually on disk.
+            from behav3d.io.images import get_image_shape
+            from behav3d.io.parameters import make_zarr_sample_record
+
+            sample_records = {}
+            for entry in originals_map:
+                sample = entry["sample"]
+                original = self.originals.get(sample, {})
+                new_shape = None
+                if entry["new_zarr"]:
+                    try:
+                        new_shape = get_image_shape(Path(entry["new_zarr"]))
+                    except Exception:
+                        new_shape = None
+                sample_records[sample] = make_zarr_sample_record(
+                    original_shape=original.get("shape"),
+                    original_dimension_order=original.get("order"),
+                    new_shape=new_shape,
+                    mode="converted",
+                )
+
+            self.finished.emit(
+                True,
+                "✅ Zarr conversion complete!",
+                updated_md,
+                originals_map,
+                sample_records,
+            )
         except Exception:
             self.finished.emit(
                 False,
                 f"❌ Conversion failed:\n{traceback.format_exc()}",
+                None,
                 None,
                 None,
             )
@@ -258,8 +317,8 @@ class _ZarrWorker(QThread):
 class _ZarrClipWorker(QThread):
     """Clips already-converted .zarr files in place to a timepoint range."""
     progress = Signal(str)
-    # (success, message)
-    finished = Signal(bool, str)
+    # (success, message, sample_records_or_None)
+    finished = Signal(bool, str, object)
 
     def __init__(self, samples: list, t_start: int, t_end: int, parent=None):
         super().__init__(parent)
@@ -270,17 +329,49 @@ class _ZarrClipWorker(QThread):
 
     def run(self):
         try:
-            from behav3d.io.images import clip_zarr_timepoints
+            from behav3d.io.images import clip_zarr_timepoints, get_image_shape
+            from behav3d.io.parameters import (
+                ZARR_TARGET_AXIS_ORDER,
+                make_zarr_sample_record,
+            )
 
+            sample_records = {}
             for entry in self.samples:
                 sample_name = entry["sample_name"]
                 zarr_path = entry["zarr_path"]
                 self.progress.emit(f"Clipping '{sample_name}' to timepoints [{self.t_start}, {self.t_end}]…")
+                # Shape before/after the in-place clip, read straight from the
+                # store so the record matches what ends up on disk. These zarrs
+                # are always TCZYX (that is what the conversion writes).
+                try:
+                    shape_before = get_image_shape(Path(zarr_path))
+                except Exception:
+                    shape_before = None
                 clip_zarr_timepoints(zarr_path, t_start=self.t_start, t_end=self.t_end)
+                try:
+                    shape_after = get_image_shape(Path(zarr_path))
+                except Exception:
+                    shape_after = None
+                sample_records[sample_name] = make_zarr_sample_record(
+                    original_shape=shape_before,
+                    original_dimension_order=(
+                        ZARR_TARGET_AXIS_ORDER if shape_before is not None else None
+                    ),
+                    new_shape=shape_after,
+                    mode="clipped_existing",
+                )
 
-            self.finished.emit(True, f"✅ Clipped {len(self.samples)} existing zarr file(s)!")
+            self.finished.emit(
+                True,
+                f"✅ Clipped {len(self.samples)} existing zarr file(s)!",
+                sample_records,
+            )
         except Exception:
-            self.finished.emit(False, f"❌ Clipping existing zarr failed:\n{traceback.format_exc()}")
+            self.finished.emit(
+                False,
+                f"❌ Clipping existing zarr failed:\n{traceback.format_exc()}",
+                None,
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -292,19 +383,45 @@ class DataPreparationTab(QWidget):
     # Signal emitted when metadata is successfully loaded
     metadata_loaded = Signal(object)  # pd.DataFrame
 
+    # The shared metadata table ---------------------------------------------
+    # Background workers used to receive this very DataFrame and the backends
+    # mutate it in place (``metadata.at[idx, "<cell>_tracks_image_path"] = ...``)
+    # while the GUI thread iterates it to refresh widgets; concurrent workers
+    # could interleave writes the same way. On a non-GUI thread the getter
+    # therefore returns a private snapshot: in-place edits stay private to that
+    # worker and are published only by *assignment* of the returned table, which
+    # every caller already does (``self.metadata_loader.metadata = updated``) and
+    # which is an atomic reference swap. The GUI thread keeps the live object.
+    @property
+    def metadata(self):
+        md = self._metadata
+        if md is not None and threading.current_thread() is not threading.main_thread():
+            return md.copy()
+        return md
+
+    @metadata.setter
+    def metadata(self, value):
+        self._metadata = value
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
         # State -----------------------------------------------------------
-        self.metadata: pd.DataFrame | None = None
+        self._metadata: pd.DataFrame | None = None
+        self.metadata = None
         self.output_dir: str = ""
         self.behav3d_parameters: dict = deepcopy(_DEFAULT_CONFIG)
         self._zarr_worker: _ZarrWorker | None = None
         self._zarr_clip_worker: _ZarrClipWorker | None = None
         self._sample_t_counts: dict = {}       # sample_name -> T count (Section 5)
+        # (t_start, t_end) of the conversion currently running, so the
+        # finished handlers can record the cut (the signals don't carry it).
+        self._zarr_cut: tuple = (None, None)
         self._edit_mode: bool = False          # True when editing loaded metadata
         self._loaded_csv_path: str = ""        # CSV path of last loaded metadata
         self._metadata_builder_dirty: bool = False
+        # Session-level opt-out for the numeric sample-name warning.
+        self._skip_numeric_name_warning: bool = False
 
         # Build UI --------------------------------------------------------
         scroll = QScrollArea(self)
@@ -340,6 +457,10 @@ class DataPreparationTab(QWidget):
     # Logging helper
     # ------------------------------------------------------------------
     def _log(self, msg: str):
+        from behav3d.napari._background_runner import redispatch_to_gui_thread
+
+        if redispatch_to_gui_thread(self._log, msg):
+            return
         self.log.append(msg)
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
 
@@ -357,6 +478,9 @@ class DataPreparationTab(QWidget):
         btn.clicked.connect(self._browse_output_dir)
         lay.addWidget(self.output_dir_edit, stretch=1)
         lay.addWidget(btn)
+        from behav3d.napari._transfer import TransferController
+        self._transfer = TransferController(self)
+        lay.addWidget(self._transfer.make_button())
         self._layout.addWidget(grp)
 
     def _browse_output_dir(self):
@@ -519,7 +643,7 @@ class DataPreparationTab(QWidget):
             multi_n.setRange(2, 10)
             multi_n.setValue(2)
             multi_n.setMaximumWidth(70)
-            multi_n.setSuffix(" ch")
+            multi_n.setSuffix(" populations")
             multi_n.setEnabled(False)
 
             def _toggle_multi(state, spin=multi_n):
@@ -620,19 +744,62 @@ class DataPreparationTab(QWidget):
 
     @staticmethod
     def _ensure_sample_prefix(name: str) -> str:
-        """Guarantee a sample name starts with ``S``.
+        """Prefix ``S_`` onto *purely numeric* sample names.
 
-        Purely numeric sample names (e.g. ``"12"``) cause downstream problems
-        in the pipeline (they get parsed as integers when read back from CSV,
-        break path/column construction, etc.). Prepending ``S`` forces a
-        non-numeric name. An empty entry is left empty so required-field
-        validation still fires, and a name that already starts with ``S`` is
-        returned unchanged so repeated edits/saves never stack extra prefixes.
+        Numeric sample names (e.g. ``"12"`` or ``"2.5"``) cause downstream
+        problems in the pipeline: they get parsed as numbers when read back
+        from CSV, which breaks path/column construction. Anything that is not
+        convertible to a number is left exactly as the user typed it. An empty
+        entry is left empty so required-field validation still fires, and the
+        result of this function is itself non-numeric, so repeated
+        edits/saves never stack extra prefixes.
         """
         name = name.strip().strip('"').strip("'")
-        if not name or name.startswith("S"):
+        if not name:
             return name
-        return "S" + name
+        try:
+            float(name)
+        except ValueError:
+            return name
+        return "S_" + name
+
+    def _warn_numeric_sample_name(self, original: str, new: str) -> None:
+        """Tell the user a numeric sample name was prefixed with ``S_``.
+
+        Honours a session-level opt-out (``_skip_numeric_name_warning``) set
+        via the dialog's "Don't show this again" checkbox; the flag resets on
+        the next napari start.
+        """
+        if self._skip_numeric_name_warning:
+            return
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Numeric sample name")
+        box.setIcon(QMessageBox.Information)
+        box.setText(
+            f"Sample name '{original}' is numeric and was renamed to '{new}'.\n\n"
+            "Purely numeric sample names break parts of the pipeline (they are "
+            "read back from the metadata CSV as numbers), so 'S_' is added "
+            "automatically. Non-numeric names are never modified."
+        )
+        box.setStandardButtons(QMessageBox.Ok)
+
+        optout = QCheckBox("Don't show this again")
+        box.setCheckBox(optout)
+
+        box.exec_()
+        if optout.isChecked():
+            self._skip_numeric_name_warning = True
+
+    def _apply_sample_prefix(self, widget) -> None:
+        """Normalise a sample-name field in place, warning if it changed."""
+        original = widget.text()
+        normalised = self._ensure_sample_prefix(original)
+        if normalised == original:
+            return
+        widget.setText(normalised)
+        if normalised != original.strip().strip('"').strip("'"):
+            self._warn_numeric_sample_name(original.strip(), normalised)
 
     def _create_sample_form(self, idx: int, org_names, imm_names, oth_names, include_dead) -> dict:
         grp = QGroupBox(f"Sample {idx + 1}")
@@ -647,13 +814,14 @@ class DataPreparationTab(QWidget):
         fields["sample_name"] = QLineEdit()
         fields["sample_name"].setPlaceholderText("e.g. Sample001")
         fields["sample_name"].setToolTip(
-            "Sample names are automatically prefixed with 'S' so they are never "
-            "purely numeric (numeric names break parts of the pipeline)."
+            "Purely numeric sample names are automatically prefixed with 'S_' "
+            "(numeric names break parts of the pipeline). Any other name is "
+            "left exactly as typed."
         )
-        # Apply the 'S' prefix as soon as the user leaves the field so the
+        # Apply the 'S_' prefix as soon as the user leaves the field so the
         # change is visible in the form, not only in the saved CSV.
         fields["sample_name"].editingFinished.connect(
-            lambda w=fields["sample_name"]: w.setText(self._ensure_sample_prefix(w.text()))
+            lambda w=fields["sample_name"]: self._apply_sample_prefix(w)
         )
         layout.addRow("Name*:", fields["sample_name"])
 
@@ -1223,7 +1391,10 @@ class DataPreparationTab(QWidget):
                 if isinstance(w, QLineEdit):
                     val = w.text().strip().strip('"').strip("'")
                     if k == "sample_name":
-                        val = self._ensure_sample_prefix(val)
+                        prefixed = self._ensure_sample_prefix(val)
+                        if prefixed != val:
+                            self._warn_numeric_sample_name(val, prefixed)
+                        val = prefixed
                     row[k] = val
                 elif isinstance(w, QComboBox):
                     row[k] = w.currentText()
@@ -1361,17 +1532,24 @@ class DataPreparationTab(QWidget):
         if getattr(self, "_metadata_load_worker", None) is not None and self._metadata_load_worker.isRunning():
             return False
 
+        if warn_if_busy(self, "loading metadata"):
+            return False
+
         self.btn_load_metadata.setEnabled(False)
         self.btn_load_metadata.setText("Loading…")
         self.metadata_info_label.setText("⏳ Loading metadata…")
 
         self._metadata_load_worker = _MetadataLoadWorker(csv_path, out_dir, parent=self)
-        self._metadata_load_worker.progress.connect(lambda msg: self._log(msg))
+        self._metadata_load_worker.progress.connect(self._log, Qt.QueuedConnection)
         self._metadata_load_worker.finished.connect(self._on_metadata_load_finished)
         self._metadata_load_worker.start()
+        self._metadata_busy = begin_busy(
+            "Loading metadata", alive=self._metadata_load_worker.isRunning
+        )
         return True
 
     def _on_metadata_load_finished(self, result: dict):
+        end_busy(getattr(self, "_metadata_busy", None))
         self.btn_load_metadata.setEnabled(True)
         self.btn_load_metadata.setText("Load Metadata")
 
@@ -1417,22 +1595,46 @@ class DataPreparationTab(QWidget):
         # Emit signal for other tabs
         self.metadata_loaded.emit(self.metadata)
 
-    def _on_tracking_completed(self):
-        """Reload metadata after tracking completes to reflect new tracking outputs."""
-        csv_path = self.behav3d_parameters.get("paths", {}).get("metadata_csv", "")
+    def refresh_metadata_after_processing(self, context: str = "processing") -> bool:
+        """Reload metadata.csv from disk and re-broadcast it to every tab.
+
+        Processing tabs (Segmentation, Tracking) write new segment/track
+        columns straight to the metadata CSV.  Without this refresh the
+        Visualization tab keeps the stale frame it received at load time and
+        the user has to press "Load Metadata" by hand before the new results
+        show up.  Every run-completion hook calls this instead.
+
+        Returns ``True`` when the reload succeeded and ``metadata_loaded``
+        was emitted.
+        """
+        csv_path = (self.behav3d_parameters.get("paths", {}) or {}).get("metadata_csv", "")
+        if not csv_path:
+            csv_path = getattr(self, "_loaded_csv_path", "") or ""
         if not csv_path or not Path(csv_path).exists():
-            self._log("⚠️ Metadata file not found after tracking — cannot refresh.")
-            return
-        
+            self._log(f"⚠️ Metadata file not found after {context} — cannot refresh.")
+            return False
+
         try:
             # Reload metadata from disk
             self.metadata = load_behav3d_metadata(csv_path)
-            self._log("✅ Metadata refreshed after tracking completion")
-            
-            # Emit signal to update all tabs with new metadata
-            self.metadata_loaded.emit(self.metadata)
         except Exception as e:
-            self._log(f"❌ Error refreshing metadata after tracking: {e}")
+            self._log(f"❌ Error refreshing metadata after {context}: {e}")
+            return False
+
+        self._loaded_csv_path = csv_path
+        try:
+            self._populate_metadata_overview()
+        except Exception:
+            pass
+        self._log(f"✅ Metadata refreshed after {context}")
+
+        # Emit signal to update all tabs with new metadata
+        self.metadata_loaded.emit(self.metadata)
+        return True
+
+    def _on_tracking_completed(self):
+        """Reload metadata after tracking completes to reflect new tracking outputs."""
+        self.refresh_metadata_after_processing("tracking")
 
     # ══════════════════════════════════════════════════════════════════════
     # Section 4 – Metadata Overview
@@ -1722,9 +1924,75 @@ class DataPreparationTab(QWidget):
                 found.append({"sample_name": sample_name, "zarr_path": str(zarr_path)})
         return found
 
+    def _snapshot_original_shapes(self) -> dict:
+        """Per-sample ``{"shape": [...], "order": "..."}`` read off the
+        Dimension Order table.
+
+        The table already holds each raw image's shape and axis order (read
+        once at metadata load), so this needs no disk access. Taken before
+        conversion because ``convert_input_files_to_zarr`` rewrites
+        ``raw_image_path`` to point at the new .zarr.
+        """
+        import ast
+
+        originals = {}
+        for i in range(self.dim_table.rowCount()):
+            sample_item = self.dim_table.item(i, 0)
+            shape_item = self.dim_table.item(i, 1)
+            combo = self.dim_table.cellWidget(i, 2)
+            if sample_item is None:
+                continue
+            shape = None
+            if shape_item is not None and shape_item.text():
+                try:
+                    shape = list(ast.literal_eval(shape_item.text()))
+                except Exception:
+                    shape = None
+            originals[sample_item.text()] = {
+                "shape": shape,
+                "order": combo.currentText() if combo is not None else None,
+            }
+        return originals
+
+    def _persist_zarr_conversion(self, t_start, t_end, sample_records):
+        """Write the zarr cut + per-sample dimensions into the params file.
+
+        Recorded even when nothing was clipped, so the parameters file
+        always answers "what were the original dimensions" \u2014 the raw files
+        may be deleted right after this (see ``_offer_delete_originals``).
+        """
+        out_dir = self.output_dir_edit.text().strip() or self.output_dir
+        if not out_dir:
+            self._log("\u26a0 No output directory \u2014 zarr conversion details not recorded.")
+            return
+        try:
+            from behav3d.io.parameters import record_zarr_conversion, params_path_for
+
+            self.behav3d_parameters = record_zarr_conversion(
+                out_dir,
+                t_start=t_start,
+                t_end=t_end,
+                sample_records=sample_records or {},
+                params=self.behav3d_parameters,
+            )
+            if t_start is None and t_end is None:
+                self._log(
+                    f"\u2705 Recorded image dimensions (no clipping) in "
+                    f"{params_path_for(out_dir)}"
+                )
+            else:
+                self._log(
+                    f"\u2705 Recorded timepoint cut [{t_start}, {t_end}] and image "
+                    f"dimensions in {params_path_for(out_dir)}"
+                )
+        except Exception as e:
+            self._log(f"\u26a0 Could not record zarr conversion details: {e}")
+
     def _on_convert_zarr(self):
         if self._zarr_worker is not None:
             self._log("⚠️ Zarr conversion already running. Please wait.")
+            return
+        if warn_if_busy(self, "converting to zarr"):
             return
         out_dir = self.output_dir_edit.text().strip()
         if self.metadata is None:
@@ -1736,6 +2004,10 @@ class DataPreparationTab(QWidget):
 
         # Save dim orders first
         self._save_dim_order()
+
+        # Snapshot the pre-conversion shapes while the table still
+        # describes the raw files.
+        originals = self._snapshot_original_shapes()
 
         # Gather clipping params
         t_start = None
@@ -1782,47 +2054,57 @@ class DataPreparationTab(QWidget):
                     self.zarr_btn.setEnabled(False)
                     self.zarr_status.setText("⏳ Clipping already-converted zarr files…")
                     self._log(f"Clipping {len(already_converted)} already-converted sample(s)…")
+                    self._zarr_clip_ctx = (out_dir, t_start, t_end, originals)
                     self._zarr_clip_worker = _ZarrClipWorker(
                         already_converted, t_start, t_end, parent=self
                     )
-                    self._zarr_clip_worker.progress.connect(lambda msg: self._log(msg))
-                    self._zarr_clip_worker.finished.connect(
-                        lambda success, message: self._on_zarr_clip_done(
-                            success, message, out_dir, t_start, t_end
-                        )
-                    )
+                    self._zarr_clip_worker.progress.connect(self._log, Qt.QueuedConnection)
+                    self._zarr_clip_worker.finished.connect(self._on_zarr_clip_done, Qt.QueuedConnection)
                     self._zarr_clip_worker.start()
+                    self._zarr_busy = begin_busy(
+                        "Clipping zarr files", alive=self._zarr_clip_worker.isRunning
+                    )
                     return
                 # else: "Leave As-Is" clicked — fall through to normal conversion
 
-        self._start_zarr_conversion(out_dir, t_start, t_end)
+        self._start_zarr_conversion(out_dir, t_start, t_end, originals)
 
-    def _on_zarr_clip_done(self, success: bool, message: str,
-                            out_dir: str, t_start, t_end):
+    def _on_zarr_clip_done(self, success: bool, message: str, sample_records=None):
+        end_busy(getattr(self, "_zarr_busy", None))
+        out_dir, t_start, t_end, originals = self._zarr_clip_ctx
         self._log(message)
         if not success:
             self.zarr_btn.setEnabled(True)
             self.zarr_status.setText(message.split("\n")[0])
             return
+        # Record the clipped samples now; the conversion that follows
+        # merges its own samples into the same block.
+        self._persist_zarr_conversion(t_start, t_end, sample_records)
         # Continue with the normal conversion for any not-yet-converted samples.
-        self._start_zarr_conversion(out_dir, t_start, t_end)
+        self._start_zarr_conversion(out_dir, t_start, t_end, originals)
 
-    def _start_zarr_conversion(self, out_dir: str, t_start, t_end):
+    def _start_zarr_conversion(self, out_dir: str, t_start, t_end, originals=None):
         self.zarr_btn.setEnabled(False)
         self.zarr_status.setText("⏳ Converting…")
         self._log("Starting zarr conversion…")
 
+        self._zarr_cut = (t_start, t_end)
         self._zarr_worker = _ZarrWorker(
             out_dir, self.metadata.copy(),
             t_start=t_start, t_end=t_end,
-            n_workers=self.zarr_workers_spin.value(), parent=self
+            n_workers=self.zarr_workers_spin.value(),
+            originals=originals, parent=self
         )
-        self._zarr_worker.progress.connect(lambda msg: self._log(msg))
+        self._zarr_worker.progress.connect(self._log, Qt.QueuedConnection)
         self._zarr_worker.finished.connect(self._on_zarr_done)
         self._zarr_worker.start()
+        self._zarr_busy = begin_busy(
+            "Converting images to zarr", alive=self._zarr_worker.isRunning
+        )
 
     def _on_zarr_done(self, success: bool, message: str,
-                       updated_metadata, originals_map):
+                       updated_metadata, originals_map, sample_records=None):
+        end_busy(getattr(self, "_zarr_busy", None))
         self.zarr_btn.setEnabled(True)
         self.zarr_status.setText(message.split("\n")[0])
         self._log(message)
@@ -1865,7 +2147,13 @@ class DataPreparationTab(QWidget):
         except Exception as e:
             self._log(f"⚠ Could not auto-reload converted metadata: {e}")
 
-        # 5) Offer deletion of the now-redundant original files
+        # 5) Record the applied cut and the original/new dimensions BEFORE
+        # offering to delete the originals, so the provenance survives
+        # even if the raw files are removed in the next step.
+        t_start, t_end = self._zarr_cut
+        self._persist_zarr_conversion(t_start, t_end, sample_records)
+
+        # 6) Offer deletion of the now-redundant original files
         self._offer_delete_originals(originals_map or [])
 
     # ══════════════════════════════════════════════════════════════════════

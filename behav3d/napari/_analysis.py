@@ -3,7 +3,8 @@ BEHAV3D napari plugin – Analysis Tab.
 
 Top-level tab wrapping two sub-tabs:
 
-- **Death Dynamics** — multi-select target cell-type picker, per-target /
+- **Population Dynamics** — Death Dynamics, Interaction and Invasiveness:
+  multi-select target cell-type picker, per-target /
   combined death dynamics, interaction analysis with its own interaction
   cell-type picker, per-step Advanced Settings, and processing-queue
   integration. Disabled when no dead channel is configured in metadata
@@ -18,6 +19,7 @@ location.
 from __future__ import annotations
 
 import datetime
+import json
 import sys
 import traceback
 from pathlib import Path
@@ -35,7 +37,14 @@ from qtpy.QtWidgets import (
 from qtpy.QtCore import Qt, QUrl
 from qtpy.QtGui import QDesktopServices
 
+from behav3d.napari._background_runner import (
+    BackgroundOperation,
+    ProgressBarRow,
+    fire_extra_callback,
+    refuse_if_busy,
+)
 from behav3d.napari._pdf_view import open_pdf_in_napari
+from behav3d.napari._preview_dims import close_backprojection_legend_docks
 from behav3d.napari._results_panel import ResultsPanel
 from behav3d.core.qt_help import make_help_row, HelpButton, reset_scroll_on_page_change
 
@@ -54,6 +63,11 @@ def _period_from_spins(start_spin, end_spin):
     if start is None and end is None:
         return None
     return (start, end)
+
+
+# Sentinel for "caller did not supply a snapshot" (distinct from a snapshot
+# of ``None``, which is a valid "no grouping columns selected").
+_UNSET = object()
 
 
 def _period_from_t_radios(radio_group, start_spin, end_spin):
@@ -123,11 +137,35 @@ def _detect_cell_types(metadata_loader):
 
 
 def _has_dead_channel(metadata) -> bool:
-    return (
+    return bool(
         metadata is not None
         and "dead_channel" in metadata.columns
         and metadata["dead_channel"].notna().any()
     )
+
+
+def _provenance_sources(pdf_path: Path, out_dir: Path) -> list:
+    """Files a results PDF was built from.
+
+    Reads the ``*_provenance.json`` written next to the PDF. Outputs produced
+    before provenance existed have none, so fall back to every filtered track
+    features CSV under the output dir.
+    """
+    prov = pdf_path.with_name(f"{pdf_path.stem}_provenance.json")
+    if prov.exists():
+        try:
+            record = json.loads(prov.read_text(encoding="utf-8"))
+            paths = [s.get("path") for s in record.get("sources", []) if s.get("path")]
+            if paths:
+                return paths
+        except Exception:
+            pass
+    return [
+        str(path)
+        for path in (out_dir / "analysis").glob(
+            "*/track_features/*_combined_track_features_filtered.csv"
+        )
+    ]
 
 
 def _filtered_csv(out_dir: Path, ct: str) -> Path:
@@ -196,35 +234,67 @@ class CollapsibleSection(QWidget):
     title and only enables/disables the contents), this widget genuinely
     hides the body when collapsed and exposes a simple ``contentLayout()``
     for callers to populate.
+
+    Pass ``highlight=True`` for a main pipeline step (e.g. "Step 1 — ...")
+    so it reads as more prominent than minor subsections like "Feature
+    Selection" or "Advanced Configuration".
     """
 
-    def __init__(self, title: str, *, expanded: bool = False, parent=None):
+    def __init__(self, title: str, *, expanded: bool = False, highlight: bool = False, parent=None):
         super().__init__(parent)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(2)
 
+        # Outer "card" — always visible (collapsed or expanded) so the section
+        # reads as a distinct, clickable box rather than plain text.
+        card = QFrame()
+        card.setObjectName("collapsibleCard")
+        if highlight:
+            card.setStyleSheet(
+                "QFrame#collapsibleCard { background: #1b2b3a; "
+                "border: 1px solid #3a6ea5; border-radius: 6px; }"
+            )
+        else:
+            card.setStyleSheet(
+                "QFrame#collapsibleCard { background: #2a2a2e; "
+                "border: 1px solid #3a3a40; border-radius: 6px; }"
+            )
+        outer.addWidget(card)
+
+        card_lay = QVBoxLayout(card)
+        card_lay.setContentsMargins(4, 4, 4, 4)
+        card_lay.setSpacing(2)
+
         self._toggle = QToolButton()
-        self._toggle.setStyleSheet(
-            "QToolButton { border: none; font-weight: bold; color: #ddd; "
-            "background: transparent; padding: 2px; text-align: left; }"
-            "QToolButton:hover { color: #fff; }"
-        )
+        if highlight:
+            self._toggle.setStyleSheet(
+                "QToolButton { border: none; font-weight: bold; font-size: 13px; "
+                "color: #ddeeff; background: transparent; padding: 2px; text-align: left; }"
+                "QToolButton:hover { color: #fff; }"
+            )
+        else:
+            self._toggle.setStyleSheet(
+                "QToolButton { border: none; font-weight: bold; color: #ddd; "
+                "background: transparent; padding: 2px; text-align: left; }"
+                "QToolButton:hover { color: #fff; }"
+            )
         self._toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self._toggle.setCheckable(True)
         self._toggle.setChecked(expanded)
         self._toggle.setText(title)
         self._toggle.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._toggle.setCursor(Qt.PointingHandCursor)
         self._toggle.clicked.connect(self._on_toggled)
-        outer.addWidget(self._toggle)
+        card_lay.addWidget(self._toggle)
 
         self._content = QFrame()
         self._content.setFrameShape(QFrame.NoFrame)
         self._content_layout = QVBoxLayout(self._content)
         self._content_layout.setContentsMargins(12, 2, 4, 4)
         self._content_layout.setSpacing(4)
-        outer.addWidget(self._content)
+        card_lay.addWidget(self._content)
         self._content.setVisible(expanded)
 
         self._update_arrow()
@@ -246,6 +316,9 @@ class CollapsibleSection(QWidget):
 
     def addLayout(self, lay):
         self._content_layout.addLayout(lay)
+
+    def setTitle(self, title: str):
+        self._toggle.setText(title)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -328,6 +401,22 @@ class DualListGroupSelector(QWidget):
             else:
                 self.list_left.addItem(item)
 
+    def set_membership(self, left: Iterable[str], right: Iterable[str], excluded: Iterable[str]):
+        """Move the listed items that are present into "Group 1" / "Group 2" / "Don't use";
+        items not mentioned stay where they are."""
+        lists = (self.list_left, self.list_right, self.list_excluded)
+        dest = {}
+        for idx, items in enumerate((left, right, excluded)):
+            dest.update({str(item): idx for item in items})
+        buckets = ([], [], [])
+        for idx, lst in enumerate(lists):
+            for i in range(lst.count()):
+                text = lst.item(i).text()
+                buckets[dest.get(text, idx)].append(text)
+        for lst, texts in zip(lists, buckets):
+            lst.clear()
+            lst.addItems(texts)
+
     def left_items(self) -> list[str]:
         return [self.list_left.item(i).text() for i in range(self.list_left.count())]
 
@@ -342,10 +431,10 @@ class DualListGroupSelector(QWidget):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Death Dynamics sub-tab
+# Population Dynamics sub-tab
 # ═══════════════════════════════════════════════════════════════════════════
-class DeathDynamicsTab(QWidget):
-    """Death dynamics + interaction analysis controls.
+class PopulationDynamicsTab(QWidget):
+    """Population dynamics controls: Death Dynamics, Interaction, Invasiveness.
 
     UI structure
     ------------
@@ -365,6 +454,12 @@ class DeathDynamicsTab(QWidget):
         self._interaction_checks: dict[str, QCheckBox] = {}
         self._interaction_labels: dict[str, QLabel] = {}
         self._target_meta: dict[str, dict] = {}
+
+        # Every Run (GUI click or Processing Queue step) executes its
+        # ``run_*_for`` body on a worker thread through this operation, which
+        # also provides the double-click / cross-tab busy guard and disables
+        # the Run buttons while a job is in flight.
+        self._bg = BackgroundOperation(self)
 
         # Queue button placeholders (wired by ``_widget``)
         self.btn_queue_dd_single = QPushButton("+🛒")
@@ -440,7 +535,7 @@ class DeathDynamicsTab(QWidget):
     def _init_ui(self):
         from behav3d.napari._guided import GuidedPanel, make_back_header
         from behav3d.napari.analysis_guided_copy import (
-            DEATH_DYNAMICS_ANALYSES, GUIDED_INTRO,
+            POPULATION_DYNAMICS_ANALYSES, GUIDED_INTRO,
         )
 
         outer = QVBoxLayout(self)
@@ -453,7 +548,7 @@ class DeathDynamicsTab(QWidget):
 
         # Page 0 — Guided explainers.
         self._guided_panel = GuidedPanel(
-            DEATH_DYNAMICS_ANALYSES,
+            POPULATION_DYNAMICS_ANALYSES,
             start_cb=self._on_guided_start,
             intro=GUIDED_INTRO,
         )
@@ -467,7 +562,7 @@ class DeathDynamicsTab(QWidget):
         form_outer.setContentsMargins(0, 0, 0, 0)
         form_outer.setSpacing(0)
         back_bar, self._focus_title = make_back_header(
-            on_back=lambda: self._stack.setCurrentIndex(0)
+            on_back=self.show_overview
         )
         form_outer.addWidget(back_bar)
         scroll = QScrollArea()
@@ -1024,6 +1119,9 @@ class DeathDynamicsTab(QWidget):
         self.run_all_container.setLayout(run_all_row)
         layout.addWidget(self.run_all_container)
 
+        self.progress_row = ProgressBarRow()
+        layout.addWidget(self.progress_row)
+
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setMaximumHeight(140)
@@ -1038,9 +1136,14 @@ class DeathDynamicsTab(QWidget):
 
         # Always land on the Guided overview; a specific analysis's settings
         # are only reached via that analysis's Start button.
-        self._stack.setCurrentIndex(0)
+        self.show_overview()
 
     # ── Guided overview / focused settings ──────────────────────────────────
+    def show_overview(self):
+        """Return to the Guided overview with no analysis focused."""
+        self._focused_analysis_id = ""
+        self._stack.setCurrentIndex(0)
+
     def _on_guided_start(self, analysis_id: str):
         """Start from a Guided card: show only that analysis's settings."""
         self._focus_step(analysis_id)
@@ -1080,6 +1183,10 @@ class DeathDynamicsTab(QWidget):
 
     # ── Log ─────────────────────────────────────────────────────────────
     def _log(self, msg: str):
+        from behav3d.napari._background_runner import redispatch_to_gui_thread
+
+        if redispatch_to_gui_thread(self._log, msg):
+            return
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         self.log_box.append(f"[{ts}] {msg}")
         self.log_box.verticalScrollBar().setValue(
@@ -1650,11 +1757,33 @@ class DeathDynamicsTab(QWidget):
             traceback.print_exc()
             self._log(f"Could not open PDF in napari: {e}")
 
+    def _warn_if_stale(self, pdf_path: Path):
+        """Log a warning when a results PDF predates its own input data.
+
+        Re-running Filtering rewrites the track features without touching the
+        Death Dynamics outputs, which then silently disagree with the data
+        sitting next to them.
+        """
+        from behav3d.analysis.organoid_analysis import is_output_stale
+
+        try:
+            out_dir = Path(self.metadata_loader.output_dir).expanduser()
+            sources = _provenance_sources(pdf_path, out_dir)
+            if sources and is_output_stale(pdf_path, sources):
+                self._log(
+                    f"⚠ {pdf_path.name} is older than the track features it was "
+                    f"built from — re-run this step to refresh it."
+                )
+        except Exception:
+            pass
+
     def _on_view_clicked(self, kind: str):
         candidates = self._view_pdf_candidates(kind)
         existing = [(lbl, p) for (lbl, p) in candidates if p.exists()]
         if not existing:
             return
+        for _lbl, path in existing:
+            self._warn_if_stale(path)
         if len(existing) == 1:
             self._open_pdf_in_napari(existing[0][1])
             return
@@ -1760,13 +1889,92 @@ class DeathDynamicsTab(QWidget):
         except Exception as e:
             self._log(f"Could not show results-folder dialog: {e}")
 
+    # ── Re-entrancy guard ────────────────────────────────────────────────
+    def _try_begin_analysis_run(self) -> bool:
+        """Refuse to start a Run while any background work is in flight.
+
+        Call first in every Run handler. Covers this tab's own job
+        (double-click), other tabs' jobs and the Processing Queue, and shows
+        the shared "please wait" dialog.
+        """
+        return not refuse_if_busy(self, "starting an analysis")
+
+    def _analysis_run_buttons(self) -> list:
+        return [
+            self.btn_run_dd_single, self.btn_run_dd_combined,
+            self.btn_run_ia_single, self.btn_run_ia_combined,
+            self.btn_run_inv, self.btn_run_all,
+        ]
+
+    def _end_analysis_run(self):
+        """Restore each button's real readiness state (data-availability
+        gating) after a run, rather than blindly re-enabling them."""
+        self._refresh_button_states()
+        self._refresh_invasiveness_buttons()
+
+    def run_in_background(self, work, *, desc, on_done=None, extra_callbacks=None):
+        """Run ``work()`` on a worker thread and finish up on the GUI thread.
+
+        ``work`` must be a closure over values already snapshotted from
+        widgets (it must not touch Qt objects); it typically calls one of the
+        ``run_*_for`` methods. ``on_done(result)`` runs on the GUI thread for
+        UI follow-ups such as offering the results folder. ``extra_callbacks``
+        is the Processing Queue's ``{"on_done", "on_failed"}`` hook.
+
+        Returns ``True`` when the job was started.
+        """
+        if self._bg.is_running():
+            self._log("⚠ An analysis is already running.")
+            fire_extra_callback(extra_callbacks, "on_failed", "already running")
+            return False
+
+        def _done(result):
+            try:
+                if on_done is not None:
+                    on_done(result)
+            except Exception as e:
+                traceback.print_exc()
+                self._log(f"Error finishing {desc}: {e}")
+            finally:
+                self._notify_results_changed()
+                self._end_analysis_run()
+            fire_extra_callback(extra_callbacks, "on_done", result)
+
+        def _failed(err):
+            self._log(f"❌ {desc} failed: {err}")
+            self._notify_results_changed()
+            self._end_analysis_run()
+            fire_extra_callback(extra_callbacks, "on_failed", str(err))
+
+        self._bg.run(
+            fn=lambda: work(),
+            desc=f"{desc}…",
+            progress_row=self.progress_row,
+            buttons=self._analysis_run_buttons(),
+            viewer=self.viewer,
+            on_done=_done,
+            on_failed=_failed,
+            inject_progress=False,
+            indeterminate=True,
+        )
+        return True
+
+    def _selected_dd_group_cols(self):
+        """Death-dynamics grouping columns (GUI thread only)."""
+        return [
+            item.text() for item in self.list_dd_group_cols.selectedItems()
+        ] or None
+
     # ── Click handlers ─────────────────────────────────────────────────
     def _on_run_dd_single(self):
         targets = self._selected_targets()
         if not targets:
             return
-        try:
-            ok = self.run_death_dynamics_for(targets, interactive=True)
+        if not self._try_begin_analysis_run():
+            return
+        group_cols = self._selected_dd_group_cols()
+
+        def _after(ok):
             if ok:
                 out_dir = Path(self.metadata_loader.output_dir).expanduser()
                 if len(targets) == 1:
@@ -1774,15 +1982,23 @@ class DeathDynamicsTab(QWidget):
                 else:
                     folder = out_dir / "analysis"
                 self._offer_open_results_folder(folder, what="Death Dynamics")
-        finally:
-            self._notify_results_changed()
+
+        self.run_in_background(
+            lambda: self.run_death_dynamics_for(
+                targets, interactive=True, group_cols=group_cols,
+            ),
+            desc="Death Dynamics",
+            on_done=_after,
+        )
 
     def _on_run_dd_combined(self):
         targets = self._selected_targets()
         if len(targets) < 2:
             return
-        try:
-            ok = self.run_multi_organoid_death_for(targets, interactive=True)
+        if not self._try_begin_analysis_run():
+            return
+
+        def _after(ok):
             if ok:
                 folder = (
                     Path(self.metadata_loader.output_dir).expanduser()
@@ -1792,45 +2008,60 @@ class DeathDynamicsTab(QWidget):
                 self._offer_open_results_folder(
                     folder, what="Combined Death Dynamics"
                 )
-        finally:
-            self._notify_results_changed()
+
+        self.run_in_background(
+            lambda: self.run_multi_organoid_death_for(targets, interactive=True),
+            desc="Combined Death Dynamics",
+            on_done=_after,
+        )
 
     def _on_run_ia_single(self):
         targets = self._selected_targets()
         interactions = self._selected_interactions()
         if not targets or not interactions:
             return
+        if not self._try_begin_analysis_run():
+            return
         self._persist_advanced()
-        try:
-            self.run_interaction_for(
+        group_by_lc = self.check_group_by_lc.isChecked()
+        self.run_in_background(
+            lambda: self.run_interaction_for(
                 targets,
                 interactions,
-                group_by_line_condition=self.check_group_by_lc.isChecked(),
+                group_by_line_condition=group_by_lc,
                 interactive=True,
-            )
-        finally:
-            self._notify_results_changed()
+                show_plots=False,
+            ),
+            desc="Interaction Analysis",
+        )
 
     def _on_run_ia_combined(self):
         targets = self._selected_targets()
         interactions = self._selected_interactions()
         if not targets or not interactions:
             return
+        if not self._try_begin_analysis_run():
+            return
         self._persist_advanced()
-        try:
-            self.run_multi_organoid_interaction_for(
-                targets,
-                interactions,
-                time_window_min=int(self.spin_time_window.value()),
-                group_by=self.combo_group_by.currentData() or "organoid_type",
-                annotate_line_condition=self.check_annotate_lc.isChecked(),
-                analysis_period_t=_period_from_t_radios(
-                    self.period_radio_group, self.spin_period_start_t, self.spin_period_end_t,
-                ),
-                interactive=True,
-            )
-        finally:
-            self._notify_results_changed()
+        ia_kwargs = self._collect_ia_combined_kwargs()
+        self.run_in_background(
+            lambda: self.run_multi_organoid_interaction_for(
+                targets, interactions, interactive=True, show_plots=False,
+                **ia_kwargs,
+            ),
+            desc="Interaction Overview",
+        )
+
+    def _collect_ia_combined_kwargs(self) -> dict:
+        """Snapshot the Interaction Overview widgets (GUI thread only)."""
+        return dict(
+            time_window_min=int(self.spin_time_window.value()),
+            group_by=self.combo_group_by.currentData() or "organoid_type",
+            annotate_line_condition=self.check_annotate_lc.isChecked(),
+            analysis_period_t=_period_from_t_radios(
+                self.period_radio_group, self.spin_period_start_t, self.spin_period_end_t,
+            ),
+        )
 
     def _on_run_all_clicked(self):
         targets = self._selected_targets()
@@ -1838,37 +2069,50 @@ class DeathDynamicsTab(QWidget):
         if not targets:
             self._log("Select at least one target.")
             return
-        has_dead = _has_dead_channel(self.metadata_loader.metadata)
-        dd_any_ok = False
-        if has_dead:
-            dd_any_ok |= bool(self.run_death_dynamics_for(targets, interactive=True))
-            if len(targets) >= 2:
-                dd_any_ok |= bool(
-                    self.run_multi_organoid_death_for(targets, interactive=True)
-                )
+        if not self._try_begin_analysis_run():
+            return
+        # Snapshot every widget value on the GUI thread; the four stages then
+        # run back to back in a single worker.
         if interactions:
             self._persist_advanced()
-            self.run_interaction_for(
-                targets,
-                interactions,
-                group_by_line_condition=self.check_group_by_lc.isChecked(),
-                interactive=True,
-            )
-            self.run_multi_organoid_interaction_for(
-                targets,
-                interactions,
-                time_window_min=int(self.spin_time_window.value()),
-                group_by=self.combo_group_by.currentData() or "organoid_type",
-                annotate_line_condition=self.check_annotate_lc.isChecked(),
-                analysis_period_t=_period_from_t_radios(
-                    self.period_radio_group, self.spin_period_start_t, self.spin_period_end_t,
-                ),
-                interactive=True,
-            )
-        if dd_any_ok:
-            folder = Path(self.metadata_loader.output_dir).expanduser() / "analysis"
-            self._offer_open_results_folder(folder, what="Death Dynamics")
-        self._notify_results_changed()
+        group_cols = self._selected_dd_group_cols()
+        group_by_lc = self.check_group_by_lc.isChecked()
+        ia_kwargs = self._collect_ia_combined_kwargs()
+
+        def _work():
+            has_dead = _has_dead_channel(self.metadata_loader.metadata)
+            dd_any_ok = False
+            if has_dead:
+                dd_any_ok |= bool(self.run_death_dynamics_for(
+                    targets, interactive=True, group_cols=group_cols,
+                ))
+                if len(targets) >= 2:
+                    dd_any_ok |= bool(
+                        self.run_multi_organoid_death_for(targets, interactive=True)
+                    )
+            if interactions:
+                self.run_interaction_for(
+                    targets,
+                    interactions,
+                    group_by_line_condition=group_by_lc,
+                    interactive=True,
+                    show_plots=False,
+                )
+                self.run_multi_organoid_interaction_for(
+                    targets,
+                    interactions,
+                    interactive=True,
+                    show_plots=False,
+                    **ia_kwargs,
+                )
+            return dd_any_ok
+
+        def _after(dd_any_ok):
+            if dd_any_ok:
+                folder = Path(self.metadata_loader.output_dir).expanduser() / "analysis"
+                self._offer_open_results_folder(folder, what="Death Dynamics")
+
+        self.run_in_background(_work, desc="Run All Analyses", on_done=_after)
 
     # ── Public run methods (called by queue) ───────────────────────────
     def run_death_dynamics_for(
@@ -1876,9 +2120,15 @@ class DeathDynamicsTab(QWidget):
         cell_types: Iterable[str],
         *,
         interactive: bool = True,
+        group_cols=_UNSET,
     ) -> bool:
         """Run per-target Death Dynamics. Returns True if at least one
         target completed successfully.
+
+        These ``run_*_for`` methods run on a worker thread (see
+        :meth:`run_in_background`) and so must not touch Qt widgets. Pass
+        ``group_cols`` snapshotted on the GUI thread; the default reads the
+        widget and is only safe when called from the GUI thread.
 
         Skips any target whose filtered CSV is missing or lacks the
         ``dead`` column with a friendly log message, so the queue can
@@ -1896,9 +2146,9 @@ class DeathDynamicsTab(QWidget):
             return False
         out_dir_path = Path(self.metadata_loader.output_dir).expanduser()
         out_dir = str(out_dir_path)
-        selected_group_cols = [
-            item.text() for item in self.list_dd_group_cols.selectedItems()
-        ] or None
+        selected_group_cols = (
+            self._selected_dd_group_cols() if group_cols is _UNSET else group_cols
+        )
         any_ok = False
         for ct in cts:
             csv = _filtered_csv(out_dir_path, ct)
@@ -2025,8 +2275,12 @@ class DeathDynamicsTab(QWidget):
         *,
         group_by_line_condition: bool = False,
         interactive: bool = True,
+        show_plots: bool | None = None,
     ):
         from behav3d.analysis.interaction_analysis import run_interaction_analysis
+
+        if show_plots is None:
+            show_plots = interactive
 
         cts = list(cell_types)
         ints = list(interaction_cell_types)
@@ -2055,7 +2309,7 @@ class DeathDynamicsTab(QWidget):
                     cell_type=ct,
                     interacting_cell_types=selected,
                     df_tracks_path=str(csv),
-                    show_plots=interactive,
+                    show_plots=show_plots,
                     group_by_line_condition=group_by_line_condition,
                 )
                 self._log(f"✅ Interaction Analysis complete for {ct}.")
@@ -2075,6 +2329,7 @@ class DeathDynamicsTab(QWidget):
         annotate_line_condition: bool = False,
         analysis_period_t: tuple = None,
         interactive: bool = True,
+        show_plots: bool | None = None,
     ):
         """Run Interaction Overview.
 
@@ -2088,6 +2343,8 @@ class DeathDynamicsTab(QWidget):
             run_multi_organoid_interaction_comparison,
         )
 
+        if show_plots is None:
+            show_plots = interactive
         cts = list(cell_types)
         ints = list(interaction_cell_types)
         if not cts or not ints:
@@ -2142,7 +2399,7 @@ class DeathDynamicsTab(QWidget):
                 time_window_min=float(time_window_min),
                 analysis_period_t=analysis_period_t,
                 annotate_line_condition=annotate_line_condition,
-                show_plots=interactive,
+                show_plots=show_plots,
             )
             self._log("✅ Interaction Overview complete.")
         except Exception as e:
@@ -2257,17 +2514,15 @@ class DeathDynamicsTab(QWidget):
         targets = self._selected_invasiveness_targets()
         if not immune_list or not targets:
             return
-        try:
-            ok = self.run_invasiveness_for(
-                immune_list,
-                targets,
-                summary_stat=self.inv_summary_combo.currentData() or "mean",
-                group_by_line_condition=self.check_inv_group_by_lc.isChecked(),
-                analysis_period_t=_period_from_t_radios(
-                    self.inv_period_radio_group, self.spin_inv_start_t, self.spin_inv_end_t,
-                ),
-                interactive=True,
-            )
+        if not self._try_begin_analysis_run():
+            return
+        summary_stat = self.inv_summary_combo.currentData() or "mean"
+        group_by_lc = self.check_inv_group_by_lc.isChecked()
+        period_t = _period_from_t_radios(
+            self.inv_period_radio_group, self.spin_inv_start_t, self.spin_inv_end_t,
+        )
+
+        def _after(ok):
             if ok:
                 base = Path(self.metadata_loader.output_dir).expanduser() / "analysis"
                 folder = (
@@ -2277,8 +2532,20 @@ class DeathDynamicsTab(QWidget):
                 self._offer_open_results_folder(
                     folder, what="Invasiveness Analysis"
                 )
-        finally:
-            self._notify_results_changed()
+
+        self.run_in_background(
+            lambda: self.run_invasiveness_for(
+                immune_list,
+                targets,
+                summary_stat=summary_stat,
+                group_by_line_condition=group_by_lc,
+                analysis_period_t=period_t,
+                interactive=True,
+                show_plots=False,
+            ),
+            desc="Invasiveness Analysis",
+            on_done=_after,
+        )
 
     def run_invasiveness_for(
         self,
@@ -2289,6 +2556,7 @@ class DeathDynamicsTab(QWidget):
         group_by_line_condition: bool = False,
         analysis_period_t: tuple = None,
         interactive: bool = True,
+        show_plots: bool | None = None,
     ) -> bool:
         """Run invasiveness analysis for one or more immune cell types vs
         targets. ``immune_cell_types`` may be a single string or a list.
@@ -2300,6 +2568,8 @@ class DeathDynamicsTab(QWidget):
             run_invasiveness_analysis,
         )
 
+        if show_plots is None:
+            show_plots = interactive
         if isinstance(immune_cell_types, str):
             immune_list = [immune_cell_types]
         else:
@@ -2325,7 +2595,7 @@ class DeathDynamicsTab(QWidget):
                 immune_cell_types=present,
                 targets=tgts,
                 summary_stat=summary_stat,
-                show_plots=interactive,
+                show_plots=show_plots,
                 group_by_line_condition=group_by_line_condition,
                 analysis_period_t=analysis_period_t,
                 organoid_types=list(organoid_types),
@@ -2362,7 +2632,7 @@ from behav3d.napari._feature_backprojection import FeatureBackprojectionTab  # n
 # Outer Analysis tab
 # ═══════════════════════════════════════════════════════════════════════════
 class AnalysisTab(QWidget):
-    """Outer tab wrapping Death Dynamics + (placeholder) Single Cell.
+    """Outer tab wrapping Feature Backprojection, Population Dynamics and Single Cell.
 
     Hosts a shared :class:`ResultsPanel` under a vertical splitter so the
     panel is visible from both inner sub-tabs.
@@ -2410,7 +2680,7 @@ class AnalysisTab(QWidget):
         # ── Cell type grouping ──────────────────────────────────────────
         # Sits above both subtabs: grouping merges already-*filtered*
         # populations (see behav3d.analysis.grouping), so it belongs after
-        # Filtering and before Death Dynamics / Single Cell, not before
+        # Filtering and before Population Dynamics / Single Cell, not before
         # Feature Extraction — that would duplicate feature
         # extraction/filtering work for every group.
         grouping_row = QHBoxLayout()
@@ -2418,7 +2688,7 @@ class AnalysisTab(QWidget):
         self.btn_open_grouping = QPushButton("🧬  Group cells together for analysis…")
         self.btn_open_grouping.setToolTip(
             "Merge several already-filtered cell types into a single "
-            "'{name}_merged' population for Death Dynamics / Single Cell.\n"
+            "'{name}_merged' population for Population Dynamics / Single Cell.\n"
             "Metadata is not modified — only behav3d_parameters.yml and a "
             "merged filtered CSV are written."
         )
@@ -2434,7 +2704,7 @@ class AnalysisTab(QWidget):
         grouping_row.addWidget(HelpButton(
             "Group cells together for analysis",
             "Combine several already-filtered cell types (e.g. CD4 T cells + "
-            "CD8 T cells) into one merged population you can run Death "
+            "CD8 T cells) into one merged population you can run Population "
             "Dynamics / Single Cell on as a single group.\n\n"
             "Each cell keeps its original type too — a new 'origin_cell_type' "
             "column records which type it came from, so you can still split "
@@ -2451,16 +2721,23 @@ class AnalysisTab(QWidget):
 
         self.inner_tabs = QTabWidget()
         self.splitter.addWidget(self.inner_tabs)
+        # Entering another analysis page triggers reloads / scans; refuse the switch
+        # while background work is running.
+        from behav3d.napari._background_runner import install_busy_guard
+
+        self._inner_tabs_busy_guard = install_busy_guard(
+            self.inner_tabs, owner=self, what="switching analysis pages"
+        )
 
         self.feature_backprojection_tab = FeatureBackprojectionTab(
             viewer=viewer, metadata_loader=metadata_loader, parent=self
         )
         self.inner_tabs.addTab(self.feature_backprojection_tab, "🔬 Feature Backprojection")
 
-        self.death_dynamics_tab = DeathDynamicsTab(
+        self.population_dynamics_tab = PopulationDynamicsTab(
             viewer=viewer, metadata_loader=metadata_loader, parent=self
         )
-        self.inner_tabs.addTab(self.death_dynamics_tab, "💀 Death Dynamics")
+        self.inner_tabs.addTab(self.population_dynamics_tab, "👥 Population Dynamics")
 
         self.single_cell_tab = SingleCellTab(
             viewer=viewer, metadata_loader=metadata_loader, parent=self
@@ -2482,7 +2759,13 @@ class AnalysisTab(QWidget):
         # Re-scan when the user switches sub-tab so new outputs show up
         # without an explicit refresh click.
         self.inner_tabs.currentChanged.connect(
-            lambda _i: self.results_panel.refresh()
+            lambda _i: self.results_panel.refresh_if_stale()
+        )
+        # Leaving Single Cell's backprojection sub-tabs for another inner tab
+        # (Feature Backprojection, Population Dynamics) shouldn't leave a
+        # stale state/track legend dock cluttering the viewer.
+        self.inner_tabs.currentChanged.connect(
+            lambda _i: close_backprojection_legend_docks(self.viewer)
         )
 
         self.stack.addWidget(self.main_content)
@@ -2510,33 +2793,108 @@ class AnalysisTab(QWidget):
             self.metadata_loader is not None
             and getattr(self.metadata_loader, "metadata", None) is not None
         )
+        # Every inner tab and the Results panel connected to ``metadata_loaded``
+        # before this slot, so they have all just refreshed: remember what
+        # the outputs looked like so the first switch to this tab doesn't
+        # redo that work.
+        self._refreshed_fingerprint = self._refresh_fingerprint()
+
+    def _refresh_fingerprint(self) -> tuple:
+        """Stat-only snapshot of every output the inner tabs inspect.
+
+        The inner tabs show which outputs exist (filtered CSVs, track-feature
+        CSVs, behavioral-state / track h5ads) and a refresh re-reads them, so
+        the snapshot holds the path, mtime and size of each of those files plus
+        the mtime of the folders that gain new files. A handful of ``stat``
+        calls per cell type; never reads file contents.
+        """
+        loader = self.metadata_loader
+        out = getattr(loader, "output_dir", None) if loader is not None else None
+        if not out or getattr(loader, "metadata", None) is None:
+            return (None,)
+        out = Path(str(out)).expanduser()
+
+        def _st(p):
+            try:
+                st = Path(p).stat()
+                return (str(p), st.st_mtime_ns, st.st_size)
+            except OSError:
+                return (str(p), None, None)
+
+        try:
+            org, imm, oth = _detect_cell_types(loader)
+        except Exception:
+            org, imm, oth = [], [], []
+        track_tab = getattr(getattr(self, "single_cell_tab", None), "track_tab", None)
+        parts = [("out", str(out), id(getattr(loader, "metadata", None)))]
+        for ct in list(org) + list(imm) + list(oth):
+            base = out / "analysis" / ct
+            parts.append(_st(base))
+            parts.append(_st(base / "track_features"))
+            parts.append(_st(_filtered_csv(out, ct)))
+            parts.append(_st(
+                base / "track_features" / f"BEHAV3D_{ct}_combined_track_features.csv"
+            ))
+            states = base / "behavioral_states"
+            parts.append(_st(states))
+            parts.append(_st(states / f"BEHAV3D_{ct}_behavioral_states.h5ad"))
+            parts.append(_st(states / "processing"))
+            parts.append(_st(
+                states / "processing" / f"BEHAV3D_{ct}_behavioral_states_modeldata.h5ad"
+            ))
+            if track_tab is not None:
+                try:
+                    tpath = track_tab._track_adata_path(ct)
+                except Exception:
+                    tpath = None
+                if tpath:
+                    parts.append(_st(tpath))
+                    parts.append(_st(Path(tpath).parent))
+        return tuple(parts)
+
+    def refresh_if_stale(self) -> bool:
+        """Refresh the inner tabs only if something they show has changed
+        since they were last refreshed. Called on every switch to this tab;
+        before, every switch re-ran the whole refresh cascade (CSV header reads,
+        h5ad reads, panel rebuilds) even when nothing had changed. Returns
+        ``True`` when a refresh ran."""
+        if self._refresh_fingerprint() == getattr(self, "_refreshed_fingerprint", None):
+            return False
+        self._on_metadata_updated()
+        return True
 
     def _on_metadata_updated(self, *_):
         """Cascade metadata updates to inner tabs and results panel."""
         if hasattr(self, "feature_backprojection_tab"):
             self.feature_backprojection_tab._on_metadata_updated()
-        if hasattr(self, "death_dynamics_tab"):
-            self.death_dynamics_tab._on_metadata_updated()
+        if hasattr(self, "population_dynamics_tab"):
+            self.population_dynamics_tab._on_metadata_updated()
         if hasattr(self, "single_cell_tab"):
             self.single_cell_tab._on_metadata_updated()
         if hasattr(self, "results_panel"):
-            self.results_panel.refresh()
+            self.results_panel.refresh_if_stale()
+        # Taken after the cascade: it may create folders (mkdir) that would
+        # otherwise make the very next check look stale.
+        self._refreshed_fingerprint = self._refresh_fingerprint()
 
     # ── Cell type grouping ────────────────────────────────────────────────
     def _on_open_grouping_dialog(self):
         """Open the cell-type grouping dialog and refresh cell-type
-        dropdowns (Death Dynamics / Single Cell) on success."""
+        dropdowns (Population Dynamics / Single Cell) on success."""
         from behav3d.napari._grouping_dialog import GroupBuilderDialog
 
         if self.metadata_loader is None or self.metadata_loader.metadata is None:
             return
 
         dlg = GroupBuilderDialog(self.metadata_loader, parent=self)
+        ctrl = getattr(self, "workers_ctrl", None)
+        if ctrl is not None and hasattr(dlg, "spin_workers"):
+            ctrl.link(dlg.spin_workers)
         dlg.group_created.connect(self._on_group_changed)
         dlg.group_removed.connect(self._on_group_changed)
         dlg.exec_()
 
     def _on_group_changed(self, group_id: str):
-        """Slot: refresh Death Dynamics / Single Cell dropdowns after a
+        """Slot: refresh Population Dynamics / Single Cell dropdowns after a
         group is created or removed."""
         self._on_metadata_updated()
