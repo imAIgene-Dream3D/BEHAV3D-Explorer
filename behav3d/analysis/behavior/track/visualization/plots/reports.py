@@ -85,6 +85,8 @@ from behav3d.analysis.behavior.general.visualization.plots.proportion_bars impor
     compute_class_by_stack_proportions,
     compute_condition_diff_stats_pairwise,
     legend_layout,
+    legend_max_ncol_for_width,
+    wrap_title_to_width,
     plot_condition_diff_grid,
     plot_condition_diff_grid_2d,
     plot_page_stacked_proportion_barh_grid,
@@ -484,7 +486,18 @@ def _plot_page_class_stack_grid(
     """
     panel_w_in = panel_w_in if panel_w_in is not None else max(0.45 * len(class_order), _STACK_GRID_MIN_PANEL_W_IN)
     panel_h_in = _STACK_GRID_PANEL_H_IN
-    legend_ncol, _, legend_margin_in = legend_layout(len(stack_order), base_margin_in=_STACK_GRID_BOTTOM_MARGIN_IN)
+
+    def _layout(fig_w, title_str):
+        # Legend columns and title lines both depend on the final figure width — on a narrow
+        # single-column grid an unwrapped title runs into the column headers and a one-row
+        # legend runs off both page edges.
+        max_ncol = legend_max_ncol_for_width(stack_order, fig_w, fontsize=7)
+        legend_ncol, _, legend_margin_in = legend_layout(
+            len(stack_order), max_ncol=max_ncol, base_margin_in=_STACK_GRID_BOTTOM_MARGIN_IN,
+        )
+        wrapped, n_lines = wrap_title_to_width(title_str, fig_w, fontsize=10)
+        top_margin_in = max(_GRID_TOP_MARGIN_IN, 0.2 + 0.2 * n_lines)
+        return legend_ncol, legend_margin_in, wrapped, top_margin_in
 
     if len(facet_cols) == 2:
         if axis_cols is not None:
@@ -498,7 +511,9 @@ def _plot_page_class_stack_grid(
         ncols_data = max(1, len(col_x_vals))
 
         fig_w = _GRID_HEADER_W_IN + ncols_data * panel_w_in
-        fig_h = _GRID_TOP_MARGIN_IN + _GRID_HEADER_H_IN + nrows_data * panel_h_in + legend_margin_in
+        title_str = f"{title} — {col_x} (columns) × {col_y} (rows)"
+        legend_ncol, legend_margin_in, title_str, top_margin_in = _layout(fig_w, title_str)
+        fig_h = top_margin_in + _GRID_HEADER_H_IN + nrows_data * panel_h_in + legend_margin_in
         fig = plt.figure(figsize=(fig_w, fig_h))
         outer = GridSpec(
             nrows=nrows_data + 1,
@@ -508,7 +523,7 @@ def _plot_page_class_stack_grid(
             width_ratios=[_GRID_HEADER_W_IN] + [panel_w_in] * ncols_data,
             hspace=1.1,
             wspace=0.35,
-            top=1.0 - _GRID_TOP_MARGIN_IN / fig_h,
+            top=1.0 - top_margin_in / fig_h,
             bottom=legend_margin_in / fig_h,
         )
 
@@ -547,16 +562,18 @@ def _plot_page_class_stack_grid(
                 draw_stacked_proportion_barv(ax, data_by_facet[key], class_order, stack_order, colors, ymax=1.0)
                 if c > 0:
                     ax.set_yticklabels([])
-
-        title_str = f"{title} — {col_x} (columns) × {col_y} (rows)"
+                else:
+                    ax.set_ylabel("Fraction of tracks", fontsize=7)
 
     else:
         col_y = facet_cols[0]
         col_y_vals = unique_vals_per_col[col_y]
         nrows_data = max(1, len(col_y_vals))
 
-        fig_w = max(panel_w_in, _STACK_GRID_MIN_PANEL_W_IN)
-        fig_h = _GRID_TOP_MARGIN_IN + nrows_data * panel_h_in + legend_margin_in
+        # Wider than a bare panel: room for the y-axis label/ticks plus a readable title.
+        fig_w = max(panel_w_in, _STACK_GRID_MIN_PANEL_W_IN) + 1.0
+        legend_ncol, legend_margin_in, title_str, top_margin_in = _layout(fig_w, f"{title} — {col_y}")
+        fig_h = top_margin_in + nrows_data * panel_h_in + legend_margin_in
         fig = plt.figure(figsize=(fig_w, fig_h))
         outer = GridSpec(
             nrows=nrows_data,
@@ -564,8 +581,10 @@ def _plot_page_class_stack_grid(
             figure=fig,
             height_ratios=[panel_h_in] * nrows_data,
             hspace=1.1,
-            top=1.0 - _GRID_TOP_MARGIN_IN / fig_h,
+            top=1.0 - top_margin_in / fig_h,
             bottom=legend_margin_in / fig_h,
+            left=0.8 / fig_w,
+            right=1.0 - 0.2 / fig_w,
         )
 
         for r, col_y_val in enumerate(col_y_vals):
@@ -578,16 +597,15 @@ def _plot_page_class_stack_grid(
                 continue
 
             draw_stacked_proportion_barv(ax, data_by_facet[key], class_order, stack_order, colors, ymax=1.0)
+            ax.set_ylabel("Fraction of tracks", fontsize=7)
             ax.set_title(f"{col_y}: {col_y_val}", fontsize=group_title_fontsize, fontweight="bold", pad=4)
-
-        title_str = f"{title} — {col_y}"
 
     legend_handles, legend_labels = _class_legend_handles(list(reversed(stack_order)), colors)
     fig.legend(
         handles=legend_handles, labels=legend_labels,
         loc="lower center", ncol=legend_ncol, frameon=False, fontsize=7,
     )
-    fig.suptitle(title_str, y=0.99, fontsize=10, fontweight="bold", wrap=True)
+    fig.suptitle(title_str, y=1.0 - 0.1 / fig_h, va="top", fontsize=10, fontweight="bold")
     return fig
 
 
@@ -819,6 +837,7 @@ def save_track_class_proportions_by_sample_plot(
     tmin_col="position_t_min",
     tmax_col="position_t_max",
     time_bin_size=None,
+    title_prefix="Track-Class Proportions",
 ):
     """
     Save one horizontal stacked bar per sample showing track-class proportions,
@@ -962,7 +981,7 @@ def save_track_class_proportions_by_sample_plot(
                 row_order=page_samples,
                 class_order=class_order,
                 colors=colors,
-                title=f"Track-Class Proportions by Sample — {class_col}",
+                title=f"{title_prefix} by Sample — {class_col}",
             )
             pdf.savefig(fig, dpi=int(dpi))
             plt.close(fig)
@@ -1078,6 +1097,7 @@ def save_track_class_proportions_by_sample_plot(
                         figsize_per_panel=(4.0, 2.8),
                         state_colors=colors,
                         time_bin_size=time_bin_size,
+                        title=f"{title_prefix} over Time by Sample — {class_col}",
                     )
                     pdf.savefig(fig_t, dpi=dpi)
                     plt.close(fig_t)
@@ -1580,6 +1600,8 @@ def save_track_contact_group_analysis(
             verbose=verbose,
             pdf_pages=pdf,
             csv_dir=csv_dir,
+            class_colors=_CONTACT_STACK_COLORS,
+            title_prefix="Contact Rate",
         )
 
         cluster_stack_grid = _save_contact_cluster_stack_grid_page(
@@ -1826,6 +1848,8 @@ def save_track_contact_rate_report(
             verbose=verbose,
             pdf_pages=pdf,
             csv_dir=csv_dir,
+            class_colors=_CONTACT_STACK_COLORS,
+            title_prefix="Contact Rate",
         )
 
         if use_target_class:

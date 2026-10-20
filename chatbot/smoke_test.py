@@ -2373,7 +2373,7 @@ def _check_choose_analysis(result: dict) -> list[str]:
     for phrase in (
         "death dynamics", "interaction analysis", "invasiveness analysis",
         "active killing", "behavioral state", "state trajectory",
-        "contact-based grouping", "contact state-shift analysis", "backprojection",
+        "contact-based grouping", "backprojection",
     ):
         if phrase not in text:
             errors.append(f"did not explain {phrase}")
@@ -2405,7 +2405,7 @@ def _check_analysis_question_on_metadata_tab(result: dict) -> list[str]:
     errors = []
     for phrase in (
         "no metadata is loaded", "interaction analysis", "invasiveness analysis",
-        "contact-based grouping", "contact state-shift analysis",
+        "contact-based grouping",
     ):
         if phrase not in text:
             errors.append(f"missing analysis overview detail: {phrase}")
@@ -3162,7 +3162,7 @@ def _check_ambiguous_contact_analysis(result: dict) -> list[str]:
     errors = []
     for phrase in (
         "interaction analysis", "contact-based grouping",
-        "contact state-shift analysis", "contact distance",
+        "contact distance",
     ):
         if phrase not in text:
             errors.append(f"missing contact-analysis clarification: {phrase}")

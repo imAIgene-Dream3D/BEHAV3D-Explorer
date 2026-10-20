@@ -198,7 +198,27 @@ Use **Generate analysis and plots ▸** to create reports and plots.
 
 **▶ Create Diagnostics** produces clustering-quality diagnostic plots (UMAP/correlation, heatmap, matrixplot, cluster-occurrence ranking). **👁** reopens the PDF.
 
-For deciding whether **`N clusters`** was sensible, inspect the **exemplar overview PDF** (see **Exemplar Tracks**, near the end of this section) first and use this diagnostics PDF second — the overview tells you whether the model has split tracks into visually meaningful trajectory types; the diagnostics help support that interpretation, but they are not the primary evidence for this particular choice.
+For deciding whether **`N clusters`** was sensible, inspect the **exemplar overview PDF** (see **Exemplar Tracks**, directly below) first and use this diagnostics PDF second — the overview tells you whether the model has split tracks into visually meaningful trajectory types; the diagnostics help support that interpretation, but they are not the primary evidence for this particular choice.
+
+### Exemplar Tracks
+
+| Control | Default | Meaning |
+|---|---|---|
+| **Exemplars / cluster** | 10 | How many representative trajectories to show per cluster. |
+| **Overview statebars** | on | Include the per-cluster state-bar overview pages. |
+
+Click **▶ Create Exemplar PDFs** to produce a PDF of representative tracks per cluster. The most important cluster-count QC file here is the overview PDF `example_tracks_overview.pdf`, which by default shows **10 exemplars per cluster** — see **How to judge whether `N clusters` is sensible** above. **👁** reopens the PDF.
+
+### Feature Heatmap
+
+Heatmap of trajectory clusters × features: each feature is averaged over every track's trajectory timepoints, then per cluster. The features the clustering used are preselected; move any other per-timepoint feature across from **Available features**, and drag rows in **Selected features** to set the order they appear in the plot (top row = first). Cell labels show the unscaled cluster mean.
+
+| Control | Default | Meaning |
+|---|---|---|
+| **Available / Selected features** | the clustering's own features | Two lists: select rows in **Available** and click **Add ▼** (or double-click a row) to move them into **Selected**; **▲ Remove** (or double-click) sends them back. **Selected** is the plot's row order — drag rows to re-order. **Select used features** restores the clustering's own set, **Select all** / **Clear** fill or empty **Selected** in bulk. |
+| **Colour scaling** | z-score | `z-score`: each feature is standardized across all tracks, then averaged per cluster; 0 = the average track, red = higher, blue = lower. `min-max`: cluster means rescaled 0–1 per feature, showing which cluster is highest/lowest. |
+
+Click **▶ Create Feature Heatmap**. Output, under `analysis/<cell_type>/behavioral_trajectories/feature_heatmaps/`: `feature_heatmap.pdf`, `feature_heatmap_cluster_means.csv`, and `feature_heatmap_track_means.csv` (the per-track means the cluster means are built from).
 
 ### Track Composition Report
 
@@ -223,40 +243,25 @@ Three or more **Group per page** columns selected at once falls back to a flat, 
 Worked example: you have 6 organoid lines — 3 healthy, 3 tumor. Pick the line-condition column for **Group in X**, tick **Group conditions**, put the 3 healthy lines in the left list and the 3 tumor lines in the right list. The report now compares healthy-pooled vs. tumor-pooled, instead of running (or plotting) all 15 pairwise line-vs-line combinations.
 ```
 
-### Feature Heatmap
-
-Heatmap of trajectory clusters × features: each feature is averaged over every track's trajectory timepoints, then per cluster. The features the clustering used are preselected; move any other per-timepoint feature across from **Available features**, and drag rows in **Selected features** to set the order they appear in the plot (top row = first). Cell labels show the unscaled cluster mean.
-
-| Control | Default | Meaning |
-|---|---|---|
-| **Available / Selected features** | the clustering's own features | Two lists: select rows in **Available** and click **Add ▼** (or double-click a row) to move them into **Selected**; **▲ Remove** (or double-click) sends them back. **Selected** is the plot's row order — drag rows to re-order. **Select used features** restores the clustering's own set, **Select all** / **Clear** fill or empty **Selected** in bulk. |
-| **Colour scaling** | z-score | `z-score`: each feature is standardized across all tracks, then averaged per cluster; 0 = the average track, red = higher, blue = lower. `min-max`: cluster means rescaled 0–1 per feature, showing which cluster is highest/lowest. |
-
-Click **▶ Create Feature Heatmap**. Output, under `analysis/<cell_type>/behavioral_trajectories/feature_heatmaps/`: `feature_heatmap.pdf`, `feature_heatmap_cluster_means.csv`, and `feature_heatmap_track_means.csv` (the per-track means the cluster means are built from).
-
-### Window Transitions
-
-Where **Track Transition Report** (below) pools everything and asks "which clusters transition into which, overall," Window Transitions asks a narrower question: **within one physical track**, does its assigned cluster drift from one "Divide long tracks" window to the next? It reconnects the sub-tracks that "Divide long tracks" split apart, via their shared parent `TrackID`, into a Sankey diagram of window-to-window cluster transitions — one diagram per sample, plus a pooled page across all samples.
-
-This is about a single track's own windows changing cluster over time, not about different tracks influencing each other.
-
-It **requires "Divide long tracks"** (in the **Track clustering controls**, above) to have been used — with a single window per track there is nothing to connect.
-
-Click **▶ Create Window Transition Sankey** to run it. Output: `window_transitions_all_samples.pdf` (the merged, pooled-plus-per-sample PDF), with the individual per-sample pages also kept under a `sankey_pdf_pages/` subfolder.
-
 ### Track Transition Report
 
-Pooled, inter-cluster transition analysis for trajectory clusters — the trajectory-cluster counterpart of [State Classification's State Transition Report](state_classification.md#reports). It uses the **same circular-diagram / Sankey engine and Advanced Configuration options** described there (min probability cutoff, emphasis gamma, node-label style, and the matrix/circular/self-transitions/per-cluster-grid/Sankey toggles) — see that page for what each control does. What's different here:
+Pooled, inter-cluster transition analysis for trajectory clusters — the trajectory-cluster counterpart of [State Classification's State Transition Report](state_classification.md#reports). It uses the **same circular-diagram / Sankey engine and Advanced Configuration options** described there (min probability cutoff, emphasis gamma, node-label style, and the matrix/circular/self-transitions/per-cluster-grid toggles) — see that page for what each control does. What's different here:
 
-- It operates on **trajectory clusters** instead of per-timepoint states, and the window index is collapsed — every track's windows are pooled together, so this is a population-wide view, not a per-window one (see **Window Transitions** above for the per-window view).
+- It operates on **trajectory clusters** instead of per-timepoint states, and the window index is collapsed — every track's windows are pooled together, so this is a population-wide view, not a per-window one (see **Window transition Sankey** below for the per-window view).
 - It **requires "Divide long tracks"** (in the **Track clustering controls**, above) to have been used when clustering. Without split windows, each track only ever has one cluster label, so there is nothing to transition between.
 - Output: `transition_analysis.pdf`.
 
 Click **▶ Track Transition Report** to run it; **+🛒** queues it, **👁** reopens the result.
 
 ```{note}
-N-gram rankings are a state-sequence concept and don't carry over here — the Track Transition Report's Advanced Configuration is the matrix/circular/Sankey subset of State Transition Report's options, not the full set.
+N-gram rankings and the all-state-pairs Sankey are state-sequence concepts and don't carry over here — the Track Transition Report's Advanced Configuration is the matrix/circular subset of State Transition Report's options, plus its own window transition Sankey (below).
 ```
+
+#### Window transition Sankey
+
+The **Window transition Sankey (per sample)** option in the Advanced Configuration (on by default) adds a narrower view to the same run: **within one physical track**, does its assigned cluster drift from one "Divide long tracks" window to the next? It reconnects the sub-tracks that "Divide long tracks" split apart, via their shared parent `TrackID`, into a Sankey diagram of window-to-window cluster transitions — one diagram per sample, plus a pooled page across all samples. This is about a single track's own windows changing cluster over time, not about different tracks influencing each other.
+
+The Sankey is saved as its own PDF, `window_transitions_all_samples.pdf` (pooled plus per-sample pages), with the individual per-sample pages also kept under a `sankey_pdf_pages/` subfolder. The **👁** next to the option reopens it. Untick the option to write only the pooled report; tick only this option (and untick the matrix / circular / per-cluster pages) to write only the Sankey.
 
 ### Condition Comparison Report
 
@@ -308,7 +313,7 @@ A cluster × contact/no_contact composition grid, faceted by **Group in X / Y / 
 
 #### Contact Condition Comparison
 
-A Welch's t-test grid comparing class composition between the contact and no_contact groups — the contact-analysis counterpart of the plain [Condition Comparison Report](#condition-comparison-report) above, always run as a binary (2D-grid-eligible) comparison. Click **▶ Create Contact Condition Comparison**. Output: `condition_comparison_<condition>.pdf`, written into `contact_analysis/contact_group_analysis/<contact_col>/` alongside `contact_analysis.pdf`.
+A Welch's t-test grid comparing class composition between the contact and no_contact groups — the contact-analysis counterpart of the plain [Condition Comparison Report](#condition-comparison-report) above, always run as a binary (2D-grid-eligible) comparison. Click **▶ Create Contact Condition Comparison**. Output: `condition_comparison_<condition>.pdf`, written into `contact_analysis/contact_condition_comparison/<contact_col>/`, with the underlying CSVs in its `csv/` subfolder.
 
 #### Contact Cluster Heatmap
 
@@ -364,17 +369,6 @@ Requires **State Classification** to have been run for this cell type (it reads 
 | **Tracks per page** | 6 | How many track rows to place on each page before starting a new one. |
 
 Click **▶ Create Track Contact Overview**. Output: `track_contact_overview.pdf`, in `contact_analysis/contact_track_overview/<contact_col>/`.
-
-### Exemplar Tracks
-
-| Control | Default | Meaning |
-|---|---|---|
-| **Exemplars / cluster** | 10 | How many representative trajectories to show per cluster. |
-| **Overview statebars** | on | Include the per-cluster state-bar overview pages. |
-| **Backprojection PDFs** | off | Also render per-exemplar backprojection figures to PDF. |
-| **Backprojection MP4** | off | Also render exemplar backprojection movies. |
-
-Click **▶ Create Exemplar PDFs** to produce a PDF of representative tracks per cluster (optionally with state bars and backprojection figures/movies). The most important cluster-count QC file here is the overview PDF `example_tracks_overview.pdf`, which by default shows **10 exemplars per cluster** — see **How to judge whether `N clusters` is sensible** above. **👁** reopens the PDF.
 
 ## Backprojection
 
@@ -443,8 +437,7 @@ You will find there, depending on which steps you ran:
 - **Feature Heatmap**: `feature_heatmaps/feature_heatmap.pdf` plus `csv/feature_heatmap_cluster_means.csv` and `csv/feature_heatmap_track_means.csv`.
 - **Track-class proportion plots** under `behavior_proportions/`: `track_class_proportions_by_sample_<class>.pdf`/`.csv`, plus `track_class_proportions_by_group_<class>.csv` when grouping is used.
 - **Condition comparison reports** under `behavior_comparisons/`: `condition_comparison_<condition>.pdf`/`.csv`.
-- **Track Transition Report**: `transition_analysis.pdf` (pooled circular diagram + transition matrix for trajectory clusters).
-- **Window Transitions**: `window_transitions_all_samples.pdf` (merged pooled + per-sample Sankey), with individual per-sample pages also kept under `sankey_pdf_pages/`.
+- **Track Transition Report**: `transition_analysis.pdf` (pooled circular diagram + transition matrix for trajectory clusters), plus — with the window transition Sankey option on — `window_transitions_all_samples.pdf` (merged pooled + per-sample Sankey), with individual per-sample pages also kept under `sankey_pdf_pages/`.
 - **Contact analysis** under `contact_analysis/`, one folder per report type, each holding a `<contact_col>/` (or, for the type comparison, a `<contact_col_a>_vs_<contact_col_b>/`) subfolder with that report's PDF plus a sibling `csv/` folder:
   - `contact_group_analysis/<contact_col>/`: `contact_analysis.pdf` (the bundled "Run Contact Analysis" report) plus `condition_comparison_<condition>.pdf`.
   - `contact_rate/<contact_col>/`: `contact_rate.pdf`.
@@ -473,7 +466,7 @@ The folder name on disk is `behavioral_trajectories`. The easiest way to reopen 
 - **Use Variable-length mode for uneven tracks.** If your tracks differ a lot in length and resampling distorts them, switch *Trajectory size* to its minimum (Variable-length) so DTW compares native lengths.
 - **Save the distance matrix only when you need it.** It grows with the square of the number of tracks and is rarely needed for routine analysis.
 - **Queue the heavy steps.** DTW clustering and classifier training are CPU-intensive — use the **+🛒** buttons to run them unattended behind your other pipeline steps.
-- **Turn on Divide long tracks when tracks run much longer than Trajectory size** and the part that would otherwise be discarded likely holds meaningfully different behaviour — you get more, shorter, independently classified trajectories instead of one truncated one. This is also a **prerequisite** for the Track Transition Report and Window Transitions below — without split windows every track has only one cluster label, so there's nothing to transition between.
+- **Turn on Divide long tracks when tracks run much longer than Trajectory size** and the part that would otherwise be discarded likely holds meaningfully different behaviour — you get more, shorter, independently classified trajectories instead of one truncated one. This is also a **prerequisite** for the Track Transition Report (including its window transition Sankey) below — without split windows every track has only one cluster label, so there's nothing to transition between.
 - **Tune Min. contiguous contact bout to your imaging's time resolution.** A few timepoints is usually enough to exclude noisy single-frame touches while still catching genuine sustained contact; lower it toward 1 only if you want any touch, however brief, to count.
 - **Cluster colors and order set during renaming persist automatically** into every later plot — proportions, condition comparisons, contact analysis, backprojection — so you don't need to reapply them per report.
 

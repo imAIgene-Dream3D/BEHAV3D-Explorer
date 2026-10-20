@@ -16,7 +16,7 @@ The analysis runs on the **cell type chosen in the dropdown at the top of the Si
 2. [Behavioral state clustering](#behavioral-state-clustering) — choose features, set the number of states, and fit the HMM.
 3. [Renaming clusters](#renaming-clusters) — give the intrinsic and full behavioral states meaningful biological names.
 4. [Reports](#reports) — generate composition, transition, feature-heatmap and condition-comparison reports.
-5. [Contact Analysis](#contact-analysis) — compare contact types and behavioral-state shifts around contact.
+5. [Contact Analysis](#contact-analysis) — compare behavioral states between contact types.
 6. [Backprojection](#backprojection) — paint the states back onto the raw images to validate them, or search for a specific sequence of states to jump straight to a matching track ([Find a Behavior](#find-a-behavior)).
 
 ## Train a new model, or reuse an existing one
@@ -311,34 +311,6 @@ Select **Contact columns to compare** (Ctrl/Cmd-click for 2 or more), then click
 <output_dir>/analysis/<cell_type>/behavioral_states/contact_analysis/contact_type_comparison/<contact columns, "_vs_"-joined>/csv/contact_type_stacked_composition.csv
 ```
 
-### State-shift analysis (behavioral state before → after contact)
-
-Does a track's **behavioural-state mix change** once it makes contact? It compares each classified track's state composition **before vs. after** its first sufficiently long contact bout, against a **timing-matched null** before/after split for tracks that never contact — so a state shift attributable to contact can be distinguished from a track-wide temporal trend that would show up either way.
-
-- **Contact tracks** use the first contiguous run of the chosen **Contact column** at least **Min. contiguous bout** timepoints long.
-- **No-contact tracks** get a synthetic reference split point instead of a real bout — its relative position within the track is drawn from the empirical distribution of real bout-start positions seen elsewhere in the run (not simply the track midpoint), so the null is matched to *when* contact tends to happen.
-
-| Control | Default | Meaning |
-|---|---|---|
-| **Contact column** | first detected | Which per-timepoint contact column to use. |
-| **Min. contiguous bout** | 5 | A track counts as "contact" if it has an unbroken run of at least this many consecutive contact timepoints; otherwise "no_contact". |
-| **Window mode** | Fixed | `Fixed` compares a fixed number of timepoints immediately before the bout starts vs. immediately after it ends. `Full` compares everything before the bout to everything after it, within the track's classified window. |
-| **Fixed window length** | 10 | Only used in `Fixed` mode — how many timepoints on each side of the bout to compare. |
-| **State column** | `full_behavioral_state` | `full_behavioral_state`, `hmm_intrinsic_behavioral_state`, or `raw_hmm_state`. |
-
-Click **▶ Run State-Shift Analysis**. This produces one combined PDF with a 2×2 layout — contact tracks vs. no-contact tracks (null) as columns, and for each:
-- a **diff-bar panel**: per-state before→after proportion change with Welch's t-test significance stars, one independent observation per track;
-- a **stacked-composition panel**: pooled per-timepoint before/after state composition.
-
-Output:
-
-```text
-<output_dir>/analysis/<cell_type>/behavioral_states/contact_analysis/contact_state_shift/<contact_col>/contact_state_shift.pdf
-<output_dir>/analysis/<cell_type>/behavioral_states/contact_analysis/contact_state_shift/<contact_col>/csv/state_shift_track_windows.csv
-<output_dir>/analysis/<cell_type>/behavioral_states/contact_analysis/contact_state_shift/<contact_col>/csv/state_shift_diff_bars.csv
-<output_dir>/analysis/<cell_type>/behavioral_states/contact_analysis/contact_state_shift/<contact_col>/csv/state_shift_stacked_composition.csv
-```
-
 ## Backprojection
 
 The final step paints the behavioural states **back onto the raw images**, so you can verify frame by frame that the computed labels match what the cells are actually doing. It is built directly into this sub-tab and works on the cell type selected at the top of Single Cell. In practice, this is the **final validation step** of the whole curation workflow: use it to confirm that the names you assigned when renaming clusters correspond to what the cells really look like.
@@ -473,7 +445,7 @@ It is written as two files: `transition_matrix_heatmap.pdf` (matrix heatmap + ci
 
 **The Condition Comparison Report** answers *"does state composition differ between these conditions?"*. It writes `condition_comparison_<condition>.pdf`/`.csv` under `behavioral_states/state_composition/behavior_proportions/`, alongside the composition report's own CSVs.
 
-**Contact Analysis** writes under `behavioral_states/contact_analysis/` — see the [Contact Analysis](#contact-analysis) section above for the exact `contact_type_comparison/` and `contact_state_shift/` paths.
+**Contact Analysis** writes under `behavioral_states/contact_analysis/` — see the [Contact Analysis](#contact-analysis) section above for the exact `contact_type_comparison/` paths.
 
 All reports, as well as backprojection, show states in the **display order set during renaming** rather than alphabetically, so axes and legends stay consistent with however you chose to arrange the clusters.
 

@@ -138,7 +138,11 @@ def plot_feature_box_by_group(
     if title is not None:
         ax.set_title(str(title))
 
-    below_lines = []
+    below_lines = [
+        "Box = median and interquartile range, whiskers = 1.5×IQR, open circles = outliers; "
+        "white dot = mean"
+        + ("; black dots = individual values" if show_points else "")
+    ]
     if len(resolved_order) >= 2:
         pairwise = _pairwise_mannwhitney(sub, feature_col, group_col, resolved_order)
         tested_pairs = [row for row in pairwise if np.isfinite(row[2])]
@@ -154,9 +158,8 @@ def plot_feature_box_by_group(
         if footnote:
             below_lines.append(footnote)
 
-    if below_lines:
-        fig.tight_layout(rect=(0.0, 0.03 + 0.03 * len(below_lines), 1.0, 1.0))
-        fig.text(0.5, 0.005, "\n".join(below_lines), ha="center", va="bottom", fontsize=7, wrap=True)
-    else:
-        fig.tight_layout()
+    fig_h = float(fig.get_size_inches()[1])
+    footnote_in = 0.12 + 0.16 * len(below_lines)
+    fig.tight_layout(rect=(0.0, footnote_in / fig_h, 1.0, 1.0))
+    fig.text(0.5, 0.06 / fig_h, "\n".join(below_lines), ha="center", va="bottom", fontsize=7, wrap=True)
     return fig

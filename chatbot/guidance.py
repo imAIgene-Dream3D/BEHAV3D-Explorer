@@ -264,7 +264,7 @@ GUIDANCE_CARDS = {
     "analysis": (
         "First identify the research question and the active analysis view. A general analysis overview "
         "must include Death Dynamics, Interaction Analysis, Invasiveness Analysis, Active Killing, "
-        "Behavioral State, State Trajectory, Contact analysis, Contact State-Shift Analysis, "
+        "Behavioral State, State Trajectory, Contact analysis, "
         "and Backprojection, then use the live metadata to suggest "
         "dataset-specific questions and a sensible sequence. It must not repeatedly navigate to the "
         "Analysis tab. Open a named "
@@ -321,10 +321,8 @@ GUIDANCE_CARDS = {
         "tracks here instead. Original BEHAV3D feature-based mode is deprecated and requires equal "
         "track lengths. The UMAP may look poor even when agglomerative clusters are sensible. "
         "Categorical DTW supports Contact analysis, which compares trajectory clusters for "
-        "tracks with and without a sufficiently long contact bout. It also supports Contact State-Shift "
-        "Analysis, which compares behavioral-state composition before and after contact against "
-        "timing-matched no-contact tracks and therefore additionally requires Behavioral State results. "
-        "Do not repeat the obsolete claim that these current contact analyses inherently produce empty "
+        "tracks with and without a sufficiently long contact bout. "
+        "Do not repeat the obsolete claim that this contact analysis inherently produces empty "
         "output."
     ),
 }

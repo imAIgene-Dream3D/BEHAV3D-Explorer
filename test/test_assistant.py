@@ -511,7 +511,7 @@ def test_analysis_question_on_metadata_tab_is_not_hijacked_by_organoid_setup():
     assert "Interaction Analysis" in text
     assert "Invasiveness Analysis" in text
     assert "Contact analysis" in text
-    assert "Contact State-Shift Analysis" in text
+    assert "State-Shift" not in text
     assert "Before I build the metadata" not in text
     assert "separate organoid types" not in text
 
@@ -757,7 +757,7 @@ def test_analysis_choose_explains_and_named_view_opens_directly():
     for name in (
         "Death Dynamics", "Interaction Analysis", "Invasiveness Analysis",
         "Active Killing", "Behavioral State", "State Trajectory",
-        "Contact analysis", "Contact State-Shift Analysis", "Backprojection",
+        "Contact analysis", "Backprojection",
     ):
         assert name in summary
     assert "8 samples" in summary
@@ -818,7 +818,7 @@ def test_analysis_intent_resolver_clarifies_overlapping_death_contact_requests()
     )
     assert "Interaction Analysis" in contact
     assert "Contact-Based Grouping" in contact
-    assert "Contact State-Shift Analysis" in contact
+    assert "State-Shift" not in contact
     assert "contact distance" in contact
     assert app.analysis_intent_clarification(
         {"current_step": "metadata"},

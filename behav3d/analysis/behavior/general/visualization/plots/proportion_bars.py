@@ -35,7 +35,8 @@ def _make_group_label(df, group_cols):
     parts = []
     for col in group_cols:
         if col in df.columns:
-            parts.append(df[col].fillna("(unknown)").astype(str))
+            # astype(object) first: fillna on a Categorical raises for a value outside its categories.
+            parts.append(df[col].astype(object).fillna("(unknown)").astype(str))
         else:
             parts.append(pd.Series(["(unknown)"] * len(df), index=df.index))
     if len(parts) == 0:
@@ -74,6 +75,31 @@ def legend_layout(n_labels, *, max_ncol=8, row_height_in=0.22, base_margin_in):
     nrows = max(1, int(np.ceil(n_labels / ncol))) if n_labels > 0 else 1
     margin_in = float(base_margin_in) + float(row_height_in) * (nrows - 1)
     return ncol, nrows, margin_in
+
+
+def legend_max_ncol_for_width(labels, fig_w_in, *, fontsize=7, handle_in=0.45, max_ncol=8):
+    """Largest legend column count whose widest row still fits inside `fig_w_in` — pass as
+    `legend_layout(..., max_ncol=...)` so long labels (e.g. sample names) wrap into more rows
+    instead of running off both sides of the page."""
+    labels = [str(x) for x in list(labels or [])]
+    if not labels:
+        return 1
+    # ~0.6 em per character is a conservative average for the default sans-serif font.
+    longest_in = max(len(s) for s in labels) * float(fontsize) * 0.6 / 72.0
+    usable_in = max(float(fig_w_in) - 0.4, 1.0)
+    return max(1, min(int(max_ncol), int(usable_in // (longest_in + handle_in))))
+
+
+def wrap_title_to_width(text, fig_w_in, *, fontsize=10):
+    """Wrap each line of a (suptitle) string so it fits inside `fig_w_in` at `fontsize` (bold).
+    Returns ``(wrapped_text, n_lines)``."""
+    import textwrap
+
+    max_chars = max(20, int((float(fig_w_in) - 0.3) * 72.0 / (float(fontsize) * 0.62)))
+    lines = []
+    for line in str(text).split("\n"):
+        lines.extend(textwrap.wrap(line, width=max_chars, break_long_words=False) or [""])
+    return "\n".join(lines), len(lines)
 
 
 def draw_thin_stacked_proportion_barh(
@@ -258,11 +284,56 @@ def welch_ttest_stars(p_value):
     return "n.s."
 
 
-def add_significance_legend(fig, *, y=0.005, fontsize=7):
+DIFF_BAR_LEGEND_TEXT = (
+    "Bar = difference in mean cluster share (right level − left level)\n"
+    "whisker = 95% CI of the difference; Welch's t-test"
+)
+# Inches reserved below a diff-bar grid for the last row's tick labels + x-axis label plus the
+# three footnote lines.
+_DIFF_GRID_BOTTOM_IN = 1.05
+
+
+def add_significance_legend(fig, *, y=0.005, fontsize=7, extra_text=None):
     """Draw the shared star-notation legend ('n.s.'/'*'/'**'/'***'/'****' thresholds) centered
     near the bottom of `fig`, so every panel using `welch_ttest_stars` stays self-explanatory
-    even when nothing is significant."""
-    fig.text(0.5, y, SIGNIFICANCE_LEGEND_TEXT, ha="center", va="bottom", fontsize=fontsize)
+    even when nothing is significant. ``extra_text`` is added as a second line (e.g. what the
+    bars/whiskers mean)."""
+    text = SIGNIFICANCE_LEGEND_TEXT if not extra_text else f"{SIGNIFICANCE_LEGEND_TEXT}\n{extra_text}"
+    fig.text(0.5, y, text, ha="center", va="bottom", fontsize=fontsize, linespacing=1.4)
+
+
+def _diff_grid_title_margin_in(title, fig_w_in):
+    """``(wrapped_title, top_margin_in)`` for a diff-bar grid page's suptitle."""
+    wrapped, n_lines = wrap_title_to_width(title, fig_w_in, fontsize=11)
+    # + room for the first row's two-line "<a> vs <b> / n=..." panel title.
+    return wrapped, 0.65 + 0.22 * n_lines
+
+
+# Vertical gap between grid rows: the x-axis label below one panel plus the two-line
+# "<a> vs <b> / n=..." title above the next.
+_DIFF_GRID_ROW_GAP_IN = 0.95
+
+
+def _diff_panel_h(n_classes):
+    return max(0.8 + 0.35 * n_classes, 2.2)
+
+
+def _diff_grid_figure(fig_w, heights_in, top_in, *, ncols, width_ratios=None):
+    """Figure + GridSpec with every margin and row gap fixed in inches. ``tight_layout`` can't be
+    used here (the axis-off header cells make it bail out silently, leaving matplotlib's
+    fractional defaults — which on a tall page become several inches of blank space)."""
+    gaps_in = _DIFF_GRID_ROW_GAP_IN * (len(heights_in) - 1)
+    fig_h = top_in + sum(heights_in) + gaps_in + _DIFF_GRID_BOTTOM_IN
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    avg_h = sum(heights_in) / len(heights_in)
+    outer = GridSpec(
+        nrows=len(heights_in), ncols=ncols, figure=fig,
+        width_ratios=width_ratios, height_ratios=heights_in,
+        hspace=_DIFF_GRID_ROW_GAP_IN / avg_h, wspace=0.25,
+        top=1.0 - top_in / fig_h, bottom=_DIFF_GRID_BOTTOM_IN / fig_h,
+        left=min(0.6 / fig_w, 0.2), right=1.0 - min(0.2 / fig_w, 0.1),
+    )
+    return fig, outer, fig_h
 
 
 def _welch_diff_rows(class_order, vals_a_panel, vals_b_panel):
@@ -584,8 +655,10 @@ def plot_condition_diff_grid(
     pair_keys = list(next(iter(diff_stats_by_group.values()), {}).keys())
     n_pairs = max(len(pair_keys), 1)
     panel_w = float(figsize_per_panel[0])
-    panel_h = figsize_per_panel[1] if figsize_per_panel[1] is not None else max(1.2 + 0.45 * len(class_order), 3.0)
+    panel_h = figsize_per_panel[1] if figsize_per_panel[1] is not None else _diff_panel_h(len(class_order))
     header_h = 0.35
+    # A lone "(all)" group has no column header to show — don't reserve an empty row for it.
+    n_header = 0 if group_labels == ["(all)"] else 1
 
     global_xmax = 0.0
     for pairs in diff_stats_by_group.values():
@@ -600,27 +673,25 @@ def plot_condition_diff_grid(
     with (nullcontext(pdf_pages) if pdf_pages is not None else PdfPages(out_pdf)) as pdf:
         for page_groups in _chunk_list(group_labels, max(1, int(max_cols_per_page))):
             n_cols = len(page_groups)
-            fig = plt.figure(figsize=(panel_w * n_cols, header_h + panel_h * n_pairs))
-            outer = GridSpec(
-                nrows=1 + n_pairs, ncols=n_cols, figure=fig,
-                width_ratios=[panel_w] * n_cols,
-                height_ratios=[header_h] + [1.0] * n_pairs,
-                hspace=0.75, wspace=0.25,
+            fig_w = max(panel_w * n_cols, 4.0)
+            page_title, top_in = _diff_grid_title_margin_in(title, fig_w)
+            fig, outer, fig_h = _diff_grid_figure(
+                fig_w, [header_h] * n_header + [panel_h] * n_pairs, top_in,
+                ncols=n_cols, width_ratios=[panel_w] * n_cols,
             )
 
-            for c, group_label in enumerate(page_groups):
+            for c, group_label in enumerate(page_groups if n_header else []):
                 ax_ch = fig.add_subplot(outer[0, c])
                 ax_ch.axis("off")
-                if group_label != "(all)":
-                    ax_ch.text(
-                        0.5, 0.5, str(group_label),
-                        ha="center", va="center", fontsize=label_fontsize,
-                        fontweight="bold", transform=ax_ch.transAxes,
-                    )
+                ax_ch.text(
+                    0.5, 0.5, str(group_label),
+                    ha="center", va="center", fontsize=label_fontsize,
+                    fontweight="bold", transform=ax_ch.transAxes,
+                )
 
             for r, (level_a, level_b) in enumerate(pair_keys):
                 for c, group_label in enumerate(page_groups):
-                    ax = fig.add_subplot(outer[r + 1, c])
+                    ax = fig.add_subplot(outer[r + n_header, c])
                     diff_df = diff_stats_by_group[group_label].get((level_a, level_b))
                     header = _wrap_row_label(f"{level_a}  vs  {level_b}")
                     n_label = _panel_n_label(diff_df)
@@ -644,9 +715,8 @@ def plot_condition_diff_grid(
                     df_long["level_b"] = level_b
                     long_rows.append(df_long)
 
-            fig.suptitle(title, fontsize=11, fontweight="bold", y=0.99)
-            add_significance_legend(fig)
-            fig.tight_layout(rect=(0.0, 0.02, 1.0, 0.95))
+            fig.suptitle(page_title, fontsize=11, fontweight="bold", y=1.0 - 0.12 / fig_h, va="top")
+            add_significance_legend(fig, y=0.06 / fig_h, extra_text=DIFF_BAR_LEGEND_TEXT)
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
@@ -741,12 +811,14 @@ def plot_condition_diff_grid_2d(
                         global_xmax = max(global_xmax, _diff_plus_se_max(d))
             global_xmax = max(global_xmax * 1.35, 5.0)
 
-            fig = plt.figure(figsize=(header_w + panel_w * ncols_data, header_h + panel_h * nrows_data))
-            outer = GridSpec(
-                nrows=1 + nrows_data, ncols=1 + ncols_data, figure=fig,
-                width_ratios=[header_w] + [panel_w] * ncols_data,
-                height_ratios=[header_h] + [panel_h] * nrows_data,
-                hspace=0.75, wspace=0.25,
+            page_title = title if level_a is not None else f"{title} — no {condition_col} comparison available"
+            if page_key != "(all)":
+                page_title += f" ({', '.join(extra_group_cols)}: {page_key})"
+            fig_w = header_w + panel_w * ncols_data
+            page_title, top_in = _diff_grid_title_margin_in(page_title, fig_w)
+            fig, outer, fig_h = _diff_grid_figure(
+                fig_w, [header_h] + [panel_h] * nrows_data, top_in,
+                ncols=1 + ncols_data, width_ratios=[header_w] + [panel_w] * ncols_data,
             )
             fig.add_subplot(outer[0, 0]).axis("off")
 
@@ -800,12 +872,8 @@ def plot_condition_diff_grid_2d(
                     df_long["level_b"] = level_b
                     long_rows.append(df_long)
 
-            page_title = title if level_a is not None else f"{title} — no {condition_col} comparison available"
-            if page_key != "(all)":
-                page_title += f" ({', '.join(extra_group_cols)}: {page_key})"
-            fig.suptitle(page_title, fontsize=11, fontweight="bold", y=0.99)
-            add_significance_legend(fig)
-            fig.tight_layout(rect=(0.0, 0.02, 1.0, 0.95))
+            fig.suptitle(page_title, fontsize=11, fontweight="bold", y=1.0 - 0.12 / fig_h, va="top")
+            add_significance_legend(fig, y=0.06 / fig_h, extra_text=DIFF_BAR_LEGEND_TEXT)
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 

@@ -17,6 +17,7 @@ sections at the top remain enabled so existing outputs can always be loaded.
 from __future__ import annotations
 
 import datetime
+import os
 import traceback
 from pathlib import Path
 from typing import Callable, Optional
@@ -1731,8 +1732,8 @@ class StateClassificationSubTab(QWidget):
             "behavioral-state classification plus the per-timepoint tracks CSV."
         ))
 
-        g_state_contact.addWidget(QLabel(
-            "Group per page (Ctrl/Cmd click for multiple) — splits both reports below into "
+        g_state_contact.addWidget(_make_info_label(
+            "Group per page (Ctrl/Cmd click for multiple) — splits the reports below into "
             "one page set per group:"
         ))
         self.list_state_contact_group_cols = QListWidget()
@@ -1752,7 +1753,7 @@ class StateClassificationSubTab(QWidget):
         )
         state_contact_type_form.addRow("State column:", self.combo_state_contact_type_state_col)
         g_state_contact.addLayout(state_contact_type_form)
-        g_state_contact.addWidget(QLabel("Contact columns to compare (Ctrl/Cmd click for 2+):"))
+        g_state_contact.addWidget(_make_info_label("Contact columns to compare (Ctrl/Cmd click for 2+):"))
         self.list_state_contact_type_compare_cols = QListWidget()
         self.list_state_contact_type_compare_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
         g_state_contact.addWidget(self.list_state_contact_type_compare_cols)
@@ -1764,11 +1765,20 @@ class StateClassificationSubTab(QWidget):
         state_contact_type_row.addWidget(self.btn_view_state_contact_type_comparison)
         g_state_contact.addLayout(state_contact_type_row)
 
+        # State-shift analysis is a development feature: only shown when the
+        # GUI runs in dev mode (BEHAV3D_DEV_MODE=1, set by launch_napari.py).
+        self.state_shift_container = QWidget()
+        g_state_shift = QVBoxLayout(self.state_shift_container)
+        g_state_shift.setContentsMargins(0, 0, 0, 0)
+        g_state_shift.setSpacing(4)
+        g_state_contact.addWidget(self.state_shift_container)
+        self.state_shift_container.setVisible(os.environ.get("BEHAV3D_DEV_MODE") == "1")
+
         state_contact_sep = QFrame()
         state_contact_sep.setFrameShape(QFrame.HLine)
-        g_state_contact.addWidget(state_contact_sep)
+        g_state_shift.addWidget(state_contact_sep)
 
-        g_state_contact.addWidget(QLabel("State-shift analysis (behavioral state before → after contact):"))
+        g_state_shift.addWidget(QLabel("State-shift analysis (behavioral state before → after contact):"))
         state_shift_form = QFormLayout()
         state_shift_form.setSpacing(3)
         self.combo_state_shift_contact_col = QComboBox()
@@ -1805,14 +1815,14 @@ class StateClassificationSubTab(QWidget):
             [FULL_STATE_COL, INTRINSIC_STATE_COL, "raw_hmm_state"]
         )
         state_shift_form.addRow("State column:", self.combo_state_shift_state_col)
-        g_state_contact.addLayout(state_shift_form)
+        g_state_shift.addLayout(state_shift_form)
         state_shift_row = QHBoxLayout()
         self.btn_state_contact_shift = QPushButton("▶ Run State-Shift Analysis")
         _style_secondary(self.btn_state_contact_shift)
         state_shift_row.addWidget(self.btn_state_contact_shift, stretch=1)
         self.btn_view_state_contact_shift = _make_view_btn()
         state_shift_row.addWidget(self.btn_view_state_contact_shift)
-        g_state_contact.addLayout(state_shift_row)
+        g_state_shift.addLayout(state_shift_row)
 
         from behav3d.napari._guided import GuidedPanel
         from behav3d.napari.analysis_guided_copy import (
@@ -6499,31 +6509,15 @@ class TrackClassificationSubTab(QWidget):
         self._feature_heatmap_defaults = []
         self._feature_heatmap_cache_key = None
 
-        self.grp_window_transitions = QGroupBox("Window Transitions")
-        g_wintrans = QVBoxLayout(self.grp_window_transitions)
-        g_wintrans.setSpacing(4)
-        g_wintrans.addWidget(_make_info_label(
-            "Sankey diagram of how each track's trajectory cluster changes from one "
-            "window to the next - reconnects the sub-tracks 'Divide long tracks' split "
-            "a track into, back through their shared parent TrackID. One diagram per "
-            "sample, plus a pooled page. Needs 'Divide long tracks' to have been used."
-        ))
-        wintrans_row = QHBoxLayout()
-        self.btn_window_transitions = QPushButton("▶ Create Window Transition Sankey")
-        _style_secondary(self.btn_window_transitions)
-        wintrans_row.addWidget(self.btn_window_transitions, stretch=1)
-        self.btn_view_window_transitions = _make_view_btn()
-        wintrans_row.addWidget(self.btn_view_window_transitions)
-        g_wintrans.addLayout(wintrans_row)
-
         self.grp_transition_analysis = QGroupBox("Track Transition Report")
         g_transanalysis = QVBoxLayout(self.grp_transition_analysis)
         g_transanalysis.setSpacing(4)
         g_transanalysis.addWidget(_make_info_label(
             "Pooled inter-cluster transition analysis: a circular diagram of how often each "
             "trajectory cluster transitions into every other cluster (window index is "
-            "collapsed, unlike the Sankey above), plus the row-normalized transition-"
-            "probability matrix. Needs 'Divide long tracks' to have been used."
+            "collapsed), plus the row-normalized transition-probability matrix. Optionally "
+            "also a per-sample Sankey of how each track's cluster changes from one window "
+            "to the next. Needs 'Divide long tracks' to have been used."
         ))
         transanalysis_row = QHBoxLayout()
         self.btn_transition_analysis = QPushButton("▶ Track Transition Report")
@@ -6604,6 +6598,18 @@ class TrackClassificationSubTab(QWidget):
             "source), arrow weight scaled to that cluster's own transitions in each case - "
             "useful when the single overlaid diagrams get too busy to read."
         ))
+        self.chk_transanalysis_include_window_sankey = QCheckBox("Window transition Sankey (per sample)")
+        self.chk_transanalysis_include_window_sankey.setChecked(True)
+        window_sankey_row = _make_chk_help_row(
+            self.chk_transanalysis_include_window_sankey, "Window Transition Sankey",
+            "Also write a Sankey diagram of how each track's trajectory cluster changes from "
+            "one window to the next - reconnects the sub-tracks 'Divide long tracks' split a "
+            "track into, back through their shared parent TrackID. One diagram per sample, "
+            "plus a pooled page, saved as a separate PDF (👁 next to this option reopens it)."
+        )
+        self.btn_view_window_transitions = _make_view_btn()
+        window_sankey_row.addWidget(self.btn_view_window_transitions)
+        adv_transition_analysis.addLayout(window_sankey_row)
         g_transanalysis.addWidget(adv_transition_analysis)
 
         self.grp_track_comparison = QGroupBox("Condition Comparison Report")
@@ -6672,7 +6678,7 @@ class TrackClassificationSubTab(QWidget):
         self.grp_contact_analysis = QGroupBox("Contact analysis")
         g_contact = QVBoxLayout(self.grp_contact_analysis)
         g_contact.setSpacing(4)
-        g_contact.addWidget(QLabel(
+        g_contact.addWidget(_make_info_label(
             "Contact-based grouping (tracks with vs. without a sufficiently long contact bout):"
         ))
         g_contact.addWidget(_make_info_label(
@@ -6746,7 +6752,7 @@ class TrackClassificationSubTab(QWidget):
         self.chk_contact_group_y_conditions.toggled.connect(
             self._on_contact_group_y_conditions_toggled
         )
-        g_contact.addWidget(QLabel("Group per page (Ctrl/Cmd click for multiple):"))
+        g_contact.addWidget(_make_info_label("Group per page (Ctrl/Cmd click for multiple):"))
         self.list_contact_group_cols = QListWidget()
         self.list_contact_group_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
         g_contact.addWidget(self.list_contact_group_cols)
@@ -6764,7 +6770,7 @@ class TrackClassificationSubTab(QWidget):
         contact_run_all_sep.setFrameShape(QFrame.HLine)
         g_contact.addWidget(contact_run_all_sep)
 
-        g_contact.addWidget(QLabel(
+        g_contact.addWidget(_make_info_label(
             "Contact rate (per-sample % of tracks in contact, plus per-target-class contact "
             "fraction if 'Use contact cell classification' is on):"
         ))
@@ -6776,7 +6782,7 @@ class TrackClassificationSubTab(QWidget):
         contact_rate_row.addWidget(self.btn_view_contact_rate)
         g_contact.addLayout(contact_rate_row)
 
-        g_contact.addWidget(QLabel(
+        g_contact.addWidget(_make_info_label(
             "Contact composition (class composition grid split by contact/no-contact, faceted by "
             "Group in X/Y/page):"
         ))
@@ -6788,7 +6794,7 @@ class TrackClassificationSubTab(QWidget):
         contact_composition_row.addWidget(self.btn_view_contact_composition)
         g_contact.addLayout(contact_composition_row)
 
-        g_contact.addWidget(QLabel(
+        g_contact.addWidget(_make_info_label(
             "Contact condition comparison (Welch's t-test grid of class composition between "
             "contact/no-contact groups):"
         ))
@@ -6800,7 +6806,7 @@ class TrackClassificationSubTab(QWidget):
         contact_condition_comparison_row.addWidget(self.btn_view_contact_condition_comparison)
         g_contact.addLayout(contact_condition_comparison_row)
 
-        g_contact.addWidget(QLabel(
+        g_contact.addWidget(_make_info_label(
             "Contact cluster heatmap (contact amount per behavioral cluster of the classified "
             "population itself, heatmaps + per-track distributions):"
         ))
@@ -6812,7 +6818,7 @@ class TrackClassificationSubTab(QWidget):
         cluster_heatmap_row.addWidget(self.btn_view_contact_cluster_heatmap)
         g_contact.addLayout(cluster_heatmap_row)
 
-        g_contact.addWidget(QLabel(
+        g_contact.addWidget(_make_info_label(
             "Contact duration comparison (how long tracks stay in contact with each touched class "
             "of 'Use contact cell classification', pairwise and each class vs. the rest):"
         ))
@@ -6832,6 +6838,7 @@ class TrackClassificationSubTab(QWidget):
         ))
         g_contact.addLayout(duration_form)
         self.label_duration_pairing_cols = QLabel("Pairing column(s) (Ctrl/Cmd click for multiple):")
+        self.label_duration_pairing_cols.setWordWrap(True)
         g_contact.addWidget(self.label_duration_pairing_cols)
         self.list_duration_pairing_cols = QListWidget()
         self.list_duration_pairing_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -6879,12 +6886,12 @@ class TrackClassificationSubTab(QWidget):
         g_contact.addLayout(duration_row)
         self._on_duration_test_mode_changed()
 
-        g_contact.addWidget(QLabel(
+        g_contact.addWidget(_make_info_label(
             "Contact type comparison (mean contact fraction per cluster, side by side across "
             "selected contact columns — e.g. healthy vs. tumor organoid contact; purely "
             "descriptive, no significance test):"
         ))
-        g_contact.addWidget(QLabel("Contact columns to compare (Ctrl/Cmd click for 2+):"))
+        g_contact.addWidget(_make_info_label("Contact columns to compare (Ctrl/Cmd click for 2+):"))
         self.list_contact_type_compare_cols = QListWidget()
         self.list_contact_type_compare_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
         g_contact.addWidget(self.list_contact_type_compare_cols)
@@ -6896,7 +6903,7 @@ class TrackClassificationSubTab(QWidget):
         contact_type_row.addWidget(self.btn_view_contact_type_comparison)
         g_contact.addLayout(contact_type_row)
 
-        g_contact.addWidget(QLabel(
+        g_contact.addWidget(_make_info_label(
             "Track contact overview (full state trajectory + contact-bout markers, one page per sample):"
         ))
         overview_form = QFormLayout()
@@ -6945,17 +6952,24 @@ class TrackClassificationSubTab(QWidget):
         opts_row.addWidget(HelpButton("Overview statebars",
             "Generate a PDF with stacked state bar plots for all exemplar tracks."))
 
+        # Backprojection PDF/MP4 exemplar outputs are a development feature: only
+        # shown when the GUI runs in dev mode (BEHAV3D_DEV_MODE=1, set by launch_napari.py).
+        self.exemplar_backproj_container = QWidget()
+        backproj_opts_row = QHBoxLayout(self.exemplar_backproj_container)
+        backproj_opts_row.setContentsMargins(0, 0, 0, 0)
         self.chk_backproj_pdf = QCheckBox("PDFs")
         self.chk_backproj_pdf.setChecked(False)
-        opts_row.addWidget(self.chk_backproj_pdf)
-        opts_row.addWidget(HelpButton("PDFs",
+        backproj_opts_row.addWidget(self.chk_backproj_pdf)
+        backproj_opts_row.addWidget(HelpButton("PDFs",
             "Generate backprojection PDFs showing exemplar tracks overlaid on raw images."))
 
         self.chk_backproj_mp4 = QCheckBox("MP4")
         self.chk_backproj_mp4.setChecked(False)
-        opts_row.addWidget(self.chk_backproj_mp4)
-        opts_row.addWidget(HelpButton("MP4",
+        backproj_opts_row.addWidget(self.chk_backproj_mp4)
+        backproj_opts_row.addWidget(HelpButton("MP4",
             "Generate backprojection video (MP4) for exemplar tracks."))
+        opts_row.addWidget(self.exemplar_backproj_container)
+        self.exemplar_backproj_container.setVisible(os.environ.get("BEHAV3D_DEV_MODE") == "1")
         opts_row.addStretch()
         g_exemplar.addLayout(opts_row)
 
@@ -7012,13 +7026,12 @@ class TrackClassificationSubTab(QWidget):
         pipeline_content_lay.setContentsMargins(6, 6, 6, 6)
         pipeline_content_lay.setSpacing(6)
         pipeline_content_lay.addWidget(self.grp_diag)
-        pipeline_content_lay.addWidget(self.grp_track_proportions)
+        pipeline_content_lay.addWidget(self.grp_exemplar)
         pipeline_content_lay.addWidget(self.grp_feature_heatmap)
-        pipeline_content_lay.addWidget(self.grp_window_transitions)
+        pipeline_content_lay.addWidget(self.grp_track_proportions)
         pipeline_content_lay.addWidget(self.grp_transition_analysis)
         pipeline_content_lay.addWidget(self.grp_track_comparison)
         pipeline_content_lay.addWidget(self.grp_contact_analysis)
-        pipeline_content_lay.addWidget(self.grp_exemplar)
         pipeline_content_lay.addStretch()
         self._pipeline_scroll.setWidget(pipeline_content)
         reset_scroll_on_page_change(self._plots_stack)
@@ -7164,7 +7177,6 @@ class TrackClassificationSubTab(QWidget):
                 [c for c in _list_widget_items(self.list_feature_heatmap_picked) if c != item.text()]
             )
         )
-        self.btn_window_transitions.clicked.connect(self._on_window_transitions)
         _wire_view_btn(self.btn_view_window_transitions, self._on_view, "window_transitions")
         self.btn_transition_analysis.clicked.connect(self._on_transition_analysis)
         _wire_view_btn(self.btn_view_transition_analysis, self._on_view, "transition_analysis")
@@ -7351,7 +7363,6 @@ class TrackClassificationSubTab(QWidget):
     # ── Guided pipeline dispatch (Step 3 create plots) ───────────────────
     _TRACK_PIPELINE_RUN_BUTTONS = {
         "track_diagnostics": "btn_diagnostics",
-        "track_window_transitions": "btn_window_transitions",
     }
 
     def _on_pipeline_start(self, pipeline_id: str):
@@ -7374,17 +7385,16 @@ class TrackClassificationSubTab(QWidget):
         from behav3d.napari.analysis_guided_copy import TRACK_PLOT_PIPELINES
         visible = {
             "track_diagnostics": {self.grp_diag},
-            "track_proportions": {self.grp_track_proportions},
+            "track_exemplars": {self.grp_exemplar},
             "track_feature_heatmap": {self.grp_feature_heatmap},
-            "track_window_transitions": {self.grp_window_transitions},
+            "track_proportions": {self.grp_track_proportions},
             "track_transition_analysis": {self.grp_transition_analysis},
             "track_comparison": {self.grp_track_comparison},
             "track_contact": {self.grp_contact_analysis},
-            "track_exemplars": {self.grp_exemplar},
         }.get(pipeline_id, set())
-        for group in (self.grp_diag, self.grp_track_proportions, self.grp_feature_heatmap,
-                      self.grp_window_transitions, self.grp_transition_analysis,
-                      self.grp_track_comparison, self.grp_contact_analysis, self.grp_exemplar):
+        for group in (self.grp_diag, self.grp_exemplar, self.grp_feature_heatmap,
+                      self.grp_track_proportions, self.grp_transition_analysis,
+                      self.grp_track_comparison, self.grp_contact_analysis):
             group.setVisible(group in visible)
         title = next(
             (s["title"] for s in TRACK_PLOT_PIPELINES if s["id"] == pipeline_id), ""
@@ -8823,7 +8833,7 @@ class TrackClassificationSubTab(QWidget):
             bool(
                 contact_dir
                 and contact_dir.exists()
-                and any(contact_dir.glob("contact_group_analysis/*/condition_comparison_*.pdf"))
+                and any(contact_dir.glob("contact_condition_comparison/*/condition_comparison_*.pdf"))
             )
         )
         self.btn_view_contact_type_comparison.setEnabled(
@@ -10191,57 +10201,6 @@ class TrackClassificationSubTab(QWidget):
             on_failed=lambda e: self._log(f"❌ Feature heatmap failed: {e}"),
         )
 
-    def _on_window_transitions(self):
-        ct = self._cell_type()
-        if not ct:
-            return
-        if self._track_adata is None:
-            QMessageBox.warning(self, "No data", "Run track clustering first.")
-            return
-        if "trajectory_window_id" not in self._track_adata.obs.columns:
-            QMessageBox.warning(
-                self, "No sub-track windows",
-                "This report needs tracks split into windows. Enable 'Divide long "
-                "tracks' in the Track clustering section's Advanced Configuration and "
-                "re-run track clustering.",
-            )
-            return
-        if self._bg.is_running():
-            QMessageBox.warning(self, "Busy", "Another operation is running.")
-            return
-        out = self._out_dir()
-        self._log(f"▶ Creating window transition Sankey for '{ct}'…")
-        track_adata = self._track_adata
-
-        def _run(**kw):
-            from behav3d.analysis.behavior.track.visualization.plots.window_transitions import (
-                save_window_transition_report,
-            )
-            from behav3d.napari._rename_dialog import _track_cluster_col
-            cluster_col = _track_cluster_col(track_adata) or "ClusterID"
-            return save_window_transition_report(
-                track_adata,
-                output_dir=str(out) if out else "",
-                cell_type=ct,
-                cluster_key=cluster_col,
-                verbose=True,
-            )
-
-        self._bg.run(
-            fn=_run,
-            desc=f"Window transition Sankey ({ct})…",
-            progress_row=self.progress_row,
-            buttons=[self.btn_window_transitions],
-            viewer=self.viewer,
-            inject_progress=False,
-            on_done=lambda r: (
-                self._log(f"✅ Window transition Sankey done for '{ct}'."),
-                self._update_view_buttons(),
-                self._notify_results(),
-            ),
-            on_failed=lambda e: self._log(f"❌ Window transition Sankey failed: {e}"),
-        )
-
     def _on_transition_analysis(self):
         ct = self._cell_type()
         if not ct:
@@ -10257,6 +10216,21 @@ class TrackClassificationSubTab(QWidget):
                 "re-run track clustering.",
             )
             return
+        include_transition_matrix = self.chk_transanalysis_include_matrix.isChecked()
+        include_circular_diagram = self.chk_transanalysis_include_circular.isChecked()
+        circular_include_self_transitions = self.chk_transanalysis_include_self.isChecked()
+        include_circular_diagram_per_cluster = self.chk_transanalysis_include_per_cluster.isChecked()
+        include_window_sankey = self.chk_transanalysis_include_window_sankey.isChecked()
+        include_pooled = (
+            include_transition_matrix or include_circular_diagram
+            or include_circular_diagram_per_cluster
+        )
+        if not (include_pooled or include_window_sankey):
+            QMessageBox.warning(
+                self, "Nothing selected",
+                "Select at least one page to include in the Track Transition Report.",
+            )
+            return
         if self._bg.is_running():
             QMessageBox.warning(self, "Busy", "Another operation is running.")
             return
@@ -10269,31 +10243,41 @@ class TrackClassificationSubTab(QWidget):
         label_style = (
             "legend" if self.combo_transanalysis_label_style.currentIndex() == 1 else "on_node"
         )
-        include_transition_matrix = self.chk_transanalysis_include_matrix.isChecked()
-        include_circular_diagram = self.chk_transanalysis_include_circular.isChecked()
-        circular_include_self_transitions = self.chk_transanalysis_include_self.isChecked()
-        include_circular_diagram_per_cluster = self.chk_transanalysis_include_per_cluster.isChecked()
 
         def _run(**kw):
-            from behav3d.analysis.behavior.track.visualization.plots.transition_analysis import (
-                save_window_cluster_transition_analysis,
-            )
             from behav3d.napari._rename_dialog import _track_cluster_col
             cluster_col = _track_cluster_col(track_adata) or "ClusterID"
-            return save_window_cluster_transition_analysis(
-                track_adata,
-                output_dir=str(out) if out else "",
-                cell_type=ct,
-                cluster_key=cluster_col,
-                min_prob_to_draw=min_prob_to_draw,
-                emphasis_gamma=emphasis_gamma,
-                label_style=label_style,
-                include_transition_matrix=include_transition_matrix,
-                include_circular_diagram=include_circular_diagram,
-                circular_include_self_transitions=circular_include_self_transitions,
-                include_circular_diagram_per_cluster=include_circular_diagram_per_cluster,
-                verbose=True,
-            )
+            results = {}
+            if include_pooled:
+                from behav3d.analysis.behavior.track.visualization.plots.transition_analysis import (
+                    save_window_cluster_transition_analysis,
+                )
+                results["transition_analysis"] = save_window_cluster_transition_analysis(
+                    track_adata,
+                    output_dir=str(out) if out else "",
+                    cell_type=ct,
+                    cluster_key=cluster_col,
+                    min_prob_to_draw=min_prob_to_draw,
+                    emphasis_gamma=emphasis_gamma,
+                    label_style=label_style,
+                    include_transition_matrix=include_transition_matrix,
+                    include_circular_diagram=include_circular_diagram,
+                    circular_include_self_transitions=circular_include_self_transitions,
+                    include_circular_diagram_per_cluster=include_circular_diagram_per_cluster,
+                    verbose=True,
+                )
+            if include_window_sankey:
+                from behav3d.analysis.behavior.track.visualization.plots.window_transitions import (
+                    save_window_transition_report,
+                )
+                results["window_transitions"] = save_window_transition_report(
+                    track_adata,
+                    output_dir=str(out) if out else "",
+                    cell_type=ct,
+                    cluster_key=cluster_col,
+                    verbose=True,
+                )
+            return results
 
         self._bg.run(
             fn=_run,
@@ -10756,11 +10740,18 @@ class TrackClassificationSubTab(QWidget):
             from behav3d.analysis.behavior.track.visualization.plots.reports import (
                 save_track_condition_comparison_report,
             )
+            from behav3d.analysis.behavior.utils import _contact_analysis_dir
             from behav3d.core.metadata import merge_condition_columns_into_obs
             from behav3d.napari._rename_dialog import _track_cluster_col
             cluster_col = _track_cluster_col(track_adata) or "ClusterID"
             df_timepoints = pd.read_csv(csv_path)
-            contact_dir = _resolve_track_paths(str(out) if out else "", ct).outfolder
+            # Same layout as the other contact reports:
+            # contact_analysis/contact_condition_comparison/{contact_col}/ (+ csv/ subfolder).
+            contact_dir = _contact_analysis_dir(
+                _resolve_track_paths(str(out) if out else "", ct).outfolder,
+                "contact_condition_comparison", contact_col,
+            )
+            csv_dir = contact_dir / "csv"
             all_extra_cols = selected_extra_cols + [c for c in (group_x, group_y) if c]
             cols_to_merge = [c for c in all_extra_cols if c not in track_adata.obs.columns]
             if cols_to_merge and md is not None:
@@ -10783,6 +10774,7 @@ class TrackClassificationSubTab(QWidget):
                 group_y_levels_map=group_y_levels_map,
                 group_cols=selected_extra_cols or None,
                 verbose=True,
+                csv_dir=csv_dir,
             )
             result = {
                 "contact_vs_no_contact": save_track_condition_comparison_report(
@@ -11661,7 +11653,7 @@ class TrackClassificationSubTab(QWidget):
             contact_dir = traj_dir / "contact_analysis"
             candidates = [
                 (f"{f.parent.name}/{f.stem}", f)
-                for f in sorted(contact_dir.glob("contact_group_analysis/*/condition_comparison_*.pdf"))
+                for f in sorted(contact_dir.glob("contact_condition_comparison/*/condition_comparison_*.pdf"))
             ]
         elif kind == "contact_cluster_heatmap" and traj_dir:
             contact_dir = traj_dir / "contact_analysis"

@@ -9,6 +9,7 @@ significance test), matching the "descriptive only" convention already used by
 """
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
@@ -132,17 +133,21 @@ def save_track_contact_type_comparison(
     )
     contact_col_colors = hash_stable_label_color_map(contact_cols)
 
-    fig, ax = plt.subplots(figsize=(7.0, max(1.0 + 0.4 * len(resolved_class_order), 3.0)))
+    legend_ncol = min(len(contact_cols), 4)
+    legend_in = 0.3 + 0.2 * (int(np.ceil(len(contact_cols) / legend_ncol)) - 1)
+    fig_h = max(1.0 + 0.4 * len(resolved_class_order), 3.0) + legend_in
+    fig, ax = plt.subplots(figsize=(7.0, fig_h))
     draw_grouped_value_barh(
         ax, resolved_class_order, mean_df, sem_df, contact_cols, contact_col_colors,
-        xlabel="Mean fraction of time in contact (%)",
+        xlabel="Mean fraction of time in contact (%) — bar = mean, whisker = SEM across tracks",
     )
+    ax.set_ylabel(str(class_col), fontsize=8)
     handles = [
         plt.Rectangle((0, 0), 1, 1, color=contact_col_colors[c]) for c in contact_cols
     ]
-    fig.legend(handles, contact_cols, loc="lower center", ncol=min(len(contact_cols), 4), frameon=False, fontsize=8)
+    fig.legend(handles, contact_cols, loc="lower center", ncol=legend_ncol, frameon=False, fontsize=8)
     fig.suptitle(f"Contact type comparison by {class_col}", fontsize=11, fontweight="bold")
-    fig.tight_layout(rect=(0.0, 0.08, 1.0, 0.94))
+    fig.tight_layout(rect=(0.0, legend_in / fig_h, 1.0, 1.0 - 0.4 / fig_h))
 
     with PdfPages(pdf_path) as pdf:
         pdf.savefig(fig)

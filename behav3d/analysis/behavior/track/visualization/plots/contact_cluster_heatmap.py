@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.lines import Line2D
 import seaborn as sns
 
 from behav3d.analysis.behavior.utils import _contact_analysis_dir, _mixed_label_sort_key
@@ -43,36 +44,44 @@ def _minmax_scale_row(values):
 
 
 def _draw_single_cluster_heatmap(ax, cluster_order, raw_values, *, row_label, cmap="viridis", vmin=None, vmax=None):
-    df_raw = pd.DataFrame(
-        np.asarray(raw_values, dtype=float).reshape(1, -1), index=[row_label], columns=cluster_order,
+    # One-row heatmap: the metric is named on the colour bar rather than as a y tick label, which
+    # would otherwise be clipped at the page's left edge for longer metric names.
+    df_raw = pd.DataFrame(np.asarray(raw_values, dtype=float).reshape(1, -1), columns=cluster_order)
+    sns.heatmap(
+        df_raw, ax=ax, cmap=cmap, cbar=True, annot=True, fmt=".1f", vmin=vmin, vmax=vmax,
+        yticklabels=False, cbar_kws={"label": row_label},
     )
-    sns.heatmap(df_raw, ax=ax, cmap=cmap, cbar=True, annot=True, fmt=".1f", vmin=vmin, vmax=vmax, yticklabels=True)
     ax.tick_params(axis="x", labelsize=8, rotation=0)
-    ax.tick_params(axis="y", labelsize=8, rotation=0)
 
 
-def _draw_raw_and_scaled_heatmaps(ax_raw, ax_scaled, cluster_order, raw_values, *, row_label, cmap="viridis"):
+def _draw_raw_and_scaled_heatmaps(ax_raw, ax_scaled, cluster_order, raw_values, *, row_label, class_col, cmap="viridis"):
     """Left panel: heatmap colored by the raw values. Right panel: the same values colored by a
     0-1 min-max scaling across clusters (for visual contrast when the raw spread is small) — both
     panels are annotated with the raw numbers so the actual magnitudes stay legible."""
     raw_arr = np.asarray(raw_values, dtype=float)
-    df_raw = pd.DataFrame(raw_arr.reshape(1, -1), index=[row_label], columns=cluster_order)
-    df_scaled = pd.DataFrame(_minmax_scale_row(raw_arr).reshape(1, -1), index=[row_label], columns=cluster_order)
+    df_raw = pd.DataFrame(raw_arr.reshape(1, -1), columns=cluster_order)
+    df_scaled = pd.DataFrame(_minmax_scale_row(raw_arr).reshape(1, -1), columns=cluster_order)
 
-    sns.heatmap(df_raw, ax=ax_raw, cmap=cmap, cbar=True, annot=True, fmt=".2f", yticklabels=True)
-    ax_raw.set_title("Raw values", fontsize=9)
+    sns.heatmap(
+        df_raw, ax=ax_raw, cmap=cmap, cbar=True, annot=True, fmt=".2f", yticklabels=False,
+        cbar_kws={"label": row_label},
+    )
+    ax_raw.set_title(f"Mean per {class_col} — colour = raw value", fontsize=9)
+    ax_raw.set_xlabel(str(class_col), fontsize=8)
     ax_raw.tick_params(axis="x", labelsize=7, rotation=0)
-    ax_raw.tick_params(axis="y", labelsize=8, rotation=0)
+    ax_raw.collections[0].colorbar.ax.yaxis.label.set_size(7)
 
     sns.heatmap(
         df_scaled, ax=ax_scaled, cmap=cmap, cbar=True, annot=df_raw.to_numpy(), fmt=".2f",
-        vmin=0.0, vmax=1.0, yticklabels=False,
+        vmin=0.0, vmax=1.0, yticklabels=False, cbar_kws={"label": "Min-max scaled (0-1)"},
     )
-    ax_scaled.set_title("Min-max scaled (0-1)", fontsize=9)
+    ax_scaled.set_title(f"Mean per {class_col} — colour = min-max scaled across {class_col}", fontsize=9)
+    ax_scaled.set_xlabel(str(class_col), fontsize=8)
     ax_scaled.tick_params(axis="x", labelsize=7, rotation=0)
+    ax_scaled.collections[0].colorbar.ax.yaxis.label.set_size(7)
 
 
-def _draw_track_violin(ax, df_long, *, cluster_order, value_col, class_col, ylabel):
+def _draw_track_violin(ax, df_long, *, cluster_order, value_col, class_col, ylabel, colors=None):
     """Violin + jittered per-track dots + mean marker of `value_col` split by `class_col` — each
     point is one track, including the many zero/no-contact tracks."""
     sub = df_long[[class_col, value_col]].copy()
@@ -83,7 +92,12 @@ def _draw_track_violin(ax, df_long, *, cluster_order, value_col, class_col, ylab
         ax.axis("off")
         return
 
-    sns.violinplot(data=sub, x=class_col, y=value_col, order=cluster_order, inner=None, cut=0, ax=ax)
+    palette = [colors[c] for c in cluster_order] if colors else None
+    sns.violinplot(
+        data=sub, x=class_col, y=value_col, order=cluster_order, inner=None, cut=0, ax=ax,
+        hue=class_col if palette else None, hue_order=cluster_order if palette else None,
+        palette=palette, legend=False,
+    )
     sns.stripplot(
         data=sub, x=class_col, y=value_col, order=cluster_order, ax=ax,
         color="black", dodge=False, jitter=0.2, alpha=0.4, size=4,
@@ -93,23 +107,38 @@ def _draw_track_violin(ax, df_long, *, cluster_order, value_col, class_col, ylab
         np.arange(len(cluster_order)), means.to_numpy(),
         s=60, color="white", edgecolor="black", linewidths=1.0, zorder=3,
     )
+    ax.legend(
+        handles=[
+            Line2D([0], [0], marker="o", color="black", alpha=0.4, linestyle="None", markersize=4, label="one track"),
+            Line2D(
+                [0], [0], marker="o", markerfacecolor="white", markeredgecolor="black", linestyle="None",
+                markersize=7, label=f"mean per {class_col}",
+            ),
+        ],
+        loc="upper right", fontsize=7, frameon=False,
+    )
     ax.set_xlabel(str(class_col), fontsize=8)
     ax.set_ylabel(ylabel, fontsize=8)
-    ax.tick_params(axis="x", labelsize=7, rotation=30)
+    ax.tick_params(axis="x", labelsize=7, rotation=0)
     ax.tick_params(axis="y", labelsize=7)
 
 
-def _plot_metric_page(cluster_order, cluster_means, per_track_df, *, class_col, value_col, row_label, ylabel, page_title):
+def _plot_metric_page(cluster_order, cluster_means, per_track_df, *, class_col, value_col, row_label, ylabel, page_title, colors=None):
     fig = plt.figure(figsize=A4_LANDSCAPE)
     gs = fig.add_gridspec(
-        nrows=2, ncols=2, height_ratios=[1, 3], hspace=0.6, wspace=0.25,
-        top=0.88, bottom=0.10, left=0.10, right=0.95,
+        nrows=2, ncols=2, height_ratios=[1, 3], hspace=0.45, wspace=0.25,
+        top=0.88, bottom=0.08, left=0.08, right=0.95,
     )
     ax_raw = fig.add_subplot(gs[0, 0])
     ax_scaled = fig.add_subplot(gs[0, 1])
-    _draw_raw_and_scaled_heatmaps(ax_raw, ax_scaled, cluster_order, cluster_means, row_label=row_label)
+    _draw_raw_and_scaled_heatmaps(
+        ax_raw, ax_scaled, cluster_order, cluster_means, row_label=row_label, class_col=class_col,
+    )
     ax_violin = fig.add_subplot(gs[1, :])
-    _draw_track_violin(ax_violin, per_track_df, cluster_order=cluster_order, value_col=value_col, class_col=class_col, ylabel=ylabel)
+    _draw_track_violin(
+        ax_violin, per_track_df, cluster_order=cluster_order, value_col=value_col, class_col=class_col,
+        ylabel=ylabel, colors=colors,
+    )
     fig.suptitle(page_title, fontsize=11, fontweight="bold")
     return fig
 
@@ -251,6 +280,7 @@ def save_track_contact_cluster_heatmap(
             row_label=f"Contact duration ({duration_unit})",
             ylabel=f"Max contact-bout length ({duration_unit})",
             page_title=f"Contact duration by {class_col} — contact_col={contact_col}",
+            colors=resolved_colors,
         )
         pdf.savefig(fig)
         plt.close(fig)
@@ -261,6 +291,7 @@ def save_track_contact_cluster_heatmap(
             row_label="Mean time in contact (%)",
             ylabel="Mean fraction of time in contact (%)",
             page_title=f"Time in contact by {class_col} — contact_col={contact_col}",
+            colors=resolved_colors,
         )
         pdf.savefig(fig)
         plt.close(fig)

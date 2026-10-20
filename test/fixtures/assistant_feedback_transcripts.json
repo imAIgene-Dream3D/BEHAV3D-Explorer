@@ -209,10 +209,9 @@
       "complete is a reasonable comparison",
       "single linkage performs poorly",
       "original behav3d feature-based mode is deprecated",
-      "categorical dtw supports contact analysis",
-      "contact state-shift analysis",
-      "requires behavioral state results"
-    ]
+      "categorical dtw supports contact analysis"
+    ],
+    "forbidden": ["state-shift"]
   },
   {
     "id": "death_preview",
@@ -287,10 +286,12 @@
       "behavioral state",
       "state trajectory",
       "contact analysis",
-      "contact state-shift analysis",
       "backprojection"
     ],
-    "forbidden": ["contact-based comparison plots are currently known to produce empty output"]
+    "forbidden": [
+      "contact-based comparison plots are currently known to produce empty output",
+      "state-shift"
+    ]
   },
   {
     "id": "metadata_does_not_own_channel_mapping",

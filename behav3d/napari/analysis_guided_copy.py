@@ -360,31 +360,25 @@ STATE_CONTACT_ANALYSIS = {
     "subtitle": "Which behavioral states coincide with organoid contact, and does contact type matter?",
     "color": "#4a90d9",
     "what_does": (
-        "Two per-timepoint contact reports that need only behavioral-state "
-        "classification (no track-DTW classification): a mean-contact-fraction "
-        "comparison across several organoid-contact columns per state (e.g. healthy "
-        "vs. tumor organoid contact), and a before-vs-after state-shift comparison "
-        "around a track's first sufficiently long contact bout."
+        "A per-timepoint contact report that needs only behavioral-state "
+        "classification (no track-DTW classification): compares the behavioral-state "
+        "composition of contacting timepoints across several organoid-contact columns "
+        "(e.g. healthy vs. tumor organoid contact)."
     ),
-    "concept": {
-        "term": "Contiguous bout",
-        "text": (
-            "a track counts as 'contact' (for the state-shift comparison) only if it "
-            "has an unbroken run of consecutive contact timepoints at least as long "
-            "as the minimum you set — brief, isolated contacts don't count."
-        ),
-    },
-    "what_get": "A contact-type comparison PDF (mean ± SEM, no significance test) and/or a state-shift PDF.",
+    "concept": None,
+    "what_get": (
+        "A contact-type comparison PDF (per-state differences with Welch's t-test, "
+        "plus stacked composition) and its CSVs."
+    ),
     "decide": [
-        _decide("Which contact column(s) to compare", _ONLY_YOU),
+        _decide("Which contact columns to compare", _ONLY_YOU),
         _decide("Which state column to use", _SUGGESTED),
-        _decide("Minimum contiguous contact bout length (state-shift)", _ESTIMATED),
     ],
     "has_params": True,
     "seed": (
-        "Explain the BEHAV3D state Contact analysis: the contact-type comparison "
-        "(mean contact fraction per state across contact columns, purely descriptive) "
-        "and the state-shift analysis (behavioral state before vs. after a contact bout)."
+        "Explain the BEHAV3D state Contact analysis: the contact-type comparison, "
+        "which compares behavioral-state composition of contacting timepoints "
+        "between selected contact columns."
     ),
 }
 
@@ -401,8 +395,8 @@ TRACK_PLOTS_ENTRY = {
     ),
     "concept": None,
     "what_get": (
-        "A choice of diagnostic and summary PDFs, plus optional "
-        "exemplar-track PDFs/MP4s, for your track clustering."
+        "A choice of diagnostic and summary PDFs, plus exemplar-track "
+        "PDFs, for your track clustering."
     ),
     "decide": [],
     "start_label": "Generate analysis and plots  ▸",
@@ -484,45 +478,18 @@ TRACK_FEATURE_HEATMAP = {
     ),
 }
 
-TRACK_WINDOW_TRANSITIONS = {
-    "id": "track_window_transitions",
-    "title": "Window Transitions",
-    "subtitle": "Does a track's movement type change across its own sub-track windows?",
-    "color": "#c98a2c",
-    "what_does": (
-        "For tracks split into windows by 'Divide long tracks', reconnects each "
-        "track's sub-track windows back through their shared TrackID and shows, "
-        "as a Sankey diagram, how the trajectory cluster changes from one window "
-        "to the next - one diagram per sample, plus a pooled page."
-    ),
-    "concept": {
-        "term": "Window",
-        "text": (
-            "a fixed-length, non-overlapping chunk of one track's timepoints - a "
-            "track longer than the trajectory size gets split into several, each "
-            "clustered independently but still tied to the same original TrackID."
-        ),
-    },
-    "what_get": "A window-transition Sankey PDF per sample (+ pooled), and the underlying link-count CSVs.",
-    "decide": [],
-    "has_params": True,
-    "seed": (
-        "Explain the BEHAV3D Window Transitions Sankey: what a track window is, "
-        "and how to read a track moving from one trajectory cluster to another "
-        "across its own windows."
-    ),
-}
-
 TRACK_TRANSITION_ANALYSIS = {
     "id": "track_transition_analysis",
     "title": "Track Transition Report",
     "subtitle": "Pooled across every window, how often does one trajectory cluster become another?",
     "color": "#c98a2c",
     "what_does": (
-        "Collapses window index out of the same window-to-window trajectory-cluster "
-        "transitions Window Transitions tracks, pooling every sample and every window "
-        "into one population-level view: a circular diagram of inter-cluster transition "
-        "probability, plus the row-normalized transition-probability matrix."
+        "For tracks split into windows by 'Divide long tracks', pools every sample's "
+        "window-to-window trajectory-cluster transitions into one population-level "
+        "view: a circular diagram of inter-cluster transition probability, plus the "
+        "row-normalized transition-probability matrix. Optionally also draws a Sankey "
+        "diagram of how each track's cluster changes from one window to the next - "
+        "one diagram per sample, plus a pooled page."
     ),
     "concept": {
         "term": "Inter-cluster transition probability",
@@ -533,17 +500,21 @@ TRACK_TRANSITION_ANALYSIS = {
         ),
     },
     "what_get": (
-        "A transition-matrix heatmap + circular transition diagram PDF, and the "
-        "underlying count/probability CSVs."
+        "A transition-matrix heatmap + circular transition diagram PDF, an optional "
+        "window-transition Sankey PDF per sample (+ pooled), and the underlying CSVs."
     ),
     "decide": [
-        _decide("Minimum probability to draw, emphasis, and which pages to include", _DEFAULTS),
+        _decide(
+            "Minimum probability to draw, emphasis, which pages to include, and whether "
+            "to add the window-transition Sankey",
+            _DEFAULTS,
+        ),
     ],
     "has_params": True,
     "seed": (
         "Explain the BEHAV3D Transition Analysis report: what the circular inter-cluster "
-        "transition diagram and its matrix show, and how the probability cutoff/emphasis "
-        "settings change what's drawn."
+        "transition diagram and its matrix show, how the probability cutoff/emphasis "
+        "settings change what's drawn, and how to read the window-transition Sankey."
     ),
 }
 
@@ -621,17 +592,15 @@ TRACK_EXEMPLAR_TRACKS = {
     ),
     "concept": None,
     "what_get": (
-        "A statebar overview PDF and/or backprojection PDFs/MP4s of "
-        "exemplar tracks, depending on which outputs you enable."
+        "A statebar overview PDF of exemplar tracks per cluster."
     ),
     "decide": [
         _decide("Number of exemplars per cluster", _DEFAULTS),
-        _decide("Which output(s) to generate (statebars / PDFs / MP4)", _SUGGESTED),
     ],
     "has_params": True,
     "seed": (
         "Explain BEHAV3D Exemplar Tracks: how exemplar tracks are chosen "
-        "per cluster and what the statebar/backprojection outputs show."
+        "per cluster and what the statebar overview shows."
     ),
 }
 
@@ -641,9 +610,8 @@ STATE_REPORT_PIPELINES = [
     STATE_COMPARISON_REPORT, STATE_CONTACT_ANALYSIS,
 ]
 TRACK_PLOT_PIPELINES = [
-    TRACK_DIAGNOSTICS, TRACK_PROPORTIONS, TRACK_FEATURE_HEATMAP, TRACK_WINDOW_TRANSITIONS,
+    TRACK_DIAGNOSTICS, TRACK_EXEMPLAR_TRACKS, TRACK_FEATURE_HEATMAP, TRACK_PROPORTIONS,
     TRACK_TRANSITION_ANALYSIS, TRACK_COMPARISON_REPORT, TRACK_CONTACT_GROUPING,
-    TRACK_EXEMPLAR_TRACKS,
 ]
 
 

@@ -19,7 +19,12 @@ from behav3d.analysis.behavior.track.visualization.plots.exemplar_track_per_clus
     _compute_state_bar_segments,
     _plot_statebar_segments_on_ax,
 )
-from behav3d.analysis.behavior.general.visualization.plots.proportion_bars import _chunk_list
+from behav3d.analysis.behavior.general.visualization.plots.proportion_bars import (
+    _chunk_list,
+    legend_layout,
+    legend_max_ncol_for_width,
+    wrap_title_to_width,
+)
 
 _TRACK_OVERVIEW_WINDOW_COL = "trajectory_window_id"
 _CONTACT_BAR_COLOR = "#2ca02c"
@@ -54,7 +59,10 @@ def _compute_contact_bar_segments(times, is_contact, min_bout_length):
     return segments
 
 
-def _plot_track_contact_overview_page(page_rows, *, sample_name, contact_col, min_bout_length, group_label=None):
+def _plot_track_contact_overview_page(
+    page_rows, *, sample_name, contact_col, min_bout_length, state_col, state_order, state_colors,
+    group_label=None,
+):
     """One PDF page: each track gets its state-over-time bar (top) with the matching contact bar
     (bottom, grey/green) directly underneath. All rows share one page-wide time axis (rather than
     each track being independently stretched to the same width), so a track's bar width in the
@@ -65,19 +73,35 @@ def _plot_track_contact_overview_page(page_rows, *, sample_name, contact_col, mi
         min(r["xlim"][0] for r in page_rows),
         max(r["xlim"][1] for r in page_rows),
     )
-    fig = plt.figure(figsize=(11.0, max(2.4, 1.7 * n)))
-    outer = fig.add_gridspec(nrows=n, ncols=1, hspace=0.75, top=0.90, bottom=0.10)
+    fig_w = 11.0
+    state_labels = [str(s) for s in state_order]
+    state_ncol, state_legend_rows, _ = legend_layout(
+        len(state_labels), max_ncol=legend_max_ncol_for_width(state_labels, fig_w, fontsize=8),
+        base_margin_in=0.0,
+    )
+    # Bottom-up: contact legend, state legend (title + rows), then the last row's x-axis label.
+    contact_legend_in = 0.3
+    state_legend_in = 0.25 + 0.2 * state_legend_rows
+    bottom_in = contact_legend_in + state_legend_in + 0.45
+    top_in = 0.6
+    fig_h = top_in + max(1.2, 1.7 * n) + bottom_in
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    outer = fig.add_gridspec(nrows=n, ncols=1, hspace=0.75, top=1 - top_in / fig_h, bottom=bottom_in / fig_h)
 
     for i, row_data in enumerate(page_rows):
         inner = outer[i].subgridspec(2, 1, height_ratios=[3, 1], hspace=0.1)
         ax_state = fig.add_subplot(inner[0])
         ax_contact = fig.add_subplot(inner[1], sharex=ax_state)
 
+        row_title = f"{row_data['sample_name']} | Track {row_data['track_id']}"
+        if row_data.get("window_id") is not None:
+            # A track split into several trajectory windows appears once per window.
+            row_title += f" | window {row_data['window_id']}"
         _plot_statebar_segments_on_ax(
             ax_state,
             segments=row_data["state_segments"],
             xlim=page_xlim,
-            title=f"{row_data['sample_name']} | Track {row_data['track_id']}",
+            title=row_title,
         )
         ax_state.set_xlabel("")
         ax_state.tick_params(labelbottom=False)
@@ -89,15 +113,25 @@ def _plot_track_contact_overview_page(page_rows, *, sample_name, contact_col, mi
         ax_contact.set_yticks([])
         ax_contact.set_xlabel("position_t", fontsize=8)
 
-    legend_handles = [
-        Patch(facecolor=_CONTACT_BAR_COLOR, edgecolor="k", label=f"contact (bout >= {min_bout_length})"),
+    state_handles = [Patch(facecolor=state_colors[s], edgecolor="none", label=str(s)) for s in state_order]
+    fig.legend(
+        handles=state_handles, title=f"top bar: state ({state_col})", loc="lower center",
+        bbox_to_anchor=(0.5, contact_legend_in / fig_h), ncol=state_ncol, frameon=False,
+        fontsize=8, title_fontsize=8,
+    )
+    contact_handles = [
+        Patch(facecolor=_CONTACT_BAR_COLOR, edgecolor="k", label=f"contact (bout ≥ {min_bout_length} timepoints)"),
         Patch(facecolor=_NO_CONTACT_BAR_COLOR, edgecolor="k", label="no contact"),
     ]
-    fig.legend(handles=legend_handles, loc="lower center", ncol=2, frameon=False, fontsize=8)
+    fig.legend(
+        handles=contact_handles, title="bottom bar:", loc="lower center", bbox_to_anchor=(0.5, 0.0),
+        ncol=3, frameon=False, fontsize=8, title_fontsize=8, alignment="left",
+    )
     title = f"Track contact overview | sample: {sample_name} | contact_col={contact_col}"
     if group_label:
         title += f" | {group_label}"
-    fig.suptitle(title, fontsize=11, fontweight="bold")
+    title, _ = wrap_title_to_width(title, fig_w, fontsize=11)
+    fig.suptitle(title, fontsize=11, fontweight="bold", y=1 - 0.1 / fig_h, va="top")
     return fig
 
 
@@ -241,6 +275,7 @@ def save_track_contact_overview_report(
                 "xlim": xlim,
                 "contact_segments": contact_segments,
                 "group_key": group_key,
+                "window_id": row[_TRACK_OVERVIEW_WINDOW_COL] if has_window_col else None,
             }
         )
 
@@ -272,6 +307,7 @@ def save_track_contact_overview_report(
                     fig = _plot_track_contact_overview_page(
                         page_rows, sample_name=sample_name, contact_col=contact_col,
                         min_bout_length=min_bout_length, group_label=group_label,
+                        state_col=state_col, state_order=state_order, state_colors=state_colors,
                     )
                     pdf.savefig(fig, dpi=int(plot_dpi), bbox_inches="tight")
                     plt.close(fig)

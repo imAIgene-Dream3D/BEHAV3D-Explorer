@@ -575,7 +575,9 @@ def _plot_overall_summary_bar(ax, overall, *, state_order, state_colors, show_yl
     if show_ylabel:
         ax.set_ylabel("Proportion", fontsize=7)
     else:
-        ax.set_yticklabels([])
+        # Not set_yticklabels([]): callers often create this axis with sharey= the main panel,
+        # and emptying the shared tick labels would wipe the main panel's y-axis labels too.
+        ax.tick_params(axis="y", labelleft=False)
     ax.set_xlabel("Overall", fontsize=7)
     for spine in ax.spines.values():
         spine.set_visible(False)
@@ -621,6 +623,7 @@ def _plot_page_relative_stacked_grid(
     sample_title_fontsize=8,
     sample_title_pad=2,
     time_bin_size=None,
+    title="Relative State Composition (Stacked) by Sample",
 ):
     """One A4 page: relative stacked composition per sample (grid)."""
     samples = list(relative_by_sample.keys())
@@ -688,7 +691,7 @@ def _plot_page_relative_stacked_grid(
         fig.tight_layout(rect=(0.03, 0, right_margin, 0.93))
     else:
         fig.tight_layout(rect=(0.03, 0, 1, 0.93))
-    fig.suptitle("Relative State Composition (Stacked) by Sample", y=0.97, fontsize=12, fontweight="bold")
+    fig.suptitle(title, y=0.97, fontsize=12, fontweight="bold")
     return fig
 
 

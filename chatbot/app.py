@@ -216,7 +216,7 @@ def _asks_general_analysis_question(messages: list[dict]) -> bool:
         "invasiveness analysis", "active killing", "behavioral state",
         "behavioural state",
         "state trajectory", "contact-based grouping", "contact based grouping",
-        "state-shift", "state shift", "backprojection",
+        "backprojection",
     ))
     if targeted:
         return False
@@ -269,11 +269,6 @@ def _analysis_intent_route(messages: list[dict]) -> str | None:
         return "interaction"
     if "invasiveness analysis" in latest:
         return "invasiveness"
-    if any(phrase in latest for phrase in (
-        "contact state-shift", "contact state shift", "state shift after contact",
-        "before and after contact", "before versus after contact",
-    )):
-        return "contact_state_shift"
     if any(phrase in latest for phrase in (
         "contact-based grouping", "contact based grouping",
         "behave differently while touching", "behavior while touching",
@@ -387,8 +382,7 @@ def analysis_intent_clarification(
         return (
             "Which contact question do you want to answer: **how many contacts occur "
             "and how groups compare** (Interaction Analysis), **whether behavior "
-            "differs while touching** (Contact-Based Grouping), **whether behavior "
-            "changes before versus after contact** (Contact State-Shift Analysis), or "
+            "differs while touching** (Contact-Based Grouping), or "
             "**the contact distance at which objects count as touching** (Feature Extraction)? "
             "Tell me which one and I will open it."
         )
@@ -816,9 +810,8 @@ def analysis_choice_summary(context: dict, messages: list[dict]) -> str | None:
             "signal state? Use **Interaction Analysis**.",
             "How much of one selected object's surface engages another? Use "
             "**Invasiveness Analysis** after extracting invasiveness features.",
-            "Do sustained-contact tracks occupy different trajectory clusters, or do "
-            "cell states change after contact? Use **Contact analysis** and "
-            "**Contact State-Shift Analysis** under State Trajectory.",
+            "Do sustained-contact tracks occupy different trajectory clusters? Use "
+            "**Contact analysis** under State Trajectory.",
         ])
     if all_populations:
         questions.append(
@@ -867,16 +860,13 @@ def analysis_choice_summary(context: dict, messages: list[dict]) -> str | None:
         "their proportions differ by condition. |\n"
         "| **Contact analysis** | Whether State Trajectory clusters differ "
         "between tracks with and without a sustained contact bout. |\n"
-        "| **Contact State-Shift Analysis** | Whether behavioral-state composition "
-        "changes before versus after contact, compared with matched no-contact tracks. |\n"
         "| **Backprojection** | Where state, trajectory, or killing labels occur in the "
         "original images for visual validation. |\n\n"
         "Death Dynamics, Interaction and Invasiveness are in the **Population Dynamics** "
         "analysis tab. "
         "State Trajectory also provides diagnostics, track-proportion plots, condition "
-        "comparisons, exemplar tracks, and the two contact analyses above. Contact-Based "
-        "Grouping requires contact features and Categorical DTW classification; Contact "
-        "State-Shift additionally requires Behavioral State results.\n\n"
+        "comparisons, exemplar tracks, and the contact analysis above. Contact-Based "
+        "Grouping requires contact features and Categorical DTW classification.\n\n"
         f"**{question_heading}**\n"
         f"{question_text}\n\n"
         "For a single-cell behavior question, the usual sequence is **Behavioral "
@@ -918,8 +908,6 @@ def analysis_navigation_action(context: dict, messages: list[dict]) -> dict | No
         (("state trajectory", "trajectory analysis"), "state_trajectory", "State Trajectory"),
         (("contact-based grouping", "contact based grouping", "behavior differs while touching",
           "behaviour differs while touching"), "state_trajectory", "State Trajectory"),
-        (("contact state-shift", "contact state shift", "before versus after contact"),
-         "state_trajectory", "State Trajectory"),
     ):
         if any(phrase in latest for phrase in phrases):
             requested = (view, label)
@@ -3982,12 +3970,10 @@ def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict])
         "- For State Trajectory, Trajectory size cannot exceed the Filtering trim. Average linkage is the "
         "default, Complete is a reasonable comparison, and Single performs poorly. Original BEHAV3D mode is "
         "deprecated. Categorical DTW supports Contact analysis for sustained-contact versus no-contact "
-        "tracks and Contact State-Shift Analysis for before/after-contact state composition; the latter also "
-        "requires Behavioral State results. Do not claim these current contact analyses are unavailable or "
-        "known to produce empty output.\n"
+        "tracks. Do not claim this contact analysis is unavailable or known to produce empty output.\n"
         "- A general analysis-choice request must enumerate all relevant routes: Death Dynamics, Interaction "
         "Analysis, Invasiveness Analysis, Active Killing, Behavioral State, State Trajectory, Contact-Based "
-        "Grouping, Contact State-Shift Analysis, and Backprojection. Then use the loaded metadata "
+        "Grouping, and Backprojection. Then use the loaded metadata "
         "populations, lines/conditions, and dead-signal "
         "availability to propose concrete biological questions and a sensible sequence, while distinguishing "
         "configured prerequisites from results that actually exist. Do not navigate for this overview. When the "

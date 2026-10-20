@@ -33,6 +33,8 @@ from behav3d.analysis.behavior.general.visualization.plots.proportion_bars impor
     compute_class_by_stack_proportions,
     draw_stacked_proportion_barv,
     legend_layout,
+    legend_max_ncol_for_width,
+    wrap_title_to_width,
     _chunk_list,
     _make_group_label,
 )
@@ -53,6 +55,26 @@ _MIN_GROUP_N_FOR_TEST = 2
 # joining them (the line moved to a separate companion panel; see ``_draw_pair_connected_lines``/
 # ``_draw_long_contact_connected_lines``).
 _SAMPLE_MARKER_SHAPES = ["o", "s", "^", "D", "v", "P", "X", "*", "h", "<", ">", "p"]
+
+
+# Black (not matplotlib's default orange) so the median stays visible on every class fill colour.
+_MEDIAN_PROPS = {"color": "black", "linewidth": 1.2}
+_BOX_LEGEND_TEXT = "Box = median (black line) and interquartile range, whiskers = 1.5×IQR; dots = individual tracks"
+_CONNECTED_BOX_LEGEND_TEXT = (
+    "Box = median (black line) and IQR of per-sample means, whiskers = 1.5×IQR; marker shape = sample. "
+    "Right of each box: grey line = one sample, bold black line = mean across samples"
+)
+
+
+def _wrapped_suptitle(fig, text, fig_w, *, fontsize=10):
+    """Suptitle wrapped to the figure width, anchored at the top edge. Returns its line count."""
+    wrapped, n_lines = wrap_title_to_width(text, fig_w, fontsize=fontsize)
+    fig.suptitle(wrapped, fontsize=fontsize, fontweight="bold", y=1.0 - 0.08 / fig.get_size_inches()[1], va="top")
+    return n_lines
+
+
+def _title_lines(text, fig_w, *, fontsize=10):
+    return wrap_title_to_width(text, fig_w, fontsize=fontsize)[1]
 
 
 def _sample_marker_map(sample_names):
@@ -245,7 +267,10 @@ def _draw_box_shell(ax, data, *, label_a, label_b, colors, widths, alpha):
         textwrap.fill(str(label_a), width=12, break_long_words=False),
         textwrap.fill(str(label_b), width=12, break_long_words=False),
     ]
-    bp = ax.boxplot(data, tick_labels=wrapped_labels, patch_artist=True, widths=widths, showfliers=False, zorder=1)
+    bp = ax.boxplot(
+        data, tick_labels=wrapped_labels, patch_artist=True, widths=widths, showfliers=False, zorder=1,
+        medianprops=_MEDIAN_PROPS,
+    )
     for patch, label in zip(bp["boxes"], (label_a, label_b)):
         patch.set_facecolor(colors.get(label, "#808080"))
         patch.set_alpha(alpha)
@@ -350,13 +375,30 @@ def _plot_duration_comparison_page(
     ncols_page = max(1, min(ncols, n))
     nrows = int(np.ceil(n / ncols_page))
     panel_w, panel_h = 2.3, 3.0
-    header_h, footer_h = 1.2, 0.4
     fig_w = max(6.0, panel_w * n_panels * ncols_page)
+
+    subtitle = f"contact_col={contact_col}  target={target_cell_type_label}  test={test_mode}"
+    if test_mode == "paired":
+        subtitle += f"  pairing_col={pairing_col_label or pairing_col}"
+    if not show_minutes:
+        subtitle += "  (minutes unavailable — no time metadata)"
+    title = f"Contact duration comparison — bout length & contact-time fraction by {target_cell_type_label} class"
+    if section_label is not None:
+        title += f"\ngroup: {section_label}"
+    else:
+        title += "\n(all data pooled)"
+    full_title = f"{title}\n{subtitle}"
+
+    # Title lines + the per-comparison panel title above the first row.
+    header_h = 0.55 + 0.19 * _title_lines(full_title, fig_w)
+    # Two-line wrapped class tick labels + two footnote lines.
+    footer_h = 0.95
     fig_h = header_h + footer_h + panel_h * nrows
     fig = plt.figure(figsize=(fig_w, fig_h))
     outer = fig.add_gridspec(
         nrows=nrows, ncols=ncols_page, hspace=0.9, wspace=0.5,
         top=1 - header_h / fig_h, bottom=footer_h / fig_h,
+        left=0.75 / fig_w, right=1 - 0.25 / fig_w,
     )
 
     for i, row in enumerate(page_rows):
@@ -389,18 +431,9 @@ def _plot_duration_comparison_page(
             ylabel="Fraction of window in contact", stars=row["fraction_stars"], colors=label_colors,
         )
 
-    subtitle = f"contact_col={contact_col}  target={target_cell_type_label}  test={test_mode}"
-    if test_mode == "paired":
-        subtitle += f"  pairing_col={pairing_col_label or pairing_col}"
-    if not show_minutes:
-        subtitle += "  (minutes unavailable — no time metadata)"
-    title = f"Contact duration comparison — bout length & contact-time fraction by {target_cell_type_label} class"
-    if section_label is not None:
-        title += f"\ngroup: {section_label}"
-    else:
-        title += "\n(all data pooled)"
-    fig.suptitle(f"{title}\n{subtitle}", fontsize=10, fontweight="bold")
-    fig.text(0.5, 0.02, SIGNIFICANCE_LEGEND_TEXT, ha="center", va="bottom", fontsize=7)
+    _wrapped_suptitle(fig, full_title, fig_w)
+    footnote, _ = wrap_title_to_width(f"{_BOX_LEGEND_TEXT}\n{SIGNIFICANCE_LEGEND_TEXT}", fig_w * 1.3, fontsize=7)
+    fig.text(0.5, 0.06 / fig_h, footnote, ha="center", va="bottom", fontsize=7, linespacing=1.4)
     return fig
 
 
@@ -426,22 +459,38 @@ def _plot_duration_comparison_connected_page(
     all_samples = sorted(
         {name for row in page_rows for name in row["sample_names"]}, key=_mixed_label_sort_key,
     )
-    ncol, n_legend_rows, legend_margin_in = legend_layout(
-        len(all_samples), max_ncol=8, row_height_in=0.2, base_margin_in=0.55,
-    )
-    header_h = 1.2
-    footer_h = legend_margin_in + 0.3
     fig_w = max(6.0, panel_w * n_panels * ncols_page)
+    ncol, n_legend_rows, legend_margin_in = legend_layout(
+        len(all_samples), max_ncol=legend_max_ncol_for_width(all_samples, fig_w, fontsize=6),
+        row_height_in=0.16, base_margin_in=0.4,
+    )
+
+    subtitle = f"contact_col={contact_col}  target={target_cell_type_label}  paired by {sample_col}"
+    if not show_minutes:
+        subtitle += "  (minutes unavailable — no time metadata)"
+    title = f"Contact duration comparison — connected by {sample_col} (box = per-sample means)"
+    if section_label is not None:
+        title += f"\ngroup: {section_label}"
+    else:
+        title += "\n(all data pooled)"
+    full_title = f"{title}\n{subtitle}"
+
+    header_h = 0.55 + 0.19 * _title_lines(full_title, fig_w)
+    # Bottom-up: footnote lines, the sample legend, then room for the rotated/wrapped tick labels.
+    footnote_h = 0.5
+    tick_h = 0.6
+    footer_h = footnote_h + legend_margin_in + tick_h
     fig_h = header_h + footer_h + panel_h * nrows
     fig = plt.figure(figsize=(fig_w, fig_h))
     # A fixed inch margin rather than matplotlib's default *fraction*-of-figure-width margin —
     # on these wide (many-comparisons-per-row) figures a fractional margin wastes an increasing
-    # amount of blank space as fig_w grows, pushing every panel toward the right.
-    side_margin_in = 0.3
+    # amount of blank space as fig_w grows, pushing every panel toward the right. The left side
+    # needs room for the first panel's y-axis label and tick labels.
+    left_margin_in, right_margin_in = 0.75, 0.3
     outer = fig.add_gridspec(
         nrows=nrows, ncols=ncols_page, hspace=0.9, wspace=0.5,
         top=1 - header_h / fig_h, bottom=footer_h / fig_h,
-        left=side_margin_in / fig_w, right=1 - side_margin_in / fig_w,
+        left=left_margin_in / fig_w, right=1 - right_margin_in / fig_w,
     )
 
     def _draw_metric_group(cell, values_a, values_b, ylabel, stars, row):
@@ -484,15 +533,7 @@ def _plot_duration_comparison_connected_page(
             "Fraction of window in contact", row["sample_fraction_stars"], row,
         )
 
-    subtitle = f"contact_col={contact_col}  target={target_cell_type_label}  paired by {sample_col}"
-    if not show_minutes:
-        subtitle += "  (minutes unavailable — no time metadata)"
-    title = f"Contact duration comparison — connected by {sample_col} (box = per-sample means)"
-    if section_label is not None:
-        title += f"\ngroup: {section_label}"
-    else:
-        title += "\n(all data pooled)"
-    fig.suptitle(f"{title}\n{subtitle}", fontsize=10, fontweight="bold")
+    _wrapped_suptitle(fig, full_title, fig_w)
 
     # Legend marker color mirrors the box panel's own rule (_draw_pair_connected_box): solid
     # black while every sample still has its own unique shape, per-sample color once shapes wrap
@@ -508,16 +549,17 @@ def _plot_duration_comparison_connected_page(
         for s in all_samples
     ]
     if handles:
-        # 0.3in above the figure bottom, expressed as a *whole-figure* fraction (fig.legend's
-        # bbox_transform is fig.transFigure, not the footer's own sub-rectangle) -- leaves the
-        # significance-legend text (at fig-fraction 0.02) room below it.
-        legend_y = 0.3 / fig_h if fig_h > 0 else 0.0
+        # Just above the footnote lines, expressed as a *whole-figure* fraction (fig.legend's
+        # bbox_transform is fig.transFigure, not the footer's own sub-rectangle).
         fig.legend(
             handles=handles, title=f"sample ({sample_col})", loc="lower center",
-            bbox_to_anchor=(0.5, legend_y), ncol=ncol, frameon=False, fontsize=6, title_fontsize=6.5,
+            bbox_to_anchor=(0.5, footnote_h / fig_h), ncol=ncol, frameon=False, fontsize=6, title_fontsize=6.5,
             handlelength=1.3, labelspacing=0.3, columnspacing=1.0,
         )
-    fig.text(0.5, 0.02, SIGNIFICANCE_LEGEND_TEXT, ha="center", va="bottom", fontsize=7)
+    footnote, _ = wrap_title_to_width(
+        f"{_CONNECTED_BOX_LEGEND_TEXT}\n{SIGNIFICANCE_LEGEND_TEXT}", fig_w * 1.3, fontsize=7,
+    )
+    fig.text(0.5, 0.06 / fig_h, footnote, ha="center", va="bottom", fontsize=7, linespacing=1.4)
     return fig
 
 
@@ -668,7 +710,7 @@ def _draw_long_contact_boxplot(ax, per_sample_df, class_order, colors):
         per_sample_df.loc[per_sample_df["target_class"] == cls, "pct_long_contact"].to_numpy(dtype=float)
         for cls in class_order
     ]
-    bp = ax.boxplot(data, tick_labels=class_order, patch_artist=True, widths=0.75, showfliers=False)
+    bp = ax.boxplot(data, tick_labels=class_order, patch_artist=True, widths=0.75, showfliers=False, medianprops=_MEDIAN_PROPS)
     for patch, cls in zip(bp["boxes"], class_order):
         patch.set_facecolor(colors.get(cls, "#808080"))
         patch.set_alpha(0.55)
@@ -715,7 +757,7 @@ def _draw_long_contact_connected_box(ax, per_sample_df, class_order, colors, sam
     pivot = _long_contact_pivot(per_sample_df, class_order, sample_col)
 
     data = [pivot[cls].dropna().to_numpy(dtype=float) for cls in class_order]
-    bp = ax.boxplot(data, tick_labels=class_order, patch_artist=True, widths=0.6, showfliers=False, zorder=1)
+    bp = ax.boxplot(data, tick_labels=class_order, patch_artist=True, widths=0.6, showfliers=False, zorder=1, medianprops=_MEDIAN_PROPS)
     for patch, cls in zip(bp["boxes"], class_order):
         patch.set_facecolor(colors.get(cls, "#808080"))
         patch.set_alpha(0.4)
@@ -799,7 +841,8 @@ def _plot_long_contact_percentage_page(
     in ``long_contact_unit``) ("long_contact") vs. didn't ("short_contact")."""
     props = counts.div(counts.sum(axis=1), axis=0).reindex(columns=_LONG_CONTACT_STACK_ORDER, fill_value=0.0)
     panel_w = max(0.6 * len(class_order), 4.0)
-    fig, (ax_bar, ax_box) = plt.subplots(1, 2, figsize=(panel_w * 2, 4.2))
+    fig_h = 4.6
+    fig, (ax_bar, ax_box) = plt.subplots(1, 2, figsize=(panel_w * 2, fig_h))
     draw_stacked_proportion_barv(
         ax_bar, props, class_order, _LONG_CONTACT_STACK_ORDER, _LONG_CONTACT_STACK_COLORS, ymax=1.0, xtick_fontsize=8,
     )
@@ -819,13 +862,24 @@ def _plot_long_contact_percentage_page(
         Patch(facecolor=_LONG_CONTACT_STACK_COLORS[s], label=legend_labels[s])
         for s in reversed(_LONG_CONTACT_STACK_ORDER)
     ]
-    fig.legend(handles=handles, loc="lower center", ncol=2, frameon=False, fontsize=8)
+    footnote_h = 0.3
+    fig.legend(
+        handles=handles, loc="lower center", bbox_to_anchor=(0.5, footnote_h / fig_h), ncol=2,
+        frameon=False, fontsize=8,
+    )
+    fig.text(
+        0.5, 0.06 / fig_h,
+        "Left: all tracks touching each class pooled (n = tracks). Right: one dot per sample; "
+        "box = median (black line) and IQR, whiskers = 1.5×IQR (n = samples)",
+        ha="center", va="bottom", fontsize=7,
+    )
 
     title = f"Long vs. short contact — % of tracks in contact with each {target_cell_type_label} class"
     if section_label is not None:
         title += f"\ngroup: {section_label}"
-    fig.suptitle(title, fontsize=10, fontweight="bold")
-    fig.tight_layout(rect=(0.0, 0.1, 1.0, 0.86))
+    fig_w = float(fig.get_size_inches()[0])
+    n_title_lines = _wrapped_suptitle(fig, title, fig_w)
+    fig.tight_layout(rect=(0.0, (footnote_h + 0.35) / fig_h, 1.0, 1.0 - (0.2 + 0.19 * n_title_lines) / fig_h))
     return fig
 
 
@@ -843,11 +897,15 @@ def _plot_long_contact_percentage_connected_page(
     box_w = max(0.6 * len(class_order), 4.0)
     lines_w = max(0.4 * len(class_order), 2.5)
     sample_names = sorted(per_sample_df[sample_col].dropna().unique().tolist(), key=_mixed_label_sort_key)
+    fig_w = bar_w + box_w + lines_w
     ncol, n_legend_rows, legend_margin = legend_layout(
-        len(sample_names), max_ncol=8, row_height_in=0.2, base_margin_in=0.55,
+        len(sample_names), max_ncol=legend_max_ncol_for_width(sample_names, fig_w, fontsize=6),
+        row_height_in=0.16, base_margin_in=0.4,
     )
+    bar_legend_h, footnote_h = 0.3, 0.3
+    fig_h = 4.2 + legend_margin + bar_legend_h + footnote_h
     fig, (ax_bar, ax_box, ax_lines) = plt.subplots(
-        1, 3, figsize=(bar_w + box_w + lines_w, 4.2 + legend_margin),
+        1, 3, figsize=(fig_w, fig_h),
         gridspec_kw={"width_ratios": [bar_w, box_w, lines_w]},
     )
     draw_stacked_proportion_barv(
@@ -884,13 +942,21 @@ def _plot_long_contact_percentage_connected_page(
         )
         for s in sample_names
     ]
-    bottom_margin = 0.1 + legend_margin / (4.2 + legend_margin)
-    bar_legend_y = bottom_margin - 0.04
-    fig.legend(handles=bar_handles, loc="lower center", bbox_to_anchor=(0.5, bar_legend_y), ncol=2, frameon=False, fontsize=8)
+    # Bottom-up: footnote, sample legend, long/short legend, then the panels' rotated tick labels.
+    fig.text(
+        0.5, 0.06 / fig_h,
+        "Middle: one marker per sample (shape = sample); box = median (black line) and IQR, "
+        "whiskers = 1.5×IQR. Right: grey line = one sample, bold black line = mean across samples",
+        ha="center", va="bottom", fontsize=7,
+    )
     fig.legend(
         handles=sample_handles, title=f"sample ({sample_col})", loc="lower center",
-        bbox_to_anchor=(0.5, 0.0), ncol=ncol, frameon=False, fontsize=6, title_fontsize=6.5,
+        bbox_to_anchor=(0.5, footnote_h / fig_h), ncol=ncol, frameon=False, fontsize=6, title_fontsize=6.5,
         handlelength=1.3, labelspacing=0.3, columnspacing=1.0,
+    )
+    fig.legend(
+        handles=bar_handles, loc="lower center",
+        bbox_to_anchor=(0.5, (footnote_h + legend_margin) / fig_h), ncol=2, frameon=False, fontsize=8,
     )
 
     title = (
@@ -899,8 +965,9 @@ def _plot_long_contact_percentage_connected_page(
     )
     if section_label is not None:
         title += f"\ngroup: {section_label}"
-    fig.suptitle(title, fontsize=10, fontweight="bold")
-    fig.tight_layout(rect=(0.0, bottom_margin, 1.0, 0.86))
+    n_title_lines = _wrapped_suptitle(fig, title, fig_w)
+    bottom_in = footnote_h + legend_margin + bar_legend_h + 0.1
+    fig.tight_layout(rect=(0.0, bottom_in / fig_h, 1.0, 1.0 - (0.2 + 0.19 * n_title_lines) / fig_h))
     return fig
 
 
