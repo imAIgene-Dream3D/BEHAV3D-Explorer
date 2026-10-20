@@ -401,6 +401,22 @@ class DualListGroupSelector(QWidget):
             else:
                 self.list_left.addItem(item)
 
+    def set_membership(self, left: Iterable[str], right: Iterable[str], excluded: Iterable[str]):
+        """Move the listed items that are present into "Group 1" / "Group 2" / "Don't use";
+        items not mentioned stay where they are."""
+        lists = (self.list_left, self.list_right, self.list_excluded)
+        dest = {}
+        for idx, items in enumerate((left, right, excluded)):
+            dest.update({str(item): idx for item in items})
+        buckets = ([], [], [])
+        for idx, lst in enumerate(lists):
+            for i in range(lst.count()):
+                text = lst.item(i).text()
+                buckets[dest.get(text, idx)].append(text)
+        for lst, texts in zip(lists, buckets):
+            lst.clear()
+            lst.addItems(texts)
+
     def left_items(self) -> list[str]:
         return [self.list_left.item(i).text() for i in range(self.list_left.count())]
 

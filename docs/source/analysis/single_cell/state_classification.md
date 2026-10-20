@@ -210,6 +210,8 @@ In other words: use the binary flags as clues, but let the **combination of QC p
 
 Use **Generate analysis and plots ▸** to create reports. Each report has a **👁** button to reopen its PDF.
 
+The settings a report ran with are remembered for each cell type (in `behav3d_parameters.yml`). When you reopen the project or switch back to that cell type, the report options show the settings you last used.
+
 ### Diagnostic
 
 **▶ Create Diagnostics** runs quality-control diagnostics on the HMM state clustering (state means, transitions, feature distributions).

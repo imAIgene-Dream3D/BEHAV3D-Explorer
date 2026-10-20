@@ -194,6 +194,8 @@ Clicking **Apply cluster names** automatically regenerates the **diagnostics** a
 
 Use **Generate analysis and plots ▸** to create reports and plots.
 
+The settings a report ran with are remembered for each cell type (in `behav3d_parameters.yml`). When you reopen the project or switch back to that cell type, the report options show the settings you last used. For contact analyses, the shared settings are saved by whichever contact report you run.
+
 ### Diagnostic
 
 **▶ Create Diagnostics** produces clustering-quality diagnostic plots (UMAP/correlation, heatmap, matrixplot, cluster-occurrence ranking). **👁** reopens the PDF.

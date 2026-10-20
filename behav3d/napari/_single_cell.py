@@ -618,6 +618,18 @@ def _list_widget_items(list_widget) -> list[str]:
     return [list_widget.item(i).text() for i in range(list_widget.count())]
 
 
+def _refill_list_keep_selection(list_widget, items) -> None:
+    """Replace a QListWidget's items with `items`, keeping the selection of the ones still present."""
+    prev = {item.text() for item in list_widget.selectedItems()}
+    list_widget.clear()
+    list_widget.addItems(list(items))
+    for i in range(list_widget.count()):
+        item = list_widget.item(i)
+        if item.text() in prev:
+            item.setSelected(True)
+
+
+
 def _inject_known_metadata_cols(adata, md_snapshot) -> None:
     """Inject known metadata grouping columns (exp_nr, well, *_line_condition) from the loaded
     metadata CSV into `adata.obs` when missing (for existing h5ad files that predate Fix 1 in
@@ -956,12 +968,203 @@ def _save_behav3d_params(metadata_loader, out_dir_fn):
             pass
 
 
+def _report_widget_value(widget):
+    """A report widget's current setting as a plain YAML-safe value."""
+    if isinstance(widget, DualListGroupSelector):
+        return {
+            "group_1": widget.left_items(),
+            "group_2": widget.right_items(),
+            "excluded": widget.excluded_items(),
+        }
+    if isinstance(widget, QCheckBox):
+        return bool(widget.isChecked())
+    if isinstance(widget, QSpinBox):
+        return int(widget.value())
+    if isinstance(widget, QDoubleSpinBox):
+        return float(widget.value())
+    if isinstance(widget, QComboBox):
+        return widget.currentText()
+    if isinstance(widget, QListWidget):
+        return [
+            widget.item(i).text() for i in range(widget.count()) if widget.item(i).isSelected()
+        ]
+    return None
+
+
+def _apply_report_widget_value(widget, value) -> bool:
+    """Set a report widget to a saved value. Returns False while the widget can't
+    fully take it yet (combo option / list items not filled in), so the caller
+    retries after the next refresh."""
+    if isinstance(widget, DualListGroupSelector):
+        saved = {k: [str(v) for v in (value or {}).get(k) or []] for k in ("group_1", "group_2", "excluded")}
+        wanted = set().union(*saved.values())
+        if not wanted:
+            return True
+        present = set(widget.left_items() + widget.right_items() + widget.excluded_items())
+        if not present:
+            return False
+        widget.set_membership(saved["group_1"], saved["group_2"], saved["excluded"])
+        return wanted <= present
+    if isinstance(widget, QCheckBox):
+        widget.setChecked(bool(value))
+        return True
+    if isinstance(widget, QSpinBox):
+        widget.setValue(int(value))
+        return True
+    if isinstance(widget, QDoubleSpinBox):
+        widget.setValue(float(value))
+        return True
+    if isinstance(widget, QComboBox):
+        idx = widget.findText(str(value))
+        if idx < 0:
+            return False
+        widget.setCurrentIndex(idx)
+        return True
+    if isinstance(widget, QListWidget):
+        wanted = {str(v) for v in value or []}
+        present = set(_list_widget_items(widget))
+        if wanted and not present:
+            return False
+        for i in range(widget.count()):
+            item = widget.item(i)
+            item.setSelected(item.text() in wanted)
+        return wanted <= present
+    return True
+
+
+class _ReportSettingsMixin:
+    """Saves the settings a report ran with to behav3d_parameters.yml, under
+    ``<_REPORT_SECTION>.<cell type>.<report>``, and restores them on reload.
+
+    ``_REPORT_SETTINGS`` maps report -> {yml key: widget attribute name, or a
+    (getter, setter) pair of method names}. Keys are applied in order, so a
+    "Group in X" combo must come before the group selector it refills.
+    """
+
+    _REPORT_SECTION = ""
+    _REPORT_SETTINGS: dict = {}
+
+    def _persist_report_settings(self, ct, *reports):
+        params = getattr(self.metadata_loader, "behav3d_parameters", None)
+        if not isinstance(params, dict) or not ct:
+            return
+        try:
+            if not isinstance(params.get(self._REPORT_SECTION), dict):
+                params[self._REPORT_SECTION] = {}
+            section = params[self._REPORT_SECTION]
+            if not isinstance(section.get(ct), dict):
+                section[ct] = {}
+            pending = getattr(self, "_pending_report_settings", None) or {}
+            for report in reports:
+                values = {}
+                for key, target in self._REPORT_SETTINGS[report].items():
+                    if isinstance(target, tuple):
+                        values[key] = getattr(self, target[0])()
+                    else:
+                        values[key] = _report_widget_value(getattr(self, target))
+                section[ct][report] = values
+                pending.pop(report, None)
+            _save_behav3d_params(self.metadata_loader, self._out_dir)
+        except Exception:
+            traceback.print_exc()
+
+    def _queue_report_settings_restore(self, ct):
+        params = getattr(self.metadata_loader, "behav3d_parameters", None) if self.metadata_loader else None
+        section = params.get(self._REPORT_SECTION) if isinstance(params, dict) else None
+        saved = section.get(ct) if ct and isinstance(section, dict) else None
+        pending = {}
+        for report, values in (saved or {}).items():
+            spec = self._REPORT_SETTINGS.get(report)
+            if spec and isinstance(values, dict):
+                pending[report] = {k: v for k, v in values.items() if k in spec}
+        self._pending_report_settings = pending
+
+    def _apply_pending_report_settings(self):
+        pending = getattr(self, "_pending_report_settings", None)
+        if not pending or getattr(self, "_applying_report_settings", False):
+            return
+        # Applying a combo/checkbox fires its handlers, which may refresh again.
+        self._applying_report_settings = True
+        try:
+            for report in list(pending):
+                values = pending[report]
+                for key, target in self._REPORT_SETTINGS[report].items():
+                    if key not in values:
+                        continue
+                    try:
+                        if isinstance(target, tuple):
+                            done = getattr(self, target[1])(values[key])
+                        else:
+                            done = _apply_report_widget_value(getattr(self, target), values[key])
+                    except Exception:
+                        done = True  # a value the widget can't take is dropped, not retried
+                    if done:
+                        values.pop(key, None)
+                if not values:
+                    pending.pop(report, None)
+        finally:
+            self._applying_report_settings = False
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # State Classification sub-tab
 # ═══════════════════════════════════════════════════════════════════════════
 
-class StateClassificationSubTab(QWidget):
+class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
     """Steps 1-4 for HMM-based behavioral state classification + backprojection."""
+
+    _REPORT_SECTION = "state_reports"
+    _REPORT_SETTINGS = {
+        "composition": {
+            "group_x": "combo_composition_group_x",
+            "group_x_grouped": "chk_composition_group_x_conditions",
+            "group_x_levels": "group_selector_composition_x",
+            "group_y": "combo_composition_group_y",
+            "group_y_grouped": "chk_composition_group_y_conditions",
+            "group_y_levels": "group_selector_composition_y",
+            "group_cols": "list_composition_group_cols",
+            "time_bin_size": "spin_state_composition_time_bin",
+        },
+        "transition": {
+            "min_prob_percent": "spin_state_transition_min_prob",
+            "emphasis_gamma": "spin_state_transition_gamma",
+            "label_style": "combo_state_transition_label_style",
+            "include_transition_matrix": "chk_state_transition_include_matrix",
+            "include_circular_diagram": "chk_state_transition_include_circular",
+            "include_self_transitions": "chk_state_transition_include_self",
+            "include_per_cluster": "chk_state_transition_include_per_cluster",
+            "include_ngram_rankings": "chk_state_transition_include_ngrams",
+            "include_sankey_pairs": "chk_state_transition_include_sankey",
+        },
+        "feature_heatmap": {
+            "state_col": "combo_state_heatmap_state_col",
+            "weighting": "combo_state_heatmap_weighting",
+            "scaling": "combo_state_heatmap_scaling",
+            "features": ("_state_heatmap_picked_items", "_restore_state_heatmap_picked"),
+        },
+        "condition_comparison": {
+            "condition_col": "combo_comparison_condition_col",
+            "group_conditions": "chk_comparison_group_conditions",
+            "condition_groups": "group_selector_comparison",
+            "group_x": "combo_comparison_group_x",
+            "group_x_grouped": "chk_comparison_group_x_conditions",
+            "group_x_levels": "group_selector_comparison_x",
+            "group_cols": "list_comparison_group_cols",
+        },
+        "contact_type_comparison": {
+            "state_col": "combo_state_contact_type_state_col",
+            "contact_cols": "list_state_contact_type_compare_cols",
+            "group_cols": "list_state_contact_group_cols",
+        },
+        "contact_shift": {
+            "contact_col": "combo_state_shift_contact_col",
+            "min_bout_length": "spin_state_shift_min_bout",
+            "window_mode": "combo_state_shift_window_mode",
+            "fixed_window_length": "spin_state_shift_window_length",
+            "state_col": "combo_state_shift_state_col",
+            "group_cols": "list_state_contact_group_cols",
+        },
+    }
 
     def __init__(self, viewer=None, metadata_loader=None, cell_type_getter=None,
                  parent=None):
@@ -2434,6 +2637,7 @@ class StateClassificationSubTab(QWidget):
         try:
             self._update_timepoint_time_labels()
             ct = self._cell_type()
+            self._queue_report_settings_restore(ct)
             if not ct:
                 self._model_adata = None
                 self._refresh_buttons()
@@ -3021,6 +3225,7 @@ class StateClassificationSubTab(QWidget):
 
         self._refresh_composition_group_cols()
         self._refresh_state_heatmap_features()
+        self._apply_pending_report_settings()
 
     def _cluster_count(self, adata, col) -> int:
         """Number of distinct values of ``adata.obs[col]`` (as strings). Counting
@@ -3117,6 +3322,15 @@ class StateClassificationSubTab(QWidget):
         )
         self._set_state_heatmap_picked(picked)
 
+    def _state_heatmap_picked_items(self):
+        return _list_widget_items(self.list_state_heatmap_picked)
+
+    def _restore_state_heatmap_picked(self, features) -> bool:
+        if not self._state_heatmap_candidates:
+            return False
+        self._set_state_heatmap_picked([str(f) for f in features or []])
+        return True
+
     def _select_state_heatmap_defaults(self):
         self._set_state_heatmap_picked(self._state_heatmap_defaults)
 
@@ -3155,6 +3369,7 @@ class StateClassificationSubTab(QWidget):
                 state_col=state_col, weighting=weighting, scaling=scaling, verbose=True,
             )
 
+        self._persist_report_settings(ct, "feature_heatmap")
         self._bg.run(
             fn=_run,
             desc=f"State feature heatmap ({ct})…",
@@ -3210,9 +3425,7 @@ class StateClassificationSubTab(QWidget):
 
     def _refresh_composition_group_cols(self):
         candidate_cols = self._composition_candidate_columns()
-        self.list_composition_group_cols.clear()
-        for col in candidate_cols:
-            self.list_composition_group_cols.addItem(col)
+        _refill_list_keep_selection(self.list_composition_group_cols, candidate_cols)
         _fit_list_widget_height(self.list_composition_group_cols)
 
         for combo in (self.combo_composition_group_x, self.combo_composition_group_y):
@@ -3234,9 +3447,7 @@ class StateClassificationSubTab(QWidget):
             self.combo_comparison_condition_col.setCurrentText(prev_cond)
         self.combo_comparison_condition_col.blockSignals(False)
 
-        self.list_comparison_group_cols.clear()
-        for col in candidate_cols:
-            self.list_comparison_group_cols.addItem(col)
+        _refill_list_keep_selection(self.list_comparison_group_cols, candidate_cols)
         _fit_list_widget_height(self.list_comparison_group_cols)
 
         prev = self.combo_comparison_group_x.currentText()
@@ -3958,6 +4169,7 @@ class StateClassificationSubTab(QWidget):
                 verbose=True,
             )
 
+        self._persist_report_settings(ct, "composition")
         self._bg.run(
             fn=_run,
             desc=f"State composition report ({ct})…",
@@ -4021,6 +4233,7 @@ class StateClassificationSubTab(QWidget):
                 verbose=True,
             )
 
+        self._persist_report_settings(ct, "contact_type_comparison")
         self._bg.run(
             fn=_run,
             desc=f"State contact type comparison ({ct})…",
@@ -4090,6 +4303,7 @@ class StateClassificationSubTab(QWidget):
                 verbose=True,
             )
 
+        self._persist_report_settings(ct, "contact_shift")
         self._bg.run(
             fn=_run,
             desc=f"State contact-shift analysis ({ct})…",
@@ -4168,6 +4382,7 @@ class StateClassificationSubTab(QWidget):
                 verbose=True,
             )
 
+        self._persist_report_settings(ct, "transition")
         self._bg.run(
             fn=_run,
             desc=f"State transition report ({ct})…",
@@ -4273,6 +4488,7 @@ class StateClassificationSubTab(QWidget):
                 verbose=True,
             )
 
+        self._persist_report_settings(ct, "condition_comparison")
         self._bg.run(
             fn=_run,
             desc=f"Condition comparison report ({ct})…",
@@ -5555,9 +5771,82 @@ class TrajectoryFeatureSelector(QWidget):
 # Track Classification sub-tab
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TrackClassificationSubTab(QWidget):
+class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
     """Track clustering (config + rename), classifier training, reports/plots and
     backprojection for DTW-based track trajectory classification."""
+
+    _REPORT_SECTION = "track_reports"
+    _REPORT_SETTINGS = {
+        "track_composition": {
+            "group_x": "combo_track_proportion_group_x",
+            "group_x_grouped": "chk_track_proportion_group_x_conditions",
+            "group_x_levels": "group_selector_track_proportion_x",
+            "group_y": "combo_track_proportion_group_y",
+            "group_y_grouped": "chk_track_proportion_group_y_conditions",
+            "group_y_levels": "group_selector_track_proportion_y",
+            "group_cols": "list_track_proportion_group_cols",
+            "time_bin_size": "spin_track_composition_time_bin",
+        },
+        "feature_heatmap": {
+            "scaling": "combo_feature_heatmap_scaling",
+            "features": ("_feature_heatmap_picked_items", "_restore_feature_heatmap_picked"),
+        },
+        "transition": {
+            "min_prob_percent": "spin_transanalysis_min_prob",
+            "emphasis_gamma": "spin_transanalysis_gamma",
+            "label_style": "combo_transanalysis_label_style",
+            "include_transition_matrix": "chk_transanalysis_include_matrix",
+            "include_circular_diagram": "chk_transanalysis_include_circular",
+            "include_self_transitions": "chk_transanalysis_include_self",
+            "include_per_cluster": "chk_transanalysis_include_per_cluster",
+            "include_window_sankey": "chk_transanalysis_include_window_sankey",
+        },
+        "condition_comparison": {
+            "condition_col": "combo_track_comparison_condition_col",
+            "group_conditions": "chk_track_comparison_group_conditions",
+            "condition_groups": "group_selector_track_comparison",
+            "group_x": "combo_track_comparison_group_x",
+            "group_x_grouped": "chk_track_comparison_group_x_conditions",
+            "group_x_levels": "group_selector_track_comparison_x",
+            "group_cols": "list_track_comparison_group_cols",
+        },
+        "exemplars": {
+            "n_per_cluster": "spin_n_per_cluster",
+            "overview_statebars": "chk_overview_statebars",
+            "backprojection_pdf": "chk_backproj_pdf",
+            "backprojection_mp4": "chk_backproj_mp4",
+        },
+        # Shared by every contact analysis button.
+        "contact": {
+            "contact_col": "combo_contact_col",
+            "min_bout_length": "spin_contact_min_bout",
+            "use_target_class": "chk_use_target_class",
+            "target_class_source": "combo_target_class_source",
+            "target_state_col": "combo_target_state_col",
+            "group_x": "combo_contact_group_x",
+            "group_x_grouped": "chk_contact_group_x_conditions",
+            "group_x_levels": "group_selector_contact_x",
+            "group_y": "combo_contact_group_y",
+            "group_y_grouped": "chk_contact_group_y_conditions",
+            "group_y_levels": "group_selector_contact_y",
+            "group_cols": "list_contact_group_cols",
+        },
+        "contact_duration": {
+            "test_mode": "combo_duration_test_mode",
+            "pairing_cols": "list_duration_pairing_cols",
+            # Unit before threshold: the unit sets the threshold's range.
+            "long_contact_unit": "combo_long_contact_unit",
+            "long_contact_threshold": "spin_long_contact_threshold",
+            "comparisons_per_page": "spin_duration_comparisons_per_page",
+        },
+        "contact_type_comparison": {
+            "contact_cols": "list_contact_type_compare_cols",
+        },
+        "contact_overview": {
+            "state_col": "combo_contact_shift_state_col",
+            "rows_per_page": "spin_track_overview_rows_per_page",
+        },
+    }
 
     def __init__(self, viewer=None, metadata_loader=None, cell_type_getter=None,
                  parent=None):
@@ -8055,6 +8344,7 @@ class TrackClassificationSubTab(QWidget):
     def _reload(self):
         self._update_timepoint_time_labels()
         ct = self._cell_type()
+        self._queue_report_settings_restore(ct)
         if not ct:
             self._track_adata = None
             self._track_adata_load_error = None
@@ -8287,6 +8577,7 @@ class TrackClassificationSubTab(QWidget):
         self._refresh_track_proportion_group_cols()
         self._refresh_contact_columns()
         self._refresh_feature_heatmap_features()
+        self._apply_pending_report_settings()
 
     def _set_feature_heatmap_picked(self, picked):
         """Set the "Selected features" list (in ``picked``'s order - the plot's row
@@ -8303,6 +8594,15 @@ class TrackClassificationSubTab(QWidget):
         _fit_list_widget_height(self.list_feature_heatmap_available, max_rows=10)
         _fit_list_widget_height(self.list_feature_heatmap_picked, max_rows=10)
         self._update_feature_heatmap_summary()
+
+    def _feature_heatmap_picked_items(self):
+        return _list_widget_items(self.list_feature_heatmap_picked)
+
+    def _restore_feature_heatmap_picked(self, features) -> bool:
+        if not self._feature_heatmap_candidates:
+            return False
+        self._set_feature_heatmap_picked([str(f) for f in features or []])
+        return True
 
     def _feature_heatmap_add_selected(self):
         chosen = [
@@ -8410,19 +8710,13 @@ class TrackClassificationSubTab(QWidget):
 
     def _refresh_track_proportion_group_cols(self):
         candidate_cols = self._track_proportion_candidate_columns()
-        self.list_track_proportion_group_cols.clear()
-        for col in candidate_cols:
-            self.list_track_proportion_group_cols.addItem(col)
+        _refill_list_keep_selection(self.list_track_proportion_group_cols, candidate_cols)
         _fit_list_widget_height(self.list_track_proportion_group_cols)
 
-        self.list_contact_group_cols.clear()
-        for col in candidate_cols:
-            self.list_contact_group_cols.addItem(col)
+        _refill_list_keep_selection(self.list_contact_group_cols, candidate_cols)
         _fit_list_widget_height(self.list_contact_group_cols)
 
-        self.list_track_comparison_group_cols.clear()
-        for col in candidate_cols:
-            self.list_track_comparison_group_cols.addItem(col)
+        _refill_list_keep_selection(self.list_track_comparison_group_cols, candidate_cols)
         _fit_list_widget_height(self.list_track_comparison_group_cols)
 
         for combo in (
@@ -8458,9 +8752,7 @@ class TrackClassificationSubTab(QWidget):
         # not itself one of the condition-like candidate_cols above, and is pre-selected by
         # default so a fresh list behaves like the old single-select combo box did.
         pairing_options = ["sample_name"] + [c for c in candidate_cols if c != "sample_name"]
-        self.list_duration_pairing_cols.clear()
-        for col in pairing_options:
-            self.list_duration_pairing_cols.addItem(col)
+        _refill_list_keep_selection(self.list_duration_pairing_cols, pairing_options)
         _fit_list_widget_height(self.list_duration_pairing_cols)
         if not self.list_duration_pairing_cols.selectedItems():
             for item in self.list_duration_pairing_cols.findItems("sample_name", Qt.MatchExactly):
@@ -9910,6 +10202,7 @@ class TrackClassificationSubTab(QWidget):
 
             return results
 
+        self._persist_report_settings(ct, "exemplars")
         self._bg.run(
             fn=_run,
             desc=f"Exemplar PDFs ({ct})…",
@@ -10137,6 +10430,7 @@ class TrackClassificationSubTab(QWidget):
                 verbose=True,
             )
 
+        self._persist_report_settings(ct, "track_composition")
         self._bg.run(
             fn=_run,
             desc=f"Track proportion plots ({ct})…",
@@ -10186,6 +10480,7 @@ class TrackClassificationSubTab(QWidget):
                 verbose=True,
             )
 
+        self._persist_report_settings(ct, "feature_heatmap")
         self._bg.run(
             fn=_run,
             desc=f"Feature heatmap ({ct})…",
@@ -10279,6 +10574,7 @@ class TrackClassificationSubTab(QWidget):
                 )
             return results
 
+        self._persist_report_settings(ct, "transition")
         self._bg.run(
             fn=_run,
             desc=f"Transition analysis ({ct})…",
@@ -10372,6 +10668,7 @@ class TrackClassificationSubTab(QWidget):
                 verbose=True,
             )
 
+        self._persist_report_settings(ct, "condition_comparison")
         self._bg.run(
             fn=_run,
             desc=f"Track condition comparison ({ct})…",
@@ -10490,6 +10787,7 @@ class TrackClassificationSubTab(QWidget):
             if callable(chain_next):
                 chain_next()
 
+        self._persist_report_settings(ct, "contact")
         self._bg.run(
             fn=_run,
             desc=f"Contact rate report ({ct})…",
@@ -10646,6 +10944,7 @@ class TrackClassificationSubTab(QWidget):
             if callable(chain_next):
                 chain_next()
 
+        self._persist_report_settings(ct, "contact")
         self._bg.run(
             fn=_run,
             desc=f"Contact composition grid ({ct})…",
@@ -10822,6 +11121,7 @@ class TrackClassificationSubTab(QWidget):
             if callable(chain_next):
                 chain_next()
 
+        self._persist_report_settings(ct, "contact")
         self._bg.run(
             fn=_run,
             desc=f"Contact condition comparison ({ct})…",
@@ -10895,6 +11195,7 @@ class TrackClassificationSubTab(QWidget):
             if callable(chain_next):
                 chain_next()
 
+        self._persist_report_settings(ct, "contact")
         self._bg.run(
             fn=_run,
             desc=f"Contact cluster heatmap ({ct})…",
@@ -11042,6 +11343,7 @@ class TrackClassificationSubTab(QWidget):
             if callable(chain_next):
                 chain_next()
 
+        self._persist_report_settings(ct, "contact", "contact_duration")
         self._bg.run(
             fn=_run,
             desc=f"Contact duration comparison ({ct})…",
@@ -11112,6 +11414,7 @@ class TrackClassificationSubTab(QWidget):
             if callable(chain_next):
                 chain_next()
 
+        self._persist_report_settings(ct, "contact", "contact_type_comparison")
         self._bg.run(
             fn=_run,
             desc=f"Contact type comparison ({ct})…",
@@ -11192,6 +11495,7 @@ class TrackClassificationSubTab(QWidget):
             if callable(chain_next):
                 chain_next()
 
+        self._persist_report_settings(ct, "contact", "contact_overview")
         self._bg.run(
             fn=_run,
             desc=f"Track contact overview ({ct})…",
