@@ -314,7 +314,8 @@ def _compact_experiment_config(config: dict) -> dict:
                 )
                 if module == "state_classification" else
                 (
-                    "behavioral_trajectory_size", "n_clusters", "linkage",
+                    "use_full_tracks", "behavioral_trajectory_size", "min_trajectory_size",
+                    "n_clusters", "linkage",
                     "trajectory_trim_mode", "split_long_tracks", "clustering_family",
                     "use_exact_original_settings", "feature_dtw_selected_columns",
                 )

@@ -1640,13 +1640,16 @@ def train_dtaidistance_trajectory_classifier(
     if not adata_full_path.exists():
         raise FileNotFoundError(f"Source behavioral-states file not found: {adata_full_path}")
 
-    trajectory_size = meta.get("behavioral_trajectory_size") or 100
+    # None (stored explicitly) = clustered on full-length tracks.
+    trajectory_size = meta.get("behavioral_trajectory_size", 100)
+    if trajectory_size is not None:
+        trajectory_size = int(trajectory_size)
     groupby_cols = list(meta.get("groupby_cols", ["sample_name", "TrackID"]))
     sequence_groupby_cols = list(meta.get("sequence_groupby_cols", groupby_cols))
     time_col = str(meta.get("time_col", "position_t"))
     min_track_length = meta.get("min_track_length", trajectory_size)
     trim_mode = str(meta.get("trajectory_trim_mode", "last"))
-    split_long_tracks = bool(meta.get("split_long_tracks", False))
+    split_long_tracks = bool(meta.get("split_long_tracks", False)) and trajectory_size is not None
     window_col = str(meta.get("trajectory_window_col", "trajectory_window_id"))
 
     if bool(verbose):
@@ -1694,7 +1697,8 @@ def train_dtaidistance_trajectory_classifier(
         feature_adata = _build_track_feature_adata(
             adata_full,
             state_col=str(state_col),
-            behavioral_trajectory_size=int(trajectory_size),
+            behavioral_trajectory_size=trajectory_size,
+            min_track_length=min_track_length,
         )
 
     # Transfer ClusterID from dtaidistance model to feature adata by the

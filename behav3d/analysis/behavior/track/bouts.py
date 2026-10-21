@@ -394,6 +394,11 @@ def _resolve_track_apply_input_adata(
     return sc.read_h5ad(path), source_kind, str(path)
 
 
+def _optional_trajectory_size(value):
+    """``None`` means full-length tracks (no length filter or trimming)."""
+    return None if value is None else int(value)
+
+
 def _build_track_preprocessing_spec(*, state_col, filter_cfg, feat_cfg):
     groupby_cols = filter_cfg.get("groupby_cols", ("sample_name", "TrackID"))
     if not isinstance(groupby_cols, (list, tuple)) or len(groupby_cols) == 0:
@@ -402,7 +407,8 @@ def _build_track_preprocessing_spec(*, state_col, filter_cfg, feat_cfg):
         "state_col": str(state_col),
         "groupby_cols": [str(c) for c in list(groupby_cols)],
         "time_col": str(filter_cfg.get("time_col", "position_t")),
-        "behavioral_trajectory_size": int(filter_cfg.get("behavioral_trajectory_size", 100)),
+        "behavioral_trajectory_size": _optional_trajectory_size(filter_cfg.get("behavioral_trajectory_size", 100)),
+        "min_track_length": _optional_trajectory_size(filter_cfg.get("min_track_length")),
         "use_fractions": bool(feat_cfg.get("use_fractions", True)),
         "use_bout_stats": bool(feat_cfg.get("use_bout_stats", True)),
         "include_bouts_mean_length": bool(feat_cfg.get("include_bouts_mean_length", True)),
@@ -479,6 +485,7 @@ def _build_track_feature_adata(
     groupby_cols=("sample_name", "TrackID"),
     time_col="position_t",
     behavioral_trajectory_size=100,
+    min_track_length=None,
     use_fractions=True,
     use_bout_stats=True,
     include_bouts_mean_length=True,
@@ -489,14 +496,28 @@ def _build_track_feature_adata(
     use_trigrams=True,
     ngram_weight="count",
 ):
-    trajectory_size = int(behavioral_trajectory_size)
-    adata_filt = filter_and_truncate_tracks_anndata(
-        adata_full,
-        groupby_cols=[str(c) for c in list(groupby_cols)],
-        time_col=str(time_col),
-        min_length=trajectory_size,
-        max_length=trajectory_size,
-    )
+    trajectory_size = _optional_trajectory_size(behavioral_trajectory_size)
+    min_track_length = _optional_trajectory_size(min_track_length)
+    if trajectory_size is None:
+        # Full-length tracks: every track is described over all of its timepoints;
+        # only tracks shorter than min_track_length (when set) are dropped.
+        if min_track_length is None:
+            adata_filt = adata_full
+        else:
+            adata_filt = _filter_tracks_for_dtaidistance(
+                adata_full,
+                groupby_cols=[str(c) for c in list(groupby_cols)],
+                time_col=str(time_col),
+                min_length=min_track_length,
+            )
+    else:
+        adata_filt = filter_and_truncate_tracks_anndata(
+            adata_full,
+            groupby_cols=[str(c) for c in list(groupby_cols)],
+            time_col=str(time_col),
+            min_length=trajectory_size,
+            max_length=trajectory_size,
+        )
     adata_state_features, _ = extract_descibing_track_state_features(
         adata_filt,
         state_col=str(state_col),
@@ -533,6 +554,7 @@ def _build_track_feature_adata(
         "time_col": str(time_col),
         "state_col": str(state_col),
         "behavioral_trajectory_size": trajectory_size,
+        "min_track_length": trajectory_size if trajectory_size is not None else min_track_length,
     }
     return adata_state_features
 
@@ -988,7 +1010,8 @@ def apply_track_classifier_to_subtracks(
             "Classifier artifact is missing required 'track_filtering.behavioral_trajectory_size'. "
             "This appears to be a legacy model. Regenerate the behavioral state trajectory model."
         )
-    behavioral_trajectory_size = int(filter_cfg["behavioral_trajectory_size"])
+    behavioral_trajectory_size = _optional_trajectory_size(filter_cfg["behavioral_trajectory_size"])
+    min_track_length = _optional_trajectory_size(filter_cfg.get("min_track_length"))
 
     apply_preprocessing_spec = dict(
         artifact.get(
@@ -1037,6 +1060,7 @@ def apply_track_classifier_to_subtracks(
         groupby_cols=groupby_cols,
         time_col=time_col,
         behavioral_trajectory_size=behavioral_trajectory_size,
+        min_track_length=min_track_length,
         use_fractions=bool(feat_cfg.get("use_fractions", True)),
         use_bout_stats=bool(use_bout_stats),
         include_bouts_mean_length=bool(feat_cfg.get("include_bouts_mean_length", True)),
@@ -1176,13 +1200,21 @@ def apply_track_classifier_to_subtracks(
         exemplar_root = resolved_paths.example_tracks_outfolder
         exemplar_root.mkdir(parents=True, exist_ok=True)
 
-        adata_plot = filter_and_truncate_tracks_anndata(
-            adata_full,
-            groupby_cols=[str(c) for c in list(groupby_cols)],
-            time_col=str(time_col),
-            min_length=int(behavioral_trajectory_size),
-            max_length=int(behavioral_trajectory_size),
-        )
+        if behavioral_trajectory_size is None:
+            adata_plot = _filter_tracks_for_dtaidistance(
+                adata_full,
+                groupby_cols=[str(c) for c in list(groupby_cols)],
+                time_col=str(time_col),
+                min_length=min_track_length,
+            )
+        else:
+            adata_plot = filter_and_truncate_tracks_anndata(
+                adata_full,
+                groupby_cols=[str(c) for c in list(groupby_cols)],
+                time_col=str(time_col),
+                min_length=int(behavioral_trajectory_size),
+                max_length=int(behavioral_trajectory_size),
+            )
         coord_enrichment_pdf = _shared_ensure_exemplar_coordinate_columns(
             adata=adata_plot,
             output_dir=output_dir,
@@ -1608,7 +1640,8 @@ def run_state_based_analysis(
     time_col="position_t",
 
     # Track filtering / truncation
-    behavioral_trajectory_size=100,
+    behavioral_trajectory_size=100,  # None = full-length tracks (no trimming or splitting)
+    min_track_length=None,  # drop tracks shorter than this; None = behavioral_trajectory_size
     trajectory_trim_mode="last",  # "last" keeps each track's final N timepoints; "first" keeps its earliest N
     split_long_tracks=False,  # divide over-length tracks into non-overlapping windows instead of dropping the rest
     trajectory_window_col="trajectory_window_id",
@@ -1733,24 +1766,33 @@ def run_state_based_analysis(
 
     # --------- Filter + truncate tracks ----------
     trim_mode = str(trajectory_trim_mode).strip().lower()
+    behavioral_trajectory_size = _optional_trajectory_size(behavioral_trajectory_size)
+    min_track_length = (
+        behavioral_trajectory_size if min_track_length is None
+        else _optional_trajectory_size(min_track_length)
+    )
+    # Full-length tracks have nothing to split.
+    split_long_tracks = bool(split_long_tracks) and behavioral_trajectory_size is not None
     # When splitting, each window is treated as its own analysis trajectory downstream
     # (same convention the DTW pipeline uses), so the window column joins groupby_cols.
     effective_groupby_cols = list(groupby_cols)
-    if bool(split_long_tracks):
+    if split_long_tracks:
         effective_groupby_cols = effective_groupby_cols + [str(trajectory_window_col)]
 
+    size_text = "full tracks" if behavioral_trajectory_size is None else str(behavioral_trajectory_size)
     filter_started = _vstart(
         verbose,
         "trajectory-clustering",
-        f"filter + truncate trajectories | behavioral_trajectory_size={int(behavioral_trajectory_size)} | "
-        f"trim_mode={trim_mode} | split_long_tracks={bool(split_long_tracks)}",
+        f"filter + truncate trajectories | behavioral_trajectory_size={size_text} | "
+        f"min_track_length={min_track_length} | trim_mode={trim_mode} | "
+        f"split_long_tracks={split_long_tracks}",
     )
     adata_filt = _filter_tracks_for_dtaidistance(
         adata_full,
         groupby_cols=list(groupby_cols),
         time_col=time_col,
-        trajectory_size=int(behavioral_trajectory_size),
-        min_length=int(behavioral_trajectory_size),
+        trajectory_size=behavioral_trajectory_size,
+        min_length=min_track_length,
         trim_mode=trim_mode,
         split_long_tracks=bool(split_long_tracks),
         window_col=str(trajectory_window_col),
@@ -1836,7 +1878,8 @@ def run_state_based_analysis(
         "groupby_cols": [str(c) for c in list(groupby_cols)],
         "time_col": str(time_col),
         "state_col": str(state_col),
-        "behavioral_trajectory_size": int(behavioral_trajectory_size),
+        "behavioral_trajectory_size": behavioral_trajectory_size,
+        "min_track_length": min_track_length,
         "trajectory_trim_mode": trim_mode,
         "split_long_tracks": bool(split_long_tracks),
     }
@@ -2071,8 +2114,8 @@ def run_state_based_analysis(
         "groupby_cols": [str(c) for c in list(groupby_cols)],
         "time_col": str(time_col),
         "state_col": str(state_col),
-        "behavioral_trajectory_size": int(behavioral_trajectory_size),
-        "min_track_length": int(behavioral_trajectory_size),
+        "behavioral_trajectory_size": behavioral_trajectory_size,
+        "min_track_length": min_track_length,
         "trajectory_trim_mode": trim_mode,
         "split_long_tracks": bool(split_long_tracks),
         "trajectory_window_col": str(trajectory_window_col),

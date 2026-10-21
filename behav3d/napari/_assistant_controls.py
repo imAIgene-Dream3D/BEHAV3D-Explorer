@@ -1056,14 +1056,21 @@ def _analysis_bindings(main_widget) -> list[dict]:
         original = "feature" in (family_text or "").lower()
         legacy_chk = getattr(track, "chk_run_legacy_behav3d", None)
         legacy = original and bool(_safe(legacy_chk.isChecked, False)) if legacy_chk is not None else False
+        full_chk = getattr(track, "chk_full_tracks", None)
+        full_tracks = bool(_safe(full_chk.isChecked, False)) if full_chk is not None else False
         for suffix, label, attr, unit, relevant in [
-            ("trajectory_size", "Trajectory size", "spin_traj_size", "timepoints", True),
+            ("use_full_tracks", "Use full-length tracks (no trimming)",
+             "chk_full_tracks", None, True),
+            ("trajectory_size",
+             "Minimal trajectory size" if full_tracks else "Trajectory size",
+             "spin_traj_size", "timepoints", True),
             ("number_of_clusters", "Number of trajectory clusters",
              "spin_n_clusters", None, True),
             ("linkage", "Agglomerative linkage", "combo_linkage", None, not original),
-            ("trim_direction", "Track trim direction", "combo_trim", None, not original),
+            ("trim_direction", "Track trim direction", "combo_trim", None,
+             not original and not full_tracks),
             ("divide_long_tracks", "Divide long tracks into full windows",
-             "chk_split_long_tracks", None, not original),
+             "chk_split_long_tracks", None, not original and not full_tracks),
             ("parallel_computation", "Use parallel computation",
              "chk_parallel", None, not original),
             ("save_distance_matrix", "Save distance matrix CSV",

@@ -629,7 +629,6 @@ def _refill_list_keep_selection(list_widget, items) -> None:
             item.setSelected(True)
 
 
-
 def _inject_known_metadata_cols(adata, md_snapshot) -> None:
     """Inject known metadata grouping columns (exp_nr, well, *_line_condition) from the loaded
     metadata CSV into `adata.obs` when missing (for existing h5ad files that predate Fix 1 in
@@ -6066,18 +6065,30 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.traj_config_summary_label.hide()
         g1.addWidget(self.traj_config_summary_label)
 
-        # Shared: Trajectory size + divide-long-tracks (always visible)
+        # Shared: full-length toggle + Trajectory size + divide-long-tracks (always visible)
         basic_form = QFormLayout()
         basic_form.setSpacing(3)
+        self.chk_full_tracks = QCheckBox("Use full-length tracks")
+        self.chk_full_tracks.setChecked(False)
+        basic_form.addRow("", _make_chk_help_row(
+            self.chk_full_tracks, "Use full-length tracks",
+            "Cluster every track over all of its timepoints instead of cutting tracks "
+            "to Trajectory size. The size box below becomes Minimal trajectory size: "
+            "tracks shorter than it are still discarded, but longer tracks are kept "
+            "whole, never trimmed or divided."
+        ))
         self.spin_traj_size = QSpinBox()
         self.spin_traj_size.setRange(1, 9999)
         self.spin_traj_size.setValue(100)
         self.spin_traj_size.setMaximumWidth(120)
-        basic_form.addRow("Trajectory size (timepoints):", make_help_row(
+        self.lbl_traj_size = QLabel("Trajectory size (timepoints):")
+        basic_form.addRow(self.lbl_traj_size, make_help_row(
             self.spin_traj_size, "Trajectory size",
             "Number of timepoints to include per track. With the default 'last' trim mode "
             "this keeps each track's final N timepoints (dropping its earlier ones); "
-            "tracks shorter than this are discarded. Match the value used in your notebook. "
+            "tracks shorter than this are discarded. With 'Use full-length tracks' on, "
+            "this is the minimal trajectory size instead: shorter tracks are discarded "
+            "and longer ones are kept whole. Match the value used in your notebook. "
             "The line below shows the equivalent real time, computed from this sample's "
             "time_interval/time_unit metadata."
         ))
@@ -6086,12 +6097,14 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.spin_traj_size.valueChanged.connect(self._update_timepoint_time_labels)
         self.chk_split_long_tracks = QCheckBox("Divide long tracks")
         self.chk_split_long_tracks.setChecked(False)
-        basic_form.addRow("", _make_chk_help_row(
+        self._split_long_tracks_row = QWidget()
+        self._split_long_tracks_row.setLayout(_make_chk_help_row(
             self.chk_split_long_tracks, "Divide long tracks",
             "Split tracks longer than Trajectory size into non-overlapping full-length "
             "analysis windows. Leftover timepoints are discarded. Original TrackID values "
             "are preserved for backprojection."
         ))
+        basic_form.addRow("", self._split_long_tracks_row)
         g1.addLayout(basic_form)
 
         # N clusters — only meaningful for agglomerative clustering (Leiden's cluster
@@ -6194,7 +6207,9 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         # tracks to Trajectory size the same way before clustering), so it stays in a
         # plain shared form rather than a basis-toggled frame. ("Divide long tracks" is
         # shown up in the always-visible basic_form, directly under Trajectory size.)
-        trim_form = QFormLayout()
+        # In its own frame so "Use full-length tracks" can hide label and box together.
+        self._trim_frame = QFrame()
+        trim_form = QFormLayout(self._trim_frame)
         trim_form.setSpacing(3)
         self.combo_trim = QComboBox()
         self.combo_trim.addItems(["last", "first"])
@@ -6205,7 +6220,9 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             "'last' keeps each track's final N timepoints (removes leading/early ones); "
             "'first' keeps each track's first N timepoints (removes trailing/late ones)."
         ))
-        self.adv1.addLayout(trim_form)
+        self.adv1.addWidget(self._trim_frame)
+        self.chk_full_tracks.toggled.connect(self._apply_full_tracks_mode)
+        self._apply_full_tracks_mode()
 
         # Linkage (DTW) and Bouts linkage each get their own self-contained frame —
         # not a shared QFormLayout row — so hiding one via setVisible() also hides its
@@ -7602,6 +7619,22 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             return None
         return ("h5ad", states_path)
 
+    def _apply_full_tracks_mode(self, *_):
+        """With "Use full-length tracks", Trajectory size becomes a minimum-only
+        filter and the trimming/dividing controls no longer apply, so hide them."""
+        full = self.chk_full_tracks.isChecked()
+        self.lbl_traj_size.setText(
+            "Minimal trajectory size (timepoints):" if full else "Trajectory size (timepoints):"
+        )
+        self._split_long_tracks_row.setVisible(not full)
+        self._trim_frame.setVisible(not full)
+
+    def _trajectory_size_param(self) -> Optional[int]:
+        """Trajectory size to cluster with; ``None`` means full-length tracks."""
+        if self.chk_full_tracks.isChecked():
+            return None
+        return int(self.spin_traj_size.value())
+
     def _apply_max_trajectory_size(self, ct: str):
         """Cap the Trajectory size spinbox at the longest available track,
         so a value guaranteed to filter out every track can't be selected.
@@ -8138,8 +8171,14 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
     # ── Config persistence / restoration ────────────────────────────────────
 
     def _collect_track_params(self, ct: str) -> dict:
+        # Full-length tracks: the box is a minimum only, so it is saved under its
+        # own key and behavioral_trajectory_size is null (no cut length).
+        full_tracks = self.chk_full_tracks.isChecked()
+        size_value = int(self.spin_traj_size.value())
         return {
-            "behavioral_trajectory_size": int(self.spin_traj_size.value()),
+            "use_full_tracks":            full_tracks,
+            "behavioral_trajectory_size": None if full_tracks else size_value,
+            "min_trajectory_size":        size_value if full_tracks else None,
             "n_clusters":                 int(self.spin_n_clusters.value()),
             "trajectory_basis":           self._basis(),
             "trajectory_features":        self.traj_feature_selector.params(),
@@ -8194,8 +8233,16 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         cfg = getattr(self.metadata_loader, "behav3d_parameters", {}).get("track_classification", {}).get(ct, {})
         if not cfg:
             return
-        if "behavioral_trajectory_size" in cfg:
-            self.spin_traj_size.setValue(int(cfg["behavioral_trajectory_size"]))
+        full_tracks = bool(cfg.get("use_full_tracks", False))
+        # Older files store the box value in behavioral_trajectory_size for both modes.
+        size_value = (
+            cfg.get("min_trajectory_size") if full_tracks else None
+        )
+        if size_value is None:
+            size_value = cfg.get("behavioral_trajectory_size")
+        if size_value is not None:
+            self.spin_traj_size.setValue(int(size_value))
+        self.chk_full_tracks.setChecked(full_tracks)
         if "n_clusters" in cfg:
             self.spin_n_clusters.setValue(int(cfg["n_clusters"]))
         raw_saved_basis = cfg.get("trajectory_basis")
@@ -9268,13 +9315,15 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             and self.traj_feature_selector.chk_tracklet_net_disp_sq.isChecked()
         )
 
+        full_tracks = self.chk_full_tracks.isChecked()
         if is_bouts:
             params = {
                 "output_dir": str(out) if out else "",
                 "cell_type": ct,
-                "behavioral_trajectory_size": int(self.spin_traj_size.value()),
+                "behavioral_trajectory_size": self._trajectory_size_param(),
+                "min_track_length": int(self.spin_traj_size.value()),
                 "trajectory_trim_mode": self.combo_trim.currentText(),
-                "split_long_tracks": self.chk_split_long_tracks.isChecked(),
+                "split_long_tracks": self.chk_split_long_tracks.isChecked() and not full_tracks,
                 "use_fractions": self.chk_bouts_use_fractions.isChecked(),
                 "use_bout_stats": self.chk_bouts_use_bout_stats.isChecked(),
                 "use_transitions": self.chk_bouts_use_transitions.isChecked(),
@@ -9299,7 +9348,8 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             params = {
                 "output_dir": str(out) if out else "",
                 "cell_type": ct,
-                "behavioral_trajectory_size": int(self.spin_traj_size.value()),
+                "behavioral_trajectory_size": self._trajectory_size_param(),
+                "min_track_length": int(self.spin_traj_size.value()),
                 "n_clusters": int(self.spin_n_clusters.value()),
                 "random_state": int(self.spin_seed.value()),
                 "linkage": self.combo_linkage.currentText(),
@@ -9312,7 +9362,7 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
                 "include_tracklet_net_displacement": include_tracklet_disp,
                 "include_tracklet_net_displacement_squared": include_tracklet_disp_sq,
                 "trajectory_trim_mode": self.combo_trim.currentText(),
-                "split_long_tracks": self.chk_split_long_tracks.isChecked(),
+                "split_long_tracks": self.chk_split_long_tracks.isChecked() and not full_tracks,
                 "parallel": self.chk_parallel.isChecked(),
                 "save_distance_matrix": self.chk_save_dist.isChecked(),
                 "plot_results": True,
@@ -9549,7 +9599,9 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         out = self._out_dir()
         self._log(f"▶ Running feature-based BEHAV3D DTW for '{ct}'…")
         n_clust = int(self.spin_n_clusters.value())
-        traj_size = int(self.spin_traj_size.value())
+        # Full-length tracks: minimum-only filter (max_track_length=None, no trimming).
+        min_len = int(self.spin_traj_size.value())
+        traj_size = self._trajectory_size_param()
         n_neigh = int(self.spin_umap_neighbors.value())
         min_dist = float(self.spin_umap_min_dist.value())
 
@@ -9579,7 +9631,7 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
                     output_dir=str(out) if out else "",
                     cell_type=ct,
                     nr_of_clusters=n_clust,
-                    min_track_length=traj_size,
+                    min_track_length=min_len,
                     max_track_length=traj_size,
                     umap_n_neighbors=n_neigh,
                     umap_minimal_distance=min_dist,
@@ -9598,7 +9650,7 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
                 output_dir=str(out) if out else "",
                 cell_type=ct,
                 nr_of_clusters=n_clust,
-                min_track_length=traj_size,
+                min_track_length=min_len,
                 max_track_length=traj_size,
                 umap_n_neighbors=n_neigh,
                 umap_minimal_distance=min_dist,

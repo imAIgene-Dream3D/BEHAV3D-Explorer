@@ -155,6 +155,8 @@ _DESCRIPTIONS: dict[str, str] = {
     "linkage": "Agglomerative linkage for trajectory clustering. Average is the default, Complete is a reasonable comparison, and Single performs poorly.",
     "trajectory_trim_mode": "Whether trajectory clustering keeps the first or last requested timepoints. This duplicates optional trimming in Filtering.",
     "behavioral_trajectory_size": "Trajectory window size for clustering; it cannot exceed the track trim length set in Filtering.",
+    "min_trajectory_size": "Only used with Use full-length tracks: tracks shorter than this many timepoints are discarded, longer ones are kept whole (behavioral_trajectory_size is then null).",
+    "use_full_tracks": "Cluster every track over all its timepoints instead of cutting it to Trajectory size. Trajectory size then becomes Minimal trajectory size (shorter tracks are discarded, longer ones kept whole); Divide long tracks and Trim mode are hidden.",
     # active killing
     "observation_window": "Timepoints counted forward from contact in which a death-signal increase is assessed. Choose it from the expected biological delay and imaging cadence.",
     "death_signal_column": "Death or reporter signal. Dead-mask pixel count with an absolute threshold is the general default; percentage assumes comparable target sizes, and mean intensity suits diffuse reporters.",
