@@ -3,132 +3,125 @@
 Cellpose is the **classic deep-learning instance segmenter** (cellpose v3) in BEHAV3D EXPLORER. Unlike the pixel-classifier methods, Cellpose is *not* a pixel classifier — it outputs cell-level instance labels directly from raw intensities, using a pretrained convolutional neural network ([Stringer et al., Nature Methods 2021](https://www.nature.com/articles/s41592-020-01018-x)).
 
 ```{note}
-This page covers **classic Cellpose (v3)**, where you load a pretrained or retrained model file. If you want the newer zero-shot foundation model that needs **no model and no training**, see [Cellpose-SAM (zero-shot)](cellpose_sam) instead — it runs cellpose v4 in a separate sidecar environment.
+This page covers **classic Cellpose (v3)**, where you load a pretrained or retrained model file. If you want the newer zero-shot foundation model that needs **no model and no training**, see [Cellpose-SAM (zero-shot)](cellpose_sam.md) instead.
 ```
 
-Classic Cellpose loads a pretrained or retrained model file — the models are trained on full segmentation masks, not painted points, so they cannot be fine-tuned from the napari plugin itself (see the [Cellpose Training Notebook](../../cellpose_training)). For method choice across all six segmentation options, see the [segmentation overview](./index.md#how-to-pick-a-method).
+Classic Cellpose needs a model file. Models are trained on full segmentation masks, not painted points, so they cannot be trained from the napari plugin itself — use the [Cellpose Training Notebook](../../cellpose_training.md). For method choice across all six segmentation options, see the [segmentation overview](./index.md#how-to-pick-a-method).
 
 ![Cellpose tab](../../_static/screenshots/segmentation_tab_cellpose.png)
 
 ## Pretrained models
 
-The pretrained Cellpose models on Zenodo:
+Two pretrained models are available, one for **organoids** (`cellpose_organoids__channel0-organoid`) and one for **T cells** (`cellpose_tcells__channel0-tcell`). Each model is a single file (no extension). Get them from:
 
-→ **[BEHAV3D Pretrained Cellpose Models](https://zenodo.org/records/18872978)**
+- **[BEHAV3D Pretrained Cellpose Models on Zenodo](https://zenodo.org/records/18872978)** — the imaging conditions they were trained on are documented there;
+- or the copies that come with BEHAV3D: in the **Browse…** dialog, open the folder where you downloaded BEHAV3D, then `behav3d` → `preprocessing` → `segmentation` → `models`.
 
-Download the model folder you need and point Cellpose at it via the **Browse…** button in the widget.
-
-```{note}
-Which specific models are bundled, and what cell types each one was trained on, is documented on the Zenodo page itself.
-```
-
-If none of the published models fit your sample, you can fine-tune one on your own labels using the [Cellpose Training Notebook](../../cellpose_training).
+If none of them fits your sample, train your own with the [Cellpose Training Notebook](../../cellpose_training.md).
 
 ## Step-by-step in the napari plugin
 
-A typical session goes like this:
-
-1. **Download a pretrained model** from the [Zenodo deposit](https://zenodo.org/records/18872978) (or train your own with the [Cellpose Training Notebook](../../cellpose_training)).
-2. **Open the Segmentation tab** → pick **Cellpose (Deep Learning)** from the method dropdown.
-3. **Set up the Channel Configuration (Section 1).** 
-   - Pick **`Same for all`** if every sample has the same channel order, or **`Per sample`** if it varies.
-   - For each channel slot, pick which cell type (or `dead`, or `(unused)`) it represents from the dropdown.
-   - Click **💾 Save Channel Configuration**.
-4. **Browse to the model directory** in Section 2 → click **📂 Load Model**.
-5. **Pick the cell type to segment** from the dropdown. Pick the timepoint range (or check `Process all timepoints`).
-6. **Click ▶ Run Cellpose.** Inspect the result for one sample first by loading it in the Visualization tab afterwards.
-7. **If you have other cell types** that use a different model (e.g. one model for organoids, a separate one for T cells), repeat steps 4–6 with the other model. The Cellpose tab does not let you preview before launching the batch — each run goes over every sample directly, so do step 6 on a small `Start / End` range first.
-8. **If your dataset has a dead-stain channel**, click **☠ Run Dead Mask (Otsu)** at the bottom of Section 3 to produce the dead mask (used later by Feature Extraction).
-9. **Queue everything** (Cellpose + Dead Mask) via the **+🛒** buttons if you prefer to launch the rest of the pipeline together — see [Processing Queue](../../plugin_essentials/processing_queue).
-
-The widget is split into three sections.
+1. **Get a model** (see above).
+2. **Open the Segmentation tab** → pick **Cellpose (Deep Learning)** in **Method:**.
+3. **Section 1 · Channel Configuration** — tell BEHAV3D EXPLORER which raw channel holds which population: pick **Same for all** or **Per sample**, choose a population (or `dead`) for each channel, then click **💾 Save Channel Configuration**.
+4. **Section 2 · Model & Cell Type** — **Browse…** to the model file and click **📂 Load Model**. Pick the **Cell type to segment** that matches the model, and keep **Process all timepoints** ticked (or set **Start:** / **End:**).
+5. **Click ▶ Run Cellpose — *cell type*.** The run goes over every sample directly (there is no preview), so check the first result in the [Visualization tab](../../plugin_essentials/visualization.md) before processing everything.
+6. **Other populations** (e.g. organoids and T cells): repeat steps 4–5 with the matching model.
+7. **Dead-stain channel?** Click **☠ Run Dead Mask (Otsu)** to produce the dead mask used later by Feature Extraction.
+8. Or **queue** the runs with the **+🛒** buttons to launch them together with the rest of the pipeline — see [Processing Queue](../../plugin_essentials/processing_queue.md).
 
 ### Section 1 · Channel Configuration
 
-This section maps **raw image channel index → cell type label**.
+This section maps **raw image channel → population**. Only the channel mapped to the population you segment is passed to the model.
 
 | Control | Effect |
 |---|---|
-| **Detected: N channel(s)** | Auto-detected channel count from the metadata (one channel per cell type plus one for the dead channel, when present). |
-| **⚙ Set Manually** + spinbox + **Apply** + **↺** | Override the channel count when the raw zarr has more channels than the metadata declares. The extra slots get a `none` option. |
-| **Mode: Same for all / Per sample** | "Same for all" sets one mapping that applies to every sample. "Per sample" lets each sample have its own mapping (useful when channel order varies). |
-| **Per-channel dropdown** | One dropdown per channel slot. Options are the cell types declared in metadata plus `dead` (if a dead channel is present) plus `(unused)` / `none` when overriding the count. |
-| **💾 Save Channel Configuration** | Persists the mapping to `behav3d_parameters.yml` (under the `cellpose` key). |
+| **Detected: N channel(s)** | Number of channels expected from the metadata (one per population, plus one when a dead channel is declared). The grey line below breaks it down (**Organoids**, **Immune**, **Other**, **Dead**). |
+| **⚙ Set Manually** → **Channels:** + **Apply** / **↺** | Use when the raw image has more channels than populations (e.g. an unused channel). Set the real count and click **Apply**; the extra channels get the option `none`. **↺** returns to the detected count. |
+| **Mode:** **Same for all** / **Per sample** | **Same for all** (default) uses one mapping for every sample. **Per sample** shows one set of dropdowns per sample, for experiments where the channel order differs. |
+| **Channel 0:**, **Channel 1:**, … | One dropdown per channel. Options: the populations in the metadata, `dead` (only when a dead channel is declared) and `none` (only after **Set Manually**). They are pre-filled in metadata order — always check them. |
+| **💾 Save Channel Configuration** | Saves the mapping in the project settings (`behav3d_parameters.yml`). **▶ Run** also saves it, but the **+🛒** queue button requires it to be saved first. |
 
 ```{warning}
-The channel mapping is critical. Cellpose expects the raw image with a specific channel order — if you mis-map, the model sees the wrong intensities. Always check the Channel Configuration before running a batch.
+The channel mapping is critical. If a population is mapped to the wrong channel, the model sees the wrong intensities and the masks are meaningless. Check the mapping before every batch.
 ```
 
 ### Section 2 · Model & Cell Type
 
 | Control | Effect |
 |---|---|
-| **Model** (text field) + **Browse…** | Path to the Cellpose model directory (the one downloaded from Zenodo or trained yourself). |
-| **📂 Load Model** | Loads the model. |
-| **Cell type to segment** | Dropdown of cell types from the metadata. The Run button text updates to reflect the selection. |
-| **Process all timepoints** (checkbox) | When checked, segments every timepoint. When unchecked, the `Start` / `End` spinboxes become active. |
-| **Start / End** | Inclusive timepoint range (0-based). |
+| **Model:** + **Browse…** | Path to the Cellpose model file (downloaded or trained yourself). You can also paste the path. |
+| **📂 Load Model** | Selects that model for the next runs. The grey line below shows **Model loaded · Channels: …**, the channel name stored in the model's file name, as a reminder of what the model was trained on. |
+| **Cell type to segment:** | Population to segment. The run button reads **▶ Run Cellpose — *cell type***. |
+| **Process all timepoints** | Default ON: segments every timepoint. Uncheck to enable **Start:** / **End:**. |
+| **Start:** / **End:** | Inclusive, 0-based timepoint range (default `0` / `0`). |
+
+```{warning}
+A run on a timepoint range **replaces the whole segmentation** of that population in each processed sample: timepoints outside the range are left empty. Use a short range to test a model, then run all timepoints.
+```
 
 ### Section 3 · Run
 
 | Control | Effect |
 |---|---|
-| **▶ Run Cellpose** | Runs immediately on every sample in the metadata, for the selected cell type, using the loaded model. Blocks the GUI until done. |
-| **+🛒** | Queues a Cellpose step in the [Processing Queue](../../plugin_essentials/processing_queue). The queue allows multiple Cellpose steps with different (model, cell type) pairs — useful when one model handles organoids and another handles immune cells. |
-| **☠ Run Dead Mask (Otsu)** | Only visible when the metadata has a dead channel. Computes one global Otsu threshold over the requested timepoint range and writes a binary mask per timepoint to `<output_dir>/images/<sample>/<sample>_mask_dead.zarr`. |
-| **+🛒** (next to the Otsu button) | Queues the Dead Mask step. |
+| **▶ Run Cellpose — *cell type*** | Segments the selected population in every sample of the metadata with the loaded model, [in the background](../../plugin_essentials/running_steps.md#background-execution). Samples whose raw image has not been converted to Zarr are skipped. When segmentations already exist, you choose what to do (see [When results already exist](../../plugin_essentials/running_steps.md#when-results-already-exist)). The result paths are written into metadata.csv. |
+| **+🛒** | Adds **🦠 Segmentation — Cellpose** for this population to the [Processing Queue](../../plugin_essentials/processing_queue.md). Queue one step per population (each with its own model). The step remembers the population and the model; the timepoint range and channel mapping are read when it starts. Shown once metadata is loaded. |
+| **☠ Run Dead Mask (Otsu)** | Only when the metadata declares a dead channel. Thresholds the channel mapped to `dead` (samples without a `dead` channel in the mapping are skipped). For each sample one automatic (Otsu) threshold is computed over all selected timepoints and applied to every timepoint, giving a binary dead mask. Uses the same timepoint setting as Section 2; timepoints outside the range stay empty. |
+| **+🛒** (next to it) | Adds **☠ Dead Mask (Otsu)** to the queue. |
 
 ## What runs under the hood
 
-For each timepoint the plugin loads the raw volume, hands it to the Cellpose model, and writes the resulting instance labels to disk. A few inference settings are fixed:
+For each timepoint, the plugin passes the 3-D volume of the mapped channel to the model and writes the resulting instance labels. These settings are fixed (not in the GUI):
 
-| Setting | Value | Notes |
-|---|---|---|
-| 3-D mode | always on | All segmentation is performed in 3-D (`do_3D=True`). |
-| Per-image normalization | always on | `normalize=True`. |
-| Auto-diameter | yes | `diameter` is not set, so the model estimates the cell diameter from the image. |
-| Minimum object size | category-dependent | Set automatically from the cell type's category: **1000 voxels** for organoids, **10 voxels** for immune / other cells. Smaller objects are dropped. |
-| Anisotropy (Z : XY voxel ratio) | from metadata | Computed **per sample** as `pixel_distance_z / pixel_distance_xy` from your metadata and passed to Cellpose. It is **not** a fixed value. |
+| Setting | Value |
+|---|---|
+| 3-D mode | Always on: each volume is segmented in 3-D, not slice by slice. |
+| Intensity normalization | Always on, per volume. |
+| Cell size | Not estimated from your images: the model expects cells at about the size (in pixels) it was trained on. |
+| Z scaling (anisotropy) | Computed per sample from the metadata, `pixel_distance_z` ÷ `pixel_distance_xy`. |
+| Minimum object size | **1000 voxels** for organoids, **10 voxels** for immune and other populations. |
+| Flat objects | Objects only one voxel thick in Z, Y or X are removed. |
+| Device | CUDA GPU when available, otherwise CPU (much slower). |
 
 ```{important}
-None of these are exposed in the GUI. The anisotropy Cellpose uses is taken directly from your metadata (`pixel_distance_z / pixel_distance_xy`), so it adapts to your acquisition automatically — **provided those pixel-size values in the metadata are correct**. If they are wrong, the model's behaviour in Z will be off; fix the pixel sizes in the metadata first.
+Z scaling comes straight from your metadata pixel sizes. If they are wrong, the model's behaviour in Z will be off — fix the pixel sizes in the metadata first.
 ```
 
 ## Tuning the result
 
-Cellpose differs from the pixel classifiers in one important way: **almost none of its parameters are exposed in the napari plugin**. Cellpose's behaviour is determined by:
+Almost none of Cellpose's parameters are exposed in the plugin. The result depends on:
 
-1. **Which pretrained model you load.** This is by far the most impactful choice.
+1. **Which model you load** — by far the most important choice.
 2. **The channel mapping** (Section 1).
-3. The few fixed inference settings listed in [What runs under the hood](#what-runs-under-the-hood) (3-D mode, per-image normalization, auto-diameter).
+3. **The pixel sizes in your metadata** (Z scaling).
 
-So tuning Cellpose mostly means deciding **which model to use** and **whether to retrain a model on your own data**, not changing GUI spinboxes.
+Tuning Cellpose therefore means choosing a model or **retraining one on your own data**, not changing GUI values.
 
-**The result has many cells missed or random blobs in the background**
+**Many cells missed, or blobs in the background**
 
-- Almost always a **channel-mapping problem**. Re-check Section 1, then reload the model.
-- If channel mapping is correct, the model may simply not have seen images like yours during training. 
+- Almost always a **channel-mapping problem**. Re-check Section 1.
+- If the mapping is correct, the model has probably not seen images like yours — retrain it on your data.
 
-**The result has two touching cells fused into one label**
+**Two touching cells fused into one label**
 
-- Cellpose under-segments by design — it produces one mask per detected cell, with no built-in watershed-style splitting afterwards.
-- The principled fix is to **fine-tune the model** with examples of touching-but-distinct cells using the [Cellpose Training Notebook](../../cellpose_training).
-- The lazy fix is to **manually split** the offending labels in the Visualization tab → [Manual Editing](../tracking/manual_editing) after tracking.
+- Cellpose has no watershed-style splitting afterwards.
+- The proper fix is to **retrain the model** with examples of touching-but-distinct cells ([Cellpose Training Notebook](../../cellpose_training.md)).
+- A quick fix is to **split** the labels by hand after tracking ([Manual Editing](../tracking/manual_editing.md)).
 
-**The result has cells split into multiple labels**
+**Cells split into several labels**
 
-- The Z scaling Cellpose uses comes from your metadata (`pixel_distance_z / pixel_distance_xy`). If those pixel sizes are wrong, the anisotropy is wrong and objects can be over-split in Z — **check and fix the pixel sizes in your metadata first**.
-- If the pixel sizes are correct but the Z resolution is still very different from the data the model was trained on, retraining a model on your own data is the only real fix.
+- Check the pixel sizes in your metadata first (they set the Z scaling).
+- If they are right but your Z resolution or cell size (in pixels) differs a lot from the training data, retrain on your own data.
 
 **Inference is very slow**
 
-- Confirm Cellpose is actually using the GPU (look at GPU utilisation in your task manager). On CPU, Cellpose is slower for 3D volumes.
-- If you only need preliminary results, reduce the timepoint range first to verify the model works, then launch the full batch.
+- Check that the GPU is used (GPU load in your task manager). On CPU, 3-D Cellpose is slow.
+- Test on a short timepoint range first, then launch the full batch.
 
 **The dead mask looks wrong (too dim or too noisy)**
 
-- The Otsu dead mask is computed **once per timepoint range** using a single global threshold. If your dead-stain intensity drifts substantially over time, the threshold may suit early frames but not late ones.
-- Either restrict the timepoint range to a stable interval, or compute the dead mask separately from a Pixel Classifier trained on the dead channel.
+- One Otsu threshold is used per sample for the whole timepoint range. If the dead-stain intensity drifts strongly over time, it may suit early frames but not late ones.
+- Restrict the range to a stable interval, or create the dead mask with a pixel classifier ([APOC](apoc.md), [ConvPaint](convpaint.md) or [Pixel Classifier](pixel_classifier.md)), which can be trained on the dead channel.
 
 ## Outputs
 
@@ -137,17 +130,18 @@ So tuning Cellpose mostly means deciding **which model to use** and **whether to
 | Cellpose instance labels | `<output_dir>/images/<sample>/<sample>_<cell_type>_segments.zarr` |
 | Dead mask (Otsu, if run) | `<output_dir>/images/<sample>/<sample>_mask_dead.zarr` |
 
-Cellpose model files are **not** stored under `<output_dir>`. They live wherever you downloaded / trained them.
+The paths are written into metadata.csv (the population's `…_segments_image_path` column and `dead_mask_path`). Model files are **not** stored under `<output_dir>`; they stay wherever you downloaded or trained them.
 
 ## Things this page does **not** claim
 
-- That the lab's pretrained models will work on every dataset — they were trained on specific imaging conditions documented in the Zenodo deposit.
-- Specific per-timepoint inference numbers — these depend on GPU, volume size, model size, and number of objects. Profile your own data.
+- That the pretrained models work on every dataset — they were trained on the imaging conditions documented in the Zenodo deposit.
+- Specific runtimes — these depend on GPU, volume size and number of objects. Profile your own data.
 
 ## See also
 
 - [Segmentation overview](./index.md) — how Cellpose fits with the other methods.
-- [Cellpose Training Notebook](../../cellpose_training) — how to fine-tune a model on your own labels.
+- [Cellpose Training Notebook](../../cellpose_training.md) — train a model on your own masks.
+- [Cellpose-SAM (zero-shot)](cellpose_sam.md) — no model needed.
 - [Zenodo pretrained models](https://zenodo.org/records/18872978).
 - [Cellpose project on GitHub](https://github.com/MouseLand/cellpose) — upstream documentation.
-- [Processing Queue](../../plugin_essentials/processing_queue) — multi-cell-type batching.
+- [Processing Queue](../../plugin_essentials/processing_queue.md) — batching several populations.

@@ -1,72 +1,72 @@
 # 📥 Import existing tracks
 
-The **Import tracking** option lets you bring in pre-existing tracking results outside BEHAV3D EXPLORER and integrate them into the canonical BEHAV3D EXPLORER output layout.
+The **Import tracking** option brings tracking results produced outside BEHAV3D EXPLORER into the standard output layout, so Feature Extraction and the rest of the pipeline can use them.
 
 ```{important}
-"Import" is **not** a tracking method per se; it's a method of *validating, converting, and copying* existing track data into the expected zarr + CSV layout so downstream Feature Extraction can consume it.
+"Import" is **not** a tracking method: it *validates, converts and copies* an existing tracked label image into the expected zarr + CSV outputs. It works like the [segmentation importer](../segmentation/import.md).
 ```
 
-The Import page is shown when you pick **Import tracking** in any cell-type sub-tab of the Tracking tab. It uses the same zarr validation logic as the [segmentation importer](../segmentation/import): a single root array, chunked one timepoint per chunk.
+## The Import page
 
-## How it works
+Pick **Import tracking** in the **Method:** dropdown of a cell-type sub-tab. The **Run … Tracking** button is disabled for this method; everything is done with the buttons on the page:
 
-The Import page reads the **`{prefix}_{ct}_tracks_image_path`** column from the metadata. For each sample × cell type it shows:
+- **➕ Add a new sample or cell type…** — jumps to the Data Preparation tab with the Metadata Builder already in edit mode, for samples or cell types not yet in the metadata.
+- One row per sample (**📁 *sample name***) with an editable path field (pre-filled from the metadata column `<prefix>_<cell_type>_tracks_image_path`, e.g. `im_tcell_tracks_image_path`), a **Browse…** button (it first asks whether you want to pick a **File** or a **Zarr / Folder**), and a status. A new path is only written to `metadata.csv` once that row has been processed. Changing a path that was already set asks **Replace existing path?** first.
 
 | Status shown | Meaning | Button offered |
 |---|---|---|
-| *No source path set in metadata* | The metadata column is empty | — (edit metadata first: Data Preparation → Metadata Builder) |
-| ⚠️ *File not found* | Path is set but the file doesn't exist | — (fix the path) |
-| TIFF source, not yet imported | A `.tif`/`.tiff` source needs conversion + tracks-CSV generation | **🔄 Convert TIFF → zarr** |
-| Zarr source, not yet imported | A `.zarr` (or zarr directory) source needs importing + tracks-CSV generation | **📄 Import zarr** |
-| ✅ *Already processed* | Both `_tracked.zarr` and `_tracks.csv` already exist at the canonical paths | **🔄 Re-process** (optional, overwrites) |
-| ⚠️ *Unsupported format* | The source is neither TIFF nor zarr | — |
+| *No source path set* | The field is empty | — (type or browse a path) |
+| ⚠️ *File not found* | The path does not exist (hover to see the path tried) | — (fix the path) |
+| — | A `.tif` / `.tiff` source, not yet imported | **🔄 Convert TIFF → zarr** |
+| — | A `.zarr` source (or folder), not yet imported | **📄 Import zarr** |
+| ✅ *Already processed* | The tracked zarr and tracks CSV already exist at the standard paths | **🔄 Re-process** (overwrites) |
+| ⚠️ *Unsupported format (…)* | Neither TIFF nor zarr | — |
 
-When you click the per-row button (**Convert TIFF → zarr**, **Import zarr**, or **Re-process**), or the global **⚡ Process All Samples** button, the widget:
+**⚡ Process All Samples** appears when at least one sample still needs importing; it processes every row with a valid source path. Whenever a tracked zarr already exists at the destination, you are asked **Overwrite existing tracking?** before it is replaced.
 
-1. Reads the source (TIFF or zarr).
-2. For a zarr source it checks the structure (single root array, chunked one timepoint per chunk) and re-chunks it if needed; a TIFF source is converted directly.
-3. Writes a zarr at `<output_dir>/images/<sample>/<sample>_<ct>_tracked.zarr` chunked one timepoint per chunk.
-4. Computes centroids per timepoint and writes the tracks CSV at `<output_dir>/trackdata/<sample>/<ct>/<sample>_<ct>_tracks.csv` in the canonical schema.
+## What happens when you process a row
 
-The **⚡ Process All Samples** button only appears once at least one sample has a source path that still needs importing.
+1. **TIFF source:** a **Confirm Axis Order** dialog shows the image shape and the detected axis order; confirm or pick the right one (e.g. `TZYX` = time, z, y, x). The TIFF is then converted to zarr.
+   **Zarr source:** a valid zarr (see below) is copied to the standard location; any other zarr is rewritten in the right layout.
+2. The labels are converted to the standard 16-bit label format (negative labels are renumbered). If the source already *is* the destination file, a backup copy is kept.
+3. The tracks CSV is computed from the labels (centroid of every TrackID at every timepoint, in pixels and physical units — see [CSV column reference](index.md#csv-column-reference)).
+4. The metadata columns `<prefix>_<cell_type>_tracks_image_path` and `<prefix>_<cell_type>_tracks_csv_path` are set to the new files and `metadata.csv` is saved.
 
-If you also have a pre-existing tracks CSV in `{prefix}_{ct}_tracks_csv_path`, the importer will use it as-is rather than recomputing centroids from the labels image — **provided the CSV already follows BEHAV3D EXPLORER's column schema** (`TrackID, SegmentID, position_t, position_x/y/z, pixel_position_x/y/z` — see [Tracking overview](index)). If the schema does not match, recompute by leaving that meadata column empty.
+Outputs: `<output_dir>/images/<sample>/<sample>_<cell_type>_tracked.zarr` and `<output_dir>/trackdata/<sample>/<cell_type>/<sample>_<cell_type>_tracks.csv`.
 
 ## What "valid" means
 
-A tracked-segments zarr is valid if it satisfies:
-
-- A **single root array** (not a `zarr.Group`).
-- A **4-D `(T, Z, Y, X)` integer array** where the pixel value is the **TrackID** (stable across timepoints — same physical cell keeps the same ID).
-- Chunked **one timepoint per chunk** (first chunk dim = `1`).
-
-For TIFF input, the structure is assumed to be `(T, Z, Y, X)` with track IDs.
+The source must be a **4-D `(T, Z, Y, X)` integer label image** in which the pixel value is the **TrackID** — the same physical cell keeps the same ID at every timepoint. A zarr is used as-is when it is a **single array** (not a group of arrays) stored **one timepoint per chunk**; otherwise it is rewritten.
 
 ```{important}
-As with segmentation import, the validator only checks **zarr structure** — it does not verify the semantics of the labels. Always preview a converted sample in the Visualization tab before running Feature Extraction.
+The importer only checks the file **structure** — it cannot verify that the IDs are really consistent over time. Always inspect a converted sample in the Visualization tab before running Feature Extraction.
+```
+
+```{warning}
+Batch tracking and the processing queue do not import. When **Run Batch Tracking (All Cell Types)** or the queue asks about existing data, keep the imported cell types (**Skip Existing**, or **Skip (keep existing)** in **Customize…**) so they are not re-tracked.
 ```
 
 ## Importing from common sources
 
 ### Imaris
 
-Imaris stores tracks within the `.ims` file. Export the tracked labels as a TIFF time-series (with the same integer ID per track across timepoints), set `{prefix}_{ct}_tracks_image_path` in the metadata to that file, and click **Convert TIFF → zarr** in the Import page.
+Export the tracked labels as a TIFF time series (same integer ID per track across timepoints), point the sample's path to it, and click **🔄 Convert TIFF → zarr**.
 
-### btrack run outside BEHAV3D EXPLORER
+### btrack or another tracker run outside BEHAV3D EXPLORER
 
-If you ran btrack standalone and wrote a labelled zarr, set the metadata path to it and Import will validate + re-chunk.
+Point the path to the labelled zarr or TIFF it wrote; the importer validates, converts and copies it.
 
-### A previous BEHAV3D EXPLORER run on a different output directory
+### A previous BEHAV3D EXPLORER run in a different output directory
 
-If you tracked once and want to copy the result into a new output directory, set the metadata path to the previous run's `*_tracked.zarr` and Import will copy it into the new output dir's canonical layout.
+Point the path to the previous run's `*_tracked.zarr`; it is copied into the new output directory.
 
 ## Tips
 
 - Always **inspect the converted result** in the Visualization tab before running Feature Extraction.
-- **Absolute paths are the most robust choice.**Use absolute paths when you set {prefix}_{ct}_tracks_image_path for external segmentations (Metadata Builder). They are the most robust choice; relative paths work only if they resolve from the metadata CSV’s directory or the working directory.
+- **Absolute paths are the most robust choice.** Relative paths work only if they resolve from the working directory or from the folder containing the metadata CSV.
 
 ## See also
 
-- [Data Preparation](../../data_preparation) — where the `*_tracks_image_path` metadata columns live.
-- [Output Directory & File Layout](../../plugin_essentials/output_layout) — the canonical paths.
-- [Import existing segmentation](../segmentation/import) — analogous workflow at the segmentation stage.
+- [Data Preparation](../../data_preparation.md) — where the `*_tracks_image_path` metadata columns live.
+- [Output Directory & File Layout](../../plugin_essentials/output_layout.md) — the standard paths.
+- [Import existing segmentation](../segmentation/import.md) — the analogous workflow at the segmentation stage.

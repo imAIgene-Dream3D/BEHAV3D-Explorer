@@ -1,75 +1,82 @@
 # 🤝 Interaction Analysis
 
-Relates target–effector contacts to target death and effector engagement. Unlike Death Dynamics, it **can run without a dead channel** — it simply skips the death-aware panels.
+Relates target–effector contacts to target death. A contact is read from the target's `<effector>_contact` column, written by [Feature Extraction](../feature_extraction.md) when the **Contact** family is on. Unlike Death Dynamics, it **can run without a dead channel** — it then skips the death-aware plots.
+
+Open it with **Start** on the **Interaction Analysis** card, tick your targets in **🎯 Target cells**, then the effectors in **🤝 Interaction cells** inside **Step 2 — Interaction Analysis** (see [Population Dynamics](index.md#selecting-cells)). Step 2 has two runs:
 
 | Button | What it does | Enabled when |
 |---|---|---|
-| **▶ Run Interaction Analysis (per target)** | For each selected target, analyses its interactions with each selected effector. | ≥ 1 target **and** ≥ 1 effector selected. |
-| **▶ Run Interaction Overview** | Produces the cumulative-contacts violin, the cumulative-to-death curves, and the active-killing dashboard across the selected target(s). Works with one or more targets. | ≥ 1 target **and** ≥ 1 effector selected. |
+| **▶ Run Interaction Analysis (per target)** | **2a** — for each selected target, one PDF per effector: cumulative contact over time and alive-vs-dead plots. | ≥ 1 target **and** ≥ 1 effector selected. |
+| **▶ Run Interaction Overview** | **2b** — one summary PDF across the selected target(s): contacts per target, cumulative-to-death curves and the active-killing dashboard. Works with one or more targets. | Same. |
+
+Each run button has a **+🛒** and a **👁** button (see [Running and viewing results](index.md#running-and-viewing-results)).
 
 ```{note}
-When **no dead channel** is configured, Interaction Analysis still runs, but the following are skipped automatically:
+**Without death data** the following are skipped automatically — when no `dead_channel` is set (Step 2 then lists them in a yellow box), or when a selected target's filtered table has no `dead` column (a disclaimer names the target):
 
-- Alive-vs-dead comparison panels (overall and per-sample)
-- Fate-based statistics (how many targets survive vs die, and their contact counts)
-- Cumulative-to-death curves (Interaction Overview)
-- The active-killing dashboard (Interaction Overview)
+- alive-vs-dead plots (overall and per sample);
+- survive / die statistics (`n_survives`, `n_dies`, `mean_contacts_survives`, `mean_contacts_dies`);
+- cumulative-to-death curves (Interaction Overview).
+
+The active-killing dashboard of the Overview needs [Active Killing](active_killing.md) results, which in turn need a dead channel.
 ```
 
 ## Interaction settings
 
-Interaction Analysis has separate settings for each run, and their controls affect **different plots**. Settings are saved to `behav3d_parameters.yml` when you run the corresponding step.
+Each run has its own collapsible settings section, closed by default.
 
 **Per-target settings** — apply to **▶ Run Interaction Analysis (per target)**:
 
 | Control | Default | What it does |
 |---|---|---|
-| **Group overall plots by immune line condition** | off | Splits the two per-target overall plots by the interacting immune cell's line condition (`im_{type}_line_condition`): the cumulative-contact curve draws one line per condition and the alive-vs-dead bar plot colours bars by condition. Only affects the per-target overall plots. |
+| **Group overall plots by immune line condition** | off | Splits the two *overall* plots by the effector's line condition (`im_<type>_line_condition` in the metadata): the cumulative-contact plot draws one line per condition, and the alive-vs-dead plot colours by condition (solid = survives, dashed = dies). Per-sample plots are unchanged. |
 
-**Interaction Overview settings** — apply to **▶ Run Interaction Overview** (the violin of cumulative contacts per organoid, the cumulative-to-death curves, and the active-killing dashboard):
+**Interaction Overview settings** — apply to **▶ Run Interaction Overview**:
 
 | Control | Default | Applies to | What it does |
 |---|---|---|---|
-| **Before-death window** | 60 min | the **cumulative-to-death curve only** | Look-back window, in minutes before each target's Time of Death. Requires death classification. |
-| **Temporal Range** — *All timepoints* / *Custom time range* → Start T – End T | All timepoints | the **cumulative-interactions-per-organoid** and **active-killing** plots | Restricts those plots to a timepoint window. *Custom time range* enables the Start T / End T spinboxes (0-indexed timepoints; defaults 0 and 100). |
-| **Annotate by immune line condition** | off | the violin and the active-killing dashboard | Adds the immune line condition as a hue / line-style annotation within the chosen *Group by* grouping, instead of pooling all conditions. Does not affect the cumulative-to-death curve. |
-| **Group by** | By target (organoid) type | violin, cumulative-to-death curve, active-killing dashboard | Sets the x-axis grouping. *By target (organoid) type* keeps each organoid type as its own group; *By treatment (immune cell)* pools all organoid types and groups by the interacting immune cell type instead. |
-
-```{note}
-The **Before-death window** and the **Temporal Range** are two separate controls for two separate sets of plots: the window only sets how far back before each death the **cumulative-to-death** curve looks, whereas the Temporal Range restricts the timepoints used by the **cumulative-interactions-per-organoid** and **active-killing** plots.
-```
+| **Before-death window:** | `60 min` | cumulative-to-death curves only | How far back before each target's time of death the curves look. Enabled only when the selected targets have death data. |
+| **Temporal Range** — **All timepoints** / **Custom time range** with **Start T:** – **End T:** | **All timepoints** (`0` – `100` when custom) | contacts-per-target plot and active-killing dashboard | Restricts those plots to a window of timepoints. It always stays inside the [timepoint range set in Filtering](../filtering.md#restrict-to-a-timepoint-range), if any. |
+| **Annotate by immune line condition** | off | contacts-per-target plot and active-killing dashboard | Shows a separate group per effector type and line condition instead of pooling them. |
+| **Group by:** | **By target (organoid) type** | all three plots | x-axis grouping: **By target (organoid) type** keeps each target type as its own group; **By treatment (immune cell)** pools target types and groups by effector type. |
 
 ## Interaction outputs
 
 | Run | Result PDF |
 |---|---|
-| Per target ↔ effector | `<output_dir>/analysis/<target>/interaction_analysis/interaction_analysis_<target>_vs_<effector>.pdf` |
-| Combined | `<output_dir>/analysis/multi_organoid_comparison/multi_organoid_interaction_comparison.pdf` |
+| Per target ↔ effector | `analysis/<target>/interaction_analysis/interaction_analysis_<target>_vs_<effector>.pdf` |
+| Interaction Overview | `analysis/multi_organoid_comparison/multi_organoid_interaction_comparison_<settings>.pdf` |
 
-**The per-pair PDF contains:**
+The Overview file name records its settings so different runs don't overwrite each other: grouping (`orgtype` / `treatment`), time range (`Tall`, or `T<start>-<end>`), and `annoLC` when annotating by line condition — e.g. `multi_organoid_interaction_comparison_orgtype_Tall.pdf`.
 
-- **Cumulative target–effector contacts over time** — overall (all samples) and per sample. This shows how contact accumulates as the experiment runs.
-- **If a dead column is present:** **alive-vs-dead comparisons** (overall and per sample) — i.e. do targets that end up dead accumulate more effector contact than those that survive?
+**The per-target PDF contains:**
 
-**The combined PDF compares across targets** (grouped by target type or by treatment, per the Advanced setting):
+- **Cumulative contacts over time** — overall (mean ± SEM over all samples) and per sample: how contact accumulates as the movie runs.
+- **If death data is present: alive vs dead** — the same curves split by whether the target survives or dies, overall and per sample: do targets that die accumulate more contact than those that survive?
 
-- A **violin comparison** of interaction metrics across the groups.
-- **If death data is present:** **cumulative-to-death curves** (contact accumulation aligned to each target's time of death).
-- **If active-killing data is present:** an **active-killing dashboard** summarising killing-related metrics.
+**The Interaction Overview PDF contains:**
+
+- **Cumulative interactions per target** — a violin of each target's total number of contact timepoints, split into *Live* and *Dying* targets when death data exists; the axis labels give dead / total counts per group.
+- **If death data is present: cumulative-to-death curves** — mean ± SEM of contact accumulation for dying targets only, aligned on each target's time of death (x-axis in minutes before death).
+- **If [Active Killing](active_killing.md) results exist: the active-killing dashboard** — *Contact event duration* per group and target fate (one point per effector–target contact event, coloured by whether it actively killed), and *Active killing efficiency*: the % of contact events in each group that actively killed.
 
 ### Which CSV backs which plot
 
-`interaction_stats_<target>_vs_<effector>.csv` is a **per-sample track summary** (mean contact percentage, mean total contacts) — it cannot reproduce the time-resolved curves in the PDF. Those are exported separately to `interaction_analysis/plot_data/`:
+Per target, under `analysis/<target>/interaction_analysis/`:
 
-| PDF panel | Backing CSV |
+| File | Contents |
 |---|---|
-| Cumulative contacts over time, all samples | `plot_data/cumulative_overall_<target>_vs_<effector>.csv` |
-| Cumulative contacts over time, per sample | `plot_data/cumulative_per_sample_<target>_vs_<effector>.csv` |
-| Alive vs dead, all samples | `plot_data/alive_vs_dead_overall_<target>_vs_<effector>.csv` |
-| Alive vs dead, per sample | `plot_data/alive_vs_dead_per_sample_<target>_vs_<effector>.csv` |
+| `interaction_stats_<target>_vs_<effector>.csv` | Per-sample summary: number of targets, mean / SD % of time in contact, mean / SD total contacts, plus survive / die counts and contacts when death data exists. |
+| `plot_data/cumulative_overall_<target>_vs_<effector>.csv` | Cumulative contacts over time, all samples. |
+| `plot_data/cumulative_per_sample_<target>_vs_<effector>.csv` | Cumulative contacts over time, per sample. |
+| `plot_data/alive_vs_dead_overall_<target>_vs_<effector>.csv` | Alive vs dead, all samples. |
+| `plot_data/alive_vs_dead_per_sample_<target>_vs_<effector>.csv` | Alive vs dead, per sample. |
 
-Each carries `mean`, `std`, `count` and `sem` per timepoint, so the shaded band is `mean ± sem` and `count` tells you how many tracks back each point. The combined PDF is accompanied by `multi_organoid_interaction_summary*.csv` (per-track) and `multi_organoid_cumulative_to_death_curves_min*.csv` (the cumulative-to-death curve).
+The `plot_data` tables carry `mean`, `std`, `count` and `sem` per timepoint: the shaded band is `mean ± sem`, and `count` tells you how many tracks back each point.
 
-```{note}
-The death-aware panels (alive-vs-dead, cumulative-to-death, active-killing dashboard) only appear when the death classification exists. With no dead channel, the PDF simply contains the contact-accumulation plots.
-```
+Interaction Overview, under `analysis/multi_organoid_comparison/`:
+
+| File | Contents |
+|---|---|
+| `multi_organoid_interaction_summary_<settings>.csv` | One row per target: total contacts per effector type, fate (*Live* / *Dying*) and time of death. |
+| `multi_organoid_cumulative_to_death_curves_min_<settings>.csv` | The cumulative-to-death curves (time in minutes). |

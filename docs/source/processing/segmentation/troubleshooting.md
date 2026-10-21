@@ -1,6 +1,6 @@
 # 🩹 Troubleshooting
 
-Symptom-first quick reference. Find your **method** below, then your **problem**. For full explanations see [Instance post-processing parameters](./index.md#instance-post-processing-parameters) and the per-method pages ([APOC](apoc), [ConvPaint](convpaint), [Pixel Classifier](pixel_classifier), [Cellpose](cellpose)).
+Symptom-first quick reference. Find your **method** below, then your **problem**. For full explanations see [Instance post-processing parameters](./index.md#instance-post-processing-parameters) and the per-method pages ([APOC](apoc.md), [ConvPaint](convpaint.md), [Pixel Classifier](pixel_classifier.md), [Cellpose](cellpose.md)).
 
 ## Which method should I use?
 
@@ -26,8 +26,9 @@ Full decision tree: [How to pick a method](./index.md#how-to-pick-a-method).
 | Foreground bleeds into background | Paint more **background** labels near the misclassified region, retrain |
 | Cells not detected at all | Paint more **foreground** labels at the missed cells' edges, retrain |
 | Good on trained timepoints, poor elsewhere | Raise **Examples/sample**, generate new training data, retrain |
-| Mask fragmented / speckled | Switch **Feature Preset** to `large_preset`, or add larger σ in *Tune Features* |
-| Training/preview slow, GPU low on memory | Switch to `small_preset`/`medium_preset`, uncheck unneeded channels |
+| Mask fragmented / speckled | Switch **Preset:** to `large_preset`, or add larger σ in **Tune Features** |
+| Training/preview slow, GPU low on memory | Switch to `small_preset`/`medium_preset`, uncheck unneeded channels in **Image Channel Inputs** |
+| No GPU listed / GPU unstable | Tick **Force CPU-only processing** (needs an OpenCL CPU runtime), or use the Pixel Classifier |
 
 ```{tip}
 Filter rows: **Gauss** = smoothed intensity (large/soft objects), **DoG** = edges (default choice for boundaries), **LoG** = blob-like spots (nuclei, cores), **SoG** = directional edges (membranes). σ scales roughly with **half the pixel-diameter** of the structure you want that filter to describe. Full table: [APOC — Tuning the parameters](apoc.md#tuning-the-parameters).
@@ -35,9 +36,9 @@ Filter rows: **Gauss** = smoothed intensity (large/soft objects), **DoG** = edge
 
 ### Touching cells are merged, or one cell is split into pieces
 
-APOC has two strategies for turning the mask into instance labels — check which one you're using (dropdown at the top of the APOC tab):
+APOC has two watershed strategies for splitting objects — check which one you're using (**Strategy:** dropdown above the cell-type tabs, or the tab's **↳ Cell type strategy:** in Advanced mode). **APOC (Direct Instance Segmentation)** never splits; switch to one of these if you need splitting.
 
-**If you're using "APOC Mask + EDT/Watershed" (the plain, non-probability strategy):**
+**If you're using "APOC Mask + EDT/Watershed Resegmentation":**
 
 | Symptom | Fix |
 |---|---|
@@ -55,7 +56,7 @@ APOC has two strategies for turning the mask into instance labels — check whic
 Don't mix these up — EDT threshold and Seed threshold are different fields that only apply to their own strategy. See [Common post-processing problems](#common-post-processing-problems-any-method) below for Mask threshold, Min size, Opening, and the "no sweet spot found" issue.
 ```
 
-**Finer features can help too, not just post-processing:** if the mask/probability boundary itself is blurry between two touching cells (not just a post-processing problem), adding smaller-σ features (e.g. DoG or SoG at σ 1–2 in *Tune Features*) can sharpen the boundary enough that watershed splits it correctly without needing extreme threshold values — see [APOC — Tuning the parameters](apoc.md#tuning-the-parameters).
+**Finer features can help too, not just post-processing:** if the mask/probability boundary itself is blurry between two touching cells (not just a post-processing problem), adding smaller-σ features (e.g. DoG or SoG at σ 1–2 in **Tune Features**) can sharpen the boundary enough that watershed splits it correctly without needing extreme threshold values — see [APOC — Tuning the parameters](apoc.md#tuning-the-parameters).
 
 ---
 
@@ -67,15 +68,16 @@ Don't mix these up — EDT threshold and Seed threshold are different fields tha
 |---|---|
 | Foreground bleeds into background | Paint more **background** labels near the misclassified region, retrain |
 | Cells not detected at all | Paint more **foreground** labels at the missed cells' edges, retrain |
-| Mask "too smooth", classes bleed together | Switch **Model** to DINOv2 / JAFAR DINOv2, retrain |
-| VRAM error during train/inference | Switch to a smaller **Model** (e.g. VGG16 instead of VGG16 Large), or raise **Downsample** |
-| Speckly mask with single-pixel noise | Raise **Smoothen** |
-| Thin structures eroded | Lower **Smoothen** |
-| A rare cell type is under-predicted | Keep **Class weights** = `Balanced` (default); try `SqrtBalanced` if `Balanced` overcorrects |
+| Mask "too smooth", classes bleed together | Switch **Model:** to DINOv2 / JAFAR DINOv2, retrain |
+| Out-of-memory error during training/prediction | Switch to a smaller **Model:** (e.g. VGG16 instead of VGG16 Large), raise **Downsample:**, or tick **Tile image** |
+| Speckly mask with single-pixel noise | Raise **Smoothen:** |
+| Thin structures eroded | Lower **Smoothen:** |
+| A rare cell type is under-predicted | Keep **Class weights:** = Balanced (default); try SqrtBalanced if Balanced overcorrects |
+| Preview says the cell type is not in the trained model | Paint that cell type's label value and retrain |
 
 ### Touching cells are merged, or one cell is split into pieces
 
-ConvPaint has two strategies (dropdown at the top of the ConvPaint tab):
+ConvPaint has two strategies (**Strategy:** dropdown, or the tab's **↳ Cell type strategy:** in Advanced mode):
 
 **If you're using "ConvPaint Mask + EDT/Watershed" (the default strategy):**
 
@@ -103,12 +105,12 @@ See [Common post-processing problems](#common-post-processing-problems-any-metho
 |---|---|
 | Foreground bleeds into background | Paint more **background** labels near the misclassified region, retrain |
 | Cells not detected at all | Paint more **foreground** labels at the missed cells' edges, retrain |
-| Good on trained timepoints, poor elsewhere | Raise **Examples/sample**, generate new training data, retrain |
+| Good on trained timepoints, poor elsewhere | Raise **Examples/sample**, generate new training data (this starts from empty labels), retrain |
 | Good on bright cells, fails on dim ones | Include some dim cells in labels, or switch to APOC/ConvPaint (richer features) |
 
 ### Touching cells are merged, or one cell is split into pieces
 
-Pixel Classifier always uses the EDT/Watershed mechanism — there is no strategy dropdown:
+Pixel Classifier always uses the EDT/Watershed mechanism — there is no strategy dropdown (the field is called **EDT:**):
 
 | Symptom | Fix |
 |---|---|
@@ -125,7 +127,7 @@ Cellpose exposes almost no GUI parameters — tuning means picking the right mod
 
 | Symptom | Fix |
 |---|---|
-| Cells missed, or random blobs in background | Re-check the channel mapping (Section 1) first, then reload the model |
+| Cells missed, or random blobs in background | Re-check the channel mapping (**1. Channel Configuration**) first, then reload the model |
 | Two touching cells fused into one label | Fine-tune the model on touching-cell examples, or manually split labels after tracking |
 | Cells split into multiple labels | Fix pixel sizes (Z anisotropy) in your metadata |
 | Inference very slow | Confirm the GPU is being used; test on a small timepoint range first |
@@ -134,24 +136,24 @@ Cellpose exposes almost no GUI parameters — tuning means picking the right mod
 
 ## Cellpose-SAM
 
-Zero-shot — no model to load or train. Tuning means the two thresholds, do_3D vs 2D+stitch, and the size filter. Full page: [Cellpose-SAM](cellpose_sam).
+Zero-shot — no model to load or train. Tuning means the two thresholds, do_3D vs 2D+stitch, and the size filter. Full page: [Cellpose-SAM](cellpose_sam.md).
 
 | Symptom | Fix |
 |---|---|
 | First run fails / "environment not ready" | Click **Set up Cellpose-SAM environment** once (Section 1) before running |
 | CUDA out-of-memory | **Lower Batch size** first (Section 4) |
 | Touching cells fused into one label | Raise **Cell prob threshold** slightly, or split manually after tracking (Cellpose has no watershed splitting) |
-| Many small / flat fragments | Keep **Remove flat segments** on; set a **Min size** in Section 5 (preview first) |
+| Many small / flat fragments | Keep **Remove flat (single-slice) segments** on; set a **Min size** in Section 5 (preview first) |
 | Large organoids silently vanish | Check **Max size fraction** = 1.0 (BEHAV3D default), not Cellpose's 0.4 |
-| Cells over-split in Z | Fix pixel sizes in metadata (they set anisotropy); turn **norm3D** on |
-| Machine powers off mid-run (laptop) | Cap **CPU threads** and add **Cooldown**; the run resumes automatically |
+| Cells over-split in Z | Fix pixel sizes in metadata (they set anisotropy); turn **Normalize across the whole Z stack (norm3D)** on |
+| Machine powers off mid-run (laptop) | Lower **Batch size**, cap **CPU threads (0=all)** and add **Cooldown between frames (s)**; re-run and choose **Skip & Resume** to continue |
 
 ---
 
 (common-post-processing-problems-any-method)=
 ## Common post-processing problems (any method)
 
-These parameters mean the same thing regardless of method — but not all of them are shown for both strategies (noted per row). The only case with *no* post-processing controls at all is APOC's **Direct Instance Segmentation** strategy.
+These parameters mean the same thing regardless of method — but not all of them are shown for both strategies (noted per row). The only case with *no* post-processing controls at all is APOC's **Direct Instance Segmentation** strategy (and the **Dead** tab).
 
 | Symptom | Fix |
 |---|---|
@@ -162,6 +164,7 @@ These parameters mean the same thing regardless of method — but not all of the
 | Real small cells dropped | **Lower Min size** (both strategies) |
 | Fuzzy / jagged boundaries, stray voxels | **Raise Opening px** (both strategies) |
 | Thin structures eroded | **Lower Opening px** (or `0`) (both strategies) |
+| EDT threshold / Min size values look very different from a protocol | Check the **Units:** switch — values are shown in µm / µm³ by default; switch to **px** to compare with pixel values |
 
 ### Raising EDT/Seed threshold doesn't seem to help
 
@@ -176,7 +179,7 @@ So raising EDT/Seed threshold and seeing no change doesn't necessarily mean you'
 
 | Object type | EDT / Seed threshold starting point | Min size |
 |---|---|---|
-| Big (organoids) | EDT ~10–12 | large, e.g. 1000 |
-| Small / crowded (immune, T cells) | EDT ~1.5–4 | small, e.g. 10 |
+| Big (organoids) | EDT ~8–15 px | large, e.g. 1000 voxels |
+| Small / crowded (immune, T cells) | EDT ~1.5–4 px | small, e.g. 10 voxels |
 
-Tune **each cell type on its own tab** — settings on one tab do not carry over to another. Details: [Advice: large vs small objects](./index.md#advice-large-vs-small-objects).
+These are pixel values (the Pixel Classifier's built-in starting points); set **Units:** to **px** to enter them. Tune **each cell type on its own tab** — settings on one tab do not carry over to another. Details: [Advice: large vs small objects](./index.md#advice-large-vs-small-objects).

@@ -1,130 +1,134 @@
 # ✨ Cellpose-SAM (zero-shot)
 
-Cellpose-SAM is the **foundation-model instance segmenter** in BEHAV3D EXPLORER. Like classic [Cellpose](cellpose) it outputs cell-level instance labels directly from raw intensities (no pixel labeling, no watershed post-processing), but it is built on the newer **Cellpose-SAM** backbone ([cellpose v4](https://github.com/MouseLand/cellpose)) and is **zero-shot** — it segments a wide range of cell shapes with *no training and no annotation*.
+Cellpose-SAM is the **foundation-model instance segmenter** in BEHAV3D EXPLORER. Like classic [Cellpose](cellpose.md) it outputs cell-level instance labels directly from raw intensities (no pixel labeling, no watershed post-processing), but it is built on the newer **Cellpose-SAM** model ([cellpose v4](https://github.com/MouseLand/cellpose)) and is **zero-shot** — it segments a wide range of cell shapes with *no training and no annotation*.
 
 For method choice across all six segmentation options (including when Cellpose-SAM is the recommended choice versus APOC / ConvPaint / classic Cellpose), see the [segmentation overview](./index.md#how-to-pick-a-method).
 
 ```{important}
-Cellpose-SAM segments **one cell type per run** (the channel(s) for that cell type must be selected). T cells and organoids cannot be predicted in a single pass — either run the tool once per cell type, or tick **Run all cell types in one batch** to loop through every declared type automatically.
+Cellpose-SAM segments **one population at a time**, from the channel(s) you select for it. T cells and organoids cannot be predicted in a single pass — run the tool once per population, or tick **Run all cell types in one batch** to loop through every population automatically.
 ```
 
-## Section 1 · Cellpose-SAM environment (one-time setup)
+## Section 1 · Cellpose-SAM Environment (one-time setup)
 
-Cellpose-SAM needs **cellpose ≥ 4**, which cannot share a Python environment with the pinned **cellpose 3** that the rest of BEHAV3D EXPLORER uses (your existing fine-tuned classic-Cellpose models depend on v3). To keep both, BEHAV3D EXPLORER creates a small **side ("sidecar") environment** containing cellpose v4.
+Cellpose-SAM needs **cellpose v4**, which cannot share a Python environment with the **cellpose v3** that the rest of BEHAV3D EXPLORER (and your classic Cellpose models) uses. BEHAV3D EXPLORER therefore installs cellpose v4 in a small **side ("sidecar") environment**.
 
 | Control | Effect |
 |---|---|
-| **Status label** | Reports the current state. Before setup it prompts you to install; after setup it shows a green **Ready** status with the detected cellpose / torch version and GPU. |
-| **Set up Cellpose-SAM environment** | Creates the sidecar env. This is a **one-time step per computer** — click it once before first use. |
+| Status line | **✅ Ready — cellpose …, torch … (*GPU*)** once set up; otherwise a ⚠️ message (e.g. *Cellpose-SAM environment not set up yet.*). **👁 Preview segmentation** and **▶ Run Cellpose-SAM** stay disabled until it is ready. |
+| **Set up Cellpose-SAM environment** | Creates the sidecar environment in the background (about a minute; needs an internet connection). **Once per computer.** It reuses your existing PyTorch install, so it only adds a few MB, and leaves your cellpose v3 install and models untouched. |
 
-The sidecar **reuses this environment's existing PyTorch install**, so it only adds a few MB. Your classic cellpose v3 install and trained models are left completely untouched.
+```{note}
+The first time you use a model (**cpsam** or **cpsam_v2**), its weights (~1.15 GB) are downloaded and stored for later runs, so the first preview or run needs an internet connection and takes longer.
+```
 
-## Section 2 · What to segment
+## Section 2 · What to Segment
 
 | Control | Default | Effect |
 |---|---|---|
-| **Cell type** | first detected | The cell type to segment. Determines the output filename and which raw channel(s) feed the model. |
-| **Channel Selection** | — | A per-cell-type checkbox picker choosing which raw channel(s) feed Cellpose-SAM for the chosen cell type. This is Cellpose-SAM's **own** channel config (`cellpose_sam.channel_selection`), separate from classic Cellpose's per-channel panel. |
-| **Run all cell types in one batch** | OFF | Segment every detected cell type in one go instead of only the selected one. When ticked, the Cell type dropdown is disabled. |
-| **Process all timepoints** | ON | Segment the whole movie. Uncheck to expose the From/To range. |
-| **From / To** | 0 / 0 | 0-indexed, **inclusive** timepoint range, active only when *Process all timepoints* is off. Timepoints outside the range keep whatever they already contain — a partial run never clears other timepoints. |
+| **Cell type:** | first population | The population to segment. Determines the output file and which channel selection and size filter are used. |
+| **Channel Selection** | see below | One checkbox per raw channel (**Channel 0**, **Channel 1**, …): tick the channel(s) that show the selected population. Each population has its own selection, used for all samples. At most **3** channels are used (if you tick more, only the first three are). |
+| **Run all cell types in one batch** | OFF | Previews and segments every population in one go, each with its own channel selection and size filter. Greys out **Cell type:**. |
+| **Process all timepoints** | ON | Segments the whole movie. Uncheck to enable **From:** / **To:**. |
+| **From:** / **To:** | `0` / `0` | Inclusive, 0-based timepoint range. Timepoints outside the range keep what they already contain — a range run never clears other timepoints. |
+
+The channel selection is independent of the classic Cellpose page. The first time, each population is pre-ticked with the channel it has in the classic Cellpose **Same for all** mapping, if you saved one; otherwise nothing is ticked. A population with no channel ticked cannot be run or queued.
 
 ## Section 3 · Device
 
 | Control | Default | Effect |
 |---|---|---|
-| **GPU Device** | auto | Which CUDA device to run on. Leave on the default/auto GPU. |
-| **Force CPU-only processing** | OFF | Hides all GPUs from Cellpose-SAM. Much slower — only force CPU if the GPU is busy with something else. |
+| **GPU Device:** | auto | CUDA GPU to run on. |
+| **Force CPU-only processing** | OFF | Hides all GPUs from Cellpose-SAM and greys out **GPU Device:**. Much slower for 3-D volumes — only use it when the GPU is busy or unavailable. |
 
-```{note}
-A full GPU run already saturates the GPU **and** every CPU core (see **CPU threads / Cooldown** in the Advanced block). CPU-only mode is dramatically slower for 3-D volumes.
-```
+## Section 4 · Segmentation Settings
 
-## Section 4 · Segmentation settings
-
-A shared **px / µm unit toggle** at the top of this section governs every size- or radius-like field below (diameter, sharpen/smooth radius, tile-norm blocksize, flow3D smooth, and the Section 5 size filter). Values are stored internally in pixels/voxels regardless of what unit is displayed; µm values are converted using each sample's own pixel size from the metadata.
+The **Units:** switch at the top (px ⇄ µm, **µm** by default when the metadata has pixel sizes) applies to every size-like field on this page: **Diameter**, **flow3D smooth**, **Sharpen radius**, **Smooth radius**, **Tile norm blocksize** and the Section 5 **Min size** / **Max size**. See [Units switches](../../plugin_essentials/running_steps.md#units-switches).
 
 | Parameter | Default | Range | What it does |
 |---|---|---|---|
-| **Model** | `cpsam` | `cpsam`, `cpsam_v2` | Which shipped Cellpose-SAM model to use. `cpsam` is the original (April 2025); `cpsam_v2` is newer (June 2026). Both are zero-shot, so you can switch freely to compare. |
-| **Diameter (0 = auto)** | 0 (auto) | ≥ 0 | Expected object diameter, used to rescale the image before segmentation. Leave at 0 — Cellpose-SAM was trained on diameters **7.5–120 px (mean 30 px)** and is robust to size, so only set it manually if your objects are far outside that range. |
-| **Flow threshold** | 0.4 | 0.0–3.0 | Maximum allowed flow error for a predicted mask to be kept. **Raise** to detect more (possibly poorly-shaped) objects; **lower** to keep only cleanly-shaped ones. **Ignored (and greyed out) when 3D segmentation is on.** |
-| **Cell prob threshold** | 0.0 | −6 to 6 | Pixels with predicted probability above this value are used to build masks. **Lower** to detect more / larger objects; **raise** to drop dim / uncertain detections. |
-| **3D segmentation (do_3D)** | ON | checkbox | **On:** cellpose averages flows over the YX / ZY / XZ views and runs dynamics in true 3D — most accurate, but roughly **10–15× slower** (measured on the reference dataset). **Off:** each Z slice is segmented in 2D and stitched across Z by IoU overlap (see *Stitch threshold*). |
-| **Stitch threshold** | 0.0 | 0.0–1.0 | IoU overlap required between a mask on one Z slice and the next for them to be joined into one 3D object. **Only used (and only editable) when 3D segmentation is off.** |
-| **Batch size** | 8 | 1–128 | Number of 256×256 patches processed together per GPU pass. **Reduce this first if you hit a CUDA out-of-memory error** — it is the main lever for GPU memory use, and has no effect on segmentation quality. |
-| **Remove flat (single-slice) segments** | ON | checkbox | Drops any output object that occupies only a single Z, Y or X slice. This is **BEHAV3D's own post-processing**, not a native Cellpose parameter: cellpose leaves flat fragments on the first/last slice (~100–350 voxels vs. ~2400–4000 for real objects on the reference dataset), most common in 2D+stitch mode. Turn off only if your objects genuinely occupy a single slice. |
+| **Model:** | `cpsam` | `cpsam`, `cpsam_v2` | `cpsam` is the original Cellpose-SAM model (April 2025), `cpsam_v2` a newer version (June 2026). Both are zero-shot; switch freely to compare. |
+| **Diameter (0=auto):** | `0` (auto) | ≥ 0 | Expected object diameter. Leave at `0`: Cellpose-SAM was trained on diameters of 7.5–120 px (mean 30 px) and is robust to size. Set it only if your objects are far outside that range. |
+| **Flow threshold:** | `0.4` | 0–3 | Maximum flow error for a mask to be kept. **Raise** to detect more (possibly poorly shaped) objects; **lower** to keep only clean shapes. Ignored when 3-D segmentation is on: the label then reads **Flow threshold (ignored in 3D):** and the field is greyed out. |
+| **Cell prob threshold:** | `0.0` | −6 to 6 | Pixels above this value are used to build masks. **Lower** to detect more / larger objects; **raise** to drop dim or uncertain detections. |
+| **3D segmentation (do_3D)** | ON | — | **On:** true 3-D segmentation — most accurate, but roughly **10–15× slower**. **Off:** each Z slice is segmented in 2-D and slices are joined by overlap (see **Stitch threshold:**). |
+| **Stitch threshold:** | `0.0` | 0–1 | Overlap needed between masks on neighbouring Z slices to join them into one object. Only editable when 3-D segmentation is off. |
+| **Batch size:** | `8` | 1–128 | Number of image patches processed together on the GPU. **Lower it first if you get a CUDA out-of-memory error**; it does not change the result. |
+| **Remove flat (single-slice) segments** | ON | — | Removes objects that occupy a single Z, Y or X slice — typically small fragments on the first/last Z slice, most common in 2-D + stitch mode. Turn off only if your objects really occupy one slice. |
 
 ```{tip}
-**Do you want 3D or 2D+stitch?** Keep **do_3D on** for the most accurate result. Switch it **off** for speed, or when the ZY/XZ views are unusable (very anisotropic data) — in that case tune the **Stitch threshold** instead. The two are deliberately kept together as an on/off workflow choice rather than a fine-tuning knob.
+**3-D or 2-D + stitch?** Keep **3D segmentation (do_3D)** on for the most accurate result. Switch it off for speed, or when the data are so anisotropic that the side views (ZY/XZ) are unusable — then tune **Stitch threshold:** instead.
 ```
 
 ### Advanced (normalization, filters)
 
-Collapsed by default. Every setting inside defaults to Cellpose's own recommended value or "off", so you can **leave it untouched for routine runs**. The split follows Cellpose's own documentation: routine tuning knobs (diameter, flow/cellprob, do_3D/stitch, batch size) stay in the main panel above; edge-case overrides live here.
+Collapsed by default. All values default to Cellpose's own recommendation or "off" (except **Max size fraction:**), so you can **leave them untouched for routine runs**.
 
 | Parameter | Default | What it does |
 |---|---|---|
-| **Norm percentiles (low / high)** | 1 / 99 | Intensity percentiles rescaled to 0/1 before segmentation. Defaults are fine for normal data. |
-| **Normalize across whole Z stack (norm3D)** | ON | On: normalization is computed once for the whole Z stack. Off: each Z slice is normalized independently — turn off if brightness drifts a lot slice-to-slice within one stack. |
-| **niter dynamics** | 0 (auto) | Iterations used to run the flow dynamics. 0 = automatic, proportional to the diameter. Long, thin objects may need a higher value (e.g. ~2000). |
-| **flow3D smooth** | 0 (off) | Standard deviation of a Gaussian filter applied to the 3D flows before computing dynamics. Increase if you see ring artifacts. Shown in the selected unit. |
-| **Sharpen radius** | 0 (off) | High-pass sharpening filter applied before segmentation. Use ~1/4–1/8 of the expected object diameter for dim, blurry images. |
-| **Smooth radius** | 0 (off) | Low-pass smoothing filter applied before segmentation. Use for noisy images. |
-| **Tile norm blocksize** | 0 (off) | Computes normalization in tiles of this size across the image rather than once per frame, brightening dark areas in unevenly-illuminated images. |
-| **Tile norm smooth3D** | 0 | Smooths the tiled normalization across Z. Only matters once *Tile norm blocksize* > 0. |
-| **Max size fraction** | 1.0 | Cellpose deletes any mask larger than this fraction of the image area. Cellpose's own upstream default is 0.4, which silently removes large organoids — BEHAV3D defaults it to 1.0 (keep everything) and relies on the size filter in Section 5 instead. |
-| **CPU threads (0 = all)** | 0 | Caps CPU threads used for mask post-processing and compression. |
-| **Cooldown between frames (s)** | 0 | Idle time inserted after each timepoint. |
+| **Norm percentiles:** low / high | `1` / `99` | Intensity percentiles rescaled to 0 and 1 before segmentation. |
+| **Normalize across the whole Z stack (norm3D)** | ON | On: one normalization for the whole stack. Off: each Z slice is normalized separately — use it if brightness drifts a lot between slices. |
+| **niter dynamics:** | `0` (auto) | Iterations of the flow dynamics; `0` = automatic. Long, thin objects may need more (e.g. ~2000). |
+| **flow3D smooth:** | `0` (off) | Smooths the 3-D flows before the dynamics; increase it if you see ring artifacts. |
+| **Sharpen radius:** | `0` (off) | Sharpening before segmentation, for dim, blurry images (about 1/4–1/8 of the object diameter). |
+| **Smooth radius:** | `0` (off) | Smoothing before segmentation, for noisy images. |
+| **Tile norm blocksize:** | `0` (off) | Normalizes in tiles of this size instead of over the whole frame; brightens dark areas of unevenly illuminated images. |
+| **Tile norm smooth3D:** | `0` | Smooths the tiled normalization across Z. Only used when **Tile norm blocksize:** > 0. |
+| **Max size fraction:** | `1.0` | Masks larger than this fraction of the image are deleted. Cellpose's own default (0.4) silently removes large organoids, so BEHAV3D EXPLORER keeps everything and relies on the Section 5 size filter. |
+| **CPU threads (0=all):** | `0` | Caps the CPU threads used for post-processing and saving. |
+| **Cooldown between frames (s):** | `0` | Pause after each timepoint (0–120 s). |
 
 ```{warning}
-**Power-delivery crashes on laptops.** A full Cellpose-SAM run saturates the GPU *and* every CPU core at once, which on some laptops draws more power than the machine can sustain, causing an abrupt shutdown mid-run. If that happens, **cap CPU threads** (a value around one quarter of your core count is a reasonable start) and **add a few seconds of cooldown**. A crashed run always **resumes automatically** from where it left off — progress is tracked in a per-sample sidecar journal — so these are recovery knobs, not an auto-apply toggle.
+**Laptops switching off mid-run.** A Cellpose-SAM run loads the GPU *and* every CPU core at once, which can draw more power than some laptops can deliver, causing an abrupt shutdown. If that happens, cap **CPU threads (0=all):** at about a quarter of your cores, add about **5 s** of cooldown and lower **Batch size:**. Progress is saved after every timepoint: run again and choose **Skip & Resume** to continue where it stopped (see [When results already exist](../../plugin_essentials/running_steps.md#when-results-already-exist)). Resuming is refused if you changed the segmentation settings in between — then choose **Overwrite All**.
 ```
 
-## Section 5 · Size filter (preview before batch)
+## Section 5 · Size Filter (preview before batch)
 
-This is a **post-processing** step, exactly like APOC's [Minimum size](apoc) filter: it **excludes** objects, it does not merge them — a small object touching a larger one is dropped, not absorbed.
+A **post-processing** step that **removes** objects outside a volume range; it never merges them (a small object touching a large one is dropped, not absorbed). **Min size:** and **Max size:** are saved separately for each population.
 
 | Control | Default | Effect |
 |---|---|---|
-| **Sample / t** | first sample / 0 | The single sample and timepoint that **Preview segmentation** runs on. Pick one representative of your data so the size histogram reflects real object/artifact sizes. |
-| **Min size** | 0 (no bound) | Minimum object volume to keep; smaller objects are removed. Set to remove debris and flat fragments. |
-| **Max size** | 0 (no bound) | Maximum object volume to keep; larger objects are removed. |
-| **👁 Preview segmentation** | — | Runs Cellpose-SAM once, **unfiltered**, on the chosen sample/timepoint and caches the result as a napari Labels layer. The Min/Max size fields then **re-filter that cached result instantly** — no Cellpose-SAM re-run while you tune the thresholds. |
+| **Sample:** / **t:** | first sample / `0` | The sample and timepoint used by **👁 Preview segmentation**. Pick a representative one. |
+| **Min size:** | `0` (no bound) | Objects smaller than this volume are removed (debris, fragments). |
+| **Max size:** | `0` (no bound) | Objects larger than this volume are removed. |
+| **👁 Preview segmentation** | — | Segments only that timepoint, **without** the size filter. The viewer is cleared and shows the raw channels of that timepoint plus a `… · preview` labels layer per population. The log lists the object count and the smallest / median / largest volume (in voxels). |
+
+After a preview, changing **Min size:** or **Max size:** re-filters the preview **instantly** (no new Cellpose-SAM run), and the line under the fields reports how many objects are kept and removed. Use it to pick thresholds that remove debris but keep real cells.
 
 ## Run
 
 | Control | Effect |
 |---|---|
-| **▶ Run Cellpose-SAM** | Runs Cellpose-SAM for every sample in the loaded metadata, using all the settings in Sections 1–5 (saved automatically on Run). Runs in the background so the GUI stays usable; progress appears in the log and the shared progress bar. |
-| **+🛒** | Queues a Cellpose-SAM segmentation step in the [Processing Queue](../../plugin_essentials/processing_queue) to run later, sequentially with the rest of the pipeline. |
+| **▶ Run Cellpose-SAM** | Segments the selected population (or all of them) in every sample with the settings of Sections 2–5, which are saved automatically. Runs [in the background](../../plugin_essentials/running_steps.md#background-execution); when segmentations already exist you choose what to do (see [When results already exist](../../plugin_essentials/running_steps.md#when-results-already-exist)). Samples whose raw image has not been converted to Zarr are skipped. Result paths are written into metadata.csv. |
+| **+🛒** | Adds **🦠 Segmentation — Cellpose-SAM** to the [Processing Queue](../../plugin_essentials/processing_queue.md). The step remembers the population (or *all cell types*), **Model:**, the device settings, **CPU threads** and **Cooldown**; the timepoint range, channel selection, Section 4 settings and size filter are read when the step starts. |
 
 ## Outputs
 
 | File | Path |
 |---|---|
-| Per-cell-type instance labels | `<output_dir>/images/<sample>/<sample>_<cell_type>_segments.zarr` |
+| Per-population instance labels | `<output_dir>/images/<sample>/<sample>_<cell_type>_segments.zarr` |
+| Progress record (used to resume an interrupted run) | `<output_dir>/images/<sample>/<sample>_<cell_type>_segments.progress.json` |
 
-Cellpose-SAM writes to the **same canonical segments path** as every other method, so tracking and everything downstream consume it identically. There is no model file to store — the `cpsam` / `cpsam_v2` weights ship with the sidecar environment.
+Cellpose-SAM writes to the **same path** as every other method, so tracking and all later steps use it in the same way. There is no model file to manage.
 
 ## Tuning the result
 
-Because Cellpose-SAM is zero-shot, tuning is mostly picking **do_3D vs 2D+stitch** and the two thresholds, then filtering by size:
+Because Cellpose-SAM is zero-shot, tuning is mostly choosing **3-D vs 2-D + stitch**, the two thresholds and the channels, then filtering by size:
 
-- **Touching cells fused into one label** → Cellpose under-segments by design (no watershed splitting). Try raising **Cell prob threshold** slightly, or lower the **Diameter** if auto-diameter overestimated it. If it persists, this is a genuine limitation — split manually after tracking via [Manual Editing](../tracking/manual_editing), or use a watershed-based method ([APOC](apoc) / [ConvPaint](convpaint)) for that cell type.
-- **Many spurious small / flat fragments** → keep **Remove flat segments** on and set a **Min size** in Section 5 (preview first to read real object sizes).
-- **Large organoids silently disappearing** → check **Max size fraction** is 1.0 (BEHAV3D's default), not Cellpose's upstream 0.4.
-- **Out-of-memory (CUDA)** → lower **Batch size** first.
-- **Objects over-split in Z** → confirm your metadata pixel sizes are correct (they set the anisotropy), and consider turning **norm3D** on.
+- **Touching cells fused into one label** → Cellpose-SAM has no watershed splitting. Try raising **Cell prob threshold:** slightly, or set a **Diameter** if the automatic one is too large. If it persists, split labels by hand after tracking ([Manual Editing](../tracking/manual_editing.md)), or use a watershed-based method ([APOC](apoc.md) / [ConvPaint](convpaint.md)) for that population.
+- **Many small or flat fragments** → keep **Remove flat (single-slice) segments** on and set a **Min size:** (preview first to read real object sizes).
+- **Large organoids disappearing** → check that **Max size fraction:** is `1.0` and **Max size:** is `0` or large enough.
+- **CUDA out of memory** → lower **Batch size:** first.
+- **Objects over-split in Z** → check the pixel sizes in your metadata (they set the Z scaling); with very anisotropic data, try 2-D + stitch.
+- **Other populations detected too** → check **Channel Selection**: tick only the channel(s) of the population you segment.
 
 ## Things this page does **not** claim
 
-- Specific per-timepoint runtimes — they depend strongly on your GPU, volume size, channel count, and do_3D vs 2D+stitch. Profile your own data.
-- That `cpsam_v2` always beats `cpsam` — both are zero-shot; compare them on your data.
+- Specific runtimes — they depend strongly on your GPU, volume size, number of channels and 3-D vs 2-D + stitch. Profile your own data.
+- That `cpsam_v2` always beats `cpsam` — compare them on your data.
 
 ## See also
 
 - [Segmentation overview](./index.md) — how Cellpose-SAM fits with the other methods.
-- [Cellpose (classic)](cellpose) — the trainable/retrainable v3 backbone, and the **dead-mask (Otsu)** step.
-- [Cellpose project on GitHub](https://github.com/MouseLand/cellpose) — upstream documentation for the Cellpose-SAM model and every inference parameter.
-- [Processing Queue](../../plugin_essentials/processing_queue) — batching segmentation steps.
+- [Cellpose (classic)](cellpose.md) — the trainable v3 model, and the **dead mask (Otsu)** step.
+- [Cellpose project on GitHub](https://github.com/MouseLand/cellpose) — upstream documentation of the model and its settings.
+- [Processing Queue](../../plugin_essentials/processing_queue.md) — batching segmentation steps.

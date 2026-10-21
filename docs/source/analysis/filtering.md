@@ -1,19 +1,13 @@
 # 🧹 Filtering
 
-Tab 6 of the BEHAV3D EXPLORER dock widget. The Filtering tab drops or trims tracks that won't survive downstream analysis — short tracks, tracks already dead at the start, tracks past the experiment duration, undersized starting cells — and produces:
+Tab 6 of the BEHAV3D EXPLORER dock widget. The Filtering tab restricts the data to the timepoints you want to analyse and drops or trims tracks that won't survive downstream analysis — short tracks, tracks past the experiment duration, undersized or already-dead starting cells — and produces:
 
-1. A **filtered per-timepoint table** that every downstream analysis (Death Dynamics, Interaction, behavioural-state classification, Active Killing) actually reads.
-2. A **summarised per-track table** with one row per surviving track. *Currently consumed only by the legacy DTW-based BEHAV3D analysis (see [below](#what-the-summarised-csv-is-for)).*
-3. A set of **quality-control PDFs** that let you check at a glance how many tracks each filter removed and what the surviving tracks look like.
+1. A **filtered per-timepoint table** that every downstream analysis (Death Dynamics, Interaction, Invasiveness, Single Cell) reads.
+2. A **summarised per-track table** with one row per surviving track (see [below](#the-summarised-csv)).
+3. **Quality-control PDFs** showing how many tracks each filter removed and what the surviving tracks look like.
 
 ```{important}
-**Filtering must be run even if you apply no filters at all.** Beyond dropping tracks, this step generates the filtered per-timepoint CSV (and interpolates missing timepoints) that every downstream analysis reads — the pipeline will not proceed to Death Dynamics, Interaction, Invasiveness or Single-Cell classification without it. The downstream state analysis is built to tolerate tracks of uneven length, so the length filters are genuinely optional; running Filtering with everything off still produces the CSV those steps need.
-```
-
-![Filtering tab](../_static/screenshots/filtering_tab.png)
-
-```{note}
-*Screenshot placeholder.*
+**Filtering must be run even if you apply no filters at all.** The filtered table it writes is the input of every analysis — nothing in the Analysis tab runs without it. Re-run Filtering whenever Feature Extraction (or **🔄  Re-run death**, or Active Killing) has produced new results for that cell type.
 ```
 
 ## Per-cell-type sub-tabs
@@ -26,134 +20,122 @@ Filtering is organised as sub-tabs per cell type along the left side, with the u
 | 🔵 | Immune |
 | 🟡 | Other |
 
-Each sub-tab has its own filter parameters and its own batch run button.
+Each sub-tab has its own filter settings and run button. The one exception is the **timepoint range**, which is a single setting shared by all cell types. The lower half of the tab is the shared [📄 Results panel](../plugin_essentials/results_panel.md).
 
-## The six filters
+## Preview track lengths
 
-All filters are **independent** — turn any combination on. When a filter is unchecked, its spinner is hidden and the filter is skipped. By default the three time-based filters (experiment duration, min length, max length) are **on**, while *timepoint range*, *min size at first timepoint* and *dead at first timepoint* are **off**.
+> **📊 See Track Length Distributions**
 
-Filters are applied in the order listed below, and each one only sees what the previous ones left behind.
+Opens a window with per-sample histograms of track length (in timepoints) from the **unfiltered** Feature Extraction table — the quickest way to choose **Min length** and **Max length** before running. Nothing is written to disk (use the window's toolbar to save the figure).
 
-### 0 · Restrict to a timepoint range
+```{tip}
+The Co-pilot assistant ([QueenB](../getting_started.md#co-pilot-assistant-queenb)) adds two quick actions on this tab: **Track lengths** opens the same preview, and **Cell counts** tabulates, per sample, how many cells present at timepoint 0 would survive a minimum track length of 20, 50, 100 and 200 timepoints. The table is saved as `BEHAV3D_<cell_type>_track_count_summary.csv` in the cell type's `quality_control/` folder.
+```
 
-> ☐ **Restrict analysis to a timepoint range** — *Start timepoint:* `0` — *End timepoint:* `0`
+## The filters
 
-Keeps only the rows inside an inclusive `[Start, End]` window and drops everything before and after it. This is the **first** filtering step, so every filter below measures only what is inside the window.
+Every filter has its own checkbox; when a filter is unchecked, its settings are hidden and it is skipped. Defaults on a fresh project:
 
-Unlike the length filters, these are **absolute positions in the experiment** (e.g. "timepoints 20 to 80"), not per-track durations. The unit follows the **Unit for time-based filters** toggle; the value stored in `behav3d_parameters.yml` is always frames.
+| Control | Default |
+|---|---|
+| **Restrict analysis to a timepoint range** | off (`0` – `0`) |
+| **Trim full time series to max timepoints** | on, **Max timepoints:** `350` |
+| **Filter tracks shorter than minimal length** | on, **Min length:** `30` |
+| **Trim tracks to maximum length** | on, **Max length:** `30`, **Split long tracks into chunks** on |
+| **Filter by minimal size at first timepoint** | off, **Min size:** `1000` voxels |
+| **Filter dead cells at first timepoint** | off — *only shown when the metadata declares a dead channel* |
+| **Unit for time-based filters:** | `frames` |
 
-Tracks that overlap the window only partially are **kept and cropped** — use *Filter short tracks* to drop the ones that end up too short.
+Filters are applied in this order, each one seeing only what the previous ones left: **timepoint range → max timepoints → min size → min length → max length → dead at first timepoint**.
+
+### Restrict to a timepoint range
+
+> ☐ **Restrict analysis to a timepoint range** — **Start timepoint:** `0` — **End timepoint:** `0`
+
+Keeps only the rows inside the inclusive **Start**–**End** window. These are **absolute positions in the movie** (e.g. "timepoints 20 to 80"), not per-track durations. Tracks that overlap the window only partially are **kept and cropped** — **Min length** then drops those that end up too short. **End** must be greater than **Start**, otherwise the run is refused.
 
 ```{important}
-**This setting is global.** It applies to every cell type, appears on every sub-tab, and editing it on one tab updates all the others. It is stored once, in a top-level `timepoint_range:` block.
+**One range for all cell types.** The range appears on every sub-tab and editing it on one updates all the others. It cannot differ between cell types because every cross-cell-type analysis (interaction, invasiveness, multi-organoid death dynamics) lines the cell types up on the timepoint axis; different windows would silently give wrong percentages and invented data.
 
-It cannot be set per cell type because every cross-cell-type analysis joins cell types on the timepoint axis. With, say, the T cells windowed to 56–78 and the organoids left at 0–120 you would get no error and no warning, but: contact percentages divided by the organoid's full span, per-timepoint SEM whose cohort silently changes mid-curve, organoids scored as "survived" purely because they were absent from the other type's window, and — in the multi-organoid death dynamics — every track of the narrower type classified as "disappeared" and flat-extended with its last value out to the wider type's end.
+**Original timepoints are preserved.** `position_t` and `relative_time` keep their original values, so plots of a 56–78 window read 56–78, not 1–23.
 ```
 
-#### Using the first-timepoint filters with a range
+#### First-timepoint filters with a range
 
-> ☐ **Enable first-timepoint filters, measured at the start of this range**
+> ☐ **Enable first-timepoint filters, measured at the start of this range** *(only shown while a range is active)*
 
-Filters 4 and 5 below test each track at its **first frame of the whole movie** (`relative_time == 1`). A window normally cuts that frame away, so both filters would silently skip every track that started earlier. While a range is active they are therefore greyed out and switched off.
-
-Tick this box to re-enable them, measured at each track's first timepoint **inside** the range: a track present from the start of the window is judged there, and one that appears part-way through is judged at the frame it appears. No track is skipped.
-
-Unlike the range itself, this one **is** per cell type — whether a cell is expected to be small or already dead at the start of the window is type-specific.
-
-```{note}
-**Timepoint numbering is never rewritten.** `position_t` and `relative_time` keep their original values, so a 56–78 window produces plots whose axis reads 56–78, not 1–23. Every downstream analysis plots on `position_t`, which is the absolute frame index.
-```
+The **minimal size** and **dead at first timepoint** filters normally test each track at its first frame of the whole movie, which a window usually cuts away. While a range is active they are therefore greyed out and switched off. Tick this box to re-enable them, measured at each track's first timepoint **inside** the range (a track that appears part-way through is judged where it appears). Unlike the range itself, this option is per cell type.
 
 #### Relationship to other timepoint settings
 
 | Setting | What it cuts | Re-run cost |
 |---|---|---|
-| **Data Preparation → Clip timepoints** | The *images*, before segmentation and tracking | Everything downstream |
-| **Filtering → Restrict to a timepoint range** (this one) | An already extracted feature set | Filtering and the analyses |
-| **Analysis → analysis period** | One analysis' view of the data | That analysis only |
+| **Data Preparation → Clip timepoints (select range)** | The *images*, before segmentation and tracking | Everything downstream |
+| **Filtering → Restrict analysis to a timepoint range** (this one) | An already extracted feature table | Filtering and the analyses |
+| **Analysis → Custom time range** | One analysis' view of the data | That analysis only |
 
-Both of the first two are recorded in `behav3d_parameters.yml` — the image cut under `zarr_conversion`, this one under `timepoint_range`.
+Active Killing deliberately scans the **full, unfiltered** movie so it never has to be re-run when you change this range; the range is applied when its results are read. When an Analysis **Custom time range** is also set, the analysis uses the overlap of the two.
 
-Active Killing deliberately scans the **full, unfiltered** movie so that it never has to be re-run when you change the window; its outputs are a complete superset and the window is applied where they are read. When an Analysis-tab period is also set, the effective window is the **intersection** of the two.
+### Trim full time series to max timepoints
 
-### 1 · Trim experiment duration
+> ☑ **Trim full time series to max timepoints** — **Max timepoints:** `350`
 
-> ☑ **Trim full time series to max timepoints** — *Max timepoints:* `350`
+Keeps only the first **Max timepoints** frames of the movie and drops every later row, for all tracks. Typical use: cut off the tail of a movie where the dye has bleached or the signal has degraded.
 
-Drops every row past the chosen experiment duration. Use **Unit for time-based filters** to interpret this value as `frames` or `hours`:
+### Filter short tracks
 
-- In `frames` mode, this is a 0-based timepoint cutoff applied to `position_t`.
-- In `hours` mode, this is applied to the `time` column that Feature Extraction already computed from your metadata's frame interval.
+> ☑ **Filter tracks shorter than minimal length** — **Min length:** `30`
 
-Typical use: cut off the tail of a movie where the dye has bleached or the signal has degraded, so downstream stats don't include the unreliable late timepoints.
+Drops whole tracks that span fewer than **Min length** timepoints (measured after the range, max-timepoints and min-size filters). Short tracks usually come from false detections, transient over-segmentation or cells that briefly entered the field of view, and add noise to every per-track statistic.
 
-### 2 · Filter short tracks
+### Trim long tracks to max length
 
-> ☑ **Filter tracks shorter than minimal length** — *Min length:* `30`
+> ☑ **Trim tracks to maximum length** — **Max length:** `30`
+> &nbsp;&nbsp;☑ **Split long tracks into chunks**
 
-Drops tracks whose **time span** (last timepoint − first timepoint) is below the threshold. The unit is the time-unit dropdown (frames or hours), same as filter 1.
+For each track longer than **Max length**:
 
-Short tracks usually correspond to false detections, transient over-segmentations, or cells that briefly entered the field of view. They bias every per-track statistic, so it's almost always worth filtering them out.
+- **Split long tracks into chunks** on: the track is cut into **consecutive full-length chunks**. The first chunk keeps the original `TrackID`; each following full chunk becomes a **new** track with a new `TrackID` (and its `relative_time` restarts at 1); a final remainder shorter than **Max length** is discarded. E.g. a 100-timepoint track at max length 30 yields three 30-timepoint tracks. The `original_TrackID` column keeps the real track number, so backprojection can still find the cell.
+- **Split long tracks into chunks** off: the track is simply **cropped** to its first **Max length** timepoints.
 
-Typical values:
+Use it for track-level analyses that need equal-length inputs; [State Trajectory](single_cell/track_classification.md) offers an equivalent option, so this can be done here or there.
 
-- Immune-cell behaviour: ≥ 30 frames at 1-minute intervals (a 30-minute observation window is the practical minimum for movement / contact statistics).
-- Organoids that should persist the whole experiment: a much larger threshold — close to the experiment duration — so you only keep organoids tracked from start to end.
+### Filter by minimum size at the first timepoint
 
-### 3 · Trim long tracks to max length
+> ☐ **Filter by minimal size at first timepoint** — **Min size:** `1000` — **Units:** `px` ⇄ `µm`
 
-> ☑ **Trim tracks to maximum length** — *Max length:* `30`
-> &nbsp;&nbsp;☑ **Split long tracks into chunks** *(sub-option, on by default)*
+Drops whole tracks whose cell is smaller than **Min size** at its first timepoint. The size is a voxel count; the **Units** switch only changes the display (µm³ by default when the metadata has pixel sizes, voxels otherwise). Common use: removing debris or segmentation fragments.
 
-For each track longer than the threshold, this controls what happens to the extra frames, via the **Split long tracks into chunks** sub-option:
+### Filter dead cells at the first timepoint
 
-- **Split on (default):** the track is cut into **consecutive full-length chunks** rather than cropped. The first chunk keeps the original `TrackID`; each following full-length chunk becomes a **new** track (a leftover remainder shorter than the max length is discarded). Every row keeps an `original_TrackID` so backprojection can still paint the real, unsplit track. E.g. a 100-timepoint track at max length 30 yields three 30-frame tracks.
-- **Split off:** the track is simply **cropped** to the first *max-length* frames; the rest is dropped.
+> ☐ **Filter dead cells at first timepoint**
 
-This is needed for track-level analyses that require uniform-length inputs. The [Track Classification](single_cell/track_classification.md) step offers an equivalent trajectory-size / split control, so this can be done here or there.
+Drops every track that is already `dead` at its first timepoint — useful to study **dying** rather than **already-dead** cells. Only shown when the metadata declares a dead channel, and needs the `dead` column from Feature Extraction (a **Dead mask % threshold** above 0).
 
-### 4 · Filter by minimum size at the first timepoint
+### Unit for time-based filters
 
-> ☑ **Filter by minimal size at first timepoint** — *Min size:* `1000`
+> **Unit for time-based filters:** `frames` ⇄ `hours`
 
-Drops whole tracks whose voxel count (`nr_pixels`) at their first appearance (`relative_time = 1`) is smaller than the threshold. If the feature table doesn't have an `nr_pixels` column, the physical **volume** (µm³) is used instead — in that fallback case, toggle the units switch to µm³ so the threshold you enter matches what's being compared.
-
-Common use: removing dust, debris, or over-segmented fragments that briefly look like cells.
-
-### 5 · Filter dead cells at the first timepoint
-
-> ☑ **Filter dead cells at first timepoint**
-
-Drops every track that is already flagged `dead` at its first appearance. This filter is only visible if your metadata has a `dead_channel` and requires that Feature Extraction has already produced a `dead` column.
-
-Typical use: when you want to study **dying** rather than **already-dead** organoids.
-
-## Time unit
-
-> *Unit for time-based filters:* `frames` ▾ / `hours`
-
-Applies to filters 1, 2 and 3 only (experiment duration, min length, max length). Pick whichever matches how you think about your experiment.
+Switches the display of **Start timepoint**, **End timepoint**, **Max timepoints**, **Min length** and **Max length** between frames and hours (using the frame interval from the metadata; disabled when it is missing). Filtering always runs on frames, so the switch never changes the result.
 
 ## Apply, Run, Queue
 
 Per sub-tab:
 
-- **Apply to all <Category>s** — copy this sub-tab's filter settings to every other sub-tab of the same category.
-- **Apply to all** — copy to all cell types.
-- **▶ Filter <CellType> Tracks & Summarize** — runs the filter and the summarisation for this cell type only. If a filtered CSV already exists, an **Overwrite Existing Filtered Data?** dialog asks before replacing it.
+- **Apply to all <Category>** (e.g. **Apply to all Organoids**) — copies this sub-tab's filter settings and unit to every sub-tab of the same category (the timepoint range is already shared).
+- **Apply to all** — copies them to all cell types.
+- **Filter <Cell type> Tracks & Summarize** — filters and summarises this cell type. If a filtered table already exists, an **Overwrite Existing Filtered Data?** dialog asks before replacing it.
 
-Main tab:
+Below the sub-tabs:
 
-- **▶ Run Batch Filtering (All Cell Types)** — runs every cell type sequentially. The batch overwrite dialog offers Overwrite All / Skip Existing / Cancel.
-- **+🛒** — adds a Filtering step to the [Processing Queue](../plugin_essentials/processing_queue).
+- **Run Batch Filtering (All Cell Types)** — runs every cell type in turn. If filtered data exists, the **Existing Filtered Data** dialog offers the usual choices, with **Customize…** per cell type (see [When results already exist](../plugin_essentials/running_steps.md#when-results-already-exist)).
+- **+🛒** — adds a Filtering step to the [Processing Queue](../plugin_essentials/processing_queue.md).
 
-Settings are persisted to `behav3d_parameters.yml` under `track_filtering.<cell_type>`, except the timepoint range, which is global and lives in its own top-level `timepoint_range:` block (`enabled` / `start` / `end`). The per-cell-type opt-in for the first-timepoint filters is stored as `first_timepoint_from_range`.
-
-Re-running Filtering for a cell type that already has a filtered CSV prompts before overwriting it — useful when trying several timepoint windows in a row.
+Settings are saved to `behav3d_parameters.yml`.
 
 ## Outputs
 
-For each cell type, filtering writes two CSVs and a folder of QC PDFs:
+For each cell type:
 
 ```text
 <output_dir>/analysis/<cell_type>/
@@ -161,85 +143,68 @@ For each cell type, filtering writes two CSVs and a folder of QC PDFs:
 │   ├── BEHAV3D_<cell_type>_combined_track_features_filtered.csv      # per-timepoint
 │   └── BEHAV3D_<cell_type>_combined_track_features_summarized.csv    # one row per track
 └── quality_control/
-    ├── BEHAV3D_filter_counts.pdf                       # always
-    ├── BEHAV3D_<target>_touching_distribution.pdf      # one per contact target
-    ├── BEHAV3D_dead_dye_distribution.pdf               # if a dead dye column exists
-    └── BEHAV3D_dead_dye_distribution_t0.pdf            # if a dead dye column exists
+    ├── BEHAV3D_filter_counts.pdf
+    ├── BEHAV3D_<target>_touching_distribution.pdf      # one per contact column
+    ├── BEHAV3D_dead_dye_distribution.pdf               # if mean_dead_dye exists
+    └── BEHAV3D_dead_dye_distribution_t0.pdf            # if mean_dead_dye exists
 ```
 
 ### The filtered CSV
 
-Same columns as the input Feature Extraction CSV, with only the rows of surviving tracks (subject to experiment duration and max-length trims). One row per `(track, timepoint)`. **This is the file every downstream analysis reads** — Death Dynamics, Interaction and behavioural-state classification all start from here.
+Same columns as the Feature Extraction table, restricted to the surviving rows, plus `original_TrackID` and the metadata grouping columns (`well`, `exp_nr`, `*_line_condition`). **This is the file every downstream analysis reads.**
 
-```{tip}
-If a sample has an **Active Killing** advanced features CSV available, filtering will use *that* as input instead of the plain feature-extraction CSV — so the immune-cell killing columns are preserved through filtering.
+```{warning}
+If [Active Killing](population_analysis/active_killing.md) results exist for the cell type, Filtering reads Active Killing's table instead of the plain Feature Extraction table, so the killing columns survive filtering. Two consequences:
+
+- **Re-run Filtering after every Active Killing run** — Active Killing reads the unfiltered table and reminds you when an older filtered table exists.
+- If Feature Extraction (or **🔄  Re-run death**) was run **after** Active Killing, Filtering stops with an error for that cell type: re-run Active Killing first, then Filtering.
 ```
 
-```{important}
-**Active Killing itself does not read this filtered CSV** — it always reads the raw, unfiltered Feature Extraction CSV (see [Feature Extraction](feature_extraction.md#active-killing-detection-immune-cells-only)). That's deliberate: it breaks a circular dependency, since Filtering (as the tip above says) reads *Active Killing's* output as its input. **Re-run Filtering after every Active Killing run** so the filtered CSV picks up the fresh killing columns — Active Killing prints a warning (and the GUI pops up a reminder) when this applies.
-```
+### The summarised CSV
 
-### What the summarised CSV is for
-
-> One row per `(sample_name, TrackID)`. Built immediately after the filtered CSV, by aggregating each track over time.
-
-The columns are:
+One row per track (`sample_name`, `TrackID`), built from the filtered table:
 
 | Column | How it's aggregated |
 |---|---|
-| `sample_name`, `TrackID` | Identity |
-| `track_length` | Number of timepoints the track has after filtering |
-| `mean_<col>` | **Mean** over the track for every numeric column (e.g. `mean_speed`, `mean_volume`, `mean_directional_persistence`, `mean_<type>_contact`, `mean_percentage_dead_mask`, …) |
-| `dies` | `True` if the track is dead at any timepoint (requires the `dead` column) |
-| `displacement_from_origin` | **Maximum** displacement from origin reached by the track (i.e. how far it ever wandered from its start) |
+| `track_length` | Number of timepoints after filtering |
+| `mean_<col>` | **Mean** over the track of every numeric and true/false column (e.g. `mean_speed`, `mean_volume`, `mean_<type>_contact` = fraction of timepoints in contact) |
+| `dies` | `True` if the track is dead at any timepoint (needs the `dead` column) |
+| `displacement_from_origin` | **Maximum** distance from the start reached by the track |
 | `cumulative_displacement` | Value at the **last** timepoint (total path length) |
-| `active_<contact>` | For each contact column, the fraction of *contact timepoints* on which the cell was actively engaged |
-| `well`, `exp_nr`, `*_line_condition`, … | First-row metadata, carried over so you can group / compare conditions later |
+| `well`, `exp_nr`, `*_line_condition` | Carried over for grouping |
 
-```{important}
-**This file is currently used only by the legacy DTW-based T-cell analysis** (the `BehavioralAnalysisPanel` ipywidgets workflow that runs UMAP + K-Means clustering on per-track means and DTW-distance matrices). The current napari behavioural-state analysis pipeline does **not** use this file — it builds its own rolling-window features from the *filtered per-timepoint* CSV instead.
-
-If you are not running the legacy T-cell analysis you can safely ignore the summarised CSV. It is still generated automatically because it is cheap to compute and a few exploratory notebooks rely on it.
-```
+It is read only by the legacy *original BEHAV3D* (feature-based DTW → UMAP → KMeans) option of [State Trajectory](single_cell/track_classification.md); all other analyses work from the per-timepoint filtered CSV.
 
 ### Quality-control PDFs
 
 Always written, one folder per cell type:
 
-| File | Pages |
+| File | Content |
 |---|---|
-| `BEHAV3D_filter_counts.pdf` | **(1)** Per-sample histogram of track length **before** filtering. **(2)** Per-sample bar chart showing how many unique tracks survived **each successive filter stage** (the stages that appear depend on which filters you enabled — timepoint range, experiment-duration cut, min size, min length, dead-at-t0). **(3)** Per-sample histogram of track length **after** filtering. |
-| `BEHAV3D_<target>_touching_distribution.pdf` | One PDF per `*_contact` column in your features (e.g. `BEHAV3D_organoid_touching_distribution.pdf` for immune-cell tracks). Per-sample bar showing the fraction of timepoints with vs without contact. |
-| `BEHAV3D_dead_dye_distribution.pdf` | Violin + strip plot of `mean_dead_dye` across all surviving timepoints. Only generated if the column exists. |
-| `BEHAV3D_dead_dye_distribution_t0.pdf` | Same plot but only at the first timepoint of each track — quick check that the dead-at-t0 filter is doing the right thing. |
-
-All PDFs are written at 600 dpi.
-
-```{note}
-The QC plots are always generated by the napari Filtering tab — there is no UI toggle to turn them off.
-```
+| `BEHAV3D_filter_counts.pdf` | **(1)** Per-sample histograms of track length **before** filtering. **(2)** Per-sample bar chart of how many tracks remain after each stage (timepoint-range, min-size and dead-at-first-timepoint bars appear only when those filters are on; the min-length bar is counted after the max-length step, so splitting can raise it). **(3)** Per-sample histograms of track length **after** filtering. |
+| `BEHAV3D_<target>_touching_distribution.pdf` | One per contact column (e.g. `BEHAV3D_organoid_touching_distribution.pdf` for T cells, plus `any_organoid` / `any_immune_cell`): per sample, the number of cell-timepoints touching vs not touching. |
+| `BEHAV3D_dead_dye_distribution.pdf` | Violin + point plot of `mean_dead_dye` over all remaining timepoints, per sample. |
+| `BEHAV3D_dead_dye_distribution_t0.pdf` | The same at each track's first timepoint — a check for the dead-at-first-timepoint filter. |
 
 ## Tips & best practices
 
-- **Always look at `BEHAV3D_filter_counts.pdf` after a run.** The per-stage bar chart is the fastest way to spot a filter that is removing far too many or far too few tracks.
-- **Re-run Filtering whenever Feature Extraction parameters change.** The filtered and summarised CSVs become stale otherwise, and downstream analyses will keep reading the old version.
-- **Re-run Filtering after Active Killing too.** Active Killing always analyses the raw, unfiltered tracks, so a filtered CSV produced before the latest Active Killing run doesn't include its killing columns. Active Killing will tell you when this applies.
-- **The minimum-track-length filter is the single most impactful one** for behavioural analyses. Short tracks add noise to every per-track statistic; ≥ 30 frames at 1-minute intervals is a reasonable minimum for immune cells.
-- **For organoids that should persist the whole experiment**, set a *large* min length (close to the experiment duration) rather than a small one — this drops organoids that disappeared mid-run.
-- **The time-unit dropdown is per cell type**, but only one unit applies to the three time-based filters of a given sub-tab. Pick the one that matches how you think about that cell type's biology.
+- **Look at `BEHAV3D_filter_counts.pdf` after every run.** The per-stage bar chart is the fastest way to spot a filter that removes far too many or far too few tracks.
+- **Mind the default max-length split.** It is on by default and turns every track longer than 30 timepoints into 30-timepoint pieces. Untick **Trim tracks to maximum length** if you want to keep full-length tracks.
+- **Minimum track length is usually the most impactful filter** for behavioural analyses; check the length histograms before choosing it.
+- **Re-run Filtering whenever its inputs change** (Feature Extraction, **🔄  Re-run death**, Active Killing); downstream analyses otherwise keep reading the old filtered table.
 
 ```{tip}
 **What we filter in practice:**
 
-- **Organoids** are usually tracked accurately and rarely need filtering — at most a small minimum-length filter to drop fragments that fuse at the start of the run.
-- **T cells / immune cells:** filter out tracks shorter than roughly **10–30 timepoints**; these short fragments are typically junk.
-- **Avoid the legacy fixed-length trim.** Old BEHAV3D set both a minimum *and* a maximum length around 100 so every track was exactly 100 frames long — a workaround for fragmented tracking. With today's accurate tracking that just throws data away; keep long tracks so per-timepoint classification can use them. Reach for *Trim tracks to maximum length* only when you deliberately need every track aligned to the same window.
-- **Trim experiment duration** is the right tool when the dead dye bleaches or signal degrades late in the movie — cut off the unreliable tail instead of trimming individual tracks.
+- **Organoids** are usually tracked accurately and rarely need filtering — at most a small minimum length to drop fragments, or a large one (close to the experiment duration) to keep only organoids followed from start to end.
+- **T cells / immune cells:** drop tracks shorter than roughly **10–30 timepoints**; these short fragments are typically junk.
+- **Avoid the legacy fixed-length trim.** Old BEHAV3D set both a minimum *and* a maximum length around 100 so every track was exactly 100 frames — a workaround for fragmented tracking. With accurate tracking that throws data away: untick **Trim tracks to maximum length** (on by default) unless you deliberately need equal-length tracks.
+- **Trim full time series** is the right tool when the dead dye bleaches or the signal degrades late in the movie.
 ```
 
 ## See also
 
-- [Feature Extraction](feature_extraction) — produces the input CSV that Filtering reads.
-- [Population Dynamics](population_analysis/index) — consumes the filtered per-timepoint CSV.
-- [Single Cell](single_cell/index) — classifies per-cell behavioural states from the filtered CSV.
-- [Output Directory & File Layout](../plugin_essentials/output_layout) — where the CSVs and QC PDFs live.
+- [Feature Extraction](feature_extraction.md) — produces the table Filtering reads.
+- [Population Dynamics](population_analysis/index.md) — reads the filtered per-timepoint CSV.
+- [Single Cell](single_cell/index.md) — classifies per-cell behavioural states from the filtered CSV.
+- [Output Directory & File Layout](../plugin_essentials/output_layout.md) — where the CSVs and QC PDFs live.

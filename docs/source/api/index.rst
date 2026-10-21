@@ -19,6 +19,8 @@ Auto-generated reference for the ``behav3d`` Python package.
    behav3d.preprocessing.segmentation
    behav3d.preprocessing.tracking
    behav3d.preprocessing.csv
+   behav3d.io
    behav3d.features
    behav3d.analysis
+   behav3d.editing
    behav3d.widgets

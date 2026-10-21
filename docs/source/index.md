@@ -1,13 +1,12 @@
 # BEHAV3D EXPLORER Wiki
 
-**BEHAV3 EXPLORER** is a Python toolkit for the behavioural analysis of cells in 3D fluorescent time-lapse microscopy. It takes you all the way from raw confocal stacks to behavioural phenotypes: segmentation → tracking → feature extraction → filtering → analysis.
+**BEHAV3D EXPLORER** is a toolkit for the behavioural analysis of cells in 3D fluorescent time-lapse microscopy, built for biologists: no coding required. It takes you from raw 3D movies to cell-by-cell behavioural readouts: segmentation → tracking → feature extraction → filtering → analysis.
 
-Although the pipeline can also be run from Python (see `notebooks/run_behav3d.ipynb` for advanced users who want to script steps or explore the code), **this wiki documents the napari GUI** — the graphical interface for day-to-day use in the lab.
+**This wiki documents the napari plugin**, the graphical interface for day-to-day use in the lab. (Advanced users can also script the pipeline from Python with `notebooks/run_behav3d.ipynb`; that route is not covered here.)
 
 ## How you use BEHAV3D EXPLORER
 
-BEHAV3D EXPLORER provides a full graphical interface through the napari viewer. To use it, launch the **napari GUI** (see [](getting_started) for setup) and work through the dock widget's tabs from left to right:
-
+[Install](installation.md) BEHAV3D EXPLORER, open the plugin (see [Getting Started](getting_started.md)) and work through the tabs of its panel from left to right:
 
 ```{mermaid}
 flowchart LR
@@ -19,13 +18,9 @@ flowchart LR
     PQ["🛒 Processing Queue"] -.batches.-> Pipeline
 ```
 
-The **Visualization** and the **Processing Queue** work across the whole pipeline: Visualization lets you visualize any sample and its outputs at any stage of the pipeline, and the Processing Queue batches segmentation / tracking / feature-extraction / filtering / analysis steps to run sequentially across all your samples. **Backprojection** — painting analysis results back onto the raw images — is built into the Single Cell workflows as their final step.
+**Visualization** and the **Processing Queue** work across the whole pipeline: Visualization shows any sample and its results at any stage, and the Processing Queue runs segmentation, tracking, feature extraction, filtering and analysis steps one after the other for all your samples. In the **📊 Analysis** tab, **🔬 Feature Backprojection** paints any measured feature back onto the cells, and the Single Cell analyses can do the same with their behavioural states and trajectory clusters.
 
-```{note}
-The **Analysis** tab is implemented end-to-end: Death Dynamics, Interaction Analysis, and Single Cell (both behavioural-**state** and **track** classification), each Single Cell workflow ending in a **Backprojection** step.
-```
-
-Navigating so many options can be difficult, but you don't have to figure it out alone: a built-in **Co-pilot assistant (QueenB)** sits next to the panel on every tab, explains what each parameter does, and can fill in the forms for you — see [Getting Started](getting_started) for details.
+There is no one-size-fits-all pipeline: you pick the segmentation, tracking and analysis methods that fit your experiment and your computer. You don't have to figure the options out alone: the built-in **Co-pilot assistant (QueenB)** sits next to the panel on every tab, explains methods and parameters, and can fill in the forms for you after you confirm. See [Getting Started](getting_started.md#co-pilot-assistant-queenb).
 
 ## Where to next
 
@@ -36,49 +31,56 @@ Navigating so many options can be difficult, but you don't have to figure it out
 :link: installation
 :link-type: doc
 
-Auto installer for Windows / macOS / Linux, manual conda/mamba steps, GPU/CPU PyTorch options, troubleshooting.
+One-click installer for Windows / macOS / Linux, automatic GPU/CPU set-up, installer options, manual installation, troubleshooting.
 ::::
 
 ::::{grid-item-card} 🧭 Getting Started
 :link: getting_started
 :link-type: doc
 
-Launch the plugin, take the 5-minute tour, learn the dock widget layout.
+Launch the plugin, learn the panel layout and the QueenB co-pilot, take the pipeline tour.
+::::
+
+::::{grid-item-card} ⚡ Quick protocol
+:link: quick_protocol
+:link-type: doc
+
+The whole pipeline on one page: the minimal path and the few real choices at each tab.
 ::::
 
 ::::{grid-item-card} 🧰 Plugin Essentials
 :link: plugin_essentials/index
 :link-type: doc
 
-Visualization, the Processing Queue, and the canonical output folder layout — concepts that span every step.
+Tools used at every step: Visualization, running steps, the Processing Queue, the Results panel, the output folder layout and moving projects.
 ::::
 
 ::::{grid-item-card} 📋 Data Preparation
 :link: data_preparation
 :link-type: doc
 
-Building the metadata table, declaring your cell types, setting up the output folder, and converting raw images to Zarr for fast access.
+Choosing the output folder, building the metadata table, declaring your cell types, and converting raw images to Zarr for fast access.
 ::::
 
 ::::{grid-item-card} ⚙️ Processing
 :link: processing/index
 :link-type: doc
 
-Segmentation (6 methods, including zero-shot Cellpose-SAM) and Tracking (btrack, Fragmentation Propagation, Bounded Propagation, Reporter Propagation, TrackPy, LapTrack, Import) — the heavy computation that turns images into trackable cells.
+Segmentation (6 methods, including zero-shot Cellpose-SAM) and Tracking (btrack, Fragmentation Propagation, Bounded Propagation, Reporter Propagation, TrackPy, LapTrack, Import tracking): turning images into tracked cells.
 ::::
 
 ::::{grid-item-card} 📈 Analysis
 :link: analysis/index
 :link-type: doc
 
-Feature extraction, filtering, death dynamics, interaction analysis, behavioural-state classification, and backprojection.
+Feature Extraction, Filtering, and the Analysis tab: Feature Backprojection, Population Dynamics (Death Dynamics, Interaction, Invasiveness, Active Killing) and Single Cell (Behavioral State, State Trajectory).
 ::::
 
 ::::{grid-item-card} 🧠 Cellpose Training
 :link: cellpose_training
 :link-type: doc
 
-How to train your own Cellpose model with the `train_behav3d_cellpose.ipynb` notebook when the pretrained models aren't enough.
+Train your own Cellpose model with the `train_behav3d_cellpose.ipynb` notebook when the pretrained models aren't enough.
 ::::
 
 ```
