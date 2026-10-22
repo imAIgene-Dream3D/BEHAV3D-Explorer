@@ -1,12 +1,12 @@
 # ⚡ APOC (GPU)
 
-APOC ([Accelerated Pixel and Object Classifiers](https://github.com/haesleinhuepf/apoc)) is the **GPU pixel classifier** option in BEHAV3D EXPLORER. It computes image features on an OpenCL GPU, trains a Random Forest classifier on those features, and runs that classifier on the GPU to predict the class of every voxel.
+APOC ([Accelerated Pixel and Object Classifiers](https://github.com/haesleinhuepf/apoc)) is the **GPU pixel classifier** option in BEHAV3D EXPLORER. It computes 3-D image features on an OpenCL GPU, trains a Random Forest classifier on the features of the painted voxels, and runs that classifier on the GPU to predict the class of every voxel.
 
 ```{important}
-APOC trains a separate binary classifier (foreground vs. background) for each cell type. If you set up N cell types in BEHAV3D, APOC trains N classifiers — plus one for the dead channel when one is declared in the metadata.
+APOC trains a separate binary classifier (foreground vs. background) for each cell type. If you set up N cell types in BEHAV3D EXPLORER, APOC trains N classifiers — plus one for the dead channel when one is declared in the metadata.
 ```
 
-APOC's own documentation does not give a formal reference for the feature and classifier parameters; the definitions on this page are the standard image-processing meanings of each filter plus the values BEHAV3D exposes. For method choice across all six segmentation options, see the [segmentation overview](./index.md#how-to-pick-a-method).
+For method choice across all six segmentation options, see the [segmentation overview](./index.md#how-to-pick-a-method).
 
 ## Strategies
 
@@ -14,13 +14,13 @@ The **Strategy:** dropdown at the top of the training area controls how a traine
 
 | Strategy | What APOC outputs | How it becomes instance labels |
 |---|---|---|
-| **APOC (Direct Instance Segmentation)** | Foreground mask. | Each connected foreground object becomes one instance — no splitting, no post-processing controls. |
+| **APOC (Direct Instance Segmentation)** | Foreground mask. | Each connected foreground object becomes one instance — no splitting, no size filter, no post-processing controls. |
 | **APOC Mask + EDT/Watershed Resegmentation** | Foreground vs. background mask. | Fill holes → opening → distance transform of the mask → threshold → watershed seeds → watershed → size filter. |
 | **APOC Probability Map + Watershed** (default) | Per-voxel foreground probability. | A mask threshold defines foreground; a higher seed threshold defines watershed seeds; watershed splits touching objects on the probability map. |
 | **Advanced (per cell type)** | — | Each cell-type tab gets its own **↳ Cell type strategy:** dropdown with the three strategies above. |
 
 ```{tip}
-The plugin opens on **APOC Probability Map + Watershed**: it splits touching objects well and copes with fuzzy boundaries. **Direct Instance Segmentation** is the simplest and fastest, but assumes your cells are already well separated by the pixel classifier alone. The watershed variants exist because biological cells in 3D very often touch — pick the one whose post-processing matches your object morphology and tune its parameters in each cell-type tab. Switch to **APOC Mask + EDT/Watershed Resegmentation** if the probability-map split isn't clean.
+The plugin opens on **APOC Probability Map + Watershed**: it places the split between touching objects using the classifier's confidence, which helps when boundaries are fuzzy. **Direct Instance Segmentation** is the simplest and fastest, but assumes your cells are already well separated by the pixel classifier alone. The watershed variants exist because biological cells in 3D very often touch — pick the one whose post-processing matches your object morphology and tune its parameters in each cell-type tab. Switch to **APOC Mask + EDT/Watershed Resegmentation** if the probability-map split isn't clean.
 ```
 
 ## Step-by-step in the napari plugin
@@ -70,11 +70,11 @@ A tab is created for each cell type detected in the metadata (and a **Dead** tab
 |---|---|---|
 | **Image Channel Inputs** | All channels checked | Tick the image channels this classifier should see. |
 | **↳ Cell type strategy:** (only with **Advanced (per cell type)**) | Same as the global strategy | Strategy for this cell type only. Not shown on the **Dead** tab. |
-| **Preset:** | `large_preset` | Pre-configured grid of feature filters × sigmas: `small_preset` (sigmas 1, 2, 5), `medium_preset` (1, 2, 5, 15), `large_preset` (1, 2, 5, 10, 25) and `custom` (starts empty). Picking a preset resets the grid to that pattern. |
+| **Preset:** | `large_preset` | Pre-configured grid of feature filters × sigmas: `small_preset` (sigmas 1, 2, 5), `medium_preset` (1, 2, 5, 15), `large_preset` (1, 2, 5, 10, 25). Picking one of these resets the grid (and the **Custom Sigmas:** list) to that pattern; picking `custom` keeps the current grid for you to edit. |
 | **Tune Features** (tick the box to expand) | Collapsed | Feature × sigma checkbox grid (rows **Gauss**, **DoG**, **LoG**, **SoG**) plus a **Custom Sigmas:** field (comma/space-separated; default `0.3, 0.5, 1, 2, 3, 4, 5, 10, 15, 25`). Click **Update Grid** after editing the sigmas — this switches the preset to `custom`. A **Features:** line below summarises the current selection. |
-| **Consider original image as well** | ON (standard presets) | Adds raw pixel intensity as an extra feature. The three standard presets turn it on; `custom` turns it off. |
+| **Consider original image as well** | ON | Adds raw pixel intensity as an extra feature. Picking one of the three standard presets turns it on; picking `custom` leaves it as it is. |
 | **Show classifier statistics** | — | Opens the feature-importance table of the trained classifier (also shown automatically after training). |
-| **Max depth:** | `5` | Maximum depth of each decision tree (range 1–20). Shallow trees (2–5) train fast and generalise well; deep trees overfit small label sets. |
+| **Max depth:** | `5` | Maximum depth of each decision tree (range 1–20). Deeper trees fit the painted pixels more closely (risk of overfitting a small label set) and make the classifier larger and slower to run. |
 | **Trees:** | `100` | Number of decision trees in the random forest (range 10–1000, step 10). |
 
 Channel inputs, preset, features and forest parameters are only visible once training data is loaded; the **Instance Segmentation Preview** group is always visible so you can set post-processing in advance.
@@ -91,7 +91,7 @@ Channel inputs, preset, features and forest parameters are only visible once tra
 | **APOC Mask + EDT/Watershed Resegmentation** | **EDT threshold** `1.0`, **Opening px** `0` (0–10), **Min size** `0`, **Fill holes** ON |
 | **APOC Probability Map + Watershed** | **Mask threshold** `0.5`, **Seed threshold** `0.8`, **Opening px** `0` (0–10), **Min size** `0` |
 
-The defaults are the **same on every tab** the first time you open APOC — only a starting point. With pixel sizes in the metadata, EDT threshold and Min size are displayed in µm / µm³ by default (switch **Units:** to **px** to see the pixel values above).
+The defaults are the **same on every tab** the first time you open APOC — only a starting point. With **EDT threshold** at `1.0` px nothing is split yet; raise it to split touching cells (see [Instance post-processing parameters](./index.md#instance-post-processing-parameters)). With pixel sizes in the metadata, EDT threshold and Min size are displayed in µm / µm³ by default (switch **Units:** to **px** to see the pixel values above).
 
 The `0.3` and `0.5` entries in **Tune Features** are filter scales in pixels. They are not a recommended range for Mask threshold or Seed threshold. For Probability Map + Watershed, start from **0.5 Mask / 0.8 Seed** and tune against the instance preview.
 
@@ -113,7 +113,7 @@ The previews are stored in the `PixelClassification` folder and restored the nex
 Every training run also stores the labelled pixels in a training bundle (`PixelClassifier_TrainingData.zip`), so they can be reused in another experiment:
 
 1. In the source experiment, click **Export Training Bundle…** and save the `.zip` (default name `behav3d_training_bundle.zip`).
-2. In the new experiment, click **Generate Training Data** first (importing replaces labeling, not image loading), then **Import Training Data** and pick the `.zip` bundle (or its `training_metadata.yml`).
+2. In the new experiment, click **Generate Training Data** first (importing adds labelled pixels; it does not load images or replace labeling), then **Import Training Data** and pick the `.zip` bundle (or its `training_metadata.yml`).
 3. If cell-type names differ, a **Cell Type Mapping** dialog lets you map each imported type to a local one, or **(skip)** it. If the pixel sizes differ by more than 10 %, a **Pixel Size Mismatch** warning asks whether to proceed (feature scales are in pixels, so the same sigma covers a different physical size).
 4. A summary dialog lists the imported pixels per cell type (**Total px**, **Fg / Bg**); untick a row to exclude it, then click **Proceed with Import**.
 
@@ -131,12 +131,12 @@ APOC does not classify raw voxels directly. For each checked **Image Channel Inp
 
 | Row | What it emphasises | Typical use |
 |---|---|---|
-| **Gauss** | Smoothed intensity at scale σ — blobs and gradual intensity changes. | Large, soft objects; reducing high-frequency noise before other filters. |
-| **DoG** | Difference between two Gaussian blurs — **edges** and thin structures at scale σ. | Boundaries between cell and background; included in all presets. |
-| **LoG** | Laplacian-of-Gaussian — **blob-like** bright/dark spots at scale σ (peaks and valleys). | Round nuclei, organoid cores, spot-like markers. |
-| **SoG** | Sobel-of-Gaussian — **directional edges** (gradient magnitude) at scale σ. | Membranes and elongated boundaries. |
+| **Gauss** | Smoothed intensity at scale σ — gradual intensity changes, with noise removed. | Large, soft objects; overall brightness of a region. |
+| **DoG** | Difference of two Gaussian blurs (σ × 0.9 and σ × 1.1) — a band-pass filter that responds to bright/dark spots and lines about σ wide and changes sign at their edges. | Structures of a given size; included in all presets. |
+| **LoG** | Laplacian of the Gaussian-blurred image — a similar spot/line response at scale σ (peaks and valleys). | Round nuclei, organoid cores, spot-like markers, thin processes. |
+| **SoG** | Sobel of the Gaussian-blurred image — **edge strength** (gradient magnitude, in any direction) at scale σ. | Cell borders, membranes. |
 
-**Sigma (σ)** is the width of the Gaussian blur **in pixels** before each filter is applied. It is **not** a probability and not microns unless your data happen to be 1 pixel = 1 µm.
+**Sigma (σ)** is the width of the Gaussian blur **in pixels** before each filter is applied. It is **not** a probability and not microns unless your data happen to be 1 pixel = 1 µm. The filters work in 3-D with the same σ in X, Y and Z (in pixels), so when the Z step is larger than the XY pixel, a given σ covers a larger physical distance in Z.
 
 | σ value | Rough neighbourhood size | What the classifier "sees" at that scale |
 |---|---|---|
@@ -195,9 +195,9 @@ Start with the proposed preset and, when object scale is uncertain, a broader ca
 
 **Classifier — Max depth and Trees**
 
-- The defaults (depth `5`, `100` trees) keep trees reasonably shallow because pixel classification uses small label sets. The workshops use **Max depth** 5 and **Trees** 100.
-- **Lower Max depth** (e.g. 2–3) if the model overfits the painted pixels; **raise it** toward 8 only if it is clearly under-fitting on textured backgrounds. Going much above 8 overfits.
-- **Raise Trees** (e.g. 100 → 200) for a small accuracy gain at the cost of training time and GPU memory. Diminishing returns past ~200.
+- The defaults (depth `5`, `100` trees) keep trees fairly shallow because pixel classification uses small label sets (APOC's own default depth is `2`). The workshops use **Max depth** 5 and **Trees** 100.
+- **Lower Max depth** (e.g. 2–3) if the model looks great on the painted pixels but poor elsewhere; **raise it** a little only if it clearly under-fits (e.g. on textured backgrounds) — deeper trees fit the painted pixels more closely and make the classifier slower.
+- **Raise Trees** (e.g. 100 → 200) for smoother predictions, with diminishing returns, at the cost of training and prediction time.
 
 **Strategy choice**
 
@@ -233,7 +233,7 @@ Standard batch controls in the **🚀 Batch Segmentation** group — see [Batch 
 
 - **Start from the defaults (`large_preset` + APOC Probability Map + Watershed).** These handle touching cells well. Drop to `small_preset`/`medium_preset` if training is slow or GPU memory is tight, or to Direct Instance Segmentation if your cells never touch.
 - **Save labels before switching method.** Labels are saved when you train, and you are asked whether to save when you leave the Segmentation tab — but switching to another method removes the training layers without asking. Click **Save User Labels** after any substantial painting.
-- **Keep RF trees fairly shallow (Max depth ~5, the default).** Deep trees overfit on small label sets, which is the typical regime for interactive pixel classification.
+- **Keep RF trees fairly shallow (Max depth ~5, the default).** Interactive labeling gives small label sets, which deep trees can fit too closely.
 - **Read the classifier statistics after training.** If a single feature dominates the importance distribution, you may be under-labelled or over-relying on one channel.
 - **Workers do not speed up APOC.** APOC inference is GPU-bound and runs sample by sample, so **Workers:** has no effect here. The setting is shared: changing it also changes it for Zarr conversion and the Pixel Classifier (see [Workers](../../plugin_essentials/running_steps.md#workers)).
 - **Several cell types (large and small)?** See [Advice: large vs small objects](./index.md#advice-large-vs-small-objects) on the overview; use **Advanced (per cell type)** when each type needs a different strategy, and **⛓ Apply same settings to all organoids** when several organoid types should share one setup.

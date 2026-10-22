@@ -61,7 +61,7 @@ DEATH_DYNAMICS = {
     "what_get": "A death-curve PDF per target (and a combined view across targets).",
     "decide": [
         _decide("Which target cell type(s)", _ONLY_YOU),
-        _decide("Time range to analyse", _ESTIMATED),
+        _decide("Condition column(s) to group the plots by", _SUGGESTED),
     ],
     "seed": (
         "Explain BEHAV3D Death Dynamics analysis for a biologist: what it "
@@ -76,12 +76,12 @@ INTERACTION = {
     "subtitle": "Do interacting cells contact targets before death?",
     "color": "#534ab7",
     "what_does": (
-        "Measures contact between an interacting cell type and target cells in "
-        "the window before each target death — i.e. whether killing is contact "
-        "dependent."
+        "Measures how often an interacting cell type contacts each target over "
+        "the movie and, when death data exist, compares targets that die with "
+        "those that survive (including contacts in the window before death)."
     ),
     "concept": None,
-    "what_get": "An interaction PDF per target, plus a cross-condition overview.",
+    "what_get": "An interaction PDF per target × interacting type, plus a cross-condition overview.",
     "decide": [
         _decide("Which target and interacting cell types", _ONLY_YOU),
         _decide("Time window before death", _ESTIMATED),
@@ -97,14 +97,15 @@ INTERACTION = {
 INVASIVENESS = {
     "id": "invasiveness",
     "title": "Invasiveness Analysis",
-    "subtitle": "How deep do interacting cells penetrate?",
+    "subtitle": "How much of each interacting cell overlaps the target?",
     "color": "#0f6e56",
     "what_does": (
-        "Scores how far an interacting cell type penetrates into the target "
-        "structure over the movie, summarised per movie."
+        "Measures, for each interacting cell over the movie, what % of the cell "
+        "(plus a 2 µm shell) overlaps the target, and whether it is ≥50% "
+        "('invasive'), summarised over time and per movie."
     ),
     "concept": None,
-    "what_get": "An invasiveness PDF summarising penetration per condition.",
+    "what_get": "An invasiveness PDF: invasive fraction and overlap % over time, plus per-movie summaries.",
     "decide": [
         _decide("Which interacting and target cell types", _ONLY_YOU),
         _decide("Per-movie summary statistic", _SUGGESTED),
@@ -267,20 +268,20 @@ STATE_TRANSITION_REPORT = {
         "Plots state-to-state transition probabilities, showing which "
         "behavioral states cells move into and out of: a transition-matrix "
         "heatmap, a circular inter-state transition diagram, n-gram "
-        "rankings, and Sankey diagrams for every state pair."
+        "rankings and, optionally, Sankey diagrams for every state pair."
     ),
     "concept": {
         "term": "Inter-cluster transition probability",
         "text": (
             "given a cell is currently in state A, how likely is its next "
-            "timepoint to be state B rather than A again? Self-transitions "
-            "are excluded from the circular diagram so it shows only "
-            "genuine switches between states."
+            "timepoint to be state B rather than A again? By default, "
+            "self-transitions are excluded from the circular diagram so it "
+            "shows only genuine switches between states."
         ),
     },
     "what_get": (
-        "A transition-matrix heatmap + circular transition diagram PDF, "
-        "n-gram rankings, and all-pairs Sankey diagrams."
+        "A transition-matrix heatmap + circular transition diagram PDF and "
+        "n-gram rankings, plus optional all-pairs Sankey diagrams (off by default)."
     ),
     "decide": [
         _decide("Minimum probability to draw, emphasis, and which pages to include", _DEFAULTS),
@@ -328,12 +329,12 @@ STATE_FEATURE_HEATMAP = {
 STATE_COMPARISON_REPORT = {
     "id": "state_comparison",
     "title": "Condition Comparison Report",
-    "subtitle": "Does state proportion differ significantly between two conditions?",
+    "subtitle": "Do state proportions differ significantly between conditions?",
     "color": "#4a90d9",
     "what_does": (
-        "Compares overall state proportions between two levels of a "
-        "condition column using Welch's t-test, optionally faceted by "
-        "another column."
+        "Compares overall state proportions between every pair of levels of "
+        "a condition column (or two custom pooled groups) using Welch's "
+        "t-test, optionally split by another column."
     ),
     "concept": {
         "term": "Welch's t-test",
@@ -344,8 +345,8 @@ STATE_COMPARISON_REPORT = {
     },
     "what_get": "A condition-comparison PDF with significance annotations.",
     "decide": [
-        _decide("Which condition column and levels to compare", _ONLY_YOU),
-        _decide("Column to facet by", _SUGGESTED),
+        _decide("Which condition column to compare (optionally pooled into two groups)", _ONLY_YOU),
+        _decide("Column to split by", _SUGGESTED),
     ],
     "has_params": True,
     "seed": (
@@ -357,12 +358,12 @@ STATE_COMPARISON_REPORT = {
 STATE_CONTACT_ANALYSIS = {
     "id": "state_contact",
     "title": "Contact analysis",
-    "subtitle": "Which behavioral states coincide with organoid contact, and does contact type matter?",
+    "subtitle": "Which behavioral states coincide with contact, and does contact type matter?",
     "color": "#4a90d9",
     "what_does": (
         "A per-timepoint contact report that needs only behavioral-state "
         "classification (no track-DTW classification): compares the behavioral-state "
-        "composition of contacting timepoints across several organoid-contact columns "
+        "composition of contacting timepoints across several contact columns "
         "(e.g. healthy vs. tumor organoid contact)."
     ),
     "concept": None,
@@ -413,16 +414,16 @@ TRACK_DIAGNOSTICS = {
     "color": "#c98a2c",
     "what_does": (
         "Runs quality-control diagnostics on the trajectory clustering "
-        "(silhouette/distance plots), so you can judge whether the clusters "
-        "are well separated."
+        "(UMAP, cluster-size and distance plots), so you can judge whether "
+        "the clusters are well separated."
     ),
     "concept": None,
-    "what_get": "Diagnostic PDF(s) with silhouette and distance plots.",
+    "what_get": "Diagnostic PDF(s) with UMAP, cluster-size and distance plots.",
     "decide": [],
     "has_params": True,
     "seed": (
-        "Explain the BEHAV3D track-clustering diagnostics: what a "
-        "silhouette plot tells you about cluster quality."
+        "Explain the BEHAV3D track-clustering diagnostics: what the UMAP, "
+        "cluster-size and distance plots tell you about cluster quality."
     ),
 }
 
@@ -495,8 +496,8 @@ TRACK_TRANSITION_ANALYSIS = {
         "term": "Inter-cluster transition probability",
         "text": (
             "given a track is currently in cluster A, how likely is its next window to "
-            "be cluster B rather than A again? Self-transitions are excluded from the "
-            "circular diagram so it shows only genuine switches between clusters."
+            "be cluster B rather than A again? By default, self-transitions are excluded "
+            "from the circular diagram so it shows only genuine switches between clusters."
         ),
     },
     "what_get": (
@@ -521,12 +522,12 @@ TRACK_TRANSITION_ANALYSIS = {
 TRACK_COMPARISON_REPORT = {
     "id": "track_comparison",
     "title": "Condition Comparison Report",
-    "subtitle": "Does track-cluster proportion differ significantly between two conditions?",
+    "subtitle": "Do track-cluster proportions differ significantly between conditions?",
     "color": "#c98a2c",
     "what_does": (
-        "Compares overall track cluster proportions between two levels of "
-        "a condition column using Welch's t-test, optionally faceted by "
-        "another column."
+        "Compares overall track cluster proportions between every pair of "
+        "levels of a condition column (or two custom pooled groups) using "
+        "Welch's t-test, optionally split by another column."
     ),
     "concept": {
         "term": "Welch's t-test",
@@ -537,8 +538,8 @@ TRACK_COMPARISON_REPORT = {
     },
     "what_get": "A condition-comparison PDF with significance annotations.",
     "decide": [
-        _decide("Which condition column and levels to compare", _ONLY_YOU),
-        _decide("Column to facet by", _SUGGESTED),
+        _decide("Which condition column to compare (optionally pooled into two groups)", _ONLY_YOU),
+        _decide("Column to split by", _SUGGESTED),
     ],
     "has_params": True,
     "seed": (
@@ -622,7 +623,7 @@ SINGLE_CELL_ANALYSES = [BEHAVIORAL_STATE, STATE_TRAJECTORY]
 
 # Short intro shown at the top of each Guided page.
 GUIDED_INTRO = (
-    "New to the analysis? Open \"See what this does\" under any analysis for a "
+    "New to the analysis? Open \"See what this analysis does\" under any analysis for a "
     "plain-language description. Guided mode explains and suggests — it never "
     "runs anything on its own; you confirm every choice in the settings."
 )

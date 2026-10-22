@@ -139,9 +139,9 @@ Collapsed by default; the rows shown depend on the method.
 
 Fresh clusters are numbered. Until a result exists the status line reads **"ℹ Run clustering first to enable renaming."**; afterwards it shows how many trajectories were loaded.
 
-Click **✏ Rename Track Clusters** to open **Rename Track Trajectory Clusters**. Each row shows the **Current name**, a **New name** field and a **Color** button; drag rows to set the order used in every plot. Giving several clusters the **same name merges them**. **💾 Save** applies the changes, **✖ Discard** closes without saving, **↺ Reset Names** restores the original numbered clusters (after a confirmation; cannot be undone).
+Click **✏ Rename Track Clusters** to open **Rename Track Trajectory Clusters**. Each row shows the **Current name**, a **New name** field and a **Color** button; drag rows to set the order used in every plot. Giving several clusters the **same name merges them**. **💾 Save** applies the changes, **✖ Discard** closes without saving, **↺ Reset Names** restores the original numbered clusters (after a confirmation; cannot be undone). Reset is not available for clusters from the `bouts` basis, the legacy BEHAV3D option or an applied classifier.
 
-The names replace the labels in the `ClusterID` column; the original labels are kept in `ClusterID_original`. Colours are stable per name across re-runs unless you pick one. Names, order and colours are used by every report and by backprojection.
+The names replace the labels in the `ClusterID` column; the labels from before the most recent save are kept in `ClusterID_original`. Colours are stable per name across re-runs unless you pick one. Names, order and colours are used by every report and by backprojection.
 
 Saving regenerates the [Diagnostic](#diagnostic) report and the exemplar/medoid overviews in `clustering/` with the new names (not for the legacy option — re-run **▶ Create Diagnostics** there). Other reports keep the old names until you re-run them.
 
@@ -215,7 +215,7 @@ Options (**⚙ Advanced Configuration**, open by default):
 | **Node labels** | On dots | Cluster names inside the dots, or in a numbered **Side legend**. |
 | **Transition matrix heatmap** | on | Page with the transition counts / probabilities. |
 | **Circular transition diagram** | on | Circular diagrams weighted by outgoing and by incoming probability. |
-| **Include self-transitions** | off | Off: arrows show how a cluster splits among the clusters it switches to. On: probabilities include windows that stay in the same cluster. |
+| **Include self-transitions** | off | Off: arrows show how a cluster splits among the clusters it switches to. On: probabilities include windows that stay in the same cluster, drawn as a loop beside each node. |
 | **Show per-cluster breakdown grid** | on | Two pages with one small diagram per cluster (outgoing, incoming). |
 | **Window transition Sankey (per sample)** | on | See below; its own **👁** reopens it. |
 
@@ -318,7 +318,7 @@ The **Live Napari Layer Backprojection** box:
 | Control | Default | What it does |
 |---|---|---|
 | **Sample** | — All samples — | Sample to show (**— All samples —** shows the first sample). |
-| **Color by** | `ClusterID` | `ClusterID` (current names) or `ClusterID_original` (labels before renaming, once renamed). |
+| **Color by** | `ClusterID` | `ClusterID` (current names) or `ClusterID_original` (labels before the most recent rename, once renamed). |
 | **Opacity** | `80 %` | Opacity of the cluster overlay (10–100 %). |
 | **Show trajectories** | on | Also draws each track's path in its cluster colour (one napari Tracks layer per cluster). |
 

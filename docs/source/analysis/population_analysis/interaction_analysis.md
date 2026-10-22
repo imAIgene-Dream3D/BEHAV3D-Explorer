@@ -37,8 +37,8 @@ Each run has its own collapsible settings section, closed by default.
 |---|---|---|---|
 | **Before-death window:** | `60 min` | cumulative-to-death curves only | How far back before each target's time of death the curves look. Enabled only when the selected targets have death data. |
 | **Temporal Range** — **All timepoints** / **Custom time range** with **Start T:** – **End T:** | **All timepoints** (`0` – `100` when custom) | contacts-per-target plot and active-killing dashboard | Restricts those plots to a window of timepoints. It always stays inside the [timepoint range set in Filtering](../filtering.md#restrict-to-a-timepoint-range), if any. |
-| **Annotate by immune line condition** | off | contacts-per-target plot and active-killing dashboard | Shows a separate group per effector type and line condition instead of pooling them. |
-| **Group by:** | **By target (organoid) type** | all three plots | x-axis grouping: **By target (organoid) type** keeps each target type as its own group; **By treatment (immune cell)** pools target types and groups by effector type. |
+| **Annotate by immune line condition** | off | all three plots | Shows a separate group (contacts-per-target plot, dashboard) or curve (cumulative-to-death) per effector type and line condition instead of pooling them. Needs an `im_<type>_line_condition` column in the metadata. |
+| **Group by:** | **By target (organoid) type** | all three plots | Grouping — the x-axis groups of the contacts-per-target plot and the dashboard, one curve per group in the cumulative-to-death plot: **By target (organoid) type** keeps each target type as its own group; **By treatment (immune cell)** pools target types and groups by effector type. |
 
 ## Interaction outputs
 
@@ -47,12 +47,12 @@ Each run has its own collapsible settings section, closed by default.
 | Per target ↔ effector | `analysis/<target>/interaction_analysis/interaction_analysis_<target>_vs_<effector>.pdf` |
 | Interaction Overview | `analysis/multi_organoid_comparison/multi_organoid_interaction_comparison_<settings>.pdf` |
 
-The Overview file name records its settings so different runs don't overwrite each other: grouping (`orgtype` / `treatment`), time range (`Tall`, or `T<start>-<end>`), and `annoLC` when annotating by line condition — e.g. `multi_organoid_interaction_comparison_orgtype_Tall.pdf`.
+The Overview file name records its settings so different runs don't overwrite each other: grouping (`orgtype` / `treatment`), the time range actually used (`Tall`, or `T<start>-<end>`; a Filtering timepoint range shows up here too), and `annoLC` when annotating by line condition — e.g. `multi_organoid_interaction_comparison_orgtype_Tall.pdf`.
 
 **The per-target PDF contains:**
 
-- **Cumulative contacts over time** — overall (mean ± SEM over all samples) and per sample: how contact accumulates as the movie runs.
-- **If death data is present: alive vs dead** — the same curves split by whether the target survives or dies, overall and per sample: do targets that die accumulate more contact than those that survive?
+- **Cumulative contacts over time** — overall (mean ± SEM over all samples) and per sample: how contact accumulates as the movie runs, counted as the number of timepoints in contact so far.
+- **If death data is present: alive vs dead** — the same curves split by whether the target survives or dies (is flagged `dead` at its last tracked timepoint), overall and per sample: do targets that die accumulate more contact than those that survive?
 
 **The Interaction Overview PDF contains:**
 
@@ -66,7 +66,7 @@ Per target, under `analysis/<target>/interaction_analysis/`:
 
 | File | Contents |
 |---|---|
-| `interaction_stats_<target>_vs_<effector>.csv` | Per-sample summary: number of targets, mean / SD % of time in contact, mean / SD total contacts, plus survive / die counts and contacts when death data exists. |
+| `interaction_stats_<target>_vs_<effector>.csv` | Per-sample summary: number of targets, mean / SD % of time in contact, mean / SD total contact timepoints, plus survive / die counts and contacts when death data exists. |
 | `plot_data/cumulative_overall_<target>_vs_<effector>.csv` | Cumulative contacts over time, all samples. |
 | `plot_data/cumulative_per_sample_<target>_vs_<effector>.csv` | Cumulative contacts over time, per sample. |
 | `plot_data/alive_vs_dead_overall_<target>_vs_<effector>.csv` | Alive vs dead, all samples. |

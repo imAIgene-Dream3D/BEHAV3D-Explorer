@@ -35,7 +35,7 @@ Download the repository (green **Code → Download ZIP** button on GitHub, then 
 **Option 2:** open a Command Prompt and run:
 
 ```bat
-cd path\to\BEHAV3D\installation
+cd path\to\BEHAV3D-Explorer\installation
 install_behav3d_windows.bat
 ```
 
@@ -46,14 +46,14 @@ install_behav3d_windows.bat
 **Option 2:** if macOS refuses to open it, open Terminal and run:
 
 ```bash
-cd path/to/BEHAV3D/installation
+cd path/to/BEHAV3D-Explorer/installation
 bash install_behav3d_macOS.command
 ```
 
 ### Linux
 
 ```bash
-cd path/to/BEHAV3D/installation
+cd path/to/BEHAV3D-Explorer/installation
 bash install_behav3d_linux.sh
 ```
 
@@ -68,7 +68,7 @@ Without options, the installer first asks for the **environment name** (press En
 5. Creates the conda environment with all dependencies, including napari.
 6. Installs **PyTorch** for your hardware: with CUDA support when an NVIDIA GPU is detected, with Apple-GPU (MPS) support on macOS, otherwise the CPU-only version.
 7. Installs **Cellpose v3** (the version used by the Cellpose method and its models), **ConvPaint** and the **BEHAV3D EXPLORER** plugin itself, plus the OpenCL support APOC needs on macOS/Linux.
-8. Checks the installation and prints a summary (PyTorch version, `CUDA: True/False`, Cellpose, ConvPaint, napari, BEHAV3D plugin).
+8. Checks the installation and prints a summary (PyTorch version, `CUDA: True/False`, Cellpose, ConvPaint, napari, BEHAV3D EXPLORER plugin).
 9. Saves the environment it used for the launchers in `napari/`, then asks whether to **launch napari now**.
 
 ```{warning}
@@ -131,7 +131,7 @@ Download [Miniforge](https://github.com/conda-forge/miniforge/releases/latest/) 
 ### Step 2: Create the environment
 
 ```bash
-cd path/to/BEHAV3D/installation
+cd path/to/BEHAV3D-Explorer/installation
 mamba env create -f environment.yml
 mamba activate behav3d
 # Avoid OpenMP/MKL conflicts with PyTorch (the installer does this too)
@@ -155,7 +155,7 @@ For APOC, also install the OpenCL loader: `mamba install -c conda-forge ocl_icd_
 ### Step 4: Install BEHAV3D EXPLORER itself
 
 ```bash
-cd path/to/BEHAV3D
+cd path/to/BEHAV3D-Explorer
 pip install -e .
 ```
 
@@ -217,7 +217,7 @@ Re-install the plugin into the environment:
 
 ```bash
 mamba activate behav3d
-cd path/to/BEHAV3D
+cd path/to/BEHAV3D-Explorer
 pip install -e .
 ```
 

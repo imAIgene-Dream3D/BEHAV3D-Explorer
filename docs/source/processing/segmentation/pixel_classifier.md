@@ -12,9 +12,9 @@ The Pixel Classifier runs entirely on the CPU. For method choice across all six 
 
 For each cell type the plugin:
 
-1. Builds a feature stack from all image channels — Gaussian-smoothed intensity plus edge strength, computed at four fixed physical scales (`0.89, 1.77, 3.54, 14.16` µm). The scales are converted to pixels with the pixel size from your metadata, so the same features work regardless of acquisition resolution. The features are not editable in the GUI.
+1. Builds a feature stack from all image channels — Gaussian-smoothed intensity plus edge strength (Sobel of the smoothed image), computed in 3-D at four fixed physical scales (`0.89, 1.77, 3.54, 14.16` µm). The scales are converted to pixels separately for XY and Z with the pixel sizes from your metadata, so the same features work regardless of acquisition resolution. The features are not editable in the GUI.
 2. Fits a binary Random Forest (50 trees, max depth 20) on the pixels you painted. The forest settings are **not exposed in the GUI**.
-3. Predicts a foreground mask, post-processes it (fill holes → morphological opening → distance transform → watershed → size filter), and writes the resulting instance labels to disk.
+3. Predicts a foreground mask, post-processes it (fill holes → morphological opening → distance transform, measured within each Z slice → watershed → size filter), and writes the resulting instance labels to disk.
 
 ## Step-by-step in the napari plugin
 
@@ -40,7 +40,7 @@ Iteration is cheap: re-training is quick and **Test Segmentation Parameters** re
 | Control | Default | Effect |
 |---|---|---|
 | **Examples/sample:** | `3` | Number of evenly spaced timepoints (always including the first and last) taken from each sample as training data (range 1–10). More timepoints = more variability for the classifier to learn from, at the cost of a longer labeling session. |
-| **Generate Training Data** | — | Prepares (in the background) and then loads `examples × samples` timepoints as image layers, plus a `User Provided Labels (…)` layer per cell type. When cached training data exists, asks **Generate New / Load Existing / Cancel**. |
+| **Generate Training Data** | — | Prepares (in the background) and then loads $\text{examples} \times \text{samples}$ timepoints as image layers, plus a `User Provided Labels (…)` layer per cell type. When cached training data exists, asks **Generate New / Load Existing / Cancel**. |
 | **Save Labels** | — | Saves every `User Provided Labels (…)` layer to disk, so the labels survive plugin restarts. |
 | **Clear Layer** / **Clear All** | — | Erase the painted labels in the selected `User Provided Labels` layer / in all of them (**Clear All** asks for confirmation). |
 | **Train Classifier** | — | Trains one Random Forest per cell type (and one for the dead channel when it has labels) and shows the prediction and instance preview. |
@@ -69,7 +69,7 @@ This section appears once metadata is loaded. It starts with **Workers:** (the n
 | **Opening:** (px, 0–10) | `3` | `0` | `0` |
 | **Fill holes** | ON | ON | ON |
 
-With pixel sizes in the metadata, **EDT:** and **Min size:** are displayed in µm / µm³ by default; switch **Units:** to **px** to see the pixel values in the table. **EDT:** works as described centrally: **higher → more splitting** of touching objects. The **Opening:** and **Fill holes** settings are also applied to the predicted mask (and to your painted foreground) during training. The dead channel has no parameter box.
+With pixel sizes in the metadata, **EDT:** and **Min size:** are displayed in µm / µm³ by default; switch **Units:** to **px** to see the pixel values in the table. **EDT:** works as described centrally: **higher → more splitting** of touching objects (no splitting at `1.0` px or below, so the "other" default does not split). The **Opening:** and **Fill holes** settings are also applied to the predicted mask, and to your painted foreground before training — painted foreground strokes narrower than about twice the **Opening:** radius are therefore dropped from the training labels. The dead channel has no parameter box.
 
 A **Test Segmentation Parameters** button at the bottom of this section re-segments the currently displayed timepoint with the current parameters and updates the `<Cell type> Segments` layers — useful for iterating on EDT / Min size / Opening / Fill holes without committing to a batch run.
 

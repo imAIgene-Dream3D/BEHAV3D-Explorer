@@ -288,7 +288,7 @@ def _make_queue_btn() -> QPushButton:
 def _make_view_btn() -> QPushButton:
     btn = QPushButton("👁")
     btn.setFixedSize(36, 28)
-    btn.setToolTip("View result (not yet available)")
+    btn.setToolTip("View latest result (enabled once it exists)")
     btn.setEnabled(False)
     btn.setStyleSheet(
         "QPushButton { background: #1a2e1a; color: #6dd56d; "
@@ -1480,7 +1480,8 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.spin_hmm_start_offset.setValue(1)
         adv_form.addRow("Start offset:", make_help_row(
             self.spin_hmm_start_offset, "Start offset",
-            "Number of initial timepoints to skip per track (e.g. dead frames). "
+            "Initial timepoints per track left out of the fit. The first frame's motion "
+            "features (e.g. speed) are a fabricated 0, so keep at least 1. "
             "0 = use all timepoints."
         ))
 
@@ -1761,12 +1762,11 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.chk_state_transition_include_self.setChecked(False)
         adv_state_transition.addLayout(_make_chk_help_row(
             self.chk_state_transition_include_self, "Include Self-Transitions",
-            "Self-transitions are never drawn as arrows (a cluster can't arc to itself). This "
-            "instead picks which probabilities the circular diagram(s) are scaled from: off "
-            "(default) renormalizes over inter-cluster switches only, so the arrows show how a "
-            "cluster splits between the states it switches to. On uses each transition's share "
-            "of all activity, including time spent not switching, which dilutes the arrows for "
-            "clusters that mostly self-transition."
+            "Picks which probabilities the circular diagram(s) use: off (default) renormalizes "
+            "over inter-cluster switches only, so the arrows show how a cluster splits between "
+            "the states it switches to. On uses each transition's share of all activity, "
+            "including time spent not switching - drawn as a loop beside each node - which "
+            "dilutes the arrows for clusters that mostly self-transition."
         ))
         self.chk_state_transition_include_per_cluster = QCheckBox("Show per-cluster breakdown grid")
         self.chk_state_transition_include_per_cluster.setChecked(True)
@@ -2115,8 +2115,8 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.sample_combo.addItem("— All samples —")
         self.sample_combo.setMinimumWidth(120)
         self.sample_combo.setToolTip(
-            "Select a sample for backprojection visualisation. "
-            "'— All samples —' uses the first available sample."
+            "Sample for backprojection. '— All samples —': Show loads "
+            "the first sample; Export writes every sample."
         )
         bp_form.addRow("Sample:", self.sample_combo)
 
@@ -2149,7 +2149,7 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
             self.chk_show_state_trajectories, "Show trajectories",
             "Overlay each track's full path as a line whose color changes over "
             "time to match its state at each timepoint. On by default — adds "
-            "one napari Tracks layer per state."
+            "a single napari Tracks layer (all states combined)."
         ))
         g_view.addLayout(bp_form)
 
@@ -6076,8 +6076,9 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         basic_form.addRow("Trajectory size (timepoints):", make_help_row(
             self.spin_traj_size, "Trajectory size",
             "Number of timepoints to include per track. With the default 'last' trim mode "
-            "this keeps each track's final N timepoints (dropping its earlier ones); "
-            "tracks shorter than this are discarded. Match the value used in your notebook. "
+            "this keeps each track's final N timepoints (the legacy BEHAV3D option always "
+            "keeps the first N); "
+            "tracks shorter than this are discarded. "
             "The line below shows the equivalent real time, computed from this sample's "
             "time_interval/time_unit metadata."
         ))
@@ -6106,8 +6107,8 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.spin_n_clusters.setMaximumWidth(90)
         n_clusters_form.addRow("N clusters:", make_help_row(
             self.spin_n_clusters, "N clusters",
-            "Number of trajectory clusters to create via hierarchical clustering of "
-            "DTW distances."
+            "Number of trajectory clusters: the cut of the agglomerative clustering of DTW "
+            "distances or bout features, or the K of K-means in the legacy BEHAV3D option."
         ))
         g1.addWidget(self._n_clusters_frame)
 
@@ -6203,7 +6204,8 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             self.combo_trim, "Trim mode",
             "How to trim each track to Trajectory size: "
             "'last' keeps each track's final N timepoints (removes leading/early ones); "
-            "'first' keeps each track's first N timepoints (removes trailing/late ones)."
+            "'first' keeps each track's first N timepoints (removes trailing/late ones). "
+            "Ignored by the legacy BEHAV3D option, which always keeps the first N."
         ))
         self.adv1.addLayout(trim_form)
 
@@ -6219,8 +6221,8 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         dtw_linkage_form.addRow("Linkage:", make_help_row(
             self.combo_linkage, "Linkage",
             "Agglomerative clustering linkage method. 'average' is the most commonly used; "
-            "'complete' produces more compact clusters. Only used with the DTW basis and "
-            "'agglomerative' Method."
+            "'complete' produces more compact clusters. Used with the State-based dtw basis "
+            "and Feature-based, with 'agglomerative' Method."
         ))
         self.adv1.addWidget(self._dtw_linkage_frame)
 
@@ -6668,7 +6670,7 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         g_diag.setSpacing(4)
         g_diag.addWidget(_make_info_label(
             "Runs quality-control diagnostics on the trajectory clustering "
-            "(silhouette/distance plots)."
+            "(UMAP, cluster-size and distance plots)."
         ))
         diag_row = QHBoxLayout()
         self.btn_diagnostics = QPushButton("▶ Create Diagnostics")
@@ -6871,12 +6873,11 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.chk_transanalysis_include_self.setChecked(False)
         adv_transition_analysis.addLayout(_make_chk_help_row(
             self.chk_transanalysis_include_self, "Include Self-Transitions",
-            "Self-transitions are never drawn as arrows (a cluster can't arc to itself). This "
-            "instead picks which probabilities the circular diagram(s) are scaled from: off "
-            "(default) renormalizes over inter-cluster switches only, so the arrows show how a "
-            "cluster splits between the clusters it switches to. On uses each transition's "
-            "share of all activity, including windows spent not switching, which dilutes the "
-            "arrows for clusters that mostly self-transition."
+            "Picks which probabilities the circular diagram(s) use: off (default) renormalizes "
+            "over inter-cluster switches only, so the arrows show how a cluster splits between "
+            "the clusters it switches to. On uses each transition's share of all activity, "
+            "including windows spent not switching - drawn as a loop beside each node - which "
+            "dilutes the arrows for clusters that mostly self-transition."
         ))
         self.chk_transanalysis_include_per_cluster = QCheckBox("Show per-cluster breakdown grid")
         self.chk_transanalysis_include_per_cluster.setChecked(True)
@@ -7119,7 +7120,8 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.combo_duration_test_mode.currentIndexChanged.connect(self._on_duration_test_mode_changed)
         duration_form.addRow("Test:", make_help_row(
             self.combo_duration_test_mode, "Comparison test",
-            "'Welch's t-test': compares the raw per-touch durations between the two groups without "
+            "'Welch's t-test': compares the per-track contact durations (each track's longest bout "
+            "with the class, and its contact-time fraction) between the two groups without "
             "assuming equal variances. 'Paired t-test': averages durations within each 'Pairing "
             "column(s)' value (combined, if more than one is selected) first, then pairs the two "
             "groups' averages for the same value (e.g. the same sample) — pairing units missing "
@@ -7239,7 +7241,8 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.chk_overview_statebars.setChecked(True)
         opts_row.addWidget(self.chk_overview_statebars)
         opts_row.addWidget(HelpButton("Overview statebars",
-            "Generate a PDF with stacked state bar plots for all exemplar tracks."))
+            "Generate the state-bar PDFs of the exemplar tracks (overview, per cluster "
+            "and per exemplar rank). Unticked, nothing is written."))
 
         # Backprojection PDF/MP4 exemplar outputs are a development feature: only
         # shown when the GUI runs in dev mode (BEHAV3D_DEV_MODE=1, set by launch_napari.py).
@@ -7365,8 +7368,8 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.sample_combo.addItem("— All samples —")
         self.sample_combo.setMinimumWidth(120)
         self.sample_combo.setToolTip(
-            "Select a sample for backprojection visualisation. "
-            "'— All samples —' uses the first available sample."
+            "Sample for backprojection. '— All samples —': Show loads "
+            "the first sample; Export writes every sample."
         )
         tbp_form.addRow("Sample:", self.sample_combo)
 
@@ -12075,7 +12078,10 @@ class SingleCellTab(QWidget):
         hdr_lay.addWidget(QLabel("Cell type:"))
         self.cell_type_combo = QComboBox()
         self.cell_type_combo.setMinimumWidth(160)
-        self.cell_type_combo.setToolTip("Immune and other cell types only (non-multicolor).")
+        self.cell_type_combo.setToolTip(
+            "Immune and other cell types (multicolor ones as their merged entry) "
+            "and cell-type groups."
+        )
         self.cell_type_combo.currentTextChanged.connect(self._on_cell_type_changed)
         hdr_lay.addWidget(self.cell_type_combo)
         # Changing the cell type reloads every sub-tab (h5ad / CSV reads); refuse it

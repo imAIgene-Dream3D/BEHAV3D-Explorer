@@ -355,9 +355,9 @@ class TimeUnitGroupManager:
         lay.addWidget(HelpButton(
             "Frames vs. Hours Units",
             "Toggle how the time-based filter values above are displayed:\n\n"
-            "- 'frames' (off): the value is shown as a raw frame/timepoint "
-            "count — the same 0-indexed 'position_t' axis filtering runs "
-            "on internally.\n"
+            "- 'frames' (off): the value is shown in frames — Start/End "
+            "timepoint are 0-indexed 'position_t' positions; Max timepoints, "
+            "Min length and Max length are numbers of timepoints.\n"
             "- 'hours' (on): the value is shown converted to real elapsed "
             "time using this sample's 'time_interval'/'time_unit' "
             "metadata.\n\n"

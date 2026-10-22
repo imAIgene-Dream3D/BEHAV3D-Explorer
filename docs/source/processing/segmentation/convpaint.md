@@ -1,6 +1,6 @@
 # 🎨 ConvPaint
 
-ConvPaint is the **deep-features pixel classifier**. Instead of computing classical features (Gaussian / edge / blob filters like [APOC](apoc.md) or [Pixel Classifier](pixel_classifier.md)), it runs your image through a pretrained CNN or transformer feature extractor (VGG16, DINOv2, …) and then fits a CatBoost gradient-boosted classifier on top of the extracted features. The result is a single multi-class pixel classifier that predicts *every* cell type at once.
+ConvPaint is the **deep-features pixel classifier**. Instead of computing classical features (smoothed intensity / edge / spot filters like [APOC](apoc.md) or [Pixel Classifier](pixel_classifier.md)), it runs each Z slice of your image through a pretrained CNN or transformer feature extractor (VGG16, DINOv2, …) and then fits a CatBoost gradient-boosted classifier on top of the extracted features. Features are therefore 2-D: each slice is classified on its own, without looking at the slices above and below. The result is a single multi-class pixel classifier that predicts *every* cell type at once.
 
 ```{important}
 ConvPaint is **multi-class single-model**: one classifier maps each pixel to background or *any* of the cell types. This is different from [APOC](apoc.md) and [Pixel Classifier](pixel_classifier.md), where you train one binary classifier per cell type. In practice you paint all classes onto a single `User Provided Labels` layer; the **Annotation legend** tells you which label value belongs to which cell type. The dead channel (when declared) gets its own separate binary model.
@@ -28,8 +28,8 @@ A full session usually goes like this:
 4. **Set Examples/sample** (default `3`) and click **Generate Training Data**. The viewer loads evenly spaced timepoints of every sample as `Channel …` image layers plus **one** `User Provided Labels` layer (and `User Provided Labels (Dead)` when a dead channel is declared). See [Generate Training Data](./index.md#common-structure-of-the-pixel-classifier-pages).
 5. **Open the Annotation legend** (shown under **Generate Training Data**) to see which label value maps to which cell type (`1` = background, `2` = first cell type, `3` = next, …). Click a row to paint that class.
 6. **Paint each class on the single label layer.** A few hundred pixels per class is usually enough; bias your strokes toward boundaries and confusing regions.
-7. **Feature Extractor** group: usually leave it on **VGG16 (default)** + **Multichannel** + **Normalize stack** + Downsample `1`. Switch to DINOv2 / JAFAR DINOv2 only if VGG16's mask is "too smooth" or fails on subtle textures.
-8. **(Optional) Classifier (CatBoost)** group: the defaults (`100` iterations, depth `5`, learning rate `0.1`, **Balanced (default)** class weights) work for most datasets.
+7. **Feature Extractor** group: usually leave it on **VGG16 (default)** + **Multichannel** + **Normalize stack** + Downsample `1`. Try a richer model only if the classes keep being confused (see [Tuning the parameters](#tuning-the-parameters)).
+8. **(Optional) Classifier (CatBoost)** group: start from the defaults (`100` iterations, depth `5`, learning rate `0.1`, **Balanced (default)** class weights).
 9. **Click ▶ Train Classifier.** This trains the multi-class classifier from `User Provided Labels` (and the separate binary death classifier if dead labels are present), then runs it on all loaded training frames and builds a preview for every cell type.
 10. **Inspect and tune.** Adjust a tab's post-processing parameters and click its **Run instance segmentation** — this re-applies only the post-processing to the stored classifier output (no feature extraction), so it is fast. Retrain after changing labels, feature-extractor or classifier settings.
 11. **Batch segmentation** → choose the timepoint range → click **▶ Run ConvPaint Batch Segmentation** for an immediate run, or **+🛒** to queue.
@@ -62,11 +62,11 @@ This group controls how raw pixels are turned into per-pixel feature vectors *be
 
 | Control | Options | Default | Effect |
 |---|---|---|---|
-| **Model:** | VGG16 (default), VGG16 Medium, VGG16 Large, DINOv2, JAFAR DINOv2, Gaussian, Cellpose, Ilastik | VGG16 (default) | Pretrained network used to extract features. VGG16 is fast and lightweight; DINOv2 / JAFAR DINOv2 are transformer-based and often more expressive (slower). **Gaussian** uses a classical filter bank — useful as a quick non-deep-learning baseline. |
-| **Channels:** | Single channel, Multichannel, RGB (3-ch color images) | Multichannel | How the channels are fed to the extractor. **Multichannel** processes each channel separately and combines the features (more features, more memory); **Single channel** and **RGB** mix the channels before extraction. |
-| **Normalize:** | No normalization, Normalize stack, Normalize per plane | Normalize stack | Intensity normalization before feature extraction: none, over the whole stack, or per image plane. |
-| **Downsample:** | −4 to 16 | `1` | Downsampling factor applied before feature extraction; predictions are scaled back to full size. `1` = native resolution; >1 = faster but coarser; <0 upsamples (rarely useful). |
-| **Smoothen:** | 0 to 20 | `1` | Smoothing applied to the predicted label map. Reduces single-pixel noise but can erode thin structures. |
+| **Model:** | VGG16 (default), VGG16 Medium, VGG16 Large, DINOv2, JAFAR DINOv2, Gaussian, Cellpose, Ilastik | VGG16 (default) | Pretrained network used to extract features. **VGG16** uses the first layer of the network at three image scales — fast and lightweight; **VGG16 Medium** / **Large** add deeper layers and scales (richer, slower). **DINOv2** is a transformer that captures broader, more semantic context but works on 14 × 14-pixel patches, so its boundaries are coarser; **JAFAR DINOv2** adds an upsampler that brings DINOv2 features back to full resolution (both slower). **Gaussian** is a single Gaussian blur at a few image scales — a quick non-deep-learning baseline. |
+| **Channels:** | Single channel, Multichannel, RGB (3-ch color images) | Multichannel | How the channels are fed to the extractor. **Multichannel** processes each channel separately and combines the features (more features, more memory); **RGB** feeds exactly three channels together as one colour image; **Single channel** is for one-channel input (with several channels, napari-convpaint switches to Multichannel). |
+| **Normalize:** | No normalization, Normalize stack, Normalize per plane | Normalize stack | Intensity normalization (per channel) before feature extraction: none, over the whole stack, or per image plane. |
+| **Downsample:** | −4 to 16 | `1` | Downsampling factor (in X and Y) applied before feature extraction; predictions are scaled back to full size. `1` = native resolution; >1 = faster but coarser; <0 upsamples (rarely useful). |
+| **Smoothen:** | 0 to 20 | `1` | Radius of a majority filter applied to the predicted class map in each Z slice; `0` and `1` = no smoothing. Removes isolated mislabelled pixels but can erode thin structures. It changes the mask used by **ConvPaint Mask + EDT/Watershed**, not the probability map. |
 
 ### 4 · Classifier (CatBoost)
 
@@ -75,7 +75,7 @@ ConvPaint uses [CatBoost](https://catboost.ai), a gradient-boosted decision-tree
 | Control | Range | Default | Effect |
 |---|---|---|---|
 | **Iterations:** | 10–2000 | `100` | Number of boosting rounds (trees). More iterations = richer model, slower to train, more risk of overfit. |
-| **Depth:** | 1–16 | `5` | Maximum depth of each tree. 3–6 is a good starting range. |
+| **Depth:** | 1–16 | `5` | Depth of each tree. Deeper trees fit more complex decision boundaries, train more slowly and can overfit. |
 | **Learning rate:** | 0.001–1.0 | `0.1` | Shrinkage applied to each new tree's contribution. Lower values need more iterations but often generalise better. |
 | **Class weights:** | Balanced (default), SqrtBalanced, None | Balanced | How to handle classes with far fewer painted pixels. **Balanced** boosts rare classes (inverse-frequency weights); **SqrtBalanced** is a milder version; **None** trains as-is. |
 | **Tile annotations** | checkbox | OFF | Training only: extracts features only in boxes around the painted regions instead of the whole image — faster when annotations are small/sparse. No effect on prediction. |
@@ -84,7 +84,7 @@ A separate **Prediction Performance (large images)** group affects prediction (t
 
 | Checkbox | Default | Effect |
 |---|---|---|
-| **Tile image** | OFF | Splits the image into ~1000 × 1000 px blocks (50 px overlap) for feature extraction and classification, then stitches the result. Lower peak memory, somewhat slower. Turn on when a large image runs out of memory during prediction. |
+| **Tile image** | OFF | Splits the image into ~1000 × 1000 px blocks (with an overlap margin) for feature extraction and classification, then stitches the result. Lower peak memory, somewhat slower. Turn on when a large image runs out of memory during prediction. |
 | **Use Dask** | OFF | Beta. Processes the tiles in parallel; checking it also checks **Tile image**. Can speed up tiled prediction on machines with free CPU cores, but does not lower memory further (peak memory can be higher). |
 
 ### 5 · Annotation & Segmentation tabs
@@ -117,42 +117,30 @@ Use the per-cell-type **Run instance segmentation** button between post-processi
 
 **Feature Extractor — Model**
 
-- **VGG16 (default)** works for most datasets and is the fastest. Try it first.
-- The mask is "too smooth" — classes that should be separable are bleeding into each other → switch to **DINOv2** or **JAFAR DINOv2** (more expressive, transformer-based features) and retrain.
+- **VGG16 (default)** is the fastest; napari-convpaint describes its low-level features as good for telling apart textures and brightness. Try it first.
+- Classes that should be separable keep being confused even after more labels → try **VGG16 Medium** / **Large** (more layers and scales), or **DINOv2** / **JAFAR DINOv2** (broader, more semantic context; prefer JAFAR if DINOv2's borders are too coarse), and retrain.
 - Out-of-memory error during training or prediction → switch to a smaller model (**VGG16** instead of **VGG16 Large**, or **Gaussian** for a quick non-deep-learning baseline), raise **Downsample:**, or turn on **Tile image**.
 
 **Feature Extractor — Channels**
 
 - **Multichannel** (default) preserves per-channel information and is almost always what you want.
-- Use **Single channel** only when the channels together are not more informative than their average.
+- **Single channel** only makes a difference when the model gets one channel; with more, napari-convpaint falls back to Multichannel.
 - Use **RGB (3-ch color images)** only for true 3-channel colour images (rare in fluorescence microscopy).
 
 ```{note}
 **Normalize**, **Downsample** and **Smoothen** follow the
-napari-convpaint definitions; no BEHAV3D-specific tuning guidance has been validated for
+napari-convpaint definitions; no BEHAV3D EXPLORER-specific tuning guidance has been validated for
 them. See the
 [napari-convpaint documentation](https://guiwitz.github.io/napari-convpaint/book/Params_settings.html).
 ```
 
-**CatBoost — Iterations**
+**CatBoost — Iterations, Depth, Learning rate**
 
-- Default `100` is sensible. Raise to 200–500 if the classifier is clearly under-fitting *and* the painted set is small enough that training stays fast (a few minutes).
-- Lower **Learning rate:** if you raise iterations a lot, otherwise CatBoost overfits.
+The defaults (`100` iterations, depth `5`, learning rate `0.1`) are napari-convpaint's own defaults; start there.
 
-**CatBoost — Depth**
-
-- Default `5` is a balanced starting point. Most ConvPaint setups stay in the 3–6 range.
-- Raise to 7–10 only for clearly under-fit textures with lots of painted pixels.
-
-**CatBoost — Learning rate**
-
-- Default `0.1` is fine. If you increase **Iterations:** substantially (e.g. 100 → 500), also lower **Learning rate:** (e.g. 0.1 → 0.03) — the classic gradient-boosting trade-off for better generalisation.
-
-**CatBoost — Class weights**
-
-- **Balanced** (default) handles cell-type imbalance well — e.g. when background is 95 % of the painted pixels and the other classes are under-predicted.
-- **None** is rarely the right answer unless your label counts are roughly equal across classes.
-- **SqrtBalanced** is the conservative middle ground when **Balanced** overcorrects (e.g. random "rare" pixels appear everywhere).
+- Classifier **under-fits** (misses cells even where you painted) → raise **Iterations:** (e.g. 100 → 200–500) and, if that is not enough, **Depth:** a little (CatBoost's tuning guide finds the best depth usually between 4 and 10). Training takes longer.
+- Classifier **over-fits** (great on the painted frames, poor elsewhere) → lower **Learning rate:** (e.g. 0.1 → 0.03) and raise **Iterations:** to compensate — CatBoost's tuning guide recommends lowering the learning rate when the model overfits.
+- Before tuning the classifier, try painting more labels where it fails: that usually helps more.
 
 **Per cell-type post-processing**
 
@@ -174,16 +162,15 @@ Standard batch controls in the **🚀 Batch Segmentation** group — see [Batch 
 
 ## Good practices & tips
 
-- **Start with VGG16.** It is the default and runs fastest on common GPUs. Only switch to DINOv2 / JAFAR DINOv2 if VGG16's prediction is "too smooth" or fails on subtle textures — these heavier extractors are slower and need more GPU memory.
-- **CatBoost defaults are sensible.** 100 iterations, depth 5, learning rate 0.1 is a balanced starting point. If you see overfitting (great on the labelled frames, poor elsewhere), lower the learning rate to ~0.03 and proportionally raise iterations.
-- **Class weights = Balanced is the safe default.** If one cell type has far fewer pixels than the others, **None** gives a classifier that systematically under-predicts that class.
+- **Start with VGG16.** It is the default and runs fastest. Switch to a heavier extractor only if classes stay confused after more labels — these are slower and need more GPU memory.
+- **Start from the CatBoost defaults** (100 iterations, depth 5, learning rate 0.1); see [Tuning the parameters](#tuning-the-parameters) for when to change them.
 - **Downsample > 1 if GPU memory is tight.** Prediction time scales with the number of feature vectors; a downsample of 2 cuts the work roughly 4× per plane. The predictions are scaled back to full size at the end.
 - **Switching feature extractors invalidates the model.** Retrain after any change to **Model:**.
 - **Save labels before switching method** — switching to another method removes the training layers without asking (leaving the tab does ask).
 
 ## Things this page does **not** claim
 
-- That DINOv2 always beats VGG16 (or vice versa) — this is dataset-dependent. The in-app help describes DINOv2 as "stronger feature representations… slower but often more accurate", which matches typical published results, but BEHAV3D EXPLORER ships no benchmark validating this on organoid / immune-cell data.
+- That DINOv2 always beats VGG16 (or vice versa) — this depends on your data. Compare the extractors on your own images.
 - Specific per-timepoint inference numbers — these depend strongly on GPU, volume size, model, and downsample. Profile your own data.
 
 ## See also

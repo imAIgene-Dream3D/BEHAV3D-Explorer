@@ -20,11 +20,11 @@ The **Method:** dropdown at the top (group **Segmentation Method**) picks the se
 
 | Method (dropdown label) | What it is | Hardware |
 |---|---|---|
-| **APOC (GPU)** | Pixel classifier trained on sparse user labels — a random forest on classical image features (Gaussian, edges, blobs, …) | GPU with OpenCL drivers (a **Force CPU-only processing** option needs an OpenCL CPU runtime) |
-| **ConvPaint (DL pixel classifier)** | Pixel classifier trained on sparse user labels — features come from a pretrained deep network (VGG16, DINOv2, …) and one gradient-boosted classifier predicts every cell type at once | PyTorch (CUDA GPU recommended; CPU possible) |
-| **Pixel Classifier (Random Forest)** | CPU pixel classifier trained on sparse user labels — random forest on Gaussian-intensity and edge features at fixed physical scales | CPU |
-| **Cellpose (Deep Learning)** | Pretrained / retrainable deep-learning instance segmenter (cellpose v3) — outputs cell-level masks directly | PyTorch (CUDA GPU strongly recommended) |
-| **Cellpose-SAM (zero-shot)** | Foundation-model instance segmenter (cellpose v4) — segments many cell shapes with no training or annotation. Most accurate, most expensive. | PyTorch (good CUDA GPU or HPC) |
+| **APOC (GPU)** | Pixel classifier trained on sparse user labels — a random forest on classical image filters (smoothed intensity, edges, spot/line filters) computed in 3-D at scales you choose | GPU with OpenCL drivers (a **Force CPU-only processing** option needs an OpenCL CPU runtime) |
+| **ConvPaint (DL pixel classifier)** | Pixel classifier trained on sparse user labels — features come from a pretrained deep network (VGG16, DINOv2, …), computed in each Z slice separately, and one gradient-boosted classifier predicts every cell type at once | PyTorch (CUDA GPU recommended; CPU possible) |
+| **Pixel Classifier (Random Forest)** | CPU pixel classifier trained on sparse user labels — random forest on smoothed-intensity and edge features computed in 3-D at fixed physical scales | CPU |
+| **Cellpose (Deep Learning)** | Deep-learning instance segmenter (cellpose v3) that runs a model file trained for your kind of images — outputs cell-level masks directly | PyTorch (CUDA GPU strongly recommended) |
+| **Cellpose-SAM (zero-shot)** | Foundation-model instance segmenter (cellpose v4) — segments many cell shapes with no training or annotation. Its authors report the best out-of-the-box accuracy on their benchmarks; it is also the most compute-hungry method here. | PyTorch (good CUDA GPU or HPC) |
 | **Import segmentation** | Checks segmentations produced outside BEHAV3D EXPLORER (`.tif`/`.tiff`/`.zarr`) and records them in the metadata: valid Zarrs are linked where they are, TIFFs and badly laid-out Zarrs are converted | n/a |
 
 ```{note}
@@ -40,10 +40,10 @@ Switching to another method while APOC, ConvPaint or Pixel Classifier training l
 
 ```{mermaid}
 flowchart TD
-    A["Your situation"] --> Q1{"Already segmented<br/>elsewhere outside <br/>BEHAV3D-Explorer? 
+    A["Your situation"] --> Q1{"Already segmented<br/>elsewhere outside <br/>BEHAV3D EXPLORER? 
     (Imaris,Ilastik, custom script, …)"}
     Q1 -- "Yes" --> Import["Import segmentation"]
-    Q1 -- "No" --> Q2{"Trained Cellpose model<br/>for this data?"}
+    Q1 -- "No" --> Q2{"Trained Cellpose model<br/>for this kind of data?"}
 
     Q2 -- "Yes" --> Cellpose["Cellpose v3<br/>(load the model)"]
     Q2 -- "No" --> QG{"Do you have a GPU?"}
@@ -51,23 +51,23 @@ flowchart TD
     QG -- "No" --> PCrf
     QG -- "Yes" --> Q3{"Channels clean?<br/>(one cell type per channel,<br/>no bleed-through)"}
 
-    Q3 -- "No" --> Q9
-    Q3 -- "Yes" --> Q5{"Can you tolerate a long<br/>runtime (accuracy over speed)?"}
+    Q3 -- "No" --> APOC
+    Q3 -- "Yes" --> Q5{"Can you tolerate a long<br/>runtime?"}
 
-    Q5 -- "No" --> Q9
-    Q5 -- "Yes" --> Q6{"Cells a very abnormal shape?<br/>(long, thin protrusions, …)"}
+    Q5 -- "No" --> APOC
+    Q5 -- "Yes" --> Q6{"Cellpose-SAM preview right?<br/>(long, thin cells not split,<br/>neighbours not fused)"}
 
-    Q6 -- "Yes" --> Q9
-    Q6 -- "No" --> SAM["Cellpose-SAM<br/>(zero-shot)"]
+    Q6 -- "Yes" --> SAM["Cellpose-SAM<br/>(zero-shot)"]
+    Q6 -- "No" --> APOC
 
-    subgraph PC ["Pixel classifier tree (User-provided sparse labeling)"]
+    subgraph PC ["Pixel classifiers (you paint sparse labels)"]
         PCrf["Pixel Classifier<br/>(Random Forest, CPU)"]
-        Q9{"Good signal/noise, low-res,<br/>simple blob-like objects?"}
-        Q9 -- "Yes" --> APOC["APOC"]
+        APOC["APOC<br/>(start here)"]
+        APOC --> Q9{"Foreground mask right<br/>after adding labels?"}
         Q9 -- "No" --> ConvPaint["ConvPaint"]
-        APOC --> Q10{"Good segmentation and good separation of touching<br/>objects after segmentation?"}
-        Q10 -- "Yes" --> Done["Finished"]
-        Q10 -- "No" --> ConvPaint
+        Q9 -- "Yes" --> Tune["Tune the splitting<br/>(post-processing)"]
+        ConvPaint --> Tune
+        PCrf --> Tune
     end
 
     classDef method fill:#d7f0e4,stroke:#1b7a5c,stroke-width:2px,color:#0b3d2e;
@@ -81,27 +81,28 @@ flowchart TD
 Practical rules:
 
 - **Import segmentation** is *not* a way to create segmentations: it checks existing masks (converting them to Zarr where needed) so the rest of the pipeline can consume them. Use it first if this covers your case — it skips everything else.
-- **Cellpose (v3)** is the fastest remaining path when the lab already has a pretrained model for your sample type (see [Cellpose page](cellpose.md) and [Zenodo](https://zenodo.org/records/18872978)), or when you can retrain one on your own masks. There is no zero-shot mode — if you have neither a pretrained nor a retrainable model, it isn't a usable option.
-- **Cellpose-SAM (v4, zero-shot)** needs **all four** to hold: clean channels (no bleed-through, one cell type per channel), a GPU, tolerance for a long runtime, and roughly convex cells (no long, thin protrusions). If any one fails, fall back to the pixel-classifier tree. In exchange it needs **no training and no annotation** — at the cost of being the slowest, most compute-heavy method (see [Cellpose-SAM page](cellpose_sam.md)). It also has no labeling step, so unlike the pixel classifiers — which can be taught to ignore channel bleed-through by painting it as background (see [Drawing technique](#drawing-technique)) — it cannot learn around bleed-through between channels.
+- **Cellpose (v3)** is the quickest route when the lab already has a model trained on images like yours (see [Cellpose page](cellpose.md) and [Zenodo](https://zenodo.org/records/18872978)), or when you can train one on full masks of your own. The page runs the model file you give it; without a suitable model, use Cellpose-SAM or a pixel classifier instead.
+- **Cellpose-SAM (v4, zero-shot)** is worth trying when you have a GPU, clean channels (no bleed-through, one cell type per channel) and time for a long run. It needs **no training and no annotation**, but it is the most compute-hungry method (see [Cellpose-SAM page](cellpose_sam.md)). Check its preview on a representative timepoint first: like other Cellpose models it can split long, thin cells (the Cellpose documentation suggests more **niter dynamics** iterations for long objects), and because it has no labeling step it cannot learn to ignore bleed-through between channels, whereas the pixel classifiers can be taught to by painting it as background (see [Drawing technique](#drawing-technique)). If the preview is wrong, use a pixel classifier.
 - **Cellpose** and **Cellpose-SAM** perform **true instance segmentation in one shot** — they directly output separated cell labels, no pixel labeling and no watershed post-processing. The three pixel classifiers (APOC, ConvPaint, Pixel Classifier) instead output a foreground/background mask or a per-class probability, which BEHAV3D EXPLORER turns into instance labels by [watershed post-processing](#instance-post-processing-parameters).
-- Otherwise, train a **pixel classifier** — pick by GPU and image quality:
-  - **APOC** needs a GPU with working OpenCL drivers, and works best with good signal-to-noise and simple, blob-like objects. You paint a few foreground/background pixels per cell type. Training is quick; inference is fast on a modern GPU.
-  - **ConvPaint** uses pretrained deep features instead of classical filters — reach for it when APOC's signal-to-noise/shape assumptions don't hold, or when APOC doesn't separate touching objects cleanly. Needs a PyTorch-compatible device (CUDA GPU strongly preferred; CPU works but is slow).
+- Otherwise, train a **pixel classifier** — pick by hardware, then by how well the classifier learns your cells:
+  - **APOC** needs a GPU with working OpenCL drivers. It classifies every voxel from classical filters, so it is not limited to round, blob-like objects (see below). You paint a few foreground/background pixels per cell type. Training is quick; inference is fast on a modern GPU. Start here when you have a GPU.
+  - **ConvPaint** uses pretrained deep features instead of classical filters — reach for it when APOC's foreground mask stays wrong after you add labels (subtle texture differences, low contrast, ambiguous boundaries). Needs a PyTorch-compatible device (CUDA GPU strongly preferred; CPU works but is slow).
   - **Pixel Classifier (Random Forest)** is the CPU-only fallback. Use it when no GPU is available.
+  - All three split touching cells with the **same** post-processing. If the mask is right but neighbouring cells stay fused, tune the [post-processing](#instance-post-processing-tuning) (or paint a thin background line between them, see [Drawing technique](#drawing-technique)) rather than switching method.
 
 **Choosing between the three pixel classifiers.** All three are trained by painting a few labels (see [Labeling foreground and background](#labeling-foreground-and-background)) and differ mainly in *where their features come from* and *what hardware they need*:
 
 | Method | Hardware | Features | Speed / cost | Choose when |
 |---|---|---|---|---|
-| **APOC** | GPU with working OpenCL | Classical filter bank (Gauss, DoG, LoG, SoG) at scales you choose, computed on the GPU | Fast to train and run, low memory | **Default choice** whenever you have a GPU — cell features are visually simple (clear edges, blobs, or intensity contrast) |
-| **ConvPaint** | CUDA GPU recommended | Deep features from a pretrained network (VGG16, DINOv2, …) | Slower feature extraction, more GPU memory | You have compute to spare **and** the cell type has features that are difficult to describe with classical filters — see below |
-| **Pixel Classifier (Random Forest)** | CPU only | Fixed set: smoothed intensity + edges at four physical scales (not editable) | Slowest of the three, but needs no GPU | No GPU is available at all |
+| **APOC** | GPU with working OpenCL | Classical filters (Gauss, DoG, LoG, SoG) at scales you choose, computed in 3-D on the GPU | Fast to train and run; GPU memory grows with the number of filters × channels | **Start here** whenever you have a GPU |
+| **ConvPaint** | CUDA GPU recommended | Deep features from a pretrained network (VGG16, DINOv2, …), computed in each Z slice | Slower feature extraction, more GPU memory | APOC's foreground mask stays wrong after adding labels — see below |
+| **Pixel Classifier (Random Forest)** | CPU only | Fixed set: smoothed intensity + edges at four physical scales, in 3-D (not editable) | Runs on the CPU, so usually the slowest | No GPU is available at all |
 
 The cutoff between APOC and ConvPaint is **feature complexity vs. speed/memory**.
 
-**APOC**'s classical filters each describe one simple visual property at one scale — a Gaussian blur, an edge (DoG/SoG), or a blob (LoG). If a cell type is reasonably describable as "a bright/dark blob" or "an edge at roughly this scale," APOC will find it, fast and cheap.
+**APOC**'s classical filters each describe one simple property around a voxel at one scale — smoothed intensity (Gauss), edge strength (SoG) or a spot/line response (DoG, LoG). The random forest combines many of them voxel by voxel, so APOC is not tied to a cell shape: round or elongated cells are learned alike, as long as their local intensity, edges or texture at these scales differ from the background. It does so fast and cheap.
 
-**ConvPaint** instead runs the image through a pretrained CNN or transformer, whose features encode learned, higher-order visual patterns (texture, local context, shape). That makes ConvPaint the better tool when there are subtle texture differences, low-contrast or ambiguous boundaries, or morphology that doesn't correspond to a simple blob/edge description. The price is slower iteration, more GPU memory, and a feature space that's harder to inspect than APOC's feature-importance table — so try APOC first and only reach for ConvPaint once APOC shows difficulty in segmenting or splitting objects.
+**ConvPaint** instead runs each Z slice through a pretrained CNN or transformer, whose features encode learned, higher-order visual patterns (texture, local context). That can help when there are subtle texture differences or low-contrast, ambiguous boundaries that classical filters do not capture. The price is slower iteration, more GPU memory, no 3-D context in the features, and a feature space that's harder to inspect than APOC's feature-importance table — so try APOC first and reach for ConvPaint when APOC's mask stays wrong despite more labels. Splitting of touching cells is the same in both (see [Instance post-processing parameters](#instance-post-processing-parameters)).
 
 ## Common structure of the pixel-classifier pages
 
@@ -113,7 +114,7 @@ The three pixel-classifier methods (APOC, ConvPaint, Pixel Classifier) follow th
 
 **Generate Training Data** (same for all three):
 
-- **Examples/sample** (default `3`, range 1–10) sets how many timepoints are taken from each sample. They are **evenly spaced** across the movie (always including the first and last timepoint), not random.
+- **Examples/sample** (default `3`, range 1–10) sets how many timepoints are taken from each sample. They are **evenly spaced** from the first to the last timepoint of the movie, not random.
 - The images are read in the background with a progress bar; napari stays responsive and the other tabs are locked meanwhile. The viewer is only cleared once the new layers are ready, so a failed load leaves your previous session untouched.
 - If training images were already generated for this project, a **Training Data Detected** dialog offers **Generate New**, **Load Existing** or **Cancel**. Previously saved labels are restored when they still fit the loaded images (Pixel Classifier: only with **Load Existing** — **Generate New** clears its saved labels).
 - The viewer then shows one image layer per channel (`Channel …`) plus empty or restored label layers to paint into.
@@ -174,23 +175,24 @@ APOC, ConvPaint and the Pixel Classifier are *pixel* classifiers: their raw outp
 
 | Parameter (GUI label) | Meaning |
 |---|---|
-| **EDT threshold** (**EDT** in Pixel Classifier) | Threshold on the Euclidean Distance Transform of the mask (distance of each voxel to the object border): voxels with a distance ≥ this value become watershed seeds. **Higher → seeds shrink toward each object's core, breaking the thin neck between touching objects → more splitting**; **lower → neighbouring cores stay connected → objects stay merged**. `0` disables splitting. |
-| **Opening px** (**Opening** in Pixel Classifier) | Morphological opening (in pixels) applied to the mask before watershed. Smooths boundaries and removes small protrusions / speckles. `0` disables. |
-| **Min size** | Segments smaller than this volume are discarded after watershed (noise / debris filter). |
-| **Fill holes** | Fill internal gaps inside objects before watershed (recommended for solid 3-D objects). Not used by the probability strategies. |
-| **Mask threshold** *(probability strategies)* | Foreground cutoff applied to the probability map to get a foreground mask. |
-| **Seed threshold** *(probability strategies)* | Higher cutoff used to place watershed seeds; should be ≥ Mask threshold. **Higher → keeps only each object's confident core as a seed, splitting more** touching objects; lower merges neighbouring cores together, splitting fewer. Same direction as EDT threshold above. |
+| **EDT threshold** (**EDT** in Pixel Classifier) | Threshold on the Euclidean Distance Transform of the mask, i.e. each foreground voxel's distance (in pixels) to the nearest background voxel. Each connected group of voxels at least this deep inside the mask is one **seed**; an object containing two or more seeds is cut between them by a watershed. **Higher → seeds shrink toward each object's core, breaking the thin neck between touching objects → more splitting**; **lower → neighbouring cores stay connected → objects stay merged**. Every voxel of a mask is at least 1 px from the background, so values up to 1 px (`0` and the APOC/ConvPaint default `1.0` included) leave one seed per object: nothing is split. |
+| **Opening px** (**Opening** in Pixel Classifier) | Morphological opening of the mask with a disk of this radius (pixels), in each Z slice, before watershed. Smooths boundaries and removes protrusions and specks narrower than about twice the radius. `0` disables. |
+| **Min size** | Objects smaller than this volume are discarded at the end (noise / debris filter). With the EDT strategies it also limits splitting: a piece smaller than Min size produced by the cut is merged back into its neighbour. |
+| **Fill holes** | Fill gaps fully enclosed by the object in each Z slice, before watershed (recommended for solid objects). Not used by the probability strategies. |
+| **Mask threshold** *(probability strategies)* | Foreground cutoff applied to the probability map: voxels above it are foreground. |
+| **Seed threshold** *(probability strategies)* | Higher cutoff used to place watershed seeds: each connected group of foreground voxels above it is one seed, and the watershed runs on the probability map. **Higher → keeps only each object's confident core as a seed, splitting more** touching objects; lower merges neighbouring cores together, splitting fewer. Same direction as EDT threshold above. At or below **Mask threshold** every object is one seed, so nothing is split. |
 
 Additional behaviour to know:
 
-- **Units: px ⇄ µm.** Each cell type's parameter block has a **Units:** switch. When the metadata contains pixel sizes, **EDT threshold** and **Min size** are shown in **µm** and **µm³** by default; flip the switch to **px** to see pixels/voxels. This only changes the display — values are always saved and used in pixels/voxels. **Opening** is always in pixels; Mask/Seed thresholds are probabilities (0–1).
-- An object is only split when it contains **two or more seeds**; otherwise it is kept whole, so raising the threshold too far looks "merged" again (see [Troubleshooting](troubleshooting.md)).
-- Objects that are flat (only one voxel thick in Z, Y or X) are always removed.
+- **Units: px ⇄ µm.** Each cell type's parameter block has a **Units:** switch. When the metadata contains pixel sizes, **EDT threshold** and **Min size** are shown in **µm** and **µm³** by default; flip the switch to **px** to see pixels/voxels. This only changes the display — values are always saved and used in pixels/voxels (EDT threshold is converted with the XY pixel size, Min size with the voxel volume). **Opening** is always in pixels; Mask/Seed thresholds are probabilities (0–1).
+- **How the distance is measured.** The Pixel Classifier measures it within each Z slice (in-plane distance). APOC and ConvPaint measure it in 3-D and count one Z step as one pixel, whatever the Z spacing; in a stack whose Z step is larger than the XY pixel, the deepest point of a cell is therefore about half the number of Z slices the cell spans, and a higher **EDT threshold** leaves no seed at all.
+- An object is only split when it contains **two or more seeds**; with fewer it is kept whole (never deleted), so raising the threshold too far — until the smaller cell's core or every core disappears — looks "merged" again (see [Troubleshooting](troubleshooting.md)).
+- Objects that are flat (only one voxel thick in Z, Y or X) are always removed by this post-processing.
 
 (instance-post-processing-tuning)=
 ### Instance post-processing tuning
 
-- Touching cells **merged** into one label → **raise EDT threshold** (Mask + EDT/Watershed strategy, Pixel Classifier), or **raise Seed threshold** (Probability strategies).
+- Touching cells **merged** into one label → **raise EDT threshold** (Mask + EDT/Watershed strategy, Pixel Classifier; it has no effect until it is above 1 px), or **raise Seed threshold** (Probability strategies; keep it above Mask threshold).
 - One cell **split** into several labels → **lower EDT threshold**, or **lower Seed threshold**.
 - Background labelled as cells → add more background labels, or **raise Mask threshold**.
 - Cells lost at the edges → **lower Mask threshold**.
@@ -205,7 +207,7 @@ Tune **each cell type on its own tab** (or, for the Pixel Classifier, its own gr
 - Work **one cell type at a time**: train (or paint), preview, look at the labels, adjust, repeat. Settings for one cell type do not apply to another.
 - **Big** (e.g. organoids): use a larger minimum size than for single cells. Stuck together → **raise** EDT threshold. Fuzzy outline → try a **probability** strategy (APOC, ConvPaint).
 - **Small / crowded** (e.g. immune, T cells): **small** minimum size; **lower** EDT threshold to start. One cell split into many → **lower** it further.
-- **Calculate before copying:** estimate a single cell's diameter from the image. With the **Units** switch on **µm** you can enter physical sizes directly. For **Min size**, a tolerant first preview is about half the estimated object volume. For **EDT threshold**, preview about 20–30 % of the object's diameter, then adjust (see [Recommended settings](../../recommended_settings.md)). Values from other experiments only transfer when the acquisition (resolution, magnification) matches.
+- **Calculate before copying:** estimate a single cell's diameter from the image. With the **Units** switch on **µm** you can enter physical sizes directly. For **Min size**, a tolerant first preview is about half the estimated object volume. For **EDT threshold**, preview about 20–30 % of the object's diameter, then adjust; in APOC and ConvPaint also keep it (in px) below about half the number of Z slices the object spans (see [How the distance is measured](#instance-post-processing-parameters) and [Recommended settings](../../recommended_settings.md)). Values from other experiments only transfer when the acquisition (resolution, magnification) matches.
 - **Several cell types in one experiment?** In APOC or ConvPaint, **Advanced (per cell type)** lets each type use a different strategy; still tune post-processing separately on each tab.
 
 ```{note}

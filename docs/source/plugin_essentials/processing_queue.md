@@ -87,7 +87,7 @@ The queue refuses to run the Pixel Classifier segmentation and APOC segmentation
 
 - **x** at the right of a row removes that step (pending steps only, not while the queue runs). Removing the Pixel Classifier segmentation step also removes its **🧠 Train Classifier** step.
 - **Clear** empties the whole queue.
-- The step count in the title bar turns yellow while steps are queued.
+- The title bar text turns yellow while steps are queued.
 
 ## What the queue does *not* do
 

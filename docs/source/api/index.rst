@@ -6,7 +6,7 @@ Auto-generated reference for the ``behav3d`` Python package.
 .. note::
 
    The wiki itself is oriented around the napari plugin's GUI. This section
-   exists for developers who want to call BEHAV3D functions directly from a
+   exists for developers who want to call BEHAV3D EXPLORER functions directly from a
    script or notebook, or who are reading the source to extend the plugin.
 
 .. toctree::

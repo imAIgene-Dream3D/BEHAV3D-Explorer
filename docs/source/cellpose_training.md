@@ -7,7 +7,7 @@ notebooks/train_behav3d_cellpose.ipynb
 ```
 
 ```{important}
-This is the **only** notebook in the BEHAV3D EXPLORER workflow that is meant for routine use. Everything else — segmentation, tracking, feature extraction, filtering, analysis — happens inside the napari plugin. The other notebook (`run_behav3d.ipynb` in `notebooks/`) is for **advanced users** who want to run the pipeline from Python; it is not covered in this wiki.
+This is the **only** notebook in the BEHAV3D EXPLORER workflow that is meant for routine use. Everything else — segmentation, tracking, feature extraction, filtering, analysis — happens inside the napari plugin.
 ```
 
 ```{tip}
@@ -16,7 +16,7 @@ No training data, or no time to annotate? Try [Cellpose-SAM (zero-shot)](process
 
 ## What it does
 
-Open the notebook in Jupyter (or VS Code) with the BEHAV3D environment active and **run the cells from top to bottom** — each step uses the settings of the previous one. The notebook produces a custom Cellpose model file that you then load in [Segmentation → Cellpose](processing/segmentation/cellpose.md).
+Open the notebook in Jupyter (or VS Code) with the BEHAV3D EXPLORER environment active and **run the cells from top to bottom** — each step uses the settings of the previous one. The notebook produces a custom Cellpose model file that you then load in [Segmentation → Cellpose](processing/segmentation/cellpose.md).
 
 ```{mermaid}
 flowchart LR
@@ -33,7 +33,7 @@ flowchart LR
 |---|---|
 | Training set | 3-D annotated images, ~70 % of your data, e.g. in `training_data/train/`. |
 | Validation set | 3-D annotated images, ~30 % of your data, e.g. in `training_data/val/`. Must be images the model has **never** seen during training. |
-| Image format | `png`, `jpg`, `jpeg`, `tif`, `tiff`. |
+| Image format | 3-D TIFF stacks (`.tif`, `.tiff`) with the channel axis first, also for a single channel (see [Step 4](#step-4--image-and-channel-settings)); masks have no channel axis. |
 | Mask pairing | Each image has a mask file (full instance labels: `0` = background, one integer per cell) in the same folder, with the same name except for an identifier (e.g. `sample01_img.tif` + `sample01_masks.tif`). |
 | Hardware | A CUDA GPU (training on CPU is impractically slow). |
 
@@ -55,13 +55,13 @@ training_data/
 
 ### Step 1 — Load packages
 
-Run the first two code cells. They load Cellpose, napari and the BEHAV3D helpers; nothing to set.
+Run the first two code cells. They load Cellpose, napari and the BEHAV3D EXPLORER helpers; nothing to set.
 
 ### Step 2 — Pick the model type
 
 In the dropdown, choose **Organoid** or **Immune cells/Other cell types**. This sets:
 
-- the **starting model** that is fine-tuned: Cellpose `cyto3` for organoids, `nuclei` for immune / other cells;
+- the **starting model** that is fine-tuned: Cellpose `cyto3` for organoids, `nuclei` for immune / other cells (when you train on one or two channels; with three or more the model starts from scratch);
 - the default **mask identifier** in Step 3 (`_organoids` or `_immune_other`) and the default model name in Step 5;
 - the **minimum object size** in the Step 6 check — **1000** voxels for organoids, **10** for immune / other, the same values the plugin uses.
 
@@ -79,8 +79,8 @@ The mask identifier is pre-filled with `_organoids` or `_immune_other`. If your 
 In the **Data/Channel config** panel:
 
 - **Z pixel size (micrometers):** and **XY pixel size (micrometers):** of your training images (used to correct for the Z/XY anisotropy);
-- **Dimension order:** `ZYX` (Z first, most TIFF stacks) or `YXZ` (Z last);
-- **Number of channels:** in the training images, and a **Label for channel *i*** for each (e.g. `tcell`, `organoid`). These labels are only used to pick the training channel(s) in Step 5 and end up in the model's file name; they do not have to match population names in the plugin.
+- **Dimension order:** of the axes after the channel axis, which must come first: `ZYX` (channel, Z, Y, X) or `YXZ` (channel, Y, X, Z);
+- **Number of channels:** in the training images, and a **Label for channel *i*** for each (e.g. `tcell`, `organoid`). These labels are only used to pick the training channel(s) in Step 5 and end up in the model's file name; they do not have to match population names in the plugin. Give every channel a **different** label: all are pre-filled with `tcell`, and the notebook finds the training channel by its label.
 
 Click **Save configuration** (use **Change configuration** to edit it again).
 
@@ -92,10 +92,10 @@ Run the cell; the **Training Cellpose** panel appears:
 - check the model name in **Basename for the … model:** (default `cellpose_organoids` or `cellpose_immune_other`);
 - click **Train the Cellpose model**.
 
-The notebook first cuts 2-D training images (up to 512 × 512 pixels) from your 3-D volumes — up to 10 planes per view (XY, ZY, ZX) per volume, corrected for anisotropy — and stores them in a `2D_cellpose<mask identifier>` subfolder of the train and validation folders. It then fine-tunes the model for **400 epochs** with fixed training settings; the notebook does not offer controls to change them. Training takes from tens of minutes to a few hours, depending on data size and GPU.
+The notebook first cuts 2-D training images (up to 512 × 512 pixels) from your 3-D volumes — up to 10 planes containing annotated cells per view (XY, ZY, ZX) per volume, corrected for anisotropy — and stores them in a `2D_cellpose<mask identifier>` subfolder of the train and validation folders. It then fine-tunes the model for **400 epochs** with fixed training settings; the notebook does not offer controls to change them. Training takes from tens of minutes to a few hours, depending on data size and GPU.
 
 ```{warning}
-**Train on one channel.** The plugin's Cellpose method gives the model **one** channel — the one mapped to the population you segment. A model trained on two or more channels does not receive its other channels in the plugin, so it performs poorly or fails to run.
+**Train on one channel.** The plugin's Cellpose method gives the model **one** channel — the one mapped to the population you segment. A model trained on two or more channels receives an empty image in place of its other channels in the plugin, so it performs poorly.
 ```
 
 ### Step 6 — Check the predictions in napari

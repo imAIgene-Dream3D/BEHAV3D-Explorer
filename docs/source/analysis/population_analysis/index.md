@@ -1,12 +1,12 @@
 # 👥 Population Dynamics
 
-**Population Dynamics** is the family of analyses that describe what happens to whole populations and to the contacts between them, as opposed to [Single Cell](../single_cell/index.md), which classifies the behaviour of individual cells. It answers four related questions about your **target** populations (organoid or "other" cell types) and the **effector** populations that contact them (immune or "other" cell types):
+**Population Dynamics** is the family of analyses that describe what happens to whole populations and to the contacts between them, as opposed to [Single Cell](../single_cell/index.md), which classifies the behaviour of individual cells. It answers four related questions about your **target** populations (organoid or "other" cell types) and the **effector** populations that contact them (immune or "other" cell types). Invasiveness and Active Killing additionally need the effector to be declared as immune (`im_`), and Invasiveness is measured against organoid types only — the prefix is a processing category, not a biological claim ([Population categories](../../data_preparation.md#population-categories)).
 
 | Page | Question it answers | Where you run it |
 |---|---|---|
 | [💀 Death Dynamics](death_dynamics.md) | How, and how fast, does a signal rise across each target population over the movie? | 📊 Analysis → 👥 Population Dynamics → **Step 1 — Death Dynamics** |
 | [🤝 Interaction Analysis](interaction_analysis.md) | How do contacts between targets and effectors relate to that signal? | 📊 Analysis → 👥 Population Dynamics → **Step 2 — Interaction Analysis** |
-| [🫳 Invasiveness Analysis](invasiveness.md) | How much of an effector's surface engages the target, from the *effector's* perspective? | 📊 Analysis → 👥 Population Dynamics → **Step 3 — Invasiveness Analysis** |
+| [🫳 Invasiveness Analysis](invasiveness.md) | How much of each effector — the cell plus a 2 µm shell — overlaps the target within the contact threshold (at the default 0 µm: the part of the cell inside the target), from the *effector's* perspective? | 📊 Analysis → 👥 Population Dynamics → **Step 3 — Invasiveness Analysis** |
 | [🎯 Active Killing](active_killing.md) | Which *individual* effectors are associated with a signal rise in the target they touched? | 🧪 Feature Extraction tab |
 
 ```{note}
@@ -72,7 +72,7 @@ Select your target(s) **first** — effector availability is judged against the 
 Next to each **▶ Run …** button:
 
 - **+🛒** — adds the step with the current selection to the [Processing Queue](../../plugin_essentials/processing_queue.md). A queued step whose inputs are still missing when it runs (e.g. Filtering earlier in the queue has not finished) skips itself with a log message instead of stopping the queue.
-- **👁** — opens the result PDF in napari, at the resolution set in the Results panel. It is enabled once the PDF exists; when several PDFs match your selection it offers a menu. If a PDF is older than the filtered table it was built from, the Log warns *"… is older than the track features it was built from — re-run this step to refresh it."*
+- **👁** — opens the result PDF in napari, at the resolution set in the Results panel. It is enabled once the PDF exists; when several PDFs match your selection it offers a menu. If a PDF is older than the filtered table it was built from, the Log warns *"… is older than the track features it was built from — re-run this step to refresh it."* Interaction and Invasiveness PDFs do not record their source table, so for them the check compares against every filtered table of the project.
 
 After Death Dynamics and Invasiveness runs, a pop-up offers **Open folder**. Every result file is also listed in the [📄 Results panel](../../plugin_essentials/results_panel.md) below the sub-tabs; where each analysis writes is summarised in [Output Directory & File Layout](../../plugin_essentials/output_layout.md#analysis).
 

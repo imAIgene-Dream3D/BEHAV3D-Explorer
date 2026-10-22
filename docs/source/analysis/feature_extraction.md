@@ -36,7 +36,7 @@ Each sub-tab lists the feature families as checkboxes. Families that downstream 
 | Family | What it measures | Always extracted for |
 |---|---|---|
 | **Contact** | Which neighbouring cells (of any cell type) each cell touches or is close to | All cell types |
-| **Invasiveness** | How much of an immune cell's surface is engaged with an organoid (0–100 %) | Optional; **immune sub-tabs only**, shown next to Contact |
+| **Invasiveness** | How much organoid lies in and right around an immune cell (0–100 %) | Optional; **immune sub-tabs only**, shown next to Contact |
 | **Movement** | Step length, distance travelled, mean square displacement, speed, directional persistence | Immune, Other |
 | **Intensity** | Per-channel intensity inside each cell's mask, plus self-normalised fold changes | All cell types |
 | **Morphology** | Volume, shape descriptors, surface area, principal axes, orientation | Optional |
@@ -101,13 +101,13 @@ The measured overlap is stored next to the alive/dead flag, so you never need to
 
 ## Active Killing
 
-The collapsible **🧬  Extended Analysis — Active Killing (Immune Cells)** section below the batch button appears when the metadata has at least one immune cell type. It detects, for each immune cell, the contacts after which the target's death signal rises enough to count as a kill. It is configured and run here but explained with the population analyses: **[Active Killing](population_analysis/active_killing.md)**. Run baseline Feature Extraction for the immune type first.
+The collapsible **🧬  Extended Analysis — Active Killing (Immune Cells)** section below the batch button appears when the metadata has at least one immune (`im_`) population, which plays the effector. It detects, for each effector cell, the contacts after which the target's death signal rises enough to count as a kill. It is configured and run here but explained with the population analyses: **[Active Killing](population_analysis/active_killing.md)**. Run baseline Feature Extraction for the immune type first.
 
 ## Apply, Run, Queue
 
 Each sub-tab has:
 
-- **Apply to all <Category>** (e.g. **Apply to all Organoids**, **Apply to all Other types**) — copies this sub-tab's feature checkboxes, contact threshold, workers, **Propagate dead signal** and (between non-organoid sub-tabs) dead threshold to every sub-tab of the same category.
+- **Apply to all <Category>** (e.g. **Apply to all Organoids**, **Apply to all Other types**) — copies this sub-tab's feature checkboxes, contact threshold, workers, **Propagate dead signal** and dead threshold to every sub-tab of the same category (the dead threshold only to immune and other sub-tabs; organoid sub-tabs already share one).
 - **Apply to all** — the same across all cell types.
 - **Run <Cell type> Feature Extraction** — runs this cell type for every sample.
 
@@ -215,15 +215,15 @@ When Morphology is on, the following are added. Units: volumes in µm³, lengths
 | `equivalent_diameter` | Diameter of a sphere with the same volume |
 | `axis1_length` / `axis2_length` / `axis3_length` | Longest / middle / shortest principal-axis length (spacing-aware) |
 | `major_axis_length`, `minor_axis_length` | The longest (`axis1`) and shortest (`axis3`) principal axis |
-| `elongation` | `axis1_length / axis2_length` — longest over middle axis |
-| `extent` | Volume divided by the **oriented** bounding-box volume (`axis1 × axis2 × axis3`) |
-| `oblateness` | Flatness: `1 − axis3/axis1` (0 = not flattened, →1 = disc-like) |
-| `prolateness` | Elongation: `1 − axis2/axis1` (0 = not elongated, →1 = cigar-like) |
+| `elongation` | $\text{axis1\_length} / \text{axis2\_length}$ — longest over middle axis |
+| `extent` | Volume divided by the **oriented** bounding-box volume ($\text{axis1} \times \text{axis2} \times \text{axis3}$) |
+| `oblateness` | Flatness: $1 - \text{axis3} / \text{axis1}$ (0 = not flattened, →1 = disc-like) |
+| `prolateness` | Elongation: $1 - \text{axis2} / \text{axis1}$ (0 = not elongated, →1 = cigar-like) |
 | `surface_area` | Physical surface area from exposed voxel faces (µm²) |
 | `sphericity` | How sphere-like the object is (1 = perfect sphere) |
-| `surface_to_volume_ratio` | `surface_area / volume` |
+| `surface_to_volume_ratio` | $\text{surface\_area} / \text{volume}$ |
 | `convex_volume` | Volume of the convex hull |
-| `solidity` | `volume / convex_volume` — how much the object fills its convex hull (1 = convex) |
+| `solidity` | $\text{volume} / \text{convex\_volume}$ — how much the object fills its convex hull (1 = convex) |
 | `orientation_vector` | Unit vector of the longest principal axis (the cell's 3-D orientation) |
 | `border_touching_segment` | `True` when the mask touches the edge of the image volume — border objects are cropped, so their morphology is unreliable |
 
@@ -265,23 +265,25 @@ For every cell type in the metadata — including the cell's own type, i.e. cont
 | `any_immune_cell_contact` / `any_immune_cell_contact_on_distance` | Aggregated over every immune type |
 
 ```{tip}
-`*_contact` answers **"is it touching?"** and `*_contact_on_distance` answers **"is it close enough to interact?"**. With the default threshold of 0 µm the two are nearly equivalent; raise it to 1–5 µm to capture near-contacts between cells that don't physically touch.
+`*_contact` answers **"is it touching?"** and `*_contact_on_distance` answers **"is it close enough to interact?"**. With the default threshold of 0 µm, `*_contact_on_distance` and `touching_*` only count segments that **overlap** the cell (possible between cell types, which are segmented separately, never within one type), so a neighbour that merely touches is flagged by `*_contact` alone. Raise the threshold by a few µm to also capture near-contacts between cells that don't physically touch.
 
 Changing the contact threshold changes the contact columns themselves, so it needs a new extraction with **Overwrite All** (Skip / Resume would reuse the cached contact measurements). Plan it as a deliberate re-run rather than interactive trial and error.
 ```
 
-### Invasiveness (immune only)
+### Invasiveness (immune populations)
+
+Offered on immune (`im_`) sub-tabs only and measured against every organoid type. The prefix is a processing category, not a biological claim: to measure it for any effector population, declare that population as immune ([Population categories](../data_preparation.md#population-categories)).
 
 When ticked, for each organoid type `<org>`:
 
 | Column | Meaning |
 |---|---|
-| `<org>_invasiveness_perc` | Of the voxels within 2 µm of the immune cell's boundary (its "surface"), the percentage that lie within the contact threshold of an `<org>` cell |
+| `<org>_invasiveness_perc` | The `<org>` voxels lying inside the immune cell or within the contact threshold of it, as a percentage of the cell's own voxels plus those within 2 µm outside its boundary |
 | `<org>_invasiveness` | `True` when `<org>_invasiveness_perc ≥ 50 %` |
 | `any_org_invasiveness_perc` | Maximum across all organoid types |
 | `any_org_invasiveness` | `True` when the cell is invasive for any organoid type |
 
-This is a **surface-engagement fraction** — how much of the immune cell's boundary is wrapped by organoid tissue — rather than a count of voxels inside the organoid. It is analysed in [Invasiveness](population_analysis/invasiveness.md).
+This is a **percentage relative to the cell's own size**, not a raw voxel count. With the default contact threshold of `0` µm it is the part of the immune cell that lies inside an organoid mask; a larger threshold also counts organoid tissue just outside the cell. It is analysed in [Invasiveness](population_analysis/invasiveness.md).
 
 ### Death
 
@@ -290,9 +292,9 @@ Requires a dead channel in the metadata and the dead mask from [Segmentation](..
 | Column | Meaning |
 |---|---|
 | `percentage_dead_mask` | Fraction (0–1) of the cell's voxels that overlap the dead mask |
-| `nr_dead_mask_pixels` | Number of overlapping voxels = `nr_pixels × percentage_dead_mask` |
+| `nr_dead_mask_pixels` | Number of overlapping voxels = $\text{nr\_pixels} \times \text{percentage\_dead\_mask}$ |
 | `increase_dead_mask` | Change in `nr_dead_mask_pixels` compared with the same cell 10 timepoints earlier — a simple death-rate proxy |
-| `smoothed_percentage_dead_mask`, `smoothed_nr_dead_mask_pixels`, `smoothed_increase_dead_mask` | Rolling means of the three signals over ≈ 10 minutes (unsmoothed copies when frames are more than 10 min apart), used by Death Dynamics to damp single-frame noise |
+| `smoothed_percentage_dead_mask`, `smoothed_nr_dead_mask_pixels`, `smoothed_increase_dead_mask` | Rolling means of the three signals over ≈ 10 minutes (unsmoothed copies when frames are more than 10 min apart), to damp single-frame noise. Death Dynamics does not read these: it recomputes its own smoothing (see [Death Dynamics](population_analysis/death_dynamics.md#reading-the-tables)) |
 | `dead` | Alive/dead flag: `percentage_dead_mask` ≥ **Dead mask % threshold**. With **Propagate dead signal** on, the flag stays `True` from the first crossing onward. Not written when the threshold is 0 |
 
 $$

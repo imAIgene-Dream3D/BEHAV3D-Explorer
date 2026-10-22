@@ -1474,7 +1474,7 @@ class CellTypeTab(QWidget):
             row2.addWidget(self.opening_nr_pixels_spin)
             row2.addWidget(HelpButton(
                 "Morphological opening",
-                "Number of erosion-then-dilation iterations applied to the mask.\n"
+                "Radius (in pixels) of the disk used to open the mask, slice by slice in Z.\n"
                 "Smooths boundaries and removes small speckles. Set to 0 to disable."
             ))
 
@@ -1545,7 +1545,7 @@ class CellTypeTab(QWidget):
             row1.addWidget(self.opening_nr_pixels_spin)
             row1.addWidget(HelpButton(
                 "Morphological opening",
-                "Number of erosion-then-dilation iterations applied to the mask.\n"
+                "Radius (in pixels) of the disk used to open the mask, slice by slice in Z.\n"
                 "Smooths boundaries and removes small speckles. Set to 0 to disable."
             ))
             group_layout.addLayout(row1)

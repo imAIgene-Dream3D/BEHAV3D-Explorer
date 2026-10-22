@@ -28,7 +28,7 @@ Pick **Import tracking** in the **Method:** dropdown of a cell-type sub-tab. The
 
 1. **TIFF source:** a **Confirm Axis Order** dialog shows the image shape and the detected axis order; confirm or pick the right one (e.g. `TZYX` = time, z, y, x). The TIFF is then converted to zarr.
    **Zarr source:** a valid zarr (see below) is copied to the standard location; any other zarr is rewritten in the right layout.
-2. The labels are converted to the standard 16-bit label format (negative labels are renumbered). If the source already *is* the destination file, a backup copy is kept.
+2. The labels are converted to the standard 16-bit label format (32-bit when IDs exceed 65 535); negative labels are given new, unused IDs, the same in every frame. If the source already *is* the destination file and has to be converted, the original is kept as a backup copy next to it.
 3. The tracks CSV is computed from the labels (centroid of every TrackID at every timepoint, in pixels and physical units — see [CSV column reference](index.md#csv-column-reference)).
 4. The metadata columns `<prefix>_<cell_type>_tracks_image_path` and `<prefix>_<cell_type>_tracks_csv_path` are set to the new files and `metadata.csv` is saved.
 

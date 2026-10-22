@@ -912,7 +912,7 @@ class CellTypeFeaturePanel(QWidget):
             "voxel spacing, so pixel-entered values are converted to µm "
             "before use).\n\n"
             "A distance transform (using real voxel spacing) is computed "
-            "around each segment's border; any other-cell-type segment "
+            "around each segment's border; any other segment "
             "found within this distance sets '{type}_contact_on_distance' "
             "= True and adds its TrackID to 'touching_{type}s'.\n\n"
             "This value also defines the neighbourhood used by the Organoid "
@@ -930,19 +930,20 @@ class CellTypeFeaturePanel(QWidget):
         if self.category == "immune" and "invasiveness" in self.feature_checks:
             inv_cb = self.feature_checks["invasiveness"]
             inv_cb.setToolTip(
-                "Count how many immune voxels lie inside organoid masks at each "
-                "timepoint. Requires both immune segments and organoid masks; "
-                "automatically aggregated downstream."
+                "Per-timepoint percentage of organoid in and right around each "
+                "immune cell (see ? for the definition). Requires both immune "
+                "segments and organoid masks; automatically aggregated downstream."
             )
             contact_row.addWidget(inv_cb)
             contact_row.addWidget(HelpButton(
                 "Organoid Invasiveness (Advanced)",
-                "Per-timepoint measure of how much of this immune cell's surface\n"
-                "is embedded in an organoid, not a voxel count inside the mask.\n\n"
-                "'Surface' pixels are those within 2 µm of the immune cell's\n"
-                "segment boundary. Of those, the fraction that also lies within\n"
-                "the Contact Threshold distance of an organoid segment gives\n"
-                "'{organoid}_invasiveness_perc' (0-100%).\n\n"
+                "Per-timepoint percentage of organoid in and right around this\n"
+                "immune cell (a percentage, not a raw voxel count).\n\n"
+                "Organoid voxels lying inside the immune cell or within the\n"
+                "Contact Threshold of it, as a percentage of the cell's own voxels\n"
+                "plus those within 2 µm outside its boundary, give\n"
+                "'{organoid}_invasiveness_perc' (0-100%). With the default Contact\n"
+                "Threshold of 0 µm this is the part of the cell inside an organoid mask.\n\n"
                 "'{organoid}_invasiveness' (bool) is True when that percentage is\n"
                 "≥ 50%. 'any_org_invasiveness[_perc]' aggregates across all\n"
                 "organoid types (max / any).\n\n"
@@ -1051,11 +1052,11 @@ class CellTypeFeaturePanel(QWidget):
             "Dead Mask Percentage Threshold",
             "Percentage of dead-mask pixels overlapping a segment's volume\n"
             "required to classify the cell as dead.\n\n"
-            "By default, classification is sticky: once a track crosses this\n"
-            "threshold at any timepoint, it is marked 'dead' from that timepoint\n"
+            "On organoid sub-tabs classification is sticky by default: once a\n"
+            "track crosses this threshold it is marked 'dead' from that timepoint\n"
             "onward for the rest of the track, even if the percentage later\n"
-            "drops again. This can be turned off in Advanced Configuration\n"
-            "below ('Propagate dead signal').\n\n"
+            "drops again. On immune/other sub-tabs it is pointwise by default.\n"
+            "Change this in Advanced Configuration below ('Propagate dead signal').\n\n"
             "Set to 0 to skip dead classification.\n"
             "Entered as a percentage here; saved to behav3d_parameters.yml\n"
             "as a fraction (e.g. 3 % is saved as 0.03).",
@@ -2695,9 +2696,9 @@ class ActiveKillingPanel(QWidget):
         layout.setSpacing(6)
 
         desc = QLabel(
-            "Detects functional killing events: for each immune\u2013target contact, "
-            "checks whether that target organoid's OWN death signal rises enough "
-            "after contact (vs its signal at contact start) to count as a kill.\n"
+            "Detects functional killing events: at every timepoint of an immune\u2013target "
+            "contact, checks whether the touched target's OWN death signal rises enough "
+            "over the observation window (vs its signal at that timepoint) to count as a kill.\n"
             "\u26a0\ufe0f  Run baseline feature extraction for the immune type FIRST."
         )
         desc.setWordWrap(True)
@@ -2760,11 +2761,11 @@ class ActiveKillingPanel(QWidget):
             make_help_row(
                 self.spin_obs_window,
                 "Observation Window",
-                "How many timepoints after contact starts to measure the touched\n"
-                "target's death-signal rise: its signal at (contact start + window)\n"
-                "minus its signal at contact start. Measured separately for each\n"
-                "touched target organoid.\n\n"
-                "If the window runs past the end of the timelapse, the last\n"
+                "How many timepoints after EACH contact timepoint t to measure the\n"
+                "touched target's death-signal rise: its signal at (t + window)\n"
+                "minus its signal at t. Measured separately for each touched\n"
+                "target and each contact timepoint.\n\n"
+                "If the target's track ends before t + window, its last\n"
                 "available frame is used (no extrapolation).",
             ),
         )
@@ -2784,7 +2785,7 @@ class ActiveKillingPanel(QWidget):
                 self.death_signal_combo,
                 "Death Signal Column",
                 "Which target-cell column is read as the death signal:\n\n"
-                "  percentage_dead_mask  - % of dead-mask pixels in the segment\n"
+                "  percentage_dead_mask  - fraction (0-1) of the segment in the dead mask\n"
                 "  mean_dead_dye         - mean dead-dye channel intensity\n"
                 "  nr_dead_mask_pixels   - raw count of dead-mask pixels\n\n"
                 "Switching this changes the units of the Absolute Threshold below,\n"
@@ -2805,12 +2806,12 @@ class ActiveKillingPanel(QWidget):
                 self.spin_threshold_mult,
                 "Killing Threshold Multiplier",
                 "Sets the kill threshold as a multiple of each touched target's OWN\n"
-                "death signal at contact start (no sample-wide or cross-organoid\n"
-                "averaging).\n\n"
-                "Active killing when, by the end of the observation window, the\n"
-                "target's signal exceeds  signal_at_contact_start x multiplier.\n\n"
-                "Default 1.5  ->  signal must grow past 150% of its value at contact.\n\n"
-                "If the signal is exactly 0 at contact start, 0.1 is used in its place\n"
+                "death signal at the contact timepoint t being scored (no sample-wide\n"
+                "or cross-organoid averaging).\n\n"
+                "Active killing at t when, by the end of the observation window\n"
+                "(t + window), the target's signal exceeds  signal_at_t x multiplier.\n\n"
+                "Default 1.5  ->  signal must grow past 150% of its value at t.\n\n"
+                "If the signal is exactly 0 at t, 0.1 is used in its place\n"
                 "so the threshold isn't trivially 0 (which would flag any rise).\n\n"
                 "Ignored when 'Use absolute threshold' is checked.",
             ),
@@ -2823,7 +2824,7 @@ class ActiveKillingPanel(QWidget):
         abs_threshold_row.addWidget(HelpButton(
             "Use Absolute Threshold",
             "Decide killing with the fixed 'Absolute threshold' below instead of "
-            "the multiplier (signal_at_contact_start x multiplier).\n\n"
+            "the multiplier (signal at each contact timepoint x multiplier).\n\n"
             "Best when targets tend to start near-zero death signal, where the "
             "multiplier becomes over-sensitive to tiny changes.\n\n"
             "Generally recommended with 2 or more target lines that have different "
@@ -2852,9 +2853,9 @@ class ActiveKillingPanel(QWidget):
             make_help_row(
                 self.spin_abs_threshold,
                 "Absolute Killing Threshold",
-                "Fixed minimum death-signal rise (in the Death Signal Column's\n"
-                "units, from contact start to the end of the observation window)\n"
-                "needed to count as a kill.\n\n"
+                "Fixed death-signal rise (in the Death Signal Column's units,\n"
+                "from each contact timepoint t to t + observation window) that\n"
+                "must be exceeded to count as a kill.\n\n"
                 "Only used when 'Use absolute threshold' is checked; it then fully\n"
                 "replaces the multiplier.\n\n"
                 "Best for targets that start near-zero death signal. Tip: pair with\n"
@@ -2872,7 +2873,8 @@ class ActiveKillingPanel(QWidget):
                 self.spin_min_contact,
                 "Minimum Contact Duration",
                 "Minimum number of consecutive timepoints an immune cell must remain\n"
-                "in contact with a target cell for the event to qualify.\n\n"
+                "in contact with ANY selected target (the touched target may change)\n"
+                "for the event to qualify.\n\n"
                 "Default: 1 (all contacts are included).",
             ),
         )
@@ -2890,9 +2892,10 @@ class ActiveKillingPanel(QWidget):
                 self.contact_column_combo,
                 "Contact Column",
                 "Which per-target-type column decides when a contact event starts/ends:\n\n"
-                "  contact              - pixel/mask adjacency (segments within ~1.73 px).\n"
-                "                         Ignores the Contact Threshold set in Feature\n"
-                "                         Extraction. This is the original behavior.\n"
+                "  contact              - pixel/mask adjacency (segments within ~1.73 px);\n"
+                "                         the target must also be within the Feature\n"
+                "                         Extraction Contact Threshold, as the touched-\n"
+                "                         target list is distance-based. Original behavior.\n"
                 "  contact_on_distance  - real (µm) distance-based contact, using the\n"
                 "                         Contact Threshold configured in Feature\n"
                 "                         Extraction. Matches the distance-based matching\n"
@@ -2967,10 +2970,10 @@ class ActiveKillingPanel(QWidget):
             "QPushButton:hover { background: #546E7A; }"
         )
         self.btn_export_gifs.setToolTip(
-            "Render the top-N active-killing events as animated GIFs (cropped 3D\n"
-            "max-projection movies: raw signal, dead mask in red, active immune\n"
-            "cell in purple).\n\n"
-            "Saved to analysis/<immune>/active_killing/<target>/gallery/<sample>/.\n"
+            "Render one animated GIF per top-N killer of EACH sample, showing its\n"
+            "strongest event (cropped 3D max-projection movie: raw signal, dead\n"
+            "mask in red, active immune cell in purple).\n\n"
+            "Saved to analysis/<immune>/active_killing/<target or 'combined'>/gallery/<sample>/.\n"
             "Requires Active Killing Analysis to have been run at least once."
         )
         self.btn_export_gifs.clicked.connect(self._on_export_gifs_clicked)
@@ -3381,7 +3384,7 @@ class ActiveKillingPanel(QWidget):
                 else:
                     axes[0].hist(df_sample_active["killing_efficiency"].dropna(), bins=20, color="red", alpha=0.8)
             axes[0].set_title("1. Killing Efficiency Distribution", fontsize=14, fontweight='bold')
-            axes[0].set_xlabel("Efficiency Score (signal increase / expected background)")
+            axes[0].set_xlabel("Efficiency Score (signal increase / killing threshold)")
             axes[0].set_ylabel("Active Killing Events")
             
             # Plot 2: Smoothed Kinetics
@@ -3447,7 +3450,7 @@ class ActiveKillingPanel(QWidget):
             else:
                 ax.hist(df_active_all["killing_efficiency"].dropna(), bins=20, color="purple", alpha=0.8)
             ax.set_title("Combined Killing Efficiency Distribution", fontsize=16, fontweight="bold")
-            ax.set_xlabel("Efficiency Score (signal increase / expected background)")
+            ax.set_xlabel("Efficiency Score (signal increase / killing threshold)")
             ax.set_ylabel("Active Killing Events")
             combined_dir = results_dir / "plots"
             combined_dir.mkdir(parents=True, exist_ok=True)

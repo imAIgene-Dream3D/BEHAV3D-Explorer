@@ -171,7 +171,7 @@ Full states combine each intrinsic state with the binary flags. Treat them as ca
 
 #### Binary precedence is a manual naming rule
 
-When several flags can be true together, decide a naming hierarchy yourself; BEHAV3D does not impose one. For example, a cell that is both **dead** and **in organoid contact** and clearly looks dead in backprojection is best simply named *dead*. If such a class does **not** look dead (it may only pick up death signal from a dying organoid it touches), name it after what you see. Use the flags as clues, but let the QC plots and backprojection decide.
+When several flags can be true together, decide a naming hierarchy yourself; BEHAV3D EXPLORER does not impose one. For example, a cell that is both **dead** and **in organoid contact** and clearly looks dead in backprojection is best simply named *dead*. If such a class does **not** look dead (it may only pick up death signal from a dying organoid it touches), name it after what you see. Use the flags as clues, but let the QC plots and backprojection decide.
 
 ## Reports
 
@@ -207,7 +207,7 @@ Which full behavioural states cells switch between, and how often. Settings are 
 | **Node labels:** | `Side legend` | State names written **On dots**, or in a numbered **Side legend** (better for long names or many states). |
 | **Transition matrix heatmap** | on | Adds the transition matrix page. |
 | **Circular transition diagram** | on | Adds the circular diagram pages. |
-| **Include self-transitions** | off | Staying in the same state is never drawn as an arrow. Off: arrows show how a state's *switches* are split between the other states. On: arrows show each transition's share of all timepoints, including staying, which makes arrows thin for states that rarely switch. |
+| **Include self-transitions** | off | Off: arrows show how a state's *switches* are split between the other states (no self-loops). On: staying in the same state is drawn as a loop beside each node and every arrow shows its share of all timepoints, which makes arrows thin for states that rarely switch. |
 | **Show per-cluster breakdown grid** | on | Adds two pages with one small diagram per state (outgoing and incoming), useful when the overlaid diagram is too busy. |
 | **N-gram rankings** | on | Adds rankings of the most common state sequences. |
 | **Sankey diagrams (all state pairs)** | off | Adds Sankey diagrams of the paths cells take from each state to each other state. The slowest part of the report. |

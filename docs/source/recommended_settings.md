@@ -1,6 +1,6 @@
 # Deriving settings for a new dataset
 
-BEHAV3D settings should be derived from the current acquisition and previewed. Cell
+BEHAV3D EXPLORER settings should be derived from the current acquisition and previewed. Cell
 names and values from earlier experiments are not presets, and the plugin's defaults
 are starting points, not recommendations.
 
@@ -31,18 +31,29 @@ directly. To enter pixels or voxels instead, first set **Units:** to **px**
 
 For **EDT threshold**, preview 20%, 25%, and 30% of the diameter:
 
-```text
-EDT (µm) = 0.20 to 0.30 * diameter_micrometres
-EDT (px) = EDT (µm) / XY_pixel_size
-```
+$$
+\begin{aligned}
+\text{EDT}\,(\text{µm}) &= (0.20 \text{ to } 0.30) \times d \\[4pt]
+\text{EDT}\,(\text{px}) &= \frac{\text{EDT}\,(\text{µm})}{\text{XY pixel size}}
+\end{aligned}
+$$
+
+where $d$ is the cell diameter in µm, and the pixel size and Z spacing (in µm) are those of your metadata.
+Values up to 1 px split nothing. APOC and ConvPaint measure this distance in 3-D and
+count one Z step as one pixel, so there the EDT threshold (in px) must also stay below
+about half the number of Z slices a cell spans, $d / (2 \times \text{Z spacing})$;
+otherwise no seed is left and nothing is split
+([Instance post-processing parameters](processing/segmentation/index.md#instance-post-processing-parameters)).
 
 For a 3D **Min size** preview, estimate the full spherical volume and begin at 50% to
 tolerate dim or incomplete masks:
 
-```text
-Min size (µm³)    = 0.5 * (4/3 * pi * (diameter_micrometres / 2)^3)
-Min size (voxels) = Min size (µm³) / (XY_pixel_size^2 * Z_spacing)
-```
+$$
+\begin{aligned}
+\text{Min size}\,(\text{µm}^3) &= 0.5 \times \frac{4}{3}\,\pi \left(\frac{d}{2}\right)^{3} \\[4pt]
+\text{Min size}\,(\text{voxels}) &= \frac{\text{Min size}\,(\text{µm}^3)}{(\text{XY pixel size})^{2} \times \text{Z spacing}}
+\end{aligned}
+$$
 
 Elongated, protrusive, and confluent objects do not fit a diameter model. Use a
 permissive threshold, annotate borders/background, and inspect the segmentation. For
@@ -57,35 +68,40 @@ types; change it when your data say otherwise ([Tracking](processing/tracking/in
 
 | Observed behavior | Starting method |
 |---|---|
-| Detection loses overlap with its previous position | btrack |
-| Detection overlaps and may fragment; no new objects appear during the movie | Fragmentation Propagation |
-| Detection overlaps/touches and IDs must remain within connected regions, or new objects appear | Bounded Propagation |
+| Detection loses overlap with its previous position | btrack (LapTrack and TrackPy are alternatives) |
+| Detection overlaps and may fragment; no new objects appear during the movie (objects appearing later get no ID) | Fragmentation Propagation |
+| Detection overlaps/touches and IDs must remain within connected regions, or new objects appear (they get new IDs) | Bounded Propagation |
 | Physical object is static but its segmented reporter flickers | Reporter Propagation |
 
 For btrack (distances in µm by default):
 
-```text
-Max search radius = fastest_measured_one_frame_displacement * (1 + margin)
-```
+$$
+\text{Max search radius} = \text{fastest one-frame displacement} \times (1 + \text{margin})
+$$
 
 Use a modest 10-25% margin. If you enable the global optimizer, set **Distance
 threshold** and **Time threshold** from the largest spatial gap and missing-frame
-duration that should reconnect. Tick **P_branch** for division; keep **P_init** and
-**P_term** (on by default) for field-of-view entry and exit. Lower **Step size
-(frames)** only after an out-of-memory error.
+duration that should reconnect. Tick **P_branch** for division (see
+[how divisions appear in the output](processing/tracking/btrack.md#tuning-the-parameters));
+keep **P_init** and **P_term** (on by default) for field-of-view entry and exit.
 
 For a moving object with a flickering reporter, track a constitutive channel and use
 the reporter as an intensity feature, or use permissive segmentation plus btrack.
 
 ## Feature extraction and analysis
 
-Choose features from the research question:
+Contact and intensity (and, for immune and other types, movement) are always extracted
+([feature families](analysis/feature_extraction.md#the-six-feature-families)). Choose
+what to add, and what to analyse, from the research question:
 
-- Movement for motility and directional behavior.
-- Contact for strict touching (contact threshold `0` µm) or calibrated proximity.
+- Movement for motility and directional behavior (optional only for organoids).
+- Contact: `*_contact` flags touching masks; `*_contact_on_distance` uses the contact
+  threshold, which at the default `0` µm counts only overlapping masks. Raise it (in µm)
+  for a calibrated proximity ([Contact](analysis/feature_extraction.md#contact)).
 - Morphology for shape/plasticity questions.
 - Channel intensity for switch-on or fluctuating reporters.
-- Invasiveness for surface engagement between selected objects.
+- Invasiveness (immune types only) for how much of an effector cell lies inside or right
+  around an organoid.
 
 Set the **Dead mask % threshold:** by eye with **👁  Preview Dead Threshold in Viewer**
 at a timepoint you trust ([Feature Extraction](analysis/feature_extraction.md#preview-dead-threshold-in-viewer)).
@@ -97,7 +113,8 @@ observation window as a duration and convert it to timepoints
 These names do not prove the signal represents death; keep your own biological
 definition.
 
-Behavioral State can classify any single-cell population. Decide whether states should
+Behavioral State can classify any immune or other population (organoid types are
+analysed in Population Dynamics). Decide whether states should
 represent movement, contact, morphology, channel intensity, or a combination. Derive
 **Window size (timepoints):** and **Smooth window (timepoints):** from event duration and
 acquisition cadence (the real time is shown below each) rather than keeping the bare
@@ -106,12 +123,12 @@ default of `5` frames.
 ## Filtering
 
 Inspect the track-length distribution (**📊 See Track Length Distributions**) before
-choosing **Min length**. A minimum removes shorter tracks. **Trim tracks to maximum
-length** is on by default (`30`, splitting longer tracks into 30-timepoint pieces):
-untick it unless you need tracks of equal length; when you do, equal minimum and
-maximum values are valid. Filtering must still run with all filters disabled because
-it creates the table every analysis reads.
+choosing **Min length**. **Trim tracks to maximum length** is on by default (`30`,
+splitting longer tracks into 30-timepoint pieces): untick it unless you need tracks of
+equal length; when you do, equal minimum and maximum values are valid. Run Filtering
+even with all filters disabled: Population Dynamics reads only the filtered table, and
+the other analyses use it whenever it exists.
 
 For how many cells survive a given minimum length, use the QueenB **Cell counts** quick
-action, which counts from the current feature table, rather than estimating
-([Filtering](analysis/filtering.md#preview-track-lengths)).
+action, which counts them from the unfiltered Feature Extraction table, rather than
+estimating ([Filtering](analysis/filtering.md#preview-track-lengths)).

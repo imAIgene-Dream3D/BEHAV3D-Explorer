@@ -5,10 +5,10 @@ Fragmentation Propagation is **not** a centroid-distance method. It links object
 ## How it works
 
 - The labels of the **first timepoint** become the track IDs.
-- At every following timepoint, each foreground piece is flooded with the ID of the previous-frame object it overlaps. A second pass on the mask dilated by **2 pixels** lets an ID also reach pieces separated from it by a gap of up to ~2 pixels.
-- Because every piece that overlaps an object's previous footprint inherits its ID, an object that **breaks into fragments keeps one identity** — which is what lets, for example, death-dye signal be quantified while an organoid falls apart.
-- Pieces smaller than **100 voxels** after propagation are removed (fixed, not adjustable).
-- Foreground that overlaps no existing track receives **no ID**: objects that appear part-way through the movie are not tracked.
+- At every following timepoint, each foreground piece is flooded with the ID of the previous-frame object it overlaps (a piece that overlaps several objects is divided between them). A second pass on the mask dilated by **2 pixels in XY** lets an ID also reach pieces lying up to about 4 pixels away within the same Z slice.
+- Because every piece that overlaps an object's previous footprint inherits its ID, an object that **breaks into fragments keeps one identity** — which is what lets, for example, death-dye signal be quantified while an organoid falls apart. Objects that fuse keep their own IDs; the joined mask is divided between them.
+- After each timepoint, a track whose **total size in that frame is below 100 voxels** is removed (fixed, not adjustable). Small fragments of a larger object are kept. Because each frame is propagated from the previous one, a removed track does not come back.
+- Foreground that neither overlaps an existing track nor lies within that small gap of one receives **no ID**: objects that appear part-way through the movie are not tracked (new objects touching an existing track take that track's ID).
 
 ## When it applies
 
@@ -38,7 +38,7 @@ By **default**, all organoid cell types are tracked as one cohort in a single **
 ```{admonition} When to set it
 :class: important
 
-- **Leave it ON (default)** to track all organoid types **in one scene with a single, shared set of track IDs**. The masks of all organoid types are combined at every timepoint; IDs are assigned at the first timepoint (unique across types) and propagated through the combined masks. You get the combined `all_organoids` output **and** per-type outputs split from the same run, so each type can still be analysed on its own.
+- **Leave it ON (default)** to track all organoid types **in one scene with a single, shared set of track IDs**. The masks of all organoid types are combined at every timepoint; IDs are assigned at the first timepoint (unique across types) and propagated through the combined masks, so where two types touch, a track can spread into the other type's mask. You get the combined `all_organoids` output **and** per-type outputs split from the same run, so each type can still be analysed on its own.
 - **Turn it OFF** to track each organoid type **separately** — its own run, its own independent IDs, and each sub-tab free to use a **different tracking method**.
 ```
 
@@ -80,10 +80,10 @@ There are no parameters to change. Tuning means **improving the segmentation**, 
 - Cause: where objects touch, the watershed divides the joined region between their IDs and the boundary may shift.
 - Fix: improve segmentation so the objects stay separated, or correct with **Swap** / **Split** in [Manual editing](manual_editing.md).
 
-**Small pieces disappear**
+**Small objects disappear**
 
-- Cause: pieces smaller than 100 voxels are removed after each frame.
-- Fix: usually harmless debris. If these pieces matter, [Bounded Propagation](bounded_propagation.md) has an adjustable size limit — but it gives separated pieces their own IDs.
+- Cause: a track whose total size in a frame falls below 100 voxels is removed and does not come back (fragments of a larger object are kept).
+- Fix: usually harmless debris. If these objects matter, [Bounded Propagation](bounded_propagation.md) has an adjustable size limit — but it gives separated pieces their own IDs.
 
 **You tracked all organoids together but needed fully separate tracking**
 

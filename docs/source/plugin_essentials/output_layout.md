@@ -13,28 +13,33 @@ You pick it once, in **Data Preparation → 1 · Output Directory**. All tabs re
 ├── metadata.csv                        # the metadata table (saved here by the Metadata Builder)
 ├── metadata.csv.bak                    # original copy, kept the first time paths are re-linked after a move
 ├── behav3d_parameters.yml              # project settings, saved automatically
+├── assistant_log.md                    # QueenB's replies, appended as you chat
 │
 ├── images/
-│   ├── PixelClassification/            # Pixel Classifier / APOC / ConvPaint classifiers and training labels
-│   │                                   #   (incl. the PixelClassifier_TrainingData.zip training bundle)
+│   ├── PixelClassification/            # Pixel Classifier / APOC / ConvPaint classifiers, training images
+│   │                                   #   and labels (incl. APOC's PixelClassifier_TrainingData.zip bundle)
 │   └── <sample>/                       # one folder per sample
-│       ├── <sample>.zarr                       # converted raw image
-│       ├── <sample>_<cell_type>_segments.zarr  # segmentation, one per population
-│       ├── <sample>_<cell_type>_segments.progress.json  # Cellpose-SAM resume record
-│       ├── <sample>_mask_dead.zarr             # dead mask (only with a dead channel)
-│       └── <sample>_<cell_type>_tracked.zarr   # tracked segments, one per population
+│       ├── <sample>.zarr                         # converted raw image
+│       ├── <sample>_<cell_type>_segments.zarr    # segmentation, one per population
+│       ├── <sample>_<cell_type>_mask.zarr        # foreground mask (APOC, ConvPaint, Pixel Classifier)
+│       ├── <sample>_mask_dead.zarr               # dead mask (only with a dead channel)
+│       ├── <sample>_<cell_type>_segments.progress.json  # resume record (Cellpose-SAM, APOC, ConvPaint)
+│       ├── .seg_processing                       # hidden marker of an interrupted Pixel Classifier run
+│       ├── <sample>_<cell_type>_tracked.zarr     # tracked segments, one per population
+│       └── <sample>_all_organoids_tracked.zarr   # all organoid types tracked together
 │
 ├── trackdata/
 │   └── <sample>/
-│       └── <cell_type>/
-│           ├── <sample>_<cell_type>_tracks.csv          # tracks table
-│           ├── <sample>_<cell_type>_track_features.csv  # per-sample features (Feature Extraction)
-│           └── intermediate_results/                    # per-sample feature parts
+│       ├── <cell_type>/
+│       │   ├── <sample>_<cell_type>_tracks.csv          # tracks table
+│       │   ├── <sample>_<cell_type>_track_features.csv  # per-sample features (Feature Extraction)
+│       │   └── intermediate_results/                    # per-sample feature parts
+│       └── all_organoids/                               # tracks table of the joint organoid run
 │
 └── analysis/
     ├── <cell_type>/
     │   ├── track_features/             # feature tables: combined, _filtered, _summarized
-    │   ├── quality_control/            # filtering QC plots and track-count tables
+    │   ├── quality_control/            # filtering QC plots, QueenB's track-count tables
     │   ├── active_killing/             # immune populations: one <target>/ folder per target (+ combined/)
     │   ├── invasiveness_analysis/      # immune populations: invasiveness (single immune type)
     │   ├── results/                    # death dynamics (per target)
@@ -43,15 +48,16 @@ You pick it once, in **Data Preparation → 1 · Output Directory**. All tabs re
     │   │                               #   holds the State Trajectory backprojection exports
     │   ├── behavioral_trajectories/    # Single Cell → State Trajectory
     │   └── trajectory_features/        # per-timepoint features used by feature-based State Trajectory
-    ├── <name>_merged/                  # cell-type group made in the Analysis tab (same sub-folders)
+    ├── <name>_merged/                  # cell-type group made in the Analysis tab (its filtered table in
+    │                                   #   track_features/, then the same analysis sub-folders)
     ├── invasiveness_analysis/          # invasiveness run on several immune types together
     └── multi_organoid_comparison/      # combined death dynamics and interaction overview
 ```
 
 ```{note}
-Folder and file names use the population name **without** its metadata prefix: `or_organoid1` and `im_tcell` become `organoid1` and `tcell`. Multicolor populations add one entry per colour (`tcell_1_multicolor`, …) plus the merged `tcell_merged`, and cell-type groups created in the Analysis tab get their own `<name>_merged` entries in the same places.
+Folder and file names use the population name **without** its metadata prefix: `or_organoid1` and `im_tcell` become `organoid1` and `tcell`. Multicolor populations add one entry per colour (`tcell_1_multicolor`, …) in `images/` and `trackdata/`, plus the merged `tcell_merged`, which is the only one that reaches `analysis/`; cell-type groups created in the Analysis tab get their own `<name>_merged` entries in the same places.
 
-Interaction Overview and invasiveness file names end with a part recording the run's settings (selected types, time range, …), so runs with different settings do not overwrite each other. Re-running Behavioral State clustering deletes the whole `behavioral_states/` folder of that cell type, including the exported backprojections of both Single Cell analyses.
+Interaction Overview and invasiveness file names end with a part recording the run's settings (selected types, time range, …), so runs with different settings do not overwrite each other. Re-running Behavioral State clustering deletes the whole `behavioral_states/` folder of that cell type, including its trained classifiers and the exported backprojections of both Single Cell analyses; re-running State Trajectory clustering likewise replaces `behavioral_trajectories/`.
 ```
 
 ## Per-step writes
@@ -68,9 +74,11 @@ Interaction Overview and invasiveness file names end with a part recording the r
 | Writes | Path |
 |---|---|
 | Segments | `images/{sample}/{sample}_{cell_type}_segments.zarr` |
-| Cellpose-SAM resume record | `images/{sample}/{sample}_{cell_type}_segments.progress.json` |
-| Dead mask | `images/{sample}/{sample}_mask_dead.zarr` |
-| Trained pixel classifiers, training labels and training bundle (`PixelClassifier_TrainingData.zip`) | `images/PixelClassification/` |
+| Foreground mask (APOC, ConvPaint, Pixel Classifier) | `images/{sample}/{sample}_{cell_type}_mask.zarr` |
+| Dead mask (dead-channel classifier, or **☠ Run Dead Mask (Otsu)** on the Cellpose page) | `images/{sample}/{sample}_mask_dead.zarr` |
+| Resume record (Cellpose-SAM, APOC, ConvPaint), used to continue an interrupted run | `images/{sample}/{sample}_{cell_type}_segments.progress.json` (APOC and ConvPaint also keep one next to each foreground mask and the dead mask) |
+| Interrupted-run marker (Pixel Classifier; hidden, removed when the sample finishes) | `images/{sample}/.seg_processing` |
+| Trained pixel classifiers, training images and labels, APOC training bundle (`PixelClassifier_TrainingData.zip`) | `images/PixelClassification/` |
 
 ### Tracking
 
@@ -78,6 +86,8 @@ Interaction Overview and invasiveness file names end with a part recording the r
 |---|---|
 | Tracked segments | `images/{sample}/{sample}_{cell_type}_tracked.zarr` |
 | Tracks table | `trackdata/{sample}/{cell_type}/{sample}_{cell_type}_tracks.csv` |
+| Organoid types tracked together (**🟣 All Organoids**): combined result, besides the per-type files above | `images/{sample}/{sample}_all_organoids_tracked.zarr` and `trackdata/{sample}/all_organoids/{sample}_all_organoids_tracks.csv` |
+| Multicolor merged result | `images/{sample}/{sample}_{base}_merged_tracked.zarr` and `trackdata/{sample}/{base}_merged/{sample}_{base}_merged_tracks.csv` |
 
 ### Feature Extraction
 
@@ -85,14 +95,16 @@ Interaction Overview and invasiveness file names end with a part recording the r
 |---|---|
 | Per-sample features and intermediate parts | `trackdata/{sample}/{cell_type}/` |
 | Combined feature table (all samples) | `analysis/{cell_type}/track_features/BEHAV3D_{cell_type}_combined_track_features.csv` |
-| Active Killing (immune only) | `analysis/{immune_type}/active_killing/{target}/`, and `…/active_killing/combined/` when several targets are selected |
+| Active Killing (effector declared as immune, `im_`) | `analysis/{immune_type}/active_killing/{target}/`, and `…/active_killing/combined/` when several targets are selected |
 
 ### Filtering
 
 | Writes | Path |
 |---|---|
 | Filtered and summarised feature tables | `analysis/{cell_type}/track_features/` (`…_filtered.csv`, `…_summarized.csv`) |
-| Quality-control plots and track counts | `analysis/{cell_type}/quality_control/` |
+| Quality-control plots | `analysis/{cell_type}/quality_control/` |
+
+The track-count tables of QueenB's **Cell counts** quick action are saved in the same `quality_control/` folder (see [Filtering](../analysis/filtering.md#preview-track-lengths)).
 
 ### Analysis
 
@@ -106,6 +118,7 @@ Interaction Overview and invasiveness file names end with a part recording the r
 | State Trajectory classification | `analysis/{cell_type}/behavioral_trajectories/` and `analysis/{cell_type}/trajectory_features/` |
 | Backprojection exports (both Single Cell analyses) | `analysis/{cell_type}/behavioral_states/backprojection/` |
 | Cell-type group table | `analysis/{name}_merged/track_features/` |
+| Cell-type group tracked segments (only with **Also build tracked segments (slower)** or **🧩 Build Tracked Segments**) | `images/{sample}/{sample}_{name}_merged_tracked.zarr` and `trackdata/{sample}/{name}_merged/` |
 
 ```{tip}
 You rarely need to browse these folders by hand: the [Results panel](results_panel.md) at the bottom of the Feature Extraction, Filtering and Analysis tabs lists everything under `analysis/` and opens it for you.
@@ -122,13 +135,13 @@ You rarely need to browse these folders by hand: the [Results panel](results_pan
 - cell-type groups created in the Analysis tab;
 - the Zarr conversion record: each sample's original shape and axis order, the timepoint cut (if any) and when the conversion was done.
 
-It is a plain text file you can open to check which settings produced a result. Deleting it resets every tab to its defaults the next time you load the metadata.
+It is a plain text file you can open to check which settings produced a result. Deleting it resets every tab to its defaults the next time you load the metadata, and also forgets the cell-type groups and the conversion record.
 
 ## How tabs find prior outputs
 
 Tabs find earlier results through the paths stored in metadata.csv and the fixed layout above. As a result:
 
-- If you delete a `*_tracked.zarr`, that sample shows no tracked segments in the Visualization tab and counts as "missing" the next time you run tracking.
+- If you delete a `*_tracked.zarr`, that sample shows no tracked segments in the Visualization tab and is tracked again the next time you run tracking (listed as incomplete while its tracks table still exists, as missing once that is gone too).
 - If you move or copy the output directory, select the new location in Data Preparation and click **Load Metadata**: paths in metadata.csv are re-linked to the new folder automatically. To move a project to another drive or computer quickly and safely, see [Moving Projects](moving_projects.md).
 - When you run a step, BEHAV3D EXPLORER uses the same layout to check which results already exist (see [Running Steps](running_steps.md#when-results-already-exist)).
 
@@ -143,7 +156,7 @@ Segmentations or tracks made outside BEHAV3D EXPLORER are brought in with the **
 
 Safe to delete (recomputed the next time you run the step):
 
-- `analysis/`: analysis outputs only (feature extraction, filtering and analyses must be rerun).
+- `analysis/`: the combined feature tables and every later result, trained Single Cell classifiers included (Feature Extraction, Filtering and the analyses must be rerun, and cell-type groups created again).
 - A specific `*_tracked.zarr` and its `trackdata/` folder if you want to re-track.
 - A specific `*_segments.zarr` if you want to re-segment.
 

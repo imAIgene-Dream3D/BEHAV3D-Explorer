@@ -63,17 +63,17 @@ QueenB, the BEHAV3D EXPLORER co-pilot, lives in the **BEHAV3D Assistant** panel 
   |---|---|
   | 📋 Data Preparation | **Walk through setup**, **Check what's missing**, **Build metadata** (asks for your samples and cell types one question at a time and fills in the Metadata Builder) |
   | 👁 Visualization | **Explain this screen**, **Tell me about my data** |
-  | 🦠 Segmentation | **Guide segmentation**, **Choose a method**, **Estimate EDT** (starting values for the **EDT threshold**, calculated from the pixel size in your metadata) |
+  | 🦠 Segmentation | **Guide segmentation**, **Choose a method**, **Estimate EDT** (starting values for the **EDT threshold**, calculated from the XY pixel size in your metadata and a typical cell diameter, 10 µm unless you give another) |
   | 📍 Tracking | **Guide tracking**, **Choose tracking method** |
   | 🧪 Feature Extraction | **Guide setup**, **Check prerequisites** |
   | 🧹 Filtering | **Review filters**, **Track lengths**, **Cell counts** (see [Filtering](analysis/filtering.md#preview-track-lengths)) |
   | 📊 Analysis | **Choose analysis**, **Review results**; each analysis card also has a **💬  Ask the assistant** button |
 
 - **It fills in forms, you confirm.** A suggested value appears under **Proposed changes** as a card showing the current and the new value: **Apply change** accepts it, **Keep current** rejects it, **Dismiss all** discards every pending card. Adding a step to the queue, creating a cell-type group, and saving or loading metadata are confirmed the same way. QueenB only acts without asking when nothing is changed: switching tab, opening an analysis or a result file, showing a preview or a calculation. In **Build metadata**, the answers you type go straight into the form.
-- **New chat** clears the conversation. If an output directory is set, the conversation is also appended to `assistant_log.md` in it.
+- **New chat** clears the conversation. While an output directory is set, each QueenB reply is also appended to `assistant_log.md` in it.
 
 ```{note}
-QueenB needs an internet connection: your questions and a text summary of the plugin state (never the images) are sent to the BEHAV3D assistant service. The status line under the top bar shows **Online** when it is reachable; **Check status** tests the connection. When the service cannot be reached, replies start with **Assistant offline** and QueenB can only look up parameter definitions (no guided help, no form-filling). It reconnects automatically once the service is back.
+QueenB needs an internet connection: your questions and a text summary of the plugin state (never the images) are sent to the BEHAV3D EXPLORER assistant service. The status line under the top bar shows **Online** when it is reachable; **Check status** tests the connection. When the service cannot be reached, replies start with **Assistant offline** and QueenB can only look up parameter definitions (no guided help, no form-filling). It reconnects automatically once the service is back.
 ```
 
 ## Pipeline tour
@@ -96,7 +96,7 @@ This is the happy path. Each step links to its full reference page.
    - Correct remaining errors with **Manual Edition** in the Visualization tab ([details](processing/tracking/manual_editing.md)).
 5. **Extract features in 🧪 Feature Extraction** ([details](analysis/feature_extraction.md))
    - For each cell type, tick the feature families you need; those that later analyses depend on are always extracted. With a dead channel, set the **Dead mask % threshold** and check it with **👁  Preview Dead Threshold in Viewer**.
-   - Optional: **🧬  Extended Analysis — Active Killing (Immune Cells)** finds the immune-cell contacts followed by a rise of the target's death signal ([details](analysis/population_analysis/active_killing.md)).
+   - Optional: **🧬  Extended Analysis — Active Killing (Immune Cells)** finds the contacts of an effector population (declared as immune, `im_`) that are followed by a rise of the target's death signal ([details](analysis/population_analysis/active_killing.md)).
 6. **Filter in 🧹 Filtering** ([details](analysis/filtering.md))
    - Choose the timepoint range and the track filters (minimal and maximal track length, minimal size or dead at the first timepoint…); **📊 See Track Length Distributions** helps you choose the lengths.
    - Run Filtering even if you apply no filter: every analysis reads its output.

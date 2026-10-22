@@ -24,13 +24,13 @@ Before watershed propagation, the current frame's mask is split into **connected
 - a region several tracks kept → split between them by watershed (genuine merges/splits are preserved);
 - a region no track kept → given a **single new track ID per disconnected patch** (so one blob does not splinter into several new tracks).
 
-So when an object breaks apart, its ID stays with the largest-overlap piece and the other pieces become new tracks. There is no gap-closing dilation here, so an ID can never leak across a background gap into a disconnected blob.
+So when an object breaks apart, its ID stays with the largest-overlap piece and the other pieces become new tracks. An object that appears part-way through the movie gets a new ID when it is a separate region; if it touches an existing object in the mask, it is absorbed into that object's track. There is no gap-closing dilation here, so an ID can never leak across a background gap into a disconnected blob. The first timepoint's labels are used unchanged as the starting IDs.
 
 ## Parameters
 
 | Control | Default | Range | What it does |
 |---|---|---|---|
-| **Min overlap fraction** | `0.00` | 0.00–1.00 | Fraction of a current-frame region's area that a track's previous-frame footprint must cover before the track may claim that region. `0` = any shared pixel qualifies; raise it to stop a track claiming a region it barely touches. |
+| **Min overlap fraction** | `0.00` | 0.00–1.00 | Fraction of a current-frame region's volume that a track's previous-frame footprint must cover before the track may claim that region. `0` = any shared pixel qualifies; raise it to stop a track claiming a region it barely touches. Set too high, objects that move or grow fail the test and restart under a new ID. |
 | **Min segment size** | `20` | ≥ 1 (voxels) | Minimum segment size, applied **after** watershed. It cleans up small fragments the watershed splitting itself can create (a shared region divided between tracks, or a leftover sliver turned into a new track), so it is normally set **much lower** than a segmentation-stage size filter. Flat segments (one voxel thick along any axis) are always removed. |
 
 ## Step-by-step in the napari plugin

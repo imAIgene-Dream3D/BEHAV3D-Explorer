@@ -26,7 +26,7 @@ All paths are read from the loaded metadata.csv, which the pipeline steps keep u
 | **Tracked Segments** | `{prefix}_{ct}_tracks_image_path` for each population (including `{base}_merged` for multicolor populations). |
 | **Tracks** | `{prefix}_{ct}_tracks_csv_path` for each population. |
 
-Tracked segments and tracks of cell-type groups created in the Analysis tab are loaded too, once their tracked segments have been built. Anything that does not exist yet (for example, you have not tracked yet) is skipped, and the **Log** box at the bottom says why (`Path not defined in metadata` or `File not found`).
+Tracked segments and tracks of cell-type groups created in the Analysis tab are loaded too, once their tracked segments have been built. Anything that does not exist yet (for example, you have not tracked yet) is skipped; for segments, the dead mask and tracks the **Log** box at the bottom says why (`Path not defined` or `File not found`).
 
 ## Layer naming and colours
 
@@ -94,7 +94,7 @@ If you try to switch tabs while the editor has unsaved changes, BEHAV3D EXPLORER
 
 - The Tracks layers are **off by default** because they can be visually noisy. Turn them on to inspect motility and displacement.
 - The **Raw:** toggle hides all raw channels at once, convenient when you only want to look at masks.
-- The **Log** box lists every layer that was added or skipped; use it to answer "why don't I see my segments?".
+- The **Log** box lists every layer that was added and why segments or tracks were skipped; use it to answer "why don't I see my segments?".
 
 ## See also
 

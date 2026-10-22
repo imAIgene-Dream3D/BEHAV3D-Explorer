@@ -64,7 +64,7 @@ All analyses run in the background; while one runs you cannot switch sub-tab or 
 | **Create Group** | Merges the members' filtered tables and shows the group's track-length distribution. |
 | **📊 Track Length Distribution** / **🧩 Build Tracked Segments** / **Remove Group** | Act on one ticked existing group: preview its track lengths, build (or rebuild) its tracked segments, or remove it (the merged table on disk is kept). |
 
-The group then appears in Feature Backprojection, Population Dynamics and Single Cell next to the real cell types. In Population Dynamics it takes the category of its first member (an organoid group is offered as a target, an immune or other group as an effector); Single Cell lists every group, whatever its members. Every row keeps an `origin_cell_type` column, so results can still be split by original type. Your `metadata.csv` is never changed; the group is recorded in `behav3d_parameters.yml` and its table is written to `analysis/<name>_merged/track_features/`.
+The group then appears in Feature Backprojection, Population Dynamics and Single Cell next to the real cell types. In Population Dynamics it takes the category of its first member (an organoid group is offered as a target, an immune group as an effector, an other group as either); Single Cell lists every group, whatever its members. Every row keeps an `origin_cell_type` column, so results can still be split by original type. Your `metadata.csv` is never changed; the group is recorded in `behav3d_parameters.yml` and its table is written to `analysis/<name>_merged/track_features/`.
 
 ```{note}
 The merged table is a snapshot taken when you click **Create Group**. If you later re-run Filtering for a member, remove the group and create it again.

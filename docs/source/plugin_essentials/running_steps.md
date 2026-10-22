@@ -55,7 +55,7 @@ Several parameter panels show a small switch that changes the **unit in which va
 
 | Switch | Where | Options |
 |---|---|---|
-| **px** ⇄ **µm** (labelled **Units:** or **Distance units:**) | Size and distance parameters in Segmentation, Tracking, Feature Extraction and Filtering | **µm** (µm, µm³; default) or **px** (pixels, voxels) |
+| **px** ⇄ **µm** (labelled **Units:**, **Distance units:** or **Contact units:**) | Size and distance parameters in Segmentation, Tracking, Feature Extraction and Filtering | **µm** (µm, µm³; default) or **px** (pixels, voxels) |
 | **frames** ⇄ **hours** | Time-based filters in Filtering | **frames** (default) or **hours** |
 
 The switch only changes the display: BEHAV3D EXPLORER converts the value back automatically, so the result is the same whichever unit you type in. The conversion uses the pixel sizes (`pixel_distance_xy`, `pixel_distance_z`) and time interval (`time_interval`, `time_unit`) of your [metadata](../data_preparation.md). If they are missing, the switch is disabled and shows *(no resolution in metadata)* or *(no time interval in metadata)*.

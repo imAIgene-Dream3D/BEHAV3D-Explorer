@@ -660,16 +660,19 @@ class CellTypeTrackingPanel(QWidget):
                 HelpSection(
                     "btrack (Bayesian)",
                     "Kalman-filter based tracker with an optional global "
-                    "hypothesis optimizer for resolving merges, splits and "
-                    "false positives.",
+                    "hypothesis optimizer for joining broken tracks, "
+                    "divisions and false positives.",
                 ),
                 HelpSection(
                     "Fragmentation Propagation",
                     "No tunable parameters. Objects are identified by spatial "
-                    "overlap between frames rather than a linking cost, so one "
-                    "identity survives fragmentation and fusion — which is what "
-                    "lets death-dye signal be quantified while an organoid "
-                    "breaks apart or merges.",
+                    "overlap between frames rather than a linking cost, so each "
+                    "object keeps its identity when it fragments, and objects "
+                    "that fuse keep their own identities — which is what lets "
+                    "death-dye signal be quantified while an organoid breaks "
+                    "apart or merges. IDs come only from the first timepoint: "
+                    "objects that appear later and overlap no existing track "
+                    "get no ID.",
                     "tracking/fragmentation_tracking.png",
                 ),
                 HelpSection(
@@ -679,7 +682,8 @@ class CellTypeTrackingPanel(QWidget):
                     "mask is split into its connected regions first and every "
                     "existing track claims whichever region its previous footprint "
                     "overlaps most. Identities that start out merged are recovered "
-                    "as distinct tracks once the objects separate.",
+                    "as distinct tracks once the objects separate, and objects "
+                    "that appear later as separate regions get new IDs.",
                     "tracking/bounded_propagation.png",
                 ),
                 HelpSection(
@@ -695,8 +699,9 @@ class CellTypeTrackingPanel(QWidget):
                 ),
                 HelpSection(
                     "TrackPy",
-                    "Crocker-Grier style nearest-neighbour linker with an "
-                    "adaptive search range; simple and fast, no merge/split "
+                    "Crocker-Grier linker: links each frame to the next with "
+                    "the smallest total displacement, with memory for short "
+                    "gaps and an adaptive search range; no merge/split "
                     "support.",
                 ),
                 HelpSection(
@@ -707,8 +712,9 @@ class CellTypeTrackingPanel(QWidget):
                 ),
                 HelpSection(
                     "Import tracking",
-                    "Load pre-computed track IDs from an existing tracks file "
-                    "instead of running a tracker.",
+                    "Import a label image tracked elsewhere (TIFF or zarr, "
+                    "pixel value = TrackID) instead of running a tracker; "
+                    "the tracks CSV is computed from it.",
                 ),
             ],
         ))
@@ -789,8 +795,9 @@ class CellTypeTrackingPanel(QWidget):
         lap_form.addRow("Gap close max frames:", make_help_row(
             self.lap_gap_frames,
             "Gap Closing Max Frames",
-            "Maximum number of consecutive frames a cell can be missing "
-            "before the gap is too large to close.\n\n"
+            "Maximum frame distance across which a lost track can be "
+            "reconnected: N bridges up to N − 1 consecutive missing frames "
+            "(e.g. 3 → up to 2 missing).\n\n"
             "Higher values recover longer disappearances but may "
             "introduce false links."
         ))
@@ -889,9 +896,10 @@ class CellTypeTrackingPanel(QWidget):
             "unambiguously (an oversized 'subnet'), TrackPy retries by "
             "shrinking the search range (see Adaptive step) until "
             "linking succeeds.\n\n"
-            "This value is the lower bound (in the unit selected above) "
-            "the search range is allowed to shrink to before giving up "
-            "and raising an error.\n\n"
+            "This value is the lower bound (always in µm, regardless of "
+            "the unit toggle) the search range may shrink to before "
+            "TrackPy gives up and BEHAV3D retries with the slower "
+            "recursive linker.\n\n"
             "Lower = more retries allowed (more robust, slower on dense "
             "data). Higher = gives up sooner."
         ))
@@ -928,7 +936,7 @@ class CellTypeTrackingPanel(QWidget):
             self.check_all_together_prop.setToolTip(
                 "When checked, all organoid types are tracked simultaneously\n"
                 "using Fragmentation Propagation, collapsing all organoid tabs into one.\n"
-                "This is the default behaviour when multiple organoid types exist."
+                "This is the default behaviour whenever organoid cell types exist."
             )
             def _on_check_all(checked, _self=self):
                 if _self._toggle_all_organoids_callback:
@@ -955,10 +963,11 @@ class CellTypeTrackingPanel(QWidget):
 
         bp_info = QLabel(
             "Same as Fragmentation Propagation, but a track ID can never span more than "
-            "one disconnected region. Each region of the current frame's "
-            "mask is claimed by whichever existing track overlaps it most, "
-            "before watershed runs; a region no track claims becomes a new "
-            "track."
+            "one disconnected region. Before watershed runs, each existing "
+            "track keeps its seed only in the one region of the current "
+            "frame it overlaps most (several tracks may share a region, "
+            "which watershed then splits); a region no track claims "
+            "becomes a new track."
         )
         bp_info.setWordWrap(True)
         bp_info.setStyleSheet("color: #888; font-size: 10px; padding: 2px 0 6px 0;")
@@ -1062,7 +1071,7 @@ class CellTypeTrackingPanel(QWidget):
             "<b>btrack</b> \u2014 Bayesian multi-object tracker.<br>"
             "<b>Step 1</b> (Kalman filter): always runs \u2014 tune and validate first.<br>"
             "<b>Step 2</b> (optimizer): opt-in \u2014 enable only once Step 1 looks correct.<br>"
-            "See <tt>models/README_btrack.md</tt> for full parameter reference."
+            "See the <b>btrack (Bayesian)</b> page of the documentation (Tracking) for the full parameter reference."
         )
         _bt_info.setWordWrap(True)
         _bt_info.setStyleSheet("color: #888; font-size: 10px; padding: 2px 0 6px 0;")
@@ -1171,8 +1180,9 @@ class CellTypeTrackingPanel(QWidget):
         step1_form.addRow("Step size (frames):", make_help_row(
             self.bt_step_size,
             "Step Size",
-            "Number of frames processed per tracking iteration.\n\n"
-            "Lower values use less RAM but may be slightly slower."
+            "Number of frames btrack advances between progress reports.\n\n"
+            "Tracking always runs to completion; this does not change\n"
+            "the tracks or memory use. Leave at 100."
         ))
 
         # ── Visual features checkbox ─────────────────────────
@@ -1182,9 +1192,9 @@ class CellTypeTrackingPanel(QWidget):
         visual_features_row.addWidget(self.bt_use_visual_features)
         visual_features_row.addWidget(HelpButton(
             "Visual Features",
-            "When enabled, raw image intensity statistics (mean, std per channel)\n"
-            "are computed alongside centroids and used by the Kalman filter for\n"
-            "more accurate linking.\n\n"
+            "When enabled, each object's size and shape (area, major/minor\n"
+            "axis length) and its mean intensity in every raw-image channel\n"
+            "are used as extra linking cues alongside its position.\n\n"
             "Requires raw image data (raw_image_path) in metadata."
         ))
         visual_features_row.addStretch()
@@ -1218,7 +1228,7 @@ class CellTypeTrackingPanel(QWidget):
         self.bt_use_optimize.setChecked(bt_cfg.get("use_optimize", False))
         self.bt_use_optimize.setToolTip(
             "Step 2 runs a global integer-programming optimizer\n"
-            "to resolve track merges, splits, and false positives.\n\n"
+            "to join broken tracks and resolve divisions and false positives.\n\n"
             "Recommended: first tune Step 1 without optimization,\n"
             "then enable this for refinement."
         )
@@ -1235,8 +1245,8 @@ class CellTypeTrackingPanel(QWidget):
             "Each checked hypothesis becomes a candidate explanation the\n"
             "optimizer can assign to a tracklet (short track segment left\n"
             "by Step 1) when resolving ambiguities.\n\n"
-            "Distance/time-limited hypotheses (P_link, P_branch, P_dead,\n"
-            "P_merge) are constrained by the Distance threshold and Time\n"
+            "Link and branch hypotheses (P_link, P_branch) are only\n"
+            "generated within the Distance threshold and Time\n"
             "threshold below.\n\n"
             "P_FP is always required by the optimizer and cannot be "
             "disabled."
@@ -1267,10 +1277,14 @@ class CellTypeTrackingPanel(QWidget):
              "Distance/Time threshold.", False),
             ("P_dead", "Cell death", "Tracklet ends because the cell "
              "died (apoptosis), rather than leaving the field of view "
-             "or being a tracking gap.", False),
+             "or being a tracking gap.\n"
+             "btrack only proposes this for detections classified as "
+             "apoptotic, which BEHAV3D EXPLORER does not provide, so it "
+             "cannot detect cell death here.", False),
             ("P_merge", "Track merging", "Two tracklets converge into "
-             "one (e.g. cells overlapping/occluding each other). "
-             "Limited by Distance/Time threshold.", False),
+             "one (e.g. cells overlapping/occluding each other).\n"
+             "btrack does not generate merge hypotheses, so ticking "
+             "this has no effect.", False),
         ]:
             cb = QCheckBox(f"{hyp_name} — {hyp_desc}")
             cb.setToolTip(hyp_tooltip)
@@ -1373,7 +1387,7 @@ class CellTypeTrackingPanel(QWidget):
             is_coming_soon = key == "import"
             self.btn_run.setEnabled(not is_coming_soon)
             if is_coming_soon:
-                self.btn_run.setToolTip("This tracking method is not yet available.")
+                self.btn_run.setToolTip("Import tracking uses the buttons on the import page above (Convert / Import / Process All Samples).")
             else:
                 self.btn_run.setToolTip("")
         self.combo_method.currentIndexChanged.connect(_on_method_idx_changed)

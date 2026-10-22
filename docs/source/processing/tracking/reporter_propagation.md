@@ -10,14 +10,17 @@ Instead of linking detections frame to frame, it works across the whole movie at
 once:
 
 1. It pools **every** segment detected at **every** timepoint.
-2. It groups together any segments that **spatially overlap** each other, regardless
-   of how far apart in time they were detected.
+2. It groups together segments that **spatially overlap**, regardless of how far
+   apart in time they were detected: each segment is compared with the largest
+   instance found so far for each object.
 3. For each group it takes the **single largest** detected instance and uses that
    one shape as the object's mask, **stamped onto every timepoint** unchanged.
 
 Because the same static mask is reused at every frame, an intensity trace can be
 read for each object even at the timepoints where it was not segmentable on its own.
-There are no linking or gap parameters: grouping is purely spatial.
+This also applies to objects first detected part-way through the movie: they get an
+ID and their mask is present at every timepoint, including those before they
+appeared. There are no linking or gap parameters: grouping is purely spatial.
 
 ```{important}
 Reporter Propagation reuses **one static shape** for every timepoint, so it assumes
@@ -35,7 +38,7 @@ position are both required for this method.
 
 | Control | Default | Range | What it does |
 |---|---|---|---|
-| **Min overlap fraction** | `0.10` | 0.00–1.00 | Minimum spatial overlap — as a fraction of the **smaller** segment's volume — for two segments (from any two timepoints, however far apart) to be grouped as the same object. `0` means any shared pixel counts. Raise it if unrelated nearby objects are being grouped together. |
+| **Min overlap fraction** | `0.10` | 0.00–1.00 | Minimum spatial overlap between a segment and an object's largest instance so far (from any timepoint, however far apart) — as a fraction of the **smaller** of the two volumes — for the segment to join that object. `0` means any shared pixel counts. Raise it if unrelated nearby objects are being grouped together. |
 | **Min segment size** | `100` | ≥ 1 (voxels) | Segments smaller than this are ignored entirely (treated as noise), both as candidates for the "largest instance" and when grouping. |
 
 ## Step-by-step in the napari plugin

@@ -21,7 +21,7 @@ The **Transfer** button next to it opens a menu to pack the project into a few v
 
 ## 2 · Metadata Builder
 
-The builder creates a metadata.csv from a form, so you never have to edit the CSV by hand. It is collapsed by default: tick the checkbox in the **2 · Metadata Builder** header to expand it. If metadata is already loaded, BEHAV3D EXPLORER first asks whether to **Edit Current** (the form is filled with the loaded metadata) or **Generate New** (empty form).
+The builder creates a metadata.csv from a form, so you never have to edit the CSV by hand. It is greyed out by default: tick the checkbox in the **2 · Metadata Builder** header to use it (unticking it again clears the form). If metadata is already loaded, BEHAV3D EXPLORER first asks whether to **Edit Current** (the form is filled with the loaded metadata) or **Generate New** (empty form).
 
 ```{note}
 **Supported raw image formats**: `.czi`, `.lif` / `.liff`, `.tif` / `.tiff`, `.ims`, and already-converted `.zarr` folders.
@@ -29,8 +29,8 @@ The builder creates a metadata.csv from a form, so you never have to edit the CS
 
 ### Workflow
 
-1. **Number of samples** (default `1`): how many samples (movies) the experiment has.
-2. **Organoid types**, **Immune types**, **Other types** (default `0` each): how many populations of each category your images contain. Tick **Include dead channel** if the acquisition has a separate live/dead (viability) dye channel; this adds a **Dead ch #** and a **Dead mask** field to every sample form.
+1. **Number of samples:** (default `1`): how many samples (movies) the experiment has.
+2. **Organoid types:**, **Immune types:**, **Other types:** (default `0` each): how many populations of each category your images contain. Tick **Include dead channel** if the acquisition has a separate live/dead (viability) dye channel; this adds a **Dead ch #** and a **Dead mask** field to every sample form.
 
    ```{important}
    **A population is defined by your images. Line and Condition are defined by your experiment.**
@@ -46,7 +46,7 @@ The builder creates a metadata.csv from a form, so you never have to edit the CS
    | Visually identical, differing only by treatment, subclone or donor | **One** population; record the difference in **Line** or **Condition** |
    ```
 
-3. Click **Configure Cell Types**. One name field appears per population, pre-filled with `organoid1`, `organoid2`…, `tcell` (first immune type), `immune2`…, and `other1`… Edit the names as you like. Next to each immune name you can tick **Multicolor** and set how many colours (`2` populations by default, 2–10); see [Multicolor cell types](#multicolor-cell-types).
+3. Click **Configure Cell Types**. One name field appears per population, pre-filled with `organoid1`, `organoid2`…, `tcell` (first immune type), `immune2`…, and `other1`… Edit the names as you like. The category you counted the population under (organoid, immune or other) is saved as the prefix `or_`, `im_` or `ot_` and decides which options the population gets later — see [Population categories](#population-categories). Next to each immune name you can tick **Multicolor** and set how many colours (`2` populations by default, 2–10); see [Multicolor cell types](#multicolor-cell-types).
 4. Click **Create Sample Forms**. One **Sample N** form appears per sample (fields below).
 5. Fill in Sample 1, then click **Fill All from Sample 1** to copy every field except **Name** and **Image path** to the other samples. Adjust what differs.
 6. Click **Save Metadata CSV**. The form is validated (all required fields filled, every image path exists) and saved as `metadata.csv` in the output directory; you are asked before an existing file is overwritten. The saved path is copied into **3 · Metadata Loader**.
@@ -148,9 +148,21 @@ BEHAV3D EXPLORER uses a **dynamic, prefixed** schema: it discovers the populatio
 
 You can have several populations per category, e.g. `or_organoid1`, `or_organoid2`, `im_tcell`. In output folders and file names the prefix is dropped (`organoid1`, `tcell`).
 
+### Population categories
+
+The category is a **processing choice, not a biological claim**. Pick the one whose options your population needs: for example, declare a non-immune killer line as immune (`im_`) to use Active Killing on it.
+
+| Category | Typical use | What it changes in the plugin |
+|---|---|---|
+| Organoid (`or_`) | Multicellular structures (organoids, spheroids, tissue fragments) | Tracking: by default all organoid types are tracked together in one **Fragmentation Propagation** run (**🟣 All Organoids**). Feature Extraction: **Propagate dead signal** is on. Target in Death Dynamics, Interaction Analysis and Active Killing; the reference that Invasiveness is measured against. Organoid types are not listed one by one in Single Cell; only cell-type groups are. |
+| Immune (`im_`) | Single motile effector cells (T cells, NK cells, macrophages…) | Tracking starts on **btrack**. **Movement** is always extracted. Dead-dye signal inside immune cells is ignored when the death of organoid and other populations is measured. The only category that can compute **Invasiveness**, be the effector in **Active Killing**, and be split into **Multicolor** populations. Effector in Interaction Analysis; analysed in Single Cell. |
+| Other (`ot_`) | Any other population | Tracking starts on **LapTrack**. **Movement** is always extracted. Can be a target (Death Dynamics, Interaction Analysis, Active Killing) or an effector (Interaction Analysis); analysed in Single Cell. |
+
+The starting methods and settings (including the Pixel Classifier's post-processing defaults, which differ per category) are only defaults: every population can use every segmentation and tracking method.
+
 ### Required columns (every row, every sample)
 
-These 9 columns must be present and non-empty for every sample; loading or saving is refused otherwise.
+These 9 columns, plus one `{prefix}_{ct}_line_condition` column per population ([Per-population columns](#per-population-columns)), must be present and non-empty for every sample; loading or saving is refused otherwise. Each population's three path columns must also be present, but they may stay empty. The builder writes all of them for you.
 
 | Column | Description | Example |
 |---|---|---|
@@ -178,10 +190,10 @@ For every population (`{prefix}` = `or` / `im` / `ot`, `{ct}` = population name)
 
 | Column | Required? | Description |
 |---|---|---|
-| `{prefix}_{ct}_line_condition` | **Yes** | Your label for the sample (e.g. `lineA_untreated`), used to split plots and comparisons. You enter **Line** and **Condition** separately in the builder; they are joined with `_` when the CSV is saved. |
-| `{prefix}_{ct}_segments_image_path` | Optional | Segmentation result for this sample. |
-| `{prefix}_{ct}_tracks_image_path` | Optional | Tracked-labels image for this sample. |
-| `{prefix}_{ct}_tracks_csv_path` | Optional | Tracks table for this sample. |
+| `{prefix}_{ct}_line_condition` | **Yes**, filled | Your label for the sample (e.g. `lineA_untreated`), used to split plots and comparisons. You enter **Line** and **Condition** separately in the builder; they are joined with `_` when the CSV is saved. |
+| `{prefix}_{ct}_segments_image_path` | Column yes, value optional | Segmentation result for this sample. |
+| `{prefix}_{ct}_tracks_image_path` | Column yes, value optional | Tracked-labels image for this sample. |
+| `{prefix}_{ct}_tracks_csv_path` | Column yes, value optional | Tracks table for this sample. |
 
 ```{note}
 The three path columns (and `dead_mask_path`) are **blank on a first run**. When a Segmentation, Tracking or dead-mask run finishes, BEHAV3D EXPLORER writes the produced paths into metadata.csv for you.
@@ -195,18 +207,20 @@ The metadata does **not** record which channel holds which population. That choi
 
 ### Multicolor cell types
 
-Use multicolor only when the **same immune population was deliberately split across more than one fluorescent colour** in the same image. Biologically it is one population; only the acquisition label differs. Splitting a crowded population across colours makes each colour sparser, so segmentation separates cells more reliably and tracking has fewer ambiguous links. The colours are merged back after tracking, so you keep one population.
+Multicolor is offered for **immune** (`im_`) populations only. Use it when the **same population was deliberately labelled with more than one fluorescent colour** in the same image. Biologically it is one population; only the acquisition label differs. Splitting a crowded population across colours makes each colour sparser, so segmentation separates cells more reliably and tracking has fewer ambiguous links. The colours are merged back after tracking, so you keep one population.
 
 **How to declare it in the builder:**
 
-1. After **Configure Cell Types**, tick **Multicolor** next to the immune name and set the number of colours (typically 2 or 3).
+1. After **Configure Cell Types**, tick **Multicolor** next to the immune name and set the number of colours (2–10). Count every label you can tell apart in the image, **combinations included**: two dyes used alone and together give three labels (dye A, dye B, A + B), so set `3`.
 2. Click **Create Sample Forms**. The builder creates one entry per colour, named `{base}_1_multicolor`, `{base}_2_multicolor`, …, each with its own columns (`im_{base}_1_multicolor_line_condition`, `…_segments_image_path`, …).
 3. **Line** and **Condition** are kept identical across the colours automatically: typing in one colour fills the others. The path fields stay separate.
 
 **What happens downstream:**
 
 - Segmentation and tracking treat each colour as its own population (one segmentation and one set of tracks per colour).
-- After tracking, the colours are combined into one population named `{base}_merged` (no prefix), and the columns `{base}_merged_tracks_image_path` and `{base}_merged_tracks_csv_path` are added to metadata.csv.
+- A combination label (e.g. A + B) needs a method that can learn which channels must be bright together: the trainable pixel classifiers (APOC, ConvPaint, Pixel Classifier) see all channels and can be painted to tell double- from single-labelled cells. Cellpose and Cellpose-SAM segment every cell visible in the chosen channel(s), so they cannot separate A + B cells from A-only cells.
+- Where objects of different colours overlap, an automatic clean-up after APOC and Pixel Classifier batches gives the shared voxels to the largest object; the others keep only their non-overlapping part, or are removed if that part is very thin (ConvPaint's classes never overlap). There is no clean-up after Cellpose, Cellpose-SAM or Import: colours that still overlap make the merge after tracking stop with a *Voxel overlap detected* error.
+- After tracking, the colours are combined into one population named `{base}_merged`, and its tracked-image and tracks-table paths are added to metadata.csv twice: `im_{base}_merged_tracks_image_path` / `im_{base}_merged_tracks_csv_path`, and the same two names without the `im_` prefix.
 - Feature Extraction, Filtering and Analysis work on `{base}_merged`, not on the individual colours.
 
 ```{tip}
@@ -222,7 +236,7 @@ If colours identify different populations, identities or treatments, declare the
 | Sample_A1 | 1 | A1 | D:/data/exp1/A1.czi | 0.5 | 2.0 | μm | 1.0 | m | lineA_untreated | donor1_activated |
 | Sample_A2 | 1 | A2 | D:/data/exp1/A2.czi | 0.5 | 2.0 | μm | 1.0 | m | lineA_treated | donor1_activated |
 
-(The optional path columns are omitted because this example starts from raw images.)
+(Each population's three path columns are also in the file, empty because this example starts from raw images; they are left out here for space.)
 
 **A multicolor example**: the same organoid population plus one T-cell population split across two colours, with a dead-dye channel. Only the columns that differ from the example above are shown:
 
@@ -231,7 +245,7 @@ If colours identify different populations, identities or treatments, declare the
 | Sample_A1 | … | 3 | lineA_untreated | donor1_activated | donor1_activated |
 | Sample_A2 | … | 3 | lineA_treated | donor1_activated | donor1_activated |
 
-After tracking, `tcell_merged_tracks_image_path` and `tcell_merged_tracks_csv_path` are added and the rest of the pipeline uses `tcell_merged`.
+After tracking, the `tcell_merged` path columns are added and the rest of the pipeline uses `tcell_merged`.
 
 ## Combining multiple experiments
 

@@ -203,7 +203,7 @@ class RenameClusterDialog(QDialog):
         ),
         "track": (
             "Assign meaningful names to each trajectory cluster "
-            "(derived from DTW distance on state sequences)."
+            "(derived from each track's state or feature sequence)."
         ),
     }
     _OBS_COLS = {
@@ -370,8 +370,8 @@ class RenameClusterDialog(QDialog):
         self._btn_reset.setEnabled(can_reset)
         if not can_reset:
             self._btn_reset.setToolTip(
-                "Original labels unavailable for this dataset "
-                "(re-run clustering to enable reset)."
+                "Original labels unavailable for this result (no reset for bouts, "
+                "legacy BEHAV3D or applied-classifier clusterings)."
             )
 
         bottom_row = QHBoxLayout()

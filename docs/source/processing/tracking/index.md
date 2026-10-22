@@ -38,9 +38,9 @@ roughly one cell diameter or more.
 
 | Method | What it does |
 |---|---|
-| **btrack (Bayesian)** | Bayesian tracker with a Kalman-filter motion model, optionally followed by a global hypothesis optimiser. The routine choice for objects that lose overlap between frames. See [btrack](btrack.md). |
-| **LapTrack** | Linear Assignment Problem tracking: links detections by solving a global optimisation on centroid distances, with gap closing and optional merge/split events. See [LapTrack](lap.md). |
-| **TrackPy** | Crocker-Grier style nearest-neighbour linker with adaptive search range and memory-based gap recovery. The lightest option — only reliable when cells are well separated relative to how far they move per frame. See [TrackPy](trackpy.md). |
+| **btrack (Bayesian)** | Bayesian tracker whose Kalman-filter motion model predicts where each object will be next, optionally followed by a global hypothesis optimiser. The routine choice for objects that lose overlap between frames. See [btrack](btrack.md). |
+| **LapTrack** | Linear Assignment Problem tracking: links detections between consecutive frames by optimal assignment on centroid distances, then closes gaps and optionally detects merges and splits. No motion prediction. An alternative to btrack. See [LapTrack](lap.md). |
+| **TrackPy** | Crocker–Grier linker: links each frame to the next with the smallest total displacement, with memory for short gaps and an adaptive search range. No motion prediction, no merge/split handling. An alternative to btrack, reliable only when cells are well separated relative to how far they move per frame. See [TrackPy](trackpy.md). |
 
 ### Overlap-based tracking methods (propagation)
 
@@ -51,9 +51,9 @@ near-static structures.
 
 | Method | What it does |
 |---|---|
-| **Fragmentation Propagation** | Propagates labels by overlap; no tunable parameters. Every piece of an object keeps the object's ID, so it suits objects that mainly change by **fragmenting** (e.g. organoids breaking up on death) in a closed set — nothing new appears mid-movie. See [Fragmentation Propagation](fragmentation_tracking.md). |
-| **Bounded Propagation** | Same overlap-based propagation, but one track ID can never span disconnected regions, and new objects receive new IDs. Use it when masks can **touch or join** but should keep separate identities. See [Bounded Propagation](bounded_propagation.md). |
-| **Reporter Propagation** | Pools segments across the whole movie, groups spatially overlapping ones regardless of time, and stamps each group's largest detection onto every timepoint. For near-static objects whose segmentation **flickers on and off** (e.g. an intermittent reporter). See [Reporter Propagation](reporter_propagation.md). |
+| **Fragmentation Propagation** | Propagates labels by overlap; no tunable parameters. Every piece of an object keeps the object's ID, so it suits objects that mainly change by **fragmenting** (e.g. organoids breaking up on death) in a closed set: IDs come only from the first timepoint, so objects that appear mid-movie get **no ID** and are not tracked. See [Fragmentation Propagation](fragmentation_tracking.md). |
+| **Bounded Propagation** | Same overlap-based propagation, but one track ID can never span disconnected regions, and objects that appear mid-movie as separate regions get **new IDs**. Use it when masks can **touch or join** but should keep separate identities. See [Bounded Propagation](bounded_propagation.md). |
+| **Reporter Propagation** | Pools segments across the whole movie, groups spatially overlapping ones regardless of time, and stamps each group's largest detection onto every timepoint — so an object first detected mid-movie also gets an ID and is present at **every** timepoint. For near-static objects whose segmentation **flickers on and off** (e.g. an intermittent reporter). See [Reporter Propagation](reporter_propagation.md). |
 
 ### Import tracking
 
@@ -79,7 +79,7 @@ verify every method visually on at least one sample before a batch run.
 
 1. **Method:** — pick the method in the **Tracking Method** box.
 2. **Set the parameters** in the panel that appears below it (each control has a **?** help button). Fragmentation Propagation has no parameters; btrack has a two-step layout; Import tracking shows a per-sample table instead.
-3. **Apply to all *Category*** / **Apply to all** (optional) — copy this sub-tab's method and all its parameters to the other sub-tabs of the same category (e.g. **Apply to all Immunes**) or to every cell type.
+3. **Apply to all *Category*** / **Apply to all** (optional) — copy this sub-tab's method and all its parameters to the other sub-tabs of the same category (e.g. **Apply to all Immunes**) or to every cell type. Only ordinary per-cell-type sub-tabs receive the settings, not the All Organoids or multicolor sub-tabs.
 4. **Run *Cell type* Tracking** — the green button at the bottom of the sub-tab (e.g. **Run Tcell Tracking**). It tracks this one cell type in **every sample** of the metadata. It is disabled when **Import tracking** is selected (imports use their own buttons).
 
 Tracking runs [in the background](../../plugin_essentials/running_steps.md#background-execution), with progress in the bar under the sub-tabs and in the **Log** box. If some outputs already exist you are first asked what to do with them (see [Existing tracking data](#existing-tracking-data)). When the run finishes, a dialog offers to switch to the Visualization tab, load the first sample and show the tracks.
@@ -118,7 +118,7 @@ Every tracking method writes a CSV with the same columns:
 | Column | Description |
 |---|---|
 | `TrackID` | Track identifier, stable across timepoints; equals the pixel value in the tracked zarr. |
-| `SegmentID` | For btrack, LapTrack and TrackPy: the label the object had in the per-timepoint segmentation. For the propagation methods, imports and manually edited data: identical to `TrackID`. |
+| `SegmentID` | For btrack, LapTrack and TrackPy: the label the object had in the per-timepoint segmentation. For the propagation methods, imports, manually edited data and CSVs rebuilt from a tracked image (**Skip & Resume**): identical to `TrackID`. |
 | `position_t` | Timepoint index, starting at 0. |
 | `position_x`, `position_y`, `position_z` | Centroid in **physical units** (pixel position × `pixel_distance_xy` / `pixel_distance_z` from the metadata). |
 | `pixel_position_x`, `pixel_position_y`, `pixel_position_z` | Centroid in **pixels**. |

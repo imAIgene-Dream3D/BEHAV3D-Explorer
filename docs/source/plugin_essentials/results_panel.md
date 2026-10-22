@@ -13,7 +13,7 @@ Files are grouped by the step that produced them, then by population (the folder
 | **Analysis → Population Dynamics** | Death dynamics, interaction, invasiveness and multi-organoid comparisons. |
 | **Analysis → Single Cell** | Behavioural-state and trajectory classification outputs. |
 
-Large intermediate folders (`per_sample`, `intermediate_results`, `track_intermediates`) start collapsed. Right-click a folder for **Expand all** / **Collapse all**.
+The large `per_sample` folders of Death Dynamics start collapsed. Right-click a folder for **Expand all** / **Collapse all**.
 
 Selecting a file shows a one-line description of what it contains under the tree (hover over it for the same text). Non-viewable files (tables, HTML, Zarr) are shown in grey.
 

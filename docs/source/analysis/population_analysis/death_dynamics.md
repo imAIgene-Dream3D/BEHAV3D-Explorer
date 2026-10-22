@@ -40,7 +40,7 @@ If a selected target has no `dead` column, a disclaimer *"⚠ No death classific
 
 Then one page per death signal (`percentage_dead_mask`, `nr_dead_mask_pixels`, and `mean_dead_dye` when present): mean ± SEM per condition group (when condition columns are selected), per-sample mean ± SEM, and per-sample mean ± SEM from baseline.
 
-**The per-sample PDF** shows snapshots of the sample (live channel, and dead mask over the segmentation) at the first, middle and last timepoints, the instantaneous "still tracked and not yet dead" curve, and per-target smoothed death-signal traces. It is only made when the sample's dead-mask image is found.
+**The per-sample PDF** shows maximum-projection snapshots of the sample at the first, middle and last timepoints (the raw image's second channel, labelled *Live Channel*, and the dead mask with the segmentation on top), the instantaneous "still tracked and not yet dead" curve, and per-target traces of the three smoothed death signals and of volume. It is only made when the sample's dead-mask image is found.
 
 **The combined PDF** compares target types (colours by line condition when the metadata has one, line style by target type):
 
@@ -83,15 +83,16 @@ Every panel can be reproduced from a table. Tables derived only for a figure go 
 
 ### Reading the tables
 
-- **Cohort columns.** `nr_alive`, `nr_dead`, `nr_disappeared` and `nr_not_yet_seen` always add up to `nr_organoids_total` (every track in that sample). `nr_organoids_t0` is kept for reference; when it differs, some tracks first appear after t = 0.
+- **Cohort columns.** `nr_alive`, `nr_dead`, `nr_disappeared` and `nr_not_yet_seen` always add up to `nr_organoids_total` (every track in that sample). `nr_organoids_t0` (tracks present at the sample's first analysed timepoint) is kept for reference; when it differs, some tracks appear later.
 - **How many targets back each mean.** `combined_mean_sem_*` has a `<feature>_n` column per timepoint. It falls as tracks end, so late timepoints are averages over survivors — check it before reading a late trend.
-- **Where a baseline sits.** `<feature>_from0_baseline_t` is the timepoint that was subtracted — normally 0, later if a channel has no data in the sample's first frame.
+- **Where a baseline sits.** `<feature>_from0_baseline_t` is the timepoint that was subtracted — normally the sample's first timepoint, later if a channel has no data there.
+- **Smoothed traces.** Death Dynamics recomputes every `smoothed_…` signal as a rolling mean over 5 timepoints, whatever the frame interval; the ≈ 10-minute smoothed columns from Feature Extraction are not used.
 - **The non-decreasing traces** are built in three steps: tracks that stop early get a **flat tail** to the sample's last timepoint; the signal is **baseline-subtracted** per track; then made **non-decreasing** (running maximum). That is why these tables have more rows than the filtered features.
 - **The cumulative-dead subpanel nudges flat curves.** Groups that sit at zero get a small upward offset so they stay visible. The drawn line is `mean_cum_dead_fraction + plot_offset`; both columns are in the table, and the offsets are named in the figure footnote.
 
 ## Provenance and stale results
 
-Each Death Dynamics PDF is written with a `<name>_provenance.json` recording the filtered table it was built from (path, size, modification time), the row/track/sample counts and the run parameters.
+The per-target and combined PDFs are each written with a `<name>_provenance.json` recording the filtered table(s) they were built from (path, size, modification time), the row/track/sample counts and the run parameters.
 
 ```{warning}
 Death Dynamics results are **not** refreshed when you re-run Filtering. When you open a PDF with **👁** and it is older than the table it came from, the Log warns you — re-run Death Dynamics to bring it back in sync.

@@ -7,7 +7,7 @@ Tab 6 of the BEHAV3D EXPLORER dock widget. The Filtering tab restricts the data 
 3. **Quality-control PDFs** showing how many tracks each filter removed and what the surviving tracks look like.
 
 ```{important}
-**Filtering must be run even if you apply no filters at all.** The filtered table it writes is the input of every analysis — nothing in the Analysis tab runs without it. Re-run Filtering whenever Feature Extraction (or **🔄  Re-run death**, or Active Killing) has produced new results for that cell type.
+**Filtering must be run even if you apply no filters at all.** The filtered table it writes is the input of Population Dynamics and the preferred input of Feature Backprojection and Single Cell. Re-run Filtering whenever Feature Extraction (or **🔄  Re-run death**, or Active Killing) has produced new results for that cell type.
 ```
 
 ## Per-cell-type sub-tabs
@@ -57,7 +57,7 @@ Keeps only the rows inside the inclusive **Start**–**End** window. These are *
 ```{important}
 **One range for all cell types.** The range appears on every sub-tab and editing it on one updates all the others. It cannot differ between cell types because every cross-cell-type analysis (interaction, invasiveness, multi-organoid death dynamics) lines the cell types up on the timepoint axis; different windows would silently give wrong percentages and invented data.
 
-**Original timepoints are preserved.** `position_t` and `relative_time` keep their original values, so plots of a 56–78 window read 56–78, not 1–23.
+**Original timepoints are preserved.** `position_t` keeps its original values, so plots of a 56–78 window read 56–78, not 1–23.
 ```
 
 #### First-timepoint filters with a range
@@ -183,7 +183,7 @@ Always written, one folder per cell type:
 |---|---|
 | `BEHAV3D_filter_counts.pdf` | **(1)** Per-sample histograms of track length **before** filtering. **(2)** Per-sample bar chart of how many tracks remain after each stage (timepoint-range, min-size and dead-at-first-timepoint bars appear only when those filters are on; the min-length bar is counted after the max-length step, so splitting can raise it). **(3)** Per-sample histograms of track length **after** filtering. |
 | `BEHAV3D_<target>_touching_distribution.pdf` | One per contact column (e.g. `BEHAV3D_organoid_touching_distribution.pdf` for T cells, plus `any_organoid` / `any_immune_cell`): per sample, the number of cell-timepoints touching vs not touching. |
-| `BEHAV3D_dead_dye_distribution.pdf` | Violin + point plot of `mean_dead_dye` over all remaining timepoints, per sample. |
+| `BEHAV3D_dead_dye_distribution.pdf` | Violin + point plot of `mean_dead_dye` over all remaining timepoints, per sample (drawn before the dead-at-first-timepoint filter is applied). |
 | `BEHAV3D_dead_dye_distribution_t0.pdf` | The same at each track's first timepoint — a check for the dead-at-first-timepoint filter. |
 
 ## Tips & best practices

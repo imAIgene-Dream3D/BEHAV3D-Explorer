@@ -441,7 +441,7 @@ class ProcessingQueuePanel(QWidget):
         self.steps_layout.setContentsMargins(0, 0, 0, 0)
         self.steps_layout.setSpacing(1)
 
-        self.empty_label = QLabel("Queue is empty. Add steps using the 🛒+ buttons or select a preset.")
+        self.empty_label = QLabel("Queue is empty. Add steps using the +🛒 buttons or select a preset.")
         self.empty_label.setStyleSheet("color: #666; font-style: italic; font-size: 10px;")
         self.empty_label.setAlignment(Qt.AlignCenter)
         self.steps_layout.addWidget(self.empty_label)

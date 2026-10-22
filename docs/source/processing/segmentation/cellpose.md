@@ -14,8 +14,8 @@ Classic Cellpose needs a model file. Models are trained on full segmentation mas
 
 Two pretrained models are available, one for **organoids** (`cellpose_organoids__channel0-organoid`) and one for **T cells** (`cellpose_tcells__channel0-tcell`). Each model is a single file (no extension). Get them from:
 
-- **[BEHAV3D Pretrained Cellpose Models on Zenodo](https://zenodo.org/records/18872978)** — the imaging conditions they were trained on are documented there;
-- or the copies that come with BEHAV3D: in the **Browse…** dialog, open the folder where you downloaded BEHAV3D, then `behav3d` → `preprocessing` → `segmentation` → `models`.
+- **[BEHAV3D EXPLORER pretrained Cellpose models on Zenodo](https://zenodo.org/records/18872978)** — the imaging conditions they were trained on are documented there;
+- or the copies that come with BEHAV3D EXPLORER: in the **Browse…** dialog, open the folder where you downloaded BEHAV3D EXPLORER, then `behav3d` → `preprocessing` → `segmentation` → `models`.
 
 If none of them fits your sample, train your own with the [Cellpose Training Notebook](../../cellpose_training.md).
 
@@ -78,7 +78,7 @@ For each timepoint, the plugin passes the 3-D volume of the mapped channel to th
 | 3-D mode | Always on: each volume is segmented in 3-D, not slice by slice. |
 | Intensity normalization | Always on, per volume. |
 | Cell size | Not estimated from your images: the model expects cells at about the size (in pixels) it was trained on. |
-| Z scaling (anisotropy) | Computed per sample from the metadata, `pixel_distance_z` ÷ `pixel_distance_xy`. |
+| Z scaling (anisotropy) | Computed per sample from the metadata, $\text{pixel\_distance\_z} / \text{pixel\_distance\_xy}$. |
 | Minimum object size | **1000 voxels** for organoids, **10 voxels** for immune and other populations. |
 | Flat objects | Objects only one voxel thick in Z, Y or X are removed. |
 | Device | CUDA GPU when available, otherwise CPU (much slower). |

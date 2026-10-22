@@ -2,7 +2,7 @@
 
 **BEHAV3D EXPLORER** is a toolkit for the behavioural analysis of cells in 3D fluorescent time-lapse microscopy, built for biologists: no coding required. It takes you from raw 3D movies to cell-by-cell behavioural readouts: segmentation → tracking → feature extraction → filtering → analysis.
 
-**This wiki documents the napari plugin**, the graphical interface for day-to-day use in the lab. (Advanced users can also script the pipeline from Python with `notebooks/run_behav3d.ipynb`; that route is not covered here.)
+**This wiki documents the napari plugin**, the graphical interface for day-to-day use in the lab.
 
 ## How you use BEHAV3D EXPLORER
 
@@ -73,7 +73,7 @@ Segmentation (6 methods, including zero-shot Cellpose-SAM) and Tracking (btrack,
 :link: analysis/index
 :link-type: doc
 
-Feature Extraction, Filtering, and the Analysis tab: Feature Backprojection, Population Dynamics (Death Dynamics, Interaction, Invasiveness, Active Killing) and Single Cell (Behavioral State, State Trajectory).
+Feature Extraction (with Active Killing), Filtering, and the Analysis tab: Feature Backprojection, Population Dynamics (Death Dynamics, Interaction, Invasiveness) and Single Cell (Behavioral State, State Trajectory).
 ::::
 
 ::::{grid-item-card} 🧠 Cellpose Training

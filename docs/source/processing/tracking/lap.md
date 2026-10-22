@@ -1,22 +1,25 @@
 # 🔗 LapTrack
 
-LapTrack — Linear Assignment Problem tracking via the [laptrack](https://github.com/yfukai/laptrack) library — links per-timepoint detections by solving a global optimization on the centroid-distance cost matrix (Hungarian-style assignment). It also supports gap closing across short disappearances and optional merge/split events.
+LapTrack — Linear Assignment Problem tracking via the [laptrack](https://github.com/yfukai/laptrack) library — works in two steps (after Jaqaman et al., 2008): it links the detections of each pair of consecutive frames by the optimal assignment on centroid distances, then solves a second assignment over all resulting track pieces to close gaps and, optionally, detect merges and splits.
 
 ```{note}
-**Not a recommended default.** The routine trackers are **[btrack](btrack.md)** for objects that
-do not overlap between frames, and **[fragmentation propagation](fragmentation_tracking.md)** for
-objects that do. LapTrack is an alternative — use it only for a reason below, not as a first choice.
+**Pre-selected, but not the routine choice.** LapTrack is pre-selected for 🟡 *Other* cell
+types in a fresh project; like every pre-selection, this is only a starting point. For objects
+that do not overlap between frames this documentation treats **[btrack](btrack.md)** as the
+routine tracker and LapTrack as an alternative; for objects that do, use an
+[overlap-based method](index.md#overlap-based-tracking-methods-propagation). Choose from your
+data and check the result.
 ```
 
 ## When to use it
 
-A general centroid-distance tracker. Consider it only when you want **globally optimal** linking (the whole cost matrix solved at once, unlike [TrackPy](trackpy.md)'s greedy nearest-neighbour), **gap closing** across brief dropouts, or built-in **division / fusion** modelling. For fast or crowded cells, **[btrack](btrack.md)** disambiguates crossing tracks better.
+A centroid-distance tracker without a motion model: it links on positions only, whereas [btrack](btrack.md) predicts each cell's next position from its recent movement. Compared with [TrackPy](trackpy.md), which links frame to frame in a similar way, LapTrack adds a separate **gap-closing** step with its own distance limit and optional **merge / split** detection.
 
 ## What runs under the hood
 
-For each sample BEHAV3D EXPLORER measures the centroid of every segment at every timepoint in **physical units** (µm, from the metadata pixel size) and LapTrack links them by solving a global assignment problem across frames. Linking uses the full **3-D** centroid distance (z scaled by `pixel_distance_z`).
+For each sample BEHAV3D EXPLORER measures the centroid of every segment at every timepoint in **physical units** (µm, from the metadata pixel size) and LapTrack links them. Linking uses the full **3-D** centroid distance (z scaled by `pixel_distance_z`).
 
-LapTrack is pre-selected for 🟡 *Other* cell types in a fresh project.
+When a merge or split is detected, the track(s) end at the event and the object(s) after it continue under new TrackIDs; the parent–daughter links are not written to the tracks CSV.
 
 ## Parameters
 
@@ -31,8 +34,8 @@ don't square the value yourself.
 | Field | Default | Range | Effect |
 |---|---|---|---|
 | **Track cost** | `45` | 1–999999 | Maximum distance a cell can move between two **consecutive** frames to be linked as the same track. |
-| **Gap close cost** | `60` | 1–999999 | Maximum distance allowed when reconnecting a track across **one or more missing** frames. Should be ≥ Track cost. |
-| **Gap close max frames** | `3` | 0–100 | Maximum number of *consecutive* frames a cell can be missing before the gap is considered too large to close. |
+| **Gap close cost** | `60` | 1–999999 | Maximum distance allowed when reconnecting track pieces in the gap-closing step. Should be ≥ Track cost. This step also considers a piece that restarts in the very next frame, so with gap closing on, a link between consecutive frames can be made up to this distance. |
+| **Gap close max frames** | `3` | 0–100 | Largest frame distance bridged by gap closing: a value of N reconnects across at most N − 1 *consecutive* missing frames (default `3` → 2 missing frames); `0` switches gap closing off. |
 | **Merging cost** | `0` | 0–999999 | Maximum distance for detecting merge events (two tracks → one). `0` disables merging detection. |
 | **Splitting cost** | `0` | 0–999999 | Maximum distance for detecting split events (one track → two). `0` disables splitting detection. |
 
@@ -43,7 +46,7 @@ don't square the value yourself.
 3. **Estimate the fastest single-frame displacement in your data**, in the unit of the **Distance units:** switch (µm by default): open the Visualization tab, load one sample, scrub through two consecutive frames and measure how far the fastest cell moves.
 4. **Set Track cost ≈ that displacement**, with a small margin (e.g. fastest cell moves ~30 µm → 35–45). The default is only a starting point (see [Tuning the parameters](#tuning-the-parameters)).
 5. **Set Gap close cost ≈ Track cost × 1.2–2.** A cell that disappears for a few frames may have moved further than in a single frame.
-6. **Set Gap close max frames** = how many consecutive missing frames you are willing to bridge.
+6. **Set Gap close max frames** = how many consecutive missing frames you are willing to bridge, plus 1.
 7. **Leave Merging cost and Splitting cost at 0** unless you actually expect cell fusion or division — both are very disruptive when triggered by mistake.
 8. (Optional) **Use the Apply buttons** (**Apply to all *Category*** / **Apply to all**) to copy these settings to cell types with similar dynamics.
 9. **Click *Run … Tracking*** (the green button at the bottom of the sub-tab, named after the cell type). For batch or queued runs, see [Generic workflow](index.md#generic-workflow-per-sub-tab).
@@ -60,13 +63,13 @@ After looking at the result in the Visualization tab, identify which failure mod
 
 **Track IDs swap between neighbouring cells**
 
-- Cause: `Track cost` is large enough that two nearby cells' candidate links cross — LapTrack picks the wrong assignment.
-- Fix: **lower `Track cost`**. If lowering it then fragments tracks, the dataset is genuinely ambiguous and you should consider btrack with **Use visual features** for better disambiguation.
+- Cause: `Track cost` (or `Gap close cost`, which also links consecutive frames) is large enough that two nearby cells' candidate links cross — LapTrack picks the wrong assignment.
+- Fix: **lower `Track cost`** (and `Gap close cost` if it is much larger). If that then fragments tracks, the dataset is genuinely ambiguous; try btrack, whose motion model and **Use visual features** add cues besides position.
 
 **A cell disappears for a few frames and then comes back as a new TrackID**
 
 - Cause: gap closing didn't bridge the disappearance.
-- Fix: **raise `Gap close cost`** so the cost of bridging the gap is high enough that LapTrack picks it over starting a new track. Also check `Gap close max frames` is at least the length of the disappearance.
+- Fix: **raise `Gap close cost`** so the cost of bridging the gap is high enough that LapTrack picks it over starting a new track. Also check `Gap close max frames` is greater than the number of missing frames.
 
 **False bridges: two unrelated cells are linked across a gap**
 
@@ -80,8 +83,8 @@ After looking at the result in the Visualization tab, identify which failure mod
 
 **LapTrack takes too long on dense data**
 
-- Cause: LapTrack solves a global assignment problem; cost is roughly quadratic in the number of detections per frame.
-- Fix: switch to [TrackPy](trackpy.md) (adaptive search range) or [btrack](btrack.md) with **Update method** = `APPROXIMATE` for very dense data.
+- Cause: LapTrack computes the distance between every pair of detections in consecutive frames, so the cost grows roughly with the square of the number of detections per frame.
+- Fix: try [btrack](btrack.md) with **Update method** = `APPROXIMATE`, which is meant for very dense data. TrackPy is not a remedy here: it also slows down on crowded data.
 
 ## Outputs
 
@@ -91,8 +94,8 @@ Standard tracking outputs (tracked zarr + tracks CSV) — see [Tracking overview
 
 - **The defaults are a generic starting point**, not a tuned recommendation — look at the result and tune for the failure modes above.
 - **Too small Track cost = fragmented tracks; too large = false links across cells.**
-- **Keep merging / splitting at 0 unless you actually see fusion / division events** — false-positive merges/splits are very disruptive downstream.
-- **LapTrack gets expensive on very dense data** (thousands of cells per timepoint); consider TrackPy or btrack (`APPROXIMATE` update) there.
+- **Keep merging / splitting at 0 unless you actually see fusion / division events** — every detected event ends the track and starts new TrackIDs, so false events fragment your tracks.
+- **LapTrack gets expensive on very dense data** (thousands of cells per timepoint); consider btrack (`APPROXIMATE` update) there.
 
 ## Things this page does **not** claim
 
@@ -101,5 +104,5 @@ Standard tracking outputs (tracked zarr + tracks CSV) — see [Tracking overview
 ## See also
 
 - [laptrack documentation](https://laptrack.readthedocs.io/) — upstream library, including a precise definition of the cost function.
-- [TrackPy](trackpy.md) — simpler nearest-neighbour alternative.
+- [TrackPy](trackpy.md) — lighter alternative without a separate gap-closing step or merge/split detection.
 - [btrack](btrack.md) — Bayesian alternative with motion model + global hypothesis solver.

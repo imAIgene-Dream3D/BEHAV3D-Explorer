@@ -678,8 +678,8 @@ class PopulationDynamicsTab(QWidget):
         dd_thr_lay.addWidget(self.dd_thresholds_form_host)
         dd_thr_info = QLabel(
             "ⓘ Dead-mask % threshold is owned by Feature Extraction. To "
-            "change it, re-run Feature Extraction (single or batch) with "
-            "the new value."
+            "change it, set the new value there, click 🔄 Re-run death, "
+            "then re-run Filtering for that cell type."
         )
         dd_thr_info.setWordWrap(True)
         dd_thr_info.setStyleSheet("color: #aaa; font-size: 10px;")
@@ -739,8 +739,8 @@ class PopulationDynamicsTab(QWidget):
 
         # ── 2a Per-target Interaction Analysis ───────────────────
         ia_single_info = QLabel(
-            "2a — Per-target analysis: cumulative contact over time and "
-            "alive vs dead bar plots (one PDF per target × immune type)."
+            "2a — Per-target analysis: cumulative contact over time, overall "
+            "and surviving vs dying targets (one PDF per target × interaction cell type)."
         )
         ia_single_info.setWordWrap(True)
         ia_single_info.setStyleSheet("color: #aaa; font-size: 11px;")
@@ -770,9 +770,10 @@ class PopulationDynamicsTab(QWidget):
             "Group overall plots by immune line condition",
             "Splits the two per-target overall plots by the interacting "
             "immune cell's line condition (im_{type}_line_condition): the "
-            "cumulative-contact curve draws one line per condition, and the "
-            "alive-vs-dead bar plot colours bars by condition. Only affects "
-            "the 2a per-target overall plots.",
+            "cumulative-contact plot draws one curve per condition, and the "
+            "alive-vs-dead plot colours curves by condition (solid = "
+            "survives, dashed = dies). Only affects the 2a per-target "
+            "overall plots.",
         ))
         gbl_row.addStretch()
         ia_single_form.addRow("", gbl_row)
@@ -875,11 +876,11 @@ class PopulationDynamicsTab(QWidget):
         annotate_lc_row.addWidget(self.check_annotate_lc)
         annotate_lc_row.addWidget(HelpButton(
             "Annotate by immune line condition",
-            "When enabled, the violin (cumulative contacts per organoid) and "
-            "the active-killing dashboard add the immune line condition as a "
-            "hue / line-style annotation within the selected 'Group by' "
-            "grouping, instead of pooling all line conditions together. Does "
-            "not affect the cumulative-to-death curve.",
+            "When enabled, the violin (cumulative contacts per organoid), the "
+            "cumulative-to-death curve and the active-killing dashboard show "
+            "a separate group / curve per immune cell type × line condition "
+            "within the selected 'Group by' grouping, instead of pooling them "
+            "together. Needs an im_{type}_line_condition column in metadata.",
         ))
         annotate_lc_row.addStretch()
         ia_overview_form.addRow("", annotate_lc_row)
@@ -890,11 +891,12 @@ class PopulationDynamicsTab(QWidget):
         self.combo_group_by.setMaximumWidth(280)
         ia_overview_form.addRow("Group by:", make_help_row(
             self.combo_group_by, "Group by",
-            "How results are grouped on the x-axis in Interaction Overview "
-            "(violin, cumulative-to-death curve, active-killing dashboard). "
-            "'By target (organoid) type' keeps each organoid type as its own "
-            "x-axis group. 'By treatment (immune cell)' pools all organoid "
-            "types together and groups by the interacting immune cell type "
+            "How results are grouped in Interaction Overview: the x-axis "
+            "groups of the violin and active-killing dashboard, and the "
+            "separate curves of the cumulative-to-death plot. 'By target "
+            "(organoid) type' keeps each organoid type as its own group. "
+            "'By treatment (immune cell)' pools all organoid "
+            "types together and groups by the interacting cell type "
             "instead.",
         ))
 
@@ -933,22 +935,24 @@ class PopulationDynamicsTab(QWidget):
             "'invasiveness' during feature extraction to compute the underlying "
             "values.\n\n"
             "Feature extraction records, for every immune cell at every "
-            "timepoint, the % of its surface touching a chosen organoid "
-            "target (a '{target}_invasiveness_perc' value, 0-100) and a "
-            "boolean invasive flag that is True once that contact reaches "
+            "timepoint, the % of the cell plus a 2 µm shell around it that "
+            "overlaps a chosen organoid target within the contact threshold "
+            "(at the default 0 µm: the part of the cell inside the organoid "
+            "mask) — a '{target}_invasiveness_perc' value, 0-100 — and a "
+            "boolean invasive flag that is True once that overlap reaches "
             "≥50%. This step turns those per-cell, per-timepoint values "
             "into three views:\n\n"
             "• Fraction over time: % of cells flagged invasive (≥50% "
-            "contact) at each timepoint.\n"
-            "• Mean / median % over time: average / typical contact % "
+            "overlap) at each timepoint.\n"
+            "• Mean / median % over time: average / typical overlap % "
             "across ALL cells (including non-invasive 0% ones) at each "
             "timepoint.\n"
             "• Per-movie summary: the chosen over-time curve collapsed to "
             "one dot per movie (see the 'Per-movie summary stat' help).\n\n"
-            "If organoid types are selected for fate cross-referencing, "
-            "fate violins (one point per organoid, requires organoid filtered "
-            "CSVs with death data) additionally show contact %/invasive-cell "
-            "counts per organoid, split by whether that organoid died.",
+            "Fate violins are added automatically when the target organoid's "
+            "filtered CSV has death data: one point per organoid, showing "
+            "overlap %/invasive-cell counts per organoid, split by whether "
+            "that organoid died.",
         ))
         inv_lay.addLayout(inv_info_row)
 
@@ -1439,8 +1443,9 @@ class PopulationDynamicsTab(QWidget):
             missing = ", ".join(missing_dead_targets)
             self.dd_disclaimer_label.setText(
                 f"⚠ No death classification found for: {missing}.\n"
-                "Re-run Feature Extraction with a Dead-mask % threshold > 0 "
-                "(Feature Extraction tab) to generate the 'dead' column."
+                "Re-run Feature Extraction (or 🔄 Re-run death) with a "
+                "Dead-mask % threshold > 0, then re-run Filtering, to "
+                "generate the 'dead' column."
             )
             self.dd_disclaimer_label.setVisible(True)
         else:
@@ -1450,8 +1455,8 @@ class PopulationDynamicsTab(QWidget):
         if has_dead and targets and not targets_with_dead:
             dd_tip = (
                 "Selected target(s) have no 'dead' column in their filtered "
-                "CSV. Re-run Feature Extraction with a Dead-mask % "
-                "threshold > 0."
+                "CSV. Re-run Feature Extraction (or 🔄 Re-run death) with a "
+                "Dead-mask % threshold > 0, then re-run Filtering."
             )
         elif has_dead and not targets:
             dd_tip = "Select at least one target above."
@@ -1535,7 +1540,8 @@ class PopulationDynamicsTab(QWidget):
                 "Interaction Analysis will still run, but alive vs dead "
                 "comparisons, cumulative-to-death curves and the active "
                 "killing dashboard will be skipped. Re-run Feature "
-                "Extraction with a Dead-mask % threshold > 0 to enable them."
+                "Extraction (or 🔄 Re-run death) with a Dead-mask % "
+                "threshold > 0, then re-run Filtering, to enable them."
             )
             self.ia_disclaimer_label.setVisible(True)
         else:
