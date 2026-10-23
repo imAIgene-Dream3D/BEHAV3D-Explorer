@@ -33,7 +33,7 @@ from behav3d.analysis.behavior.state.utils import (
     _resolve_positions_csv_path,
     cap_values_to_quantile,
 )
-from behav3d.analysis.behavior.track.utils import _winfo
+from behav3d.analysis.behavior.track.utils import _peek_track_outfolder, _winfo
 
 ID_COLS = ("sample_name", "TrackID")
 TIME_COL = "position_t"
@@ -54,11 +54,31 @@ def _drop_none(value):
     return value
 
 
+def _trajectory_feature_filename(cell_type):
+    return f"BEHAV3D_{cell_type}_trajectory_features.h5ad"
+
+
 def trajectory_feature_adata_path(output_dir, cell_type):
+    """Canonical write location: ``behavioral_trajectories/trajectory_features/``."""
     return (
-        Path(output_dir).expanduser() / "analysis" / str(cell_type) / TRAJECTORY_FEATURES_SUBDIR
-        / f"BEHAV3D_{cell_type}_trajectory_features.h5ad"
+        _peek_track_outfolder(output_dir, cell_type) / TRAJECTORY_FEATURES_SUBDIR
+        / _trajectory_feature_filename(cell_type)
     )
+
+
+def find_trajectory_feature_adata_path(output_dir, cell_type):
+    """Read-only lookup of the feature h5ad. Falls back to the older
+    ``analysis/<cell_type>/trajectory_features/`` location (never written
+    anymore) when only that file exists on disk."""
+    path = trajectory_feature_adata_path(output_dir, cell_type)
+    if not path.exists():
+        legacy = (
+            Path(output_dir).expanduser() / "analysis" / str(cell_type) / TRAJECTORY_FEATURES_SUBDIR
+            / _trajectory_feature_filename(cell_type)
+        )
+        if legacy.exists():
+            return legacy
+    return path
 
 
 def build_trajectory_feature_adata(

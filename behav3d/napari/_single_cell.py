@@ -8097,8 +8097,8 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             return state
         out = self._out_dir()
         if out and ct:
-            from behav3d.analysis.behavior.track.trajectory_features import trajectory_feature_adata_path
-            feat = trajectory_feature_adata_path(str(out), ct)
+            from behav3d.analysis.behavior.track.trajectory_features import find_trajectory_feature_adata_path
+            feat = find_trajectory_feature_adata_path(str(out), ct)
             if feat.exists():
                 return feat
         return state
