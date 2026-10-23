@@ -1444,14 +1444,21 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         adv_sec = CollapsibleSection("(Optional) Advanced configuration", expanded=False)
         adv_form = QFormLayout()
 
+        # Auto state selection (BIC) and sticky HMM are development features:
+        # only shown when the GUI runs in dev mode (BEHAV3D_DEV_MODE=1, set by launch_napari.py).
+        self._dev_mode = os.environ.get("BEHAV3D_DEV_MODE") == "1"
+
         self.combo_hmm_n_states_mode = QComboBox()
         self.combo_hmm_n_states_mode.addItems(["fixed", "auto"])
-        adv_form.addRow("State selection mode:", make_help_row(
+        self.row_n_states_mode = QLabel("State selection mode:")
+        n_states_mode_row = make_help_row(
             self.combo_hmm_n_states_mode, "State selection mode",
             "'fixed' uses n_states directly. 'auto' fits a separate HMM for every k "
             "between k_min and k_max and selects the model with the lowest BIC "
             "(Bayesian Information Criterion)."
-        ))
+        )
+        self.help_n_states_mode = n_states_mode_row.itemAt(1).widget()
+        adv_form.addRow(self.row_n_states_mode, n_states_mode_row)
 
         self.spin_hmm_k_min = QSpinBox()
         self.spin_hmm_k_min.setRange(2, 50)
@@ -1530,11 +1537,13 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         ))
 
         self.chk_hmm_sticky = QCheckBox("Sticky HMM")
-        adv_form.addRow("", _make_chk_help_row(
+        sticky_row = _make_chk_help_row(
             self.chk_hmm_sticky, "Sticky HMM",
             "Adds a self-transition bias (kappa) to make the model prefer staying "
             "in the same state, producing longer, more stable behavioral bouts."
-        ))
+        )
+        self.help_sticky = sticky_row.itemAt(1).widget()
+        adv_form.addRow("", sticky_row)
 
         self.spin_hmm_stickiness_kappa = QDoubleSpinBox()
         self.spin_hmm_stickiness_kappa.setRange(0.0, 100.0)
@@ -1567,6 +1576,11 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
             "Seed for reproducibility of HMM initialisation."
         ))
 
+        if not self._dev_mode:
+            for w in (self.row_n_states_mode, self.combo_hmm_n_states_mode, self.help_n_states_mode,
+                      self.chk_hmm_sticky, self.help_sticky):
+                w.setVisible(False)
+
         adv_sec.addLayout(adv_form)
         train_lay.addWidget(adv_sec)
 
@@ -1577,8 +1591,9 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.spin_hmm_n_states.setValue(4)
         nstates_form.addRow("n_states:", make_help_row(
             self.spin_hmm_n_states, "Number of states",
-            "Number of HMM behavioral states. Ignored in 'auto' mode (use k_min/k_max). "
-            "Typical values: 3–8."
+            "Number of HMM behavioral states. "
+            + ("Ignored in 'auto' mode (use k_min/k_max). " if self._dev_mode else "")
+            + "Typical values: 3–8."
         ))
         train_lay.addLayout(nstates_form)
 
@@ -2458,7 +2473,7 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.grp_apply.setVisible(checked)
 
     def _toggle_n_states_mode(self, mode):
-        auto = mode == "auto"
+        auto = mode == "auto" and self._dev_mode
         self.spin_hmm_n_states.setEnabled(not auto)
         self.spin_hmm_k_min.setVisible(auto)
         self.row_k_min.setVisible(auto)
@@ -2468,6 +2483,7 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.help_k_max.setVisible(auto)
 
     def _toggle_sticky_hmm(self, checked):
+        checked = checked and self._dev_mode
         self.spin_hmm_stickiness_kappa.setVisible(checked)
         self.row_kappa.setVisible(checked)
         self.help_kappa.setVisible(checked)
@@ -2854,7 +2870,8 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
                 self.combo_hmm_n_states_mode.setCurrentText("fixed")
                 self.spin_hmm_n_states.setValue(n_states_cfg)
             elif n_states_cfg == "auto":
-                self.combo_hmm_n_states_mode.setCurrentText("auto")
+                # Auto mode is dev-only; outside dev mode fall back to fixed n_states.
+                self.combo_hmm_n_states_mode.setCurrentText("auto" if self._dev_mode else "fixed")
             if "k_min" in cfg:
                 self.spin_hmm_k_min.setValue(int(cfg["k_min"]))
             if "k_max" in cfg:
@@ -2872,7 +2889,8 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
             if "min_covar" in cfg:
                 self.spin_hmm_min_covar.setValue(float(cfg["min_covar"]))
             if "sticky" in cfg:
-                self.chk_hmm_sticky.setChecked(bool(cfg["sticky"]))
+                # Sticky HMM is dev-only; outside dev mode it stays off.
+                self.chk_hmm_sticky.setChecked(bool(cfg["sticky"]) and self._dev_mode)
             if "stickiness_kappa" in cfg:
                 self.spin_hmm_stickiness_kappa.setValue(float(cfg["stickiness_kappa"]))
             if "transmat_alpha" in cfg:
