@@ -732,6 +732,11 @@ def _make_chk_help_row(chk: QCheckBox, title: str, desc: str) -> QHBoxLayout:
 _DEFAULT_TIMEPOINT_FEATURES = {"speed", "sphericity", "elongation", "extent", "solidity"}
 _DEFAULT_WINDOW_FEATURES    = {"net_displacement"}
 _DEFAULT_LOG_SCALE_FEATURES = {"speed"}
+# Feature-based trajectory clustering, when the behavioral-state features aren't
+# used (net_displacement_tracklet is ticked by default too, see
+# TrajectoryFeatureSelector).
+_DEFAULT_TRAJECTORY_FEATURES        = {"speed", "percentage_dead_mask"}
+_DEFAULT_TRAJECTORY_BINARY_FEATURES = {"any_organoid_contact"}
 
 _TECHNICAL_OBS_COLS = {
     "position_t", "sample_name", "TrackID",
@@ -5398,6 +5403,9 @@ class TrajectoryFeatureSelector(QWidget):
         self._binary_checkboxes: dict = {}
         self._logscale_checkboxes: dict = {}
         self._pending_cfg: dict = {}
+        # Full-tracklet displacement: needs position_x/y/z (see _set_positions_available).
+        self._positions_available = True
+        self._tracklet_wanted = (True, False)
         self._loaded_key = None
         self._scanning = False
         self._scan_queued = None
@@ -5415,6 +5423,7 @@ class TrajectoryFeatureSelector(QWidget):
         ))
 
         self.tabs = QTabWidget()
+        self.tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         tp_tab = QWidget()
         tp_lay = QVBoxLayout(tp_tab)
         tp_lay.setSpacing(2)
@@ -5451,6 +5460,7 @@ class TrajectoryFeatureSelector(QWidget):
             "when 'Divide long tracks' is on -- back to that point at every later timepoint."
         ))
         self.chk_tracklet_net_disp = QCheckBox("net_displacement_tracklet")
+        self.chk_tracklet_net_disp.setChecked(True)
         self.chk_tracklet_net_disp.stateChanged.connect(self._update_tab_labels)
         win_lay.addWidget(self.chk_tracklet_net_disp)
         self.chk_tracklet_net_disp_sq = QCheckBox("net_displacement_tracklet_squared")
@@ -5471,11 +5481,7 @@ class TrajectoryFeatureSelector(QWidget):
         bin_tab_lay.addStretch(1)
         self.tabs.addTab(bin_tab, "Binary Features")
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setMinimumHeight(220)
-        scroll.setWidget(self.tabs)
-        lay.addWidget(scroll)
+        lay.addWidget(self.tabs)
 
         proc = CollapsibleSection("Feature Processing", expanded=False)
         proc_form = QFormLayout()
@@ -5560,6 +5566,7 @@ class TrajectoryFeatureSelector(QWidget):
         self._binary_checkboxes = {}
 
         if not csv_path or not Path(csv_path).exists():
+            self._set_positions_available(False)
             self.timepoint_lay.addWidget(_make_info_label(
                 "<i>No track-features CSV found for this cell type. Run feature extraction first.</i>"
             ))
@@ -5567,6 +5574,7 @@ class TrajectoryFeatureSelector(QWidget):
             return
 
         cols = list(pd.read_csv(csv_path, nrows=0).columns)
+        self._set_positions_available({"position_x", "position_y", "position_z"} <= set(cols))
         excluded = excluded_non_behavior_columns(cols, metadata=metadata)
         usable = [c for c in cols if c not in excluded]
 
@@ -5624,6 +5632,25 @@ class TrajectoryFeatureSelector(QWidget):
             self._loaded_key = None  # force populate() to rebuild for the latest request
             self.populate(csv_path, metadata=metadata, cfg=cfg)
 
+    def _set_positions_available(self, available: bool):
+        """The full-tracklet displacement features are computed from
+        position_x/y/z; without them they can't be selected."""
+        was_available = self._positions_available
+        self._positions_available = bool(available)
+        for cb in (self.chk_tracklet_net_disp, self.chk_tracklet_net_disp_sq):
+            if not available:
+                cb.setChecked(False)
+            cb.setEnabled(available)
+        if available and not was_available and self.isEnabled():
+            # Positions are back (e.g. another cell type): re-apply the wanted ticks.
+            self.set_tracklet_features(*self._tracklet_wanted)
+
+    def set_tracklet_features(self, tracklet: bool, tracklet_sq: bool):
+        """Tick the full-tracklet displacement features (never without positions)."""
+        self._tracklet_wanted = (bool(tracklet), bool(tracklet_sq))
+        self.chk_tracklet_net_disp.setChecked(bool(tracklet) and self._positions_available)
+        self.chk_tracklet_net_disp_sq.setChecked(bool(tracklet_sq) and self._positions_available)
+
     def is_populating(self) -> bool:
         """True while the column scan behind the checkboxes is still running."""
         return bool(self._scanning)
@@ -5642,8 +5669,9 @@ class TrajectoryFeatureSelector(QWidget):
         ]
 
         saved = cfg.get("features")
-        saved = set(saved) if saved is not None else set(_DEFAULT_TIMEPOINT_FEATURES)
-        saved_bin = set(cfg.get("binary_features", []) or [])
+        saved = set(saved) if saved is not None else set(_DEFAULT_TRAJECTORY_FEATURES)
+        saved_bin = cfg.get("binary_features")
+        saved_bin = set(saved_bin) if saved_bin is not None else set(_DEFAULT_TRAJECTORY_BINARY_FEATURES)
 
         def _add_group(title, names):
             sec = CollapsibleSection(title, expanded=False)
@@ -5890,6 +5918,10 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         # of writing a full per-sample zarr up front.
         self._track_bp_preview: Optional[dict] = None
         self._track_bp_dims_callback = None
+        # The hand-picked Trajectory Features selection that "Use features used in
+        # behavioral state clustering" replaced while ticked
+        # (see _on_use_state_features_preset_toggled / _picker_fallback).
+        self._picker_before_preset = None
 
         self._display_save_timer = QTimer(self)
         self._display_save_timer.setSingleShot(True)
@@ -7528,8 +7560,12 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         - If state adata is absent: the track-clustering block (grp_track) stays
           enabled but is locked into 'Feature-based' mode (combo_clustering_family
           forced + disabled), since State-based clustering cannot run without it.
-          The train-classifier block, plotting page and backprojection are disabled
-          since they all require state adata.
+          The train-classifier block is disabled (it trains on state-derived
+          features). The plotting page and backprojection stay enabled: their
+          state-dependent buttons (exemplars, track contact overview, state
+          target class) gate themselves, and backprojection falls back to the
+          trajectory-features h5ad (see _per_timepoint_adata_path /
+          _update_bp_buttons).
         - If state adata is present: all steps enabled; if the dropdown was previously
           force-locked, it is automatically reset to State-based and re-enabled.
         """
@@ -7542,22 +7578,20 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         if not self._behavioral_states_available(ct):
             self.warning_label.setText(
                 f"⚠ Behavioral states not found for cell type '{ct}'.\n"
-                "State-based clustering requires running State Classification first "
-                "and is unavailable until then.\n"
-                "You can still run Feature-based clustering below."
+                "You can run Feature-based clustering, its reports and backprojection.\n"
+                "State-based clustering, classifier training, exemplar PDFs and the "
+                "track contact overview need State Classification to be run first."
             )
             self.warning_label.show()
 
             # Track clustering stays available, but lock into Feature-based mode.
-            # NB: disable only the plotting page, not the whole `_subtab_stack`
-            # — grp_track lives on page 0 of that stack, so disabling the stack
-            # would also grey out its "Run Feature-based BEHAV3D Clustering"
-            # button despite the setEnabled(True) above.
-            self.grp_track.setEnabled(True)
-            for grp in [self.grp3, self.grp_bp]:
-                grp.setEnabled(False)
+            # Reports and backprojection stay enabled; their state-dependent
+            # buttons are gated individually (_refresh_buttons, _update_bp_buttons).
+            for grp in [self.grp_track, self.grp_bp]:
+                grp.setEnabled(True)
+            self.grp3.setEnabled(False)
             # Not _plotting_page.setEnabled: keep its lists scrollable.
-            set_scroll_content_enabled(self._plotting_page, False)
+            set_scroll_content_enabled(self._plotting_page, True)
 
             # Force the method dropdown to Feature-based and prevent switching.
             self.combo_clustering_family.blockSignals(True)
@@ -7568,6 +7602,7 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             self.combo_clustering_family.blockSignals(False)
             self._apply_clustering_family_mode("feature_based")
 
+            _apply_group_tracked_gate(self.warning_label, self.grp_bp, self.metadata_loader, ct)
             return False
         else:
             self.warning_label.hide()
@@ -7760,8 +7795,16 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         feature columns. The actual clustering dispatch (_dispatch_track_cluster)
         bypasses this selector entirely when checked, clustering directly on the
         saved behavioral-state h5ad with its exact HMM preprocessing instead."""
-        self.traj_feature_selector.setEnabled(not checked)
+        sel = self.traj_feature_selector
+        sel.setEnabled(not checked)
         if checked:
+            # Remember the hand-picked selection: the preset overwrites the picker.
+            if self._picker_before_preset is None and not sel.is_populating():
+                self._picker_before_preset = (
+                    sel.params(),
+                    sel.chk_tracklet_net_disp.isChecked(),
+                    sel.chk_tracklet_net_disp_sq.isChecked(),
+                )
             self._apply_state_features_preset()
             # position_x/y/z aren't retained in the saved behavioral-states h5ad,
             # so the full-tracklet displacement features can't be computed under
@@ -7771,6 +7814,30 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             self.traj_feature_selector.chk_tracklet_net_disp_sq.setChecked(False)
         else:
             self.lbl_state_features_preset.hide()
+            traj_params, tracklet, tracklet_sq = self._picker_fallback()
+            self._picker_before_preset = None
+            sel.set_params(traj_params)
+            sel.set_tracklet_features(tracklet, tracklet_sq)
+
+    def _picker_fallback(self, ct: str = None) -> tuple:
+        """Trajectory Features selection to use while the state-features preset is
+        off: the selection from before the preset was ticked, else the saved one,
+        else the defaults. Returns (selector params, tracklet, tracklet_squared)."""
+        if self._picker_before_preset is not None:
+            return self._picker_before_preset
+        ct = ct or self._cell_type()
+        cfg = (
+            getattr(self.metadata_loader, "behav3d_parameters", {})
+            .get("track_classification", {}).get(ct, {})
+        )
+        traj_params = dict(cfg.get("trajectory_features") or {})
+        traj_params.setdefault("features", sorted(_DEFAULT_TRAJECTORY_FEATURES))
+        traj_params.setdefault("binary_features", sorted(_DEFAULT_TRAJECTORY_BINARY_FEATURES))
+        return (
+            traj_params,
+            bool(cfg.get("include_tracklet_net_displacement", True)),
+            bool(cfg.get("include_tracklet_net_displacement_squared", False)),
+        )
 
     def _apply_state_features_preset(self):
         """Populate the (locked) Trajectory Features selector display and the
@@ -8159,11 +8226,19 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
     # ── Config persistence / restoration ────────────────────────────────────
 
     def _collect_track_params(self, ct: str) -> dict:
+        sel = self.traj_feature_selector
+        if self.chk_use_state_features_preset.isChecked():
+            # The selector shows the state model's features; keep the hand-picked ones.
+            traj_params, tracklet, tracklet_sq = self._picker_fallback(ct)
+        else:
+            traj_params = sel.params()
+            tracklet = sel.chk_tracklet_net_disp.isChecked()
+            tracklet_sq = sel.chk_tracklet_net_disp_sq.isChecked()
         return {
             "behavioral_trajectory_size": int(self.spin_traj_size.value()),
             "n_clusters":                 int(self.spin_n_clusters.value()),
             "trajectory_basis":           self._basis(),
-            "trajectory_features":        self.traj_feature_selector.params(),
+            "trajectory_features":        traj_params,
             "linkage":                    self.combo_linkage.currentText(),
             "clustering_method":          self.combo_clustering_method.currentText(),
             "leiden_n_neighbors":         int(self.spin_leiden_neighbors.value()),
@@ -8180,8 +8255,8 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             "bouts_drop_redundant":       self.chk_bouts_drop_redundant.isChecked(),
             "trajectory_trim_mode":       self.combo_trim.currentText(),
             "split_long_tracks":          self.chk_split_long_tracks.isChecked(),
-            "include_tracklet_net_displacement": self.traj_feature_selector.chk_tracklet_net_disp.isChecked(),
-            "include_tracklet_net_displacement_squared": self.traj_feature_selector.chk_tracklet_net_disp_sq.isChecked(),
+            "include_tracklet_net_displacement": tracklet,
+            "include_tracklet_net_displacement_squared": tracklet_sq,
             "parallel":                   self.chk_parallel.isChecked(),
             "save_distance_matrix":       self.chk_save_dist.isChecked(),
             "random_state":               int(self.spin_seed.value()),
@@ -8213,6 +8288,16 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
 
     def _populate_track_settings(self, ct: str):
         cfg = getattr(self.metadata_loader, "behav3d_parameters", {}).get("track_classification", {}).get(ct, {})
+        # Per cell type, with defaults when nothing is saved, so a cell type
+        # without saved settings doesn't inherit the previous one's ticks.
+        self._picker_before_preset = None
+        self.chk_use_state_features_preset.blockSignals(True)
+        self.chk_use_state_features_preset.setChecked(bool(cfg.get("use_state_features_preset", False)))
+        self.chk_use_state_features_preset.blockSignals(False)
+        self.traj_feature_selector.set_tracklet_features(
+            cfg.get("include_tracklet_net_displacement", True),
+            cfg.get("include_tracklet_net_displacement_squared", False),
+        )
         if not cfg:
             return
         if "behavioral_trajectory_size" in cfg:
@@ -8262,10 +8347,6 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             self.combo_trim.setCurrentText(cfg["trajectory_trim_mode"])
         if "split_long_tracks" in cfg:
             self.chk_split_long_tracks.setChecked(bool(cfg["split_long_tracks"]))
-        if "include_tracklet_net_displacement" in cfg:
-            self.traj_feature_selector.chk_tracklet_net_disp.setChecked(bool(cfg["include_tracklet_net_displacement"]))
-        if "include_tracklet_net_displacement_squared" in cfg:
-            self.traj_feature_selector.chk_tracklet_net_disp_sq.setChecked(bool(cfg["include_tracklet_net_displacement_squared"]))
         if "parallel" in cfg:
             self.chk_parallel.setChecked(bool(cfg["parallel"]))
         if "save_distance_matrix" in cfg:
@@ -8337,11 +8418,6 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             self.chk_run_legacy_behav3d.blockSignals(True)
             self.chk_run_legacy_behav3d.setChecked(run_legacy)
             self.chk_run_legacy_behav3d.blockSignals(False)
-
-        if "use_state_features_preset" in cfg:
-            self.chk_use_state_features_preset.blockSignals(True)
-            self.chk_use_state_features_preset.setChecked(bool(cfg["use_state_features_preset"]))
-            self.chk_use_state_features_preset.blockSignals(False)
 
         if family in ("state_based", "feature_based"):
             self.combo_clustering_family.blockSignals(True)
@@ -8574,6 +8650,23 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.btn_apply_track.setEnabled(state_model)
         # Exemplar PDFs draw each track's behavioral-state bar.
         self.btn_exemplars.setEnabled(has_adata and has_state_file)
+        # Explain on hover why these stay greyed out.
+        state_hint = (
+            "Requires behavioral state classification. "
+            "Run State Classification to unlock this button."
+        )
+        cluster_hint = "Run State Trajectory clustering first."
+        train_apply_tip = "" if state_model else (
+            state_hint + " Then re-run trajectory clustering on the states."
+            if has_adata else cluster_hint
+        )
+        self.btn_train_track.setToolTip(train_apply_tip)
+        self.btn_apply_track.setToolTip(train_apply_tip)
+        self.btn_exemplars.setToolTip(
+            "" if (has_adata and has_state_file)
+            else state_hint if not has_state_file
+            else cluster_hint
+        )
         self.btn_track_proportions.setEnabled(has_adata)
         self.btn_feature_heatmap.setEnabled(has_adata)
         # Checks the file, not the (slow, async) loaded adata, so the entry
