@@ -39,7 +39,7 @@ Iteration is cheap: re-training is quick and **Test Segmentation Parameters** re
 
 | Control | Default | Effect |
 |---|---|---|
-| **Examples/sample:** | `3` | Number of evenly spaced timepoints (always including the first and last) taken from each sample as training data (range 1–10). More timepoints = more variability for the classifier to learn from, at the cost of a longer labeling session. |
+| **Examples/sample:** | `3` | Number of evenly spaced timepoints (from the first to the last timepoint; with `1`, only the first) taken from each sample as training data (range 1–10). More timepoints = more variability for the classifier to learn from, at the cost of a longer labeling session. |
 | **Generate Training Data** | — | Prepares (in the background) and then loads $\text{examples} \times \text{samples}$ timepoints as image layers, plus a `User Provided Labels (…)` layer per cell type. When cached training data exists, asks **Generate New / Load Existing / Cancel**. |
 | **Save Labels** | — | Saves every `User Provided Labels (…)` layer to disk, so the labels survive plugin restarts. |
 | **Clear Layer** / **Clear All** | — | Erase the painted labels in the selected `User Provided Labels` layer / in all of them (**Clear All** asks for confirmation). |

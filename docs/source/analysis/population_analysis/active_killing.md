@@ -38,7 +38,7 @@ $$
 
 By default, $D$ is read as its **running maximum** up to that timepoint on the target's own track. Segmentation is sometimes unstable — a dead-mask segment can be included in one frame and dropped in the next — so the raw signal can dip and recover instead of only rising as the cell dies (e.g. raw values `0, 10, 20, 200, 150, 100, 200, 200, 250` are read as `0, 10, 20, 200, 200, 200, 200, 200, 250`). This is the **Persistent death signal (running max)** option; turning it off reads the raw signal.
 
-If the target's track ends before $t + W$, $D_{\text{end}}$ is read at its last available timepoint (no extrapolation). The rise $\Delta D$ is compared to a threshold $\theta$ set by the mode:
+If the target's track ends before $t + W$, $D_{\text{end}}$ is read at its last available timepoint (no extrapolation); a missing row at $t$ or $t + W$ is replaced by the nearest earlier or later row of that target. The rise $\Delta D$ is compared to a threshold $\theta$ set by the mode:
 
 $$
 \theta =
@@ -48,13 +48,15 @@ D_{\text{start}} \times (m - 1) & \text{(multiplier mode)}
 \end{cases}
 $$
 
-Multiplier mode therefore requires $D_{\text{end}} > D_{\text{start}} \times m$ — the signal must grow past $m\times$ its value **at that timepoint**. A start value of exactly $0$ is replaced by $0.1$ so the threshold isn't trivially zero. The target is flagged as killed at $t$ when
+Multiplier mode therefore requires $D_{\text{end}} > D_{\text{start}} \times m$ — the signal must grow past $m\times$ its value **at that timepoint**. A start value of exactly $0$ is replaced by $0.1$ when the threshold is computed, so the threshold is not zero; for pixel counts, almost any rise then qualifies. The target is flagged as killed at $t$ when
 
 $$
 \Delta D > \theta
 \qquad\text{with}\qquad
-\text{killing\_efficiency} = \frac{\Delta D}{\theta}
+\mathrm{killing\_efficiency} = \frac{\Delta D}{\theta}
 $$
+
+When $\theta \le 0$ (for example the default absolute threshold $0$), `killing_efficiency` is 1 if $\Delta D > 0$ and 0 otherwise.
 
 This is repeated for **every touched target at every timepoint of the contact**. At each timepoint the target with the **highest** `killing_efficiency` is reported as that timepoint's target (`targeted_track_id`, set only when it is actually flagged as killed), so the reported target can change from one timepoint to the next.
 
@@ -87,13 +89,13 @@ None of these values are universal — they depend on your **biology** and your 
 - **Absolute threshold vs. multiplier** — the **absolute** threshold (a fixed increase, e.g. +20–30 dead pixels) is the general recommendation, pairs naturally with `nr_dead_mask_pixels`, and is best when targets start near zero. The **multiplier** (fold-change over each target's own signal) suits a single target line, or wells where cell-to-cell baseline variation makes one fixed value unreliable. With **two target lines that have different baseline death rates the multiplier becomes unreliable** — the same fold-change is a very different absolute increase per line — so prefer the absolute threshold there.
 
 ```{tip}
-**Calibrating an absolute pixel threshold to "one dead cell".** The right value depends on cell size and pixel resolution, so recompute it for your own setup. A cell of diameter $d$ imaged at resolution $r$ (µm/pixel) fills roughly
+**Calibrating an absolute pixel threshold to "one dead cell".** The right value depends on cell size and pixel resolution, so recompute it for your own setup. `nr_dead_mask_pixels` counts 3-D voxels. A cell of diameter $d$ imaged with XY pixel size $r_{xy}$ and Z spacing $r_z$ (in µm) covers roughly
 
 $$
-\text{area} \approx \pi \left(\frac{d}{2r}\right)^{2} \ \text{pixels}
+\text{voxels} \approx \frac{\tfrac{4}{3}\,\pi \left(\tfrac{d}{2}\right)^{3}}{r_{xy}^{2}\, r_{z}}
 $$
 
-e.g. a ~10 µm cell at 1 µm/pixel is about $\pi \times 5^2 \approx 80$ pixels if the whole cell fills with dye. "One dead cell" could therefore mean anywhere from ~20 pixels (partial staining, smaller cells, coarser resolution) to ~80+ pixels (full-cell fill, larger cells, finer resolution). Use this as a starting point, then fine-tune by eye against a timepoint you trust.
+e.g. a ~10 µm cell with 1 µm XY pixels and 2 µm Z spacing is about 260 voxels if the whole cell fills with dye (a single slice through its centre shows $\pi \times 5^2 \approx 80$ pixels). "One dead cell" could therefore mean anywhere from ~25 voxels (partial staining, smaller cells, coarser resolution) to ~260+ voxels (full-cell fill, larger cells, finer resolution). Use this as a starting point, then fine-tune by eye against a timepoint you trust.
 ```
 
 ## Running it

@@ -156,7 +156,7 @@ All measurements are in µm and hours.
 
 #### How the movement features are computed
 
-Let $\mathbf{p}(t) = (x, y, z)$ be a cell's centroid at timepoint $t$ (in µm), $\Delta t$ the frame interval (in hours), and $\mathbf{s}(t) = \mathbf{p}(t) - \mathbf{p}(t-1)$ the step vector between consecutive frames.
+Let $\mathbf{p}(t) = (x, y, z)$ be a cell's centroid at timepoint $t$ (in µm), $\Delta t$ the frame interval (in hours), and $\mathbf{s}(t) = \mathbf{p}(t) - \mathbf{p}(t-1)$ the step vector between consecutive frames. Here $t$ counts frames from the track's first position ($t = 0$), and $\mathbf{s}(0) = \mathbf{0}$, so displacement and speed are 0 at a track's first timepoint.
 
 $$
 \text{displacement}(t) = \lVert \mathbf{s}(t) \rVert
@@ -166,8 +166,8 @@ $$
 
 $$
 \begin{aligned}
-\text{cumulative\_displacement}(t) &= \sum_{i \le t} \lVert \mathbf{s}(i) \rVert \\[4pt]
-\text{displacement\_from\_origin}(t) &= \lVert \mathbf{p}(t) - \mathbf{p}(0) \rVert
+\mathrm{cumulative\_displacement}(t) &= \sum_{i \le t} \lVert \mathbf{s}(i) \rVert \\[4pt]
+\mathrm{displacement\_from\_origin}(t) &= \lVert \mathbf{p}(t) - \mathbf{p}(0) \rVert
 \end{aligned}
 $$
 
@@ -215,15 +215,15 @@ When Morphology is on, the following are added. Units: volumes in µm³, lengths
 | `equivalent_diameter` | Diameter of a sphere with the same volume |
 | `axis1_length` / `axis2_length` / `axis3_length` | Longest / middle / shortest principal-axis length (spacing-aware) |
 | `major_axis_length`, `minor_axis_length` | The longest (`axis1`) and shortest (`axis3`) principal axis |
-| `elongation` | $\text{axis1\_length} / \text{axis2\_length}$ — longest over middle axis |
+| `elongation` | $\mathrm{axis1\_length} / \mathrm{axis2\_length}$ — longest over middle axis |
 | `extent` | Volume divided by the **oriented** bounding-box volume ($\text{axis1} \times \text{axis2} \times \text{axis3}$) |
-| `oblateness` | Flatness: $1 - \text{axis3} / \text{axis1}$ (0 = not flattened, →1 = disc-like) |
+| `oblateness` | $1 - \text{axis3} / \text{axis1}$ (0 = all axes equal; →1 when the shortest axis is much shorter than the longest, as in discs and in cigars; use `prolateness` to tell them apart) |
 | `prolateness` | Elongation: $1 - \text{axis2} / \text{axis1}$ (0 = not elongated, →1 = cigar-like) |
 | `surface_area` | Physical surface area from exposed voxel faces (µm²) |
-| `sphericity` | How sphere-like the object is (1 = perfect sphere) |
-| `surface_to_volume_ratio` | $\text{surface\_area} / \text{volume}$ |
+| `sphericity` | How sphere-like the object is (higher = rounder; a perfectly round cell scores about 0.65, see below) |
+| `surface_to_volume_ratio` | $\mathrm{surface\_area} / \text{volume}$ |
 | `convex_volume` | Volume of the convex hull |
-| `solidity` | $\text{volume} / \text{convex\_volume}$ — how much the object fills its convex hull (1 = convex) |
+| `solidity` | $\text{volume} / \mathrm{convex\_volume}$ — how much the object fills its convex hull (1 = convex) |
 | `orientation_vector` | Unit vector of the longest principal axis (the cell's 3-D orientation) |
 | `border_touching_segment` | `True` when the mask touches the edge of the image volume — border objects are cropped, so their morphology is unreliable |
 
@@ -234,14 +234,14 @@ Let $V$ be the object's physical volume and $A$ its surface area. **Surface area
 $$
 \begin{aligned}
 \Psi &= \frac{\pi^{1/3}\,(6V)^{2/3}}{A} \\[4pt]
-\text{surface\_to\_volume\_ratio} &= \frac{A}{V} \\[4pt]
-\text{equivalent\_diameter} &= \left(\frac{6V}{\pi}\right)^{1/3}
+\mathrm{surface\_to\_volume\_ratio} &= \frac{A}{V} \\[4pt]
+\mathrm{equivalent\_diameter} &= \left(\frac{6V}{\pi}\right)^{1/3}
 \end{aligned}
 $$
 
-$\Psi = 1$ for a perfect sphere and decreases as the object becomes more irregular or elongated.
+$\Psi$ decreases as the object becomes more irregular or elongated. Because the surface area is counted from voxel faces (a staircase surface), even a perfectly round cell scores only about $0.65$, never $1$, and `surface_to_volume_ratio` is about 1.5 times the value for a smooth surface. Compare cells with each other rather than with 1.
 
-The three **principal axes** ($a \ge b \ge c$ = `axis1` ≥ `axis2` ≥ `axis3`) come from a principal-component analysis of the mask's voxel coordinates in physical units. The shape descriptors are then:
+The three **principal axes** ($a \ge b \ge c$ = `axis1` ≥ `axis2` ≥ `axis3`) are found by a principal-component analysis of the mask's voxel coordinates in physical units; each axis length is the object's full extent along that direction. The shape descriptors are then:
 
 $$
 \begin{aligned}
@@ -292,13 +292,13 @@ Requires a dead channel in the metadata and the dead mask from [Segmentation](..
 | Column | Meaning |
 |---|---|
 | `percentage_dead_mask` | Fraction (0–1) of the cell's voxels that overlap the dead mask |
-| `nr_dead_mask_pixels` | Number of overlapping voxels = $\text{nr\_pixels} \times \text{percentage\_dead\_mask}$ |
-| `increase_dead_mask` | Change in `nr_dead_mask_pixels` compared with the same cell 10 timepoints earlier — a simple death-rate proxy |
+| `nr_dead_mask_pixels` | Number of overlapping voxels = $\mathrm{nr\_pixels} \times \mathrm{percentage\_dead\_mask}$ |
+| `increase_dead_mask` | Change in `nr_dead_mask_pixels` compared with the same cell 10 timepoints earlier (with the track's first value during its first 10 timepoints) — a simple death-rate proxy |
 | `smoothed_percentage_dead_mask`, `smoothed_nr_dead_mask_pixels`, `smoothed_increase_dead_mask` | Rolling means of the three signals over ≈ 10 minutes (unsmoothed copies when frames are more than 10 min apart), to damp single-frame noise. Death Dynamics does not read these: it recomputes its own smoothing (see [Death Dynamics](population_analysis/death_dynamics.md#reading-the-tables)) |
 | `dead` | Alive/dead flag: `percentage_dead_mask` ≥ **Dead mask % threshold**. With **Propagate dead signal** on, the flag stays `True` from the first crossing onward. Not written when the threshold is 0 |
 
 $$
-\text{percentage\_dead\_mask} = \frac{\#\{\text{cell voxels overlapping the dead mask}\}}{\#\{\text{cell voxels}\}}
+\mathrm{percentage\_dead\_mask} = \frac{\#\{\text{cell voxels overlapping the dead mask}\}}{\#\{\text{cell voxels}\}}
 $$
 
 The death signals capture death differently: `percentage_dead_mask` is **size-independent** (good when objects differ in size) but saturates; `nr_dead_mask_pixels` is an **absolute** count (pairs well with an absolute threshold — see [Active Killing](population_analysis/active_killing.md)); and `mean_dead_dye` (Intensity family) is the **mean dead-channel intensity** over the whole mask — the right choice when there is no dead-cell segmentation, or when the dye is diffuse rather than forming a discrete region.

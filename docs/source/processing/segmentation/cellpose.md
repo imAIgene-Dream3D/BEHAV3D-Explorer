@@ -78,7 +78,7 @@ For each timepoint, the plugin passes the 3-D volume of the mapped channel to th
 | 3-D mode | Always on: each volume is segmented in 3-D, not slice by slice. |
 | Intensity normalization | Always on, per volume. |
 | Cell size | Not estimated from your images: the model expects cells at about the size (in pixels) it was trained on. |
-| Z scaling (anisotropy) | Computed per sample from the metadata, $\text{pixel\_distance\_z} / \text{pixel\_distance\_xy}$. |
+| Z scaling (anisotropy) | Computed per sample from the metadata, $\mathrm{pixel\_distance\_z} / \mathrm{pixel\_distance\_xy}$. |
 | Minimum object size | **1000 voxels** for organoids, **10 voxels** for immune and other populations. |
 | Flat objects | Objects only one voxel thick in Z, Y or X are removed. |
 | Device | CUDA GPU when available, otherwise CPU (much slower). |

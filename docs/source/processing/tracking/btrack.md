@@ -8,8 +8,8 @@ tracks"* ([btrack documentation](https://btrack.readthedocs.io/en/stable/user_gu
 
 In BEHAV3D EXPLORER, btrack runs in **two steps** on a cell type's per-timepoint
 segmentation: **Step 1**, the Kalman-filter tracker, always runs; **Step 2**, the global
-hypothesis optimiser, is optional and should only be switched on once Step 1 looks
-correct. Choose btrack when objects lose frame-to-frame overlap, regardless of their
+hypothesis optimiser, is optional (tick **Enable global track optimization** to include
+it). Both steps run together in the same tracking run. Choose btrack when objects lose frame-to-frame overlap, regardless of their
 biological identity (see [Tracking overview](index.md)). It is the method pre-selected for
 immune (🔵) cell types in a fresh project.
 
@@ -49,7 +49,7 @@ edges or the start and end of the movie.
 
 | Control | Default | What it does |
 |---|---|---|
-| **Enable global track optimization** | off | Runs the optimiser after Step 1. |
+| **Enable global track optimization** | off | Adds Step 2 to the run: the optimiser works on the tracklets that Step 1 leaves. |
 | **Hypotheses** | `P_FP`, `P_init`, `P_term`, `P_link` ticked | Which explanations the optimiser may assign to a tracklet (a short track piece left by Step 1). **P_FP — False positive** is always on (greyed out). Add **P_branch** only for dividing cells (definitions below). **P_dead** cannot detect cell death here: btrack only proposes it for detections classified as apoptotic, which BEHAV3D EXPLORER does not provide. Ticking **P_merge** has no effect: btrack does not generate merge hypotheses. |
 | **Distance threshold** | `60` | Maximum distance for generating link/branch hypotheses (in the selected distance unit). |
 | **Time threshold** | `3` | Maximum frame gap for generating link hypotheses (1–999 frames). |
@@ -72,14 +72,14 @@ edges or the start and end of the movie.
 
 1. **Open the Tracking tab** and pick the sub-tab for the cell type you want to track.
 2. From the **Method:** dropdown, pick **btrack (Bayesian)**.
-3. **Configure Step 1**:
+3. **Configure Step 1** (always used):
    - **Config preset**: start with **Cell (bundled)**; try **Particle (bundled)** or your own file only if Cell gives poor results.
    - **Max search radius**: measure the fastest plausible one-frame displacement, then add a 10–25 % margin.
    - **Update method**: keep **EXACT**; switch to **APPROXIMATE** only if tracking is too slow.
    - **Step size (frames)**: leave at `100`; it only sets how often progress is reported.
    - **Use visual features**: tick to add size, shape and intensity as linking cues (needs the raw image).
-4. **Click *Run … Tracking*** (the green button at the bottom of the sub-tab, named after the cell type) and **inspect the result** in the Visualization tab.
-5. **Optionally enable Step 2**: tick **Enable global track optimization**, tick only the hypotheses your data needs (`P_branch` for division; keep `P_init`/`P_term` so tracks can start and end, e.g. at the field borders), and derive **Distance threshold** / **Time threshold** from the largest spatial and missing-frame gaps that should be bridged. Re-run and re-inspect.
+4. **Optionally configure Step 2**: tick **Enable global track optimization**, tick only the hypotheses your data needs (`P_branch` for division; keep `P_init`/`P_term` so tracks can start and end, e.g. at the field borders), and derive **Distance threshold** / **Time threshold** from the largest spatial and missing-frame gaps that should be bridged.
+5. **Click *Run … Tracking*** (the green button at the bottom of the sub-tab, named after the cell type) and **inspect the result** in the Visualization tab.
 6. **Iterate** (see [Tuning the parameters](#tuning-the-parameters)). For batch or queued runs, see [Generic workflow](index.md#generic-workflow-per-sub-tab).
 
 ## Tuning the parameters
@@ -130,7 +130,7 @@ Standard tracking outputs (tracked zarr + tracks CSV) — see [Tracking overview
 
 ## Good practices & tips
 
-- **Validate Step 1 before enabling Step 2.** The optimiser cannot fix a poorly tuned search radius.
+- **Set Max search radius carefully.** The optimiser (Step 2) cannot fix a poorly tuned search radius.
 - **Use EXACT unless tracking is too slow.**
 - **Workers are capped at one less than your CPU core count**, so the computer stays responsive.
 

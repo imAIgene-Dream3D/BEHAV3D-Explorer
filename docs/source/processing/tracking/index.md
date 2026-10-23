@@ -38,7 +38,7 @@ roughly one cell diameter or more.
 
 | Method | What it does |
 |---|---|
-| **btrack (Bayesian)** | Bayesian tracker whose Kalman-filter motion model predicts where each object will be next, optionally followed by a global hypothesis optimiser. The routine choice for objects that lose overlap between frames. See [btrack](btrack.md). |
+| **btrack (Bayesian)** | Bayesian tracker whose Kalman-filter motion model predicts where each object will be next, with an optional global hypothesis optimiser. The routine choice for objects that lose overlap between frames. See [btrack](btrack.md). |
 | **LapTrack** | Linear Assignment Problem tracking: links detections between consecutive frames by optimal assignment on centroid distances, then closes gaps and optionally detects merges and splits. No motion prediction. An alternative to btrack. See [LapTrack](lap.md). |
 | **TrackPy** | Crocker–Grier linker: links each frame to the next with the smallest total displacement, with memory for short gaps and an adaptive search range. No motion prediction, no merge/split handling. An alternative to btrack, reliable only when cells are well separated relative to how far they move per frame. See [TrackPy](trackpy.md). |
 

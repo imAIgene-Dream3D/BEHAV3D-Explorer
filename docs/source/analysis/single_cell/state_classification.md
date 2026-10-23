@@ -103,16 +103,16 @@ A good state count is one where each intrinsic state tells a distinct story you 
 
 The selected timepoint features are smoothed, the window features are added, all features are capped, log-scaled where ticked and standardised. A single Gaussian HMM is then fitted across all tracks: each state has its own multivariate-Gaussian feature distribution (shape set by **Covariance type:**), and a learned transition matrix gives the probability of moving between states from one timepoint to the next. Each track is then decoded as the one state sequence that best explains the whole track (Viterbi decoding), which is what makes the model suited to behaviour over time.
 
-With $\mathbf{p}(t)$ the cell position, $w$ the window size and $\mathbf{s}(i)=\mathbf{p}(i)-\mathbf{p}(i-1)$ the steps inside the window ending at $t$:
+With $\mathbf{p}(t)$ the cell position, $w$ the window size ($w \ge 2$), $\mathbf{s}(i)=\mathbf{p}(i)-\mathbf{p}(i-1)$ the steps, and $t_s = \max(t_0, t-w+1)$ the start of the window ending at $t$ ($t_0$ is the first timepoint of the track, so windows are shorter at the start of a track):
 
 $$
 \begin{aligned}
-\text{net\_displacement} &= \lVert \mathbf{p}(t) - \mathbf{p}(t-w+1) \rVert \\[4pt]
-\text{straightness} &= \frac{\text{net\_displacement}}{\sum_i \lVert \mathbf{s}(i) \rVert}
+\mathrm{net\_displacement} &= \lVert \mathbf{p}(t) - \mathbf{p}(t_s) \rVert \\[4pt]
+\text{straightness} &= \frac{\mathrm{net\_displacement}}{\sum_{i=t_s+1}^{t} \lVert \mathbf{s}(i) \rVert}
 \end{aligned}
 $$
 
-**straightness** ranges from 0 (a cell that wanders and ends where it started) to 1 (perfectly straight travel). **mean_square_displacement** is the mean squared distance of each position in the window from the window's first position. Together they separate directed migration from local scanning.
+**straightness** ranges from 0 (a cell that wanders and ends where it started, or does not move) to 1 (perfectly straight travel). **mean_square_displacement** is the mean squared distance of each position in the window from the window's first position. Together they separate directed migration from local scanning.
 
 ### Running it
 
