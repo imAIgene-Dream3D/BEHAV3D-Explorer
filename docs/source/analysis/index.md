@@ -36,7 +36,7 @@ flowchart LR
 
 Until metadata is loaded the tab only shows *"Load metadata in the Data Preparation tab to see analysis options."* Once it is loaded you see, from top to bottom:
 
-- the **🧬  Group cells together for analysis…** button (see [below](#grouping-cell-types));
+- the **🧬  Group cells together for analysis** button (see [below](#grouping-cell-types));
 - the three sub-tabs **🔬 Feature Backprojection**, **👥 Population Dynamics** and **🧬 Single Cell**;
 - the shared [📄 Results panel](../plugin_essentials/results_panel.md), which lists every result file and refreshes when you switch sub-tab.
 
@@ -54,7 +54,7 @@ All analyses run in the background; while one runs you cannot switch sub-tab or 
 
 ### Grouping cell types
 
-**🧬  Group cells together for analysis…** merges several **already filtered** cell types (e.g. CD4 + CD8 T cells) into one population that you can analyse as a single group. It opens the **Cell Type Grouping** dialog:
+**🧬  Group cells together for analysis** merges several **already filtered** cell types (e.g. CD4 + CD8 T cells) into one population that you can analyse as a single group. It opens the **Cell Type Grouping** dialog:
 
 | Control | What it does |
 |---|---|

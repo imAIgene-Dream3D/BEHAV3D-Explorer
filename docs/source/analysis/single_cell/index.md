@@ -18,7 +18,7 @@ The **🧬 Single Cell** sub-tab of **📊 Analysis**. Where [Population Dynamic
 The **Cell type:** dropdown lists the individually tracked populations:
 
 - **immune** and **other** cell types (multicolour populations appear once, as their merged `<type>_merged` entry, not per colour);
-- every cell-type group made with [**🧬  Group cells together for analysis…**](../index.md#grouping-cell-types).
+- every cell-type group made with [**🧬  Group cells together for analysis**](../index.md#grouping-cell-types).
 
 Organoid types are not listed; they are analysed in [Population Dynamics](../population_analysis/index.md). Nothing here is specific to immune cells: declare any individually tracked population as an *other* cell type and it becomes available.
 

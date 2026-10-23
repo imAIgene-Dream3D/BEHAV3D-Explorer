@@ -46,8 +46,8 @@ You pick it once, in **Data Preparation → 1 · Output Directory**. All tabs re
     │   ├── interaction_analysis/       # interaction analysis (per target)
     │   ├── behavioral_states/          # Single Cell → Behavioral State; its backprojection/ also
     │   │                               #   holds the State Trajectory backprojection exports
-    │   ├── behavioral_trajectories/    # Single Cell → State Trajectory
-    │   └── trajectory_features/        # per-timepoint features used by feature-based State Trajectory
+    │   └── behavioral_trajectories/    # Single Cell → State Trajectory; its trajectory_features/
+    │                                   #   holds the per-timepoint features used by feature-based clustering
     ├── <name>_merged/                  # cell-type group made in the Analysis tab (its filtered table in
     │                                   #   track_features/, then the same analysis sub-folders)
     ├── invasiveness_analysis/          # invasiveness run on several immune types together
@@ -115,7 +115,7 @@ The track-count tables of QueenB's **Cell counts** quick action are saved in the
 | Invasiveness Analysis | `analysis/{immune_type}/invasiveness_analysis/`, or `analysis/invasiveness_analysis/` for several immune types together |
 | Combined Death Dynamics / Interaction Overview | `analysis/multi_organoid_comparison/` |
 | Behavioral State classification | `analysis/{cell_type}/behavioral_states/` |
-| State Trajectory classification | `analysis/{cell_type}/behavioral_trajectories/` and `analysis/{cell_type}/trajectory_features/` |
+| State Trajectory classification | `analysis/{cell_type}/behavioral_trajectories/` |
 | Backprojection exports (both Single Cell analyses) | `analysis/{cell_type}/behavioral_states/backprojection/` |
 | Cell-type group table | `analysis/{name}_merged/track_features/` |
 | Cell-type group tracked segments (only with **Also build tracked segments (slower)** or **🧩 Build Tracked Segments**) | `images/{sample}/{sample}_{name}_merged_tracked.zarr` and `trackdata/{sample}/{name}_merged/` |

@@ -123,7 +123,7 @@ Run it for every cell type **even with no filters**: the analyses read its filte
 
 *Full detail: [Analysis](analysis/index.md).*
 
-Three sub-tabs: **🔬 Feature Backprojection** (paint any feature onto the cells), **👥 Population Dynamics** and **🧬 Single Cell**. The last two open on a **Guided overview**: click **Start — open the settings  ▸** on the card you want. To analyse several filtered cell types as one, use **🧬  Group cells together for analysis…**.
+Three sub-tabs: **🔬 Feature Backprojection** (paint any feature onto the cells), **👥 Population Dynamics** and **🧬 Single Cell**. The last two open on a **Guided overview**: click **Start — open the settings  ▸** on the card you want. To analyse several filtered cell types as one, use **🧬  Group cells together for analysis**.
 
 **👥 Population Dynamics** — population- and interaction-level readouts:
 
@@ -146,5 +146,5 @@ Both can paint their result back onto the images (**Backprojection**).
 **Key knobs:**
 
 - **Active Killing:** **Observation window (tp):** (`5`), **Killing threshold multiplier:** (`1.5`) or **Use absolute threshold**, **Min contact duration (tp):** (`1`). Re-run Filtering afterwards.
-- **Behavioral State:** the features (pre-ticked: speed, elongation, sphericity, extent, solidity, net_displacement), **Window size (timepoints):** and **Smooth window (timepoints):** (`5` each — judge the real time shown below them), and **n_states:** (`4`) or **State selection mode:** `auto`. Re-running the clustering deletes that cell type's previous `behavioral_states` results.
+- **Behavioral State:** the features (pre-ticked: speed, elongation, sphericity, extent, solidity, net_displacement), **Window size (timepoints):** and **Smooth window (timepoints):** (`5` each — judge the real time shown below them), and **n_states:** (`4`). Re-running the clustering deletes that cell type's previous `behavioral_states` results.
 - **State Trajectory:** **Trajectory size (timepoints):** (`100`) and **N clusters:** (`6`).

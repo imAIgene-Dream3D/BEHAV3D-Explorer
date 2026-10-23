@@ -2691,7 +2691,7 @@ class AnalysisTab(QWidget):
         # extraction/filtering work for every group.
         grouping_row = QHBoxLayout()
         grouping_row.setContentsMargins(6, 6, 6, 4)
-        self.btn_open_grouping = QPushButton("🧬  Group cells together for analysis…")
+        self.btn_open_grouping = QPushButton("🧬  Group cells together for analysis")
         self.btn_open_grouping.setToolTip(
             "Merge several already-filtered cell types into a single "
             "'{name}_merged' population for Population Dynamics / Single Cell.\n"
