@@ -384,14 +384,10 @@ class DataPreparationTab(QWidget):
     metadata_loaded = Signal(object)  # pd.DataFrame
 
     # The shared metadata table ---------------------------------------------
-    # Background workers used to receive this very DataFrame and the backends
-    # mutate it in place (``metadata.at[idx, "<cell>_tracks_image_path"] = ...``)
-    # while the GUI thread iterates it to refresh widgets; concurrent workers
-    # could interleave writes the same way. On a non-GUI thread the getter
-    # therefore returns a private snapshot: in-place edits stay private to that
-    # worker and are published only by *assignment* of the returned table, which
-    # every caller already does (``self.metadata_loader.metadata = updated``) and
-    # which is an atomic reference swap. The GUI thread keeps the live object.
+    # Backends edit the metadata in place, so on a non-GUI thread the getter
+    # returns a private copy. Changes are published only by assigning the
+    # result back (``self.metadata_loader.metadata = updated``), an atomic
+    # swap. The GUI thread gets the live object.
     @property
     def metadata(self):
         md = self._metadata
@@ -1140,9 +1136,6 @@ class DataPreparationTab(QWidget):
         is_checked = self.builder_grp.isChecked()
         if not is_checked and self.metadata is not None:
             # Collapsed + Metadata loaded -> Yellow Edit
-            # NOTE: To keep the button active while the group is "collapsed", 
-            # we would technically need the group to be checked. 
-            # In standard Qt, an unchecked QGroupBox disables all children.
             self.btn_save_metadata.setText("Edit Metadata CSV")
             self.btn_save_metadata.setStyleSheet(
                 "background-color: #FFA726; color: white; font-weight: bold;"
@@ -1153,12 +1146,6 @@ class DataPreparationTab(QWidget):
             self.btn_save_metadata.setText("Save Metadata CSV")
             self.btn_save_metadata.setStyleSheet(
                 "background-color: #4CAF50; color: white; font-weight: bold;"
-            )
-        elif self.metadata is not None and not is_checked:
-            # Fallback for yellow state
-            self.btn_save_metadata.setText("Edit Metadata CSV")
-            self.btn_save_metadata.setStyleSheet(
-                "background-color: #FFA726; color: white; font-weight: bold;"
             )
         else:
             # Default Green Save
@@ -1645,7 +1632,7 @@ class DataPreparationTab(QWidget):
 
         self.metadata_table = QTableWidget(0, 0)
         self.metadata_table.setAlternatingRowColors(True)
-        # Fix for white-on-white text in some themes
+        # Dark alternate rows so text stays readable in light-text themes
         self.metadata_table.setStyleSheet("QTableWidget { alternate-background-color: #333; }")
         self.metadata_table.setMaximumHeight(250)
         lay.addWidget(self.metadata_table)
@@ -1670,8 +1657,6 @@ class DataPreparationTab(QWidget):
                 item = QTableWidgetItem(str(val) if pd.notna(val) else "")
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 self.metadata_table.setItem(i, j, item)
-
-        # self.metadata_table.resizeColumnsToContents()  # Removed to prevent excessive width
 
     # ══════════════════════════════════════════════════════════════════════
     # Section 5 – Dimension Order Table

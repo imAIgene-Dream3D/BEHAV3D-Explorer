@@ -1277,18 +1277,14 @@ class ProcessingQueuePanel(QWidget):
 
     # ── Run queue (event-driven state machine) ─────────────────────────
     #
-    # The queue used to be a synchronous ``for step in self._steps`` loop
-    # that called the backend directly and froze napari for the entire
-    # run.  It now mirrors the per-tab background-execution pattern:
-    # each step is dispatched via ``run_batch_*(block=False,
-    # extra_callbacks=...)`` and the queue advances when the underlying
+    # Each step is dispatched in the background via ``run_batch_*(block=False,
+    # extra_callbacks=...)``; the queue advances when the underlying
     # :class:`BackgroundOperation` fires its on-done / on-failed slot.
     # The state machine has four entry points:
     #   - :meth:`_on_run_queue`       — pre-flight, lock UI, kick off step 0.
     #   - :meth:`_start_next_step`    — mark RUNNING, dispatch, wire progress.
     #   - :meth:`_step_done`          — mark DONE, advance to idx+1.
     #   - :meth:`_step_failed`        — mark ERROR, dialog, finalize.
-    # All CLI prints live verbatim inside these slots.
 
     def _on_run_queue(self):
         if not self._steps or self._is_running:
@@ -2047,9 +2043,8 @@ class ProcessingQueuePanel(QWidget):
                     apoc_widget.spin_t_start.setValue(int(p.get("t_start", 0)))
                 if hasattr(apoc_widget, "spin_t_end"):
                     apoc_widget.spin_t_end.setValue(int(p.get("t_end", 100)))
-        # skip_existing is passed per call: writing it onto the widget used to
-        # leak into later GUI runs (e.g. a single-cell-type run recomputing
-        # outputs it had no reason to touch).
+        # Pass skip_existing per call rather than storing it on the widget,
+        # so it does not carry over into later manual runs.
         apoc_widget._on_run_segmentation(
             interactive=False, block=False, extra_callbacks=extra_callbacks, plan=plan,
             overwrite_existing=not skip_existing,

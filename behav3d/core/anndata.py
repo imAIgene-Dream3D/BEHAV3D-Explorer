@@ -19,11 +19,8 @@ from matplotlib.backends.backend_pdf import PdfPages
 import scanpy as sc
 from tqdm import tqdm
 
-# NOTE: umap / igraph / leidenalg / seaborn / imageio_ffmpeg were imported here
-# but never used. ``import umap`` alone cost ~10 s of numba JIT compilation
-# (via pynndescent) and was paid on the Qt main thread by every napari tab that
-# reaches this module through ``df_to_adata``. Keep this module's imports lean;
-# import heavy optional stacks inside the functions that actually need them.
+# Imported by many napari tabs: keep module-level imports light and import
+# heavy optional packages (umap, igraph, ...) inside the functions that use them.
 
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 from sklearn.cluster import KMeans, HDBSCAN, AgglomerativeClustering

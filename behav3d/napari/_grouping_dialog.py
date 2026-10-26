@@ -486,8 +486,7 @@ class GroupBuilderDialog(QDialog):
         box.exec_()
 
         if selected is not None and out_csv is not None:
-            # This was the group-creation flow: finish with the same sanity
-            # plot / close that the synchronous path used to.
+            # Group-creation flow: show the length-distribution plot and close.
             self._show_length_distribution(output_dir, group_id)
             self.accept()
 

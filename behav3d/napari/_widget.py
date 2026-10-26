@@ -239,9 +239,7 @@ class BEHAV3DWidget(QWidget):
             layout.addWidget(self.btn_toggle_assistant)
 
 
-        # Always-visible hint that something is running in the background. Work
-        # started elsewhere (a queue, another tab) used to go unnoticed, and
-        # clicking around while it ran was a main source of crashes.
+        # Always-visible banner while background work (queue, other tabs) is running.
         self.busy_label = QLabel()
         self.busy_label.setWordWrap(True)
         self.busy_label.setStyleSheet(
@@ -309,9 +307,6 @@ class BEHAV3DWidget(QWidget):
         self.tabs.addTab(self.analysis_tab, "📊 Analysis")
 
         reset_scroll_on_page_change(self.tabs)
-
-        # Backprojection is now integrated into the Single Cell tab
-        # (Step 4 in State Classification, Step 5 in Track Classification)
 
         # --- Processing Queue (collapsible bottom panel) ------------------
         self.queue_panel = ProcessingQueuePanel(
@@ -432,14 +427,6 @@ class BEHAV3DWidget(QWidget):
         try:
             from behav3d.napari._assistant import AssistantDock
             self.assistant = AssistantDock(main_widget=self)
-            # self._assistant_dock = self.viewer.window.add_dock_widget(
-            #     self.assistant, area="right", name="BEHAV3D Assistant"
-            # )
-            # # Remove the native 'x' button so napari doesn't destroy the widget
-            # from qtpy.QtWidgets import QDockWidget
-            # self._assistant_dock.setFeatures(
-            #     self._assistant_dock.features() & ~QDockWidget.DockWidgetClosable
-            # )
 
             from napari._qt.widgets.qt_viewer_dock_widget import QtViewerDockWidget
 
@@ -448,7 +435,7 @@ class BEHAV3DWidget(QWidget):
                 self.assistant,
                 name="BEHAV3D Assistant",
                 area="right",
-                close_btn=False,   # <-- this is the one that actually works
+                close_btn=False,
             )
             self.viewer.window._add_viewer_dock_widget(self._assistant_dock, menu=self.viewer.window.window_menu)
             
@@ -1007,9 +994,7 @@ class BEHAV3DWidget(QWidget):
 
         # Refresh the Analysis tab when switched to, but only if something it
         # shows changed since its last refresh (a stat-only check; see
-        # AnalysisTab.refresh_if_stale). It used to re-run the whole cascade on
-        # every switch, which on big datasets meant re-reading CSV headers and
-        # h5ad files on the GUI thread each time.
+        # AnalysisTab.refresh_if_stale).
         # Skip it while a background column scan is in flight in the Single
         # Cell sub-tabs: re-cascading would only queue a second full-CSV rescan
         # behind the first. That scan's own on_done callback refreshes the UI,

@@ -1650,8 +1650,8 @@ def plot_interaction_violin_comparison(
         edgecolor="white", linewidth=0.3,
     )
 
-    # Legend: organoid fate (colour). Immune type / line condition are now
-    # disaggregated onto the x-axis (separate violins), so no marker legend.
+    # Legend: organoid fate (colour). Immune type / line condition are on the
+    # x-axis (separate violins), so no marker legend.
     legend_handles = []
     if hue_order:
         legend_handles.extend([
@@ -2543,10 +2543,8 @@ def plot_interaction_overview_dashboard(
         return None
 
     # Dynamic group count drives figure width: 2 x N_present_org_types.
-    # Panels are now stacked vertically (contact duration on top as the
-    # main view, active-killing efficiency as a smaller sub-panel below),
-    # so the figure no longer needs to stretch horizontally to fit two
-    # side-by-side panels.
+    # Panels are stacked vertically: contact duration on top (main view),
+    # active-killing efficiency as a smaller sub-panel below.
     n_groups = max(2 * len(org_types), 4)
     figwidth = max(11.0, 3.2 * n_groups + 3.0)
 

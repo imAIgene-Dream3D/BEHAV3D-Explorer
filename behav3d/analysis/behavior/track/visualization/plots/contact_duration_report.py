@@ -52,8 +52,8 @@ _MIN_GROUP_N_FOR_TEST = 2
 # Cycled (not hashed, so neighboring samples stay visually distinct even when there are only a
 # handful) per sorted sample name to give each one a stable marker shape -- used by the
 # "connected by sample" boxplot panels so a sample's two dots stay identifiable without a line
-# joining them (the line moved to a separate companion panel; see ``_draw_pair_connected_lines``/
-# ``_draw_long_contact_connected_lines``).
+# joining them (the connecting lines are drawn in a companion panel; see
+# ``_draw_pair_connected_lines``/``_draw_long_contact_connected_lines``).
 _SAMPLE_MARKER_SHAPES = ["o", "s", "^", "D", "v", "P", "X", "*", "h", "<", ">", "p"]
 
 

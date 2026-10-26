@@ -1672,9 +1672,6 @@ class ActiveKillingPanel:
                     if item: gallery_items.append(item)
                 
                 if gallery_items:
-                    # No easy way to clear previous "Processing" messages without clearing everything, 
-                    # but we can wrap them in a VBox to show them all at once at the end of sample processing.
-                    # Or just display them. Let's just display them.
                     display(widgets.VBox(gallery_items))
                 else:
                     display(widgets.HTML("<i>Could not generate gallery items for this sample.</i>"))

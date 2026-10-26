@@ -1410,10 +1410,8 @@ class CellTypeFeaturePanel(QWidget):
                 pct_dead = float(pct_arr[coords]) if pct_arr is not None else None
                 return label_id, pct_dead
             except Exception as exc:
-                # Throttled: mouse-move fires very frequently, so only log
-                # when the failure reason actually changes, instead of
-                # silently swallowing every occurrence (which previously
-                # made "hover sometimes shows nothing" undiagnosable).
+                # Mouse-move fires very often: only log when the failure
+                # reason changes.
                 msg = str(exc)
                 if getattr(self, "_last_hover_error_msg", None) != msg:
                     self._last_hover_error_msg = msg
@@ -3897,12 +3895,6 @@ class FeatureExtractionTab(QWidget):
         self.splitter.setCollapsible(0, False)
         self.splitter.setCollapsible(1, True)
         self.splitter.setSizes([600, 400])
-
-        # ── Global Death Classification group (Organoids only) ─────────────
-
-        # Note: cell-type grouping now lives in the Analysis tab (after
-        # Filtering) — see AnalysisTab in _analysis.py. It merges already
-        # *filtered* populations, so it never needs to appear here.
 
         # ── Per-cell-type sub-tabs ─────────────────────────────────────────
         self.cell_tabs = QTabWidget()

@@ -2245,17 +2245,7 @@ class PixelClassifierWidget(QWidget):
                 # Get prediction for current timepoint
                 # Expected shape (Z, Y, X)
                 mask_t = pred_data[t_idx]
-                
-                # Check for content
-                # Background=1, Foreground=2 (usually)
-                # But let's check values
-                
-                # Get parameters for this target
-                # If 'Dead', use defaults or specific widget if added (currently Dead doesn't have params widget in UI logic above, need check)
-                # The UI logic in _refresh_params_ui iterates over self.all_cell_types only.
-                # So 'Dead' might not have adjustable params in UI. 
-                # Let's skip 'Dead' if not in param_widgets or use defaults.
-                
+
                 cell_type_key = target.lower()
                 if cell_type_key == 'dead':
                      # Use defaults for dead
@@ -2274,12 +2264,7 @@ class PixelClassifierWidget(QWidget):
 
                 self.log(f"  Segmenting {target} (EDT={edt}, Size={size}, Open={opening})...")
                 
-                # Preprocess mask (Postprocess prediction)
-                # logic from napari_pixelclassifier.segment_and_update:
-                # mask_t has labels: 0=background, 1=background_label, 2=foreground
-                # extract fg (2)
-                
-                # Postprocess the prediction mask
+                # Prediction labels: 0=background, 1=background label, 2=foreground
                 fg_mask = (mask_t == 2).astype(bool)
                 
                 if np.any(fg_mask):
@@ -2299,13 +2284,8 @@ class PixelClassifierWidget(QWidget):
 
                 # Update 'Segments' layer
                 seg_layer_name = f'{target} Segments' # e.g. "Organoid1 Segments"
-                # "Dead" usually doesn't have a segments layer in the original code snippet 
-                # (only 'User Provided' and 'Pixel Classification' for Dead).
-                # But let's check create_layers logic. 
-                # In _on_load_training_clicked:
-                # self.viewer.add_labels(..., name=f'{cell_type.capitalize()} Segments', ...) for cell types
-                # Not for Dead.
-                
+
+                # Dead has no Segments layer (only User Provided / Pixel Classification).
                 if target == 'Dead':
                      continue 
                 
@@ -5523,8 +5503,6 @@ class APOCWidget(QWidget):
         self.training_layout = QVBoxLayout(self.training_group)
         self.training_layout.setContentsMargins(4, 4, 4, 4)
 
-        # Strategy config is now inside APOCTrainingWidget
-        
         train_ctrl_lay = QHBoxLayout()
         train_ctrl_lay.addWidget(QLabel("Examples/sample:"))
         self.spin_examples = QSpinBox()
@@ -5633,8 +5611,6 @@ class APOCWidget(QWidget):
         self.training_placeholder.setStyleSheet("color:#888; font-style:italic; padding:10px;")
         self.training_layout.addWidget(self.training_placeholder)
         layout.addWidget(self.training_group)
-
-        # (Strategy selector is now inside training_group above)
 
         # ── Batch controls ──────────────────────────────────────
         batch_group = QGroupBox("🚀 Batch Segmentation")

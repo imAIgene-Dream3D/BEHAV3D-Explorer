@@ -2629,11 +2629,6 @@ from behav3d.napari._single_cell import SingleCellTab  # noqa: E402  (re-exporte
 from behav3d.napari._feature_backprojection import FeatureBackprojectionTab  # noqa: E402  (re-exported)
 
 
-# NOTE: ResultsPanel used to be defined here; it now lives in
-# behav3d/napari/_results_panel.py so the Filtering and Feature
-# Extraction tabs can embed an instance without importing the
-# (much heavier) Analysis module.
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Outer Analysis tab
 # ═══════════════════════════════════════════════════════════════════════════

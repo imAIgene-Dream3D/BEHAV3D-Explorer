@@ -101,10 +101,8 @@ class _ImportTrackingPage(QWidget):
         self._switch_to_data_prep_edit = switch_to_data_prep_edit_callback
         # sample_name -> {"path_edit", "browse_btn", "status_layout", "last_value", "row_idx"}
         self._rows = {}
-        # The per-sample rows (each one stats its source and destination paths) are
-        # only built while this page is on screen: every metadata (re)load used to
-        # rebuild the page of *every* cell type's panel, shown or not -- including
-        # panels of earlier generations that Qt's QTabWidget.clear() keeps alive.
+        # Per-sample rows are built lazily, only while this page is on screen;
+        # a metadata reload while hidden just marks the page stale.
         self._stale = False
         self._init_ui()
         if hasattr(metadata_loader, "metadata_loaded"):
@@ -2818,7 +2816,7 @@ class TrackingTab(QWidget):
         # Cell-type-level progress: one "step" per cell-type panel.  We
         # scale each step into 100 sub-units so the activity dock can
         # estimate ETA from sample-level ticks within a step.
-        steps_total = total  # noqa: F841 (kept for readability / future use)
+        steps_total = total
         steps_done = [0]
 
         def _do_batch(progress_cb=None):

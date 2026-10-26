@@ -5125,11 +5125,9 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
                 single_layer=True,
             )
 
-            # Close any stale legend/statebar dock up front — including a
-            # previous visualize-matched-track scrubber — before adding the
-            # new scrubber and legend below, since both are now tagged for
-            # this same cleanup and calling it again in between would just
-            # remove the scrubber this method itself just created.
+            # Close stale legend/statebar/scrubber docks once, up front: the new
+            # scrubber and legend below share the same cleanup tag, so calling it
+            # again in between would remove the scrubber just created.
             close_backprojection_legend_docks(self.viewer)
 
             try:

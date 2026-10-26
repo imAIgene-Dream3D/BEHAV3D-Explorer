@@ -264,7 +264,6 @@ class VisualizationTab(QWidget):
         # Options
         self.clear_layers_cb = QCheckBox("Clear existing layers before loading")
         self.clear_layers_cb.setChecked(True)
-        # sel_lay.addWidget(self.clear_layers_cb) # Removed as it does not make sense right now
 
         self.info_label = QLabel("")
         self.info_label.setStyleSheet("color: #666; font-style: italic;")

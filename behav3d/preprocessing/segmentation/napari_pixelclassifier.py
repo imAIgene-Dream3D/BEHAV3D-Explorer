@@ -567,12 +567,6 @@ def _apply_classifier(args):
     prediction = zarr.open(outpath, mode="r+")
     prediction[idx] = future.predict_segmenter(features, clf)
 
-# def apply_classifier_in_memory(args):
-#     clf, path, outpath, idx = args
-#     features = np.asarray(load_image(path, mode="r")[idx])
-#     prediction = zarr.open(outpath, mode="r+")
-#     prediction[idx] = future.predict_segmenter(features, clf)
-
 
 def apply_classifier(classifier, features_outpath, pred_labels_outpath, n_workers=4):
     shape = load_image(features_outpath).shape
