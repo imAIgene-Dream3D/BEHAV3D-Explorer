@@ -6,7 +6,7 @@ APOC ([Accelerated Pixel and Object Classifiers](https://github.com/haesleinhuep
 APOC trains a separate binary classifier (foreground vs. background) for each cell type. If you set up N cell types in BEHAV3D EXPLORER, APOC trains N classifiers — plus one for the dead channel when one is declared in the metadata.
 ```
 
-For method choice across all six segmentation options, see the [segmentation overview](./index.md#how-to-pick-a-method).
+For method choice across all six segmentation options, see the [segmentation overview](./index.md#how-to-pick-a-method). No pixel classifier is best on every dataset — APOC, [ConvPaint](convpaint.md) and the Pixel Classifier can each win depending on the data, and with APOC the choice of features (see [Tuning the parameters](#tuning-the-parameters)) usually matters more than the method itself.
 
 ## Strategies
 
@@ -240,14 +240,9 @@ Standard batch controls in the **🚀 Batch Segmentation** group — see [Batch 
 - **Save labels before switching method.** Labels are saved when you train, and you are asked whether to save when you leave the Segmentation tab — but switching to another method removes the training layers without asking. Click **Save User Labels** after any substantial painting.
 - **Keep RF trees fairly shallow (Max depth ~5, the default).** Interactive labeling gives small label sets, which deep trees can fit too closely.
 - **Read the classifier statistics after training.** If a single feature dominates the importance distribution, you may be under-labelled or over-relying on one channel.
-- **Workers do not speed up APOC.** APOC inference is GPU-bound and runs sample by sample, so **Workers:** has no effect here. The setting is shared: changing it also changes it for Zarr conversion and the Pixel Classifier (see [Workers](../../plugin_essentials/running_steps.md#workers)).
+- **Workers do not speed up APOC.** APOC inference is GPU-bound and runs sample by sample, so **Workers:** has no effect here. How long each timepoint takes depends mostly on your GPU, the volume size and the number of checked channels and features, so time a short timepoint range on your own data before queuing a full batch. The setting is shared: changing it also changes it for Zarr conversion and the Pixel Classifier (see [Workers](../../plugin_essentials/running_steps.md#workers)).
 - **Several cell types (large and small)?** See [Advice: large vs small objects](./index.md#advice-large-vs-small-objects) on the overview; use **Advanced (per cell type)** when each type needs a different strategy, and **⛓ Apply same settings to all organoids** when several organoid types should share one setup.
 - **Reuse labels across experiments** with the same imaging setup via **Export Training Bundle…** / **Import Training Data** (section 5) instead of repainting from scratch.
-
-## Things this page does **not** claim
-
-- Per-timepoint inference time numbers — they depend strongly on your GPU, volume size, and channel count. Profile your own data.
-- That APOC always beats ConvPaint or Pixel Classifier. This is dataset-dependent; the choice of features is what matters.
 
 ## See also
 

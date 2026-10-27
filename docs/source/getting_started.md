@@ -16,6 +16,23 @@ Double-click the launcher for your system in the `napari/` folder of BEHAV3D EXP
 
 The launcher starts the environment the installer created and opens napari (window title **BEHAV3D Explorer**) with the plugin already docked on the right. Keep the terminal window it opens: closing it closes napari. It shows the progress messages of every step, which are also saved in the `logs/` folder of BEHAV3D EXPLORER.
 
+````{note}
+**macOS / Linux:** If double-clicking `run_behav3d_macos.command` opens it as text or shows an error about access privileges (macOS), or the terminal answers `Permission denied` (Linux), the file doesn't have executable rights to open. To fix it:
+
+1. Open a terminal (macOS: **Terminal**, in Applications → Utilities).
+2. Type `chmod +x ` (with a space at the end), then drag the launcher from Finder or your file manager into the terminal window to fill in its path, and press Enter. For example:
+   ```bash
+   chmod +x path/to/BEHAV3D-Explorer/napari/run_behav3d_macos.command
+   ```
+3. The file can now run: double-click it again
+````
+
+```{note}
+**If macOS says the file "cannot be opened" or "Apple could not verify".** macOS blocks files downloaded from the internet the first time you open them. To open it anyway:
+
+- Open **System Settings → Privacy & Security**, scroll down to the message about the blocked file, click **Open Anyway** and confirm with your password. 
+```
+
 :::
 
 :::{tab-item} Manual
@@ -78,7 +95,7 @@ QueenB needs an internet connection: your questions and a text summary of the pl
 
 ## Pipeline tour
 
-This is the happy path. Each step links to its full reference page.
+This is the standard route from raw images to results. Each step links to its full reference page for options and alternatives.
 
 1. **Set up your project in 📋 Data Preparation** ([details](data_preparation.md))
    - In **1 · Output Directory**, pick the folder that will hold everything BEHAV3D EXPLORER writes.

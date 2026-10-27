@@ -82,13 +82,16 @@ Practical rules:
 
 - **Import segmentation** is *not* a way to create segmentations: it checks existing masks (converting them to Zarr where needed) so the rest of the pipeline can consume them. Use it first if this covers your case — it skips everything else.
 - **Cellpose (v3)** is the quickest route when the lab already has a model trained on images like yours (see [Cellpose page](cellpose.md) and [Zenodo](https://zenodo.org/records/18872978)), or when you can train one on full masks of your own. The page runs the model file you give it; without a suitable model, use Cellpose-SAM or a pixel classifier instead.
-- **Cellpose-SAM (v4, zero-shot)** is worth trying when you have a GPU, clean channels (no bleed-through, one cell type per channel) and time for a long run. It needs **no training and no annotation**, but it is the most compute-hungry method (see [Cellpose-SAM page](cellpose_sam.md)). Check its preview on a representative timepoint first: like other Cellpose models it can split long, thin cells (the Cellpose documentation suggests more **niter dynamics** iterations for long objects), and because it has no labeling step it cannot learn to ignore bleed-through between channels, whereas the pixel classifiers can be taught to by painting it as background (see [Drawing technique](#drawing-technique)). If the preview is wrong, use a pixel classifier.
-- **Cellpose** and **Cellpose-SAM** perform **true instance segmentation in one shot** — they directly output separated cell labels, no pixel labeling and no watershed post-processing. The three pixel classifiers (APOC, ConvPaint, Pixel Classifier) instead output a foreground/background mask or a per-class probability, which BEHAV3D EXPLORER turns into instance labels by [watershed post-processing](#instance-post-processing-parameters).
+- **Cellpose-SAM (v4, zero-shot)** is worth trying when you have a GPU, clean channels (no bleed-through, one cell type per channel) and time for a long run. It needs **no training and no annotation**, but it is the most compute-hungry method (see [Cellpose-SAM page](cellpose_sam.md)). Check its preview on a representative timepoint first: like other Cellpose models it can split long, thin cells (the Cellpose documentation suggests more **niter dynamics** iterations for long objects), and because it has no labeling step it cannot learn to ignore bleed-through between channels, whereas the pixel classifiers can be taught to by painting it as background (see [Labeling tips](#labeling-tips)). If the preview is wrong, use a pixel classifier.
 - Otherwise, train a **pixel classifier** — pick by hardware, then by how well the classifier learns your cells:
   - **APOC** needs a GPU with working OpenCL drivers. It classifies every voxel from classical filters, so it is not limited to round, blob-like objects (see below). You paint a few foreground/background pixels per cell type. Training is quick; inference is fast on a modern GPU. Start here when you have a GPU.
   - **ConvPaint** uses pretrained deep features instead of classical filters — reach for it when APOC's foreground mask stays wrong after you add labels (subtle texture differences, low contrast, ambiguous boundaries). Needs a PyTorch-compatible device (CUDA GPU strongly preferred; CPU works but is slow).
   - **Pixel Classifier (Random Forest)** is the CPU-only fallback. Use it when no GPU is available.
-  - All three split touching cells with the **same** post-processing. If the mask is right but neighbouring cells stay fused, tune the [post-processing](#instance-post-processing-tuning) (or paint a thin background line between them, see [Drawing technique](#drawing-technique)) rather than switching method.
+  - All three split touching cells with the **same** post-processing. If the mask is right but neighbouring cells stay fused, tune the [post-processing](#instance-post-processing-tuning) (or paint a thin background line between them, see [Labeling tips](#labeling-tips)) rather than switching method.
+
+```{note}
+**Cellpose** and **Cellpose-SAM** perform **true instance segmentation in one shot** — they directly output separated cell labels, no pixel labeling and no watershed post-processing. The three pixel classifiers (APOC, ConvPaint, Pixel Classifier) instead output a foreground/background mask or a per-class probability, which BEHAV3D EXPLORER turns into instance labels by [watershed post-processing](#instance-post-processing-parameters).
+```
 
 **Choosing between the three pixel classifiers.** All three are trained by painting a few labels (see [Labeling foreground and background](#labeling-foreground-and-background)) and differ mainly in *where their features come from* and *what hardware they need*:
 
@@ -141,25 +144,21 @@ The pixel classifiers are trained by painting a few labels into the label layers
 
 - **Dead channel** (only when a dead channel is declared in the metadata): every method adds a separate binary layer `User Provided Labels (Dead)` (`1` = background, `2` = dead signal), with its own **Dead** row of legend buttons.
 
-**Labeling tips (apply to all three methods):**
+### Labeling tips
 
-- You only need **enough pixels to disambiguate the classes** — typically dozens to a few hundred per class per timepoint. You do *not* need to paint whole cells.
-- **Bias your strokes toward boundaries** and any visually-confusing region (touching cells, low-contrast areas) — that is where pixel classifiers fail most.
-- Label examples from **different timepoints and Z-slices** (e.g. start / middle / end and a few Z levels) so the classifier sees the variability in your data.
-- **Balance examples across all classes** — don't only label the easiest cells.
-- **Avoid contradictory labels**; only label regions you are confident about.
-- **Save your labels often** (**Save User Labels** in APOC, **💾 Save User Labels** in ConvPaint, **Save Labels** in Pixel Classifier). Labels are also saved automatically when training starts. Saving runs in the background: the labels are copied at the moment you click, so you can keep painting while they are written (strokes made after the click go in the next save).
-- After training, look at the prediction (and the probability map, where available) to see where the model struggles and label more data there.
+Practical tips that apply to all three methods and can give cleaner segmentations:
 
-### Drawing technique
-
-These practical conventions come from the training sessions and give noticeably cleaner segmentations:
-
+- **You only need enough pixels to disambiguate the classes** - You do *not* necessarily need to paint whole cells every time. Parts of the cell/organoid are often enough
+- **Label examples from different timepoints and Z-slices** (e.g. start / middle / end and a few Z levels) so the classifier sees the variability in your data.
+- **Focus labeling on regions where segmenation is liekly going to be more difficult** - don't only label the easiest cells, label across the complexity of the dataset.
 - **Draw background first, then overlay foreground.** Lay down the background class along and just over the object edge, then paint the foreground over the part that sits on the object. Layering it this way produces a very clean border.
+- **You don't have to always label cells completely**. Often focusing on the boundary of background and foreground for a part of the cell or any visually-confusing region (touching cells, low-contrast areas) is enough — that is where pixel classifiers fail most.
 - **Split touching objects with a thin background line.** Where two objects touch, draw a thin background line between them, bordered by foreground, so the classifier learns to separate them. For objects tracked by **fragmentation propagation**, you only need to get this right on **timepoint 1** of each sample — the method copies the segmentation forward.
 - **Draw thin / elongated cells thicker than the signal (~3 px).** Segmentation connects adjacent pixels, so a one-pixel-wide stroke on an elongated T cell leaves gaps; a slightly over-thick line yields one clean segment.
 - **Paint channel bleed-through as background.** Where another channel's signal bleeds into the one you are training (e.g. organoid signal appearing in the T-cell channel at higher Z), explicitly paint it as background — even when it is much brighter — so the model learns to ignore it.
 - **For the dead mask, label the bright dead blobs.** Concentrate on the clear high-intensity dead signal; including very dim red is optional and tends to be noisier.
+- **Save your labels often** (**Save User Labels** in APOC, **💾 Save User Labels** in ConvPaint, **Save Labels** in Pixel Classifier). Labels are also saved automatically when training starts. Saving runs in the background: the labels are copied at the moment you click, so you can keep painting while they are written (strokes made after the click go in the next save).
+- **Use the prediction and [probability map](#reading-the-probability-map) after training to find regions that need more labeling** After training, look at the prediction (and the [probability map](#reading-the-probability-map), where available) to see where the model struggles and label more data there. This would for example be background where the probability map has values that are close to being called foreground or clear foreground that is not labeled as foreground yet.
 
 ### Reading the probability map
 
@@ -192,10 +191,10 @@ Additional behaviour to know:
 (instance-post-processing-tuning)=
 ### Instance post-processing tuning
 
-- Touching cells **merged** into one label → **raise EDT threshold** (Mask + EDT/Watershed strategy, Pixel Classifier; it has no effect until it is above 1 px), or **raise Seed threshold** (Probability strategies; keep it above Mask threshold).
+- Touching cells **merged** into one label → **raise EDT threshold** (Mask + EDT/Watershed strategy, Pixel Classifier; it has no effect until it is above 1 px), or **raise Seed threshold** (Probability strategies; keep it above Mask threshold). If it is already high, try **lowering** it instead ([details](troubleshooting.md#raising-edtseed-threshold-doesnt-seem-to-help)).
 - One cell **split** into several labels → **lower EDT threshold**, or **lower Seed threshold**.
-- Background labelled as cells → add more background labels, or **raise Mask threshold**.
-- Cells lost at the edges → **lower Mask threshold**.
+- Background labelled as cells → paint more background where the [probability map](#reading-the-probability-map) reads high and retrain; only as a last resort **raise Mask threshold** (aim for the default `0.5`).
+- Cells lost at the edges → paint more foreground at the edges where the [probability map](#reading-the-probability-map) reads low and retrain; only as a last resort **lower Mask threshold** (aim for the default `0.5`).
 - Small speckles appear as tiny labels → **raise Min size**; real small cells dropped → **lower Min size**.
 - Fuzzy / jagged boundaries or single stray voxels → **raise Opening**; thin structures eroded → **lower Opening** (or `0`).
 

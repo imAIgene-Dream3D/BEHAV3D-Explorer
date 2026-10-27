@@ -43,7 +43,24 @@ install_behav3d_windows.bat
 
 **Option 1 (recommended):** double-click `install_behav3d_macOS.command`.
 
-**Option 2:** if macOS refuses to open it, open Terminal and run:
+```{note}
+**If the installer opens as text or says "you do not have access privileges".** The file has lost its permission to run (this can happen while unzipping or copying). To fix it:
+
+1. Open **Terminal** (Applications → Utilities).
+2. Type `chmod +x ` (with a space at the end), drag `install_behav3d_macOS.command` from Finder into the Terminal window to fill in its path, and press Enter. The full command looks like:
+    ```bash
+    chmod +x path/to/BEHAV3D-Explorer/installation/install_behav3d_macOS.command
+    ```
+3. The file can now run: double-click it again.
+```
+
+```{note}
+**If macOS says the file "cannot be opened" or "Apple could not verify".** macOS blocks files downloaded from the internet the first time you open them. To open it anyway:
+
+- Open **System Settings → Privacy & Security**, scroll down to the message about the blocked file, click **Open Anyway** and confirm with your password. 
+```
+
+**Option 2:** if macOS still refuses to open it, open Terminal and run:
 
 ```bash
 cd path/to/BEHAV3D-Explorer/installation

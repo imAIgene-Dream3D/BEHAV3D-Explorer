@@ -25,7 +25,7 @@ Full decision tree: [How to pick a method](./index.md#how-to-pick-a-method).
 |---|---|
 | Foreground bleeds into background | Paint more **background** labels near the misclassified region, retrain |
 | Cells not detected at all | Paint more **foreground** labels at the missed cells' edges, retrain |
-| Good on trained timepoints, poor elsewhere | Raise **Examples/sample**, generate new training data, retrain |
+| Good on trained timepoints, poor elsewhere | Raise **Examples/sample**, generate new training data, retrain. If it still fits the painted pixels much better than the rest, the model may be overfitting: **lower Max depth** (e.g. 2–3) and retrain |
 | Mask fragmented / speckled | Switch **Preset:** to `large_preset`, or add larger σ in **Tune Features** |
 | Training/preview slow, GPU low on memory | Switch to `small_preset`/`medium_preset`, uncheck unneeded channels in **Image Channel Inputs** |
 | No GPU listed / GPU unstable | Tick **Force CPU-only processing** (needs an OpenCL CPU runtime), or use the Pixel Classifier |
@@ -42,14 +42,14 @@ APOC has two watershed strategies for splitting objects — check which one you'
 
 | Symptom | Fix |
 |---|---|
-| Touching cells merged into one label | **Raise EDT threshold** (the default `1.0` px splits nothing) |
+| Touching cells merged into one label | **Raise EDT threshold** (the default `1.0` px splits nothing); if it is already high, try **lowering** it ([details](#raising-edtseed-threshold-doesnt-seem-to-help)) |
 | One cell split into several labels | **Lower EDT threshold** |
 
 **If you're using "APOC Probability Map + Watershed" (the default strategy):**
 
 | Symptom | Fix |
 |---|---|
-| Touching cells merged into one label | **Raise Seed threshold** |
+| Touching cells merged into one label | **Raise Seed threshold**; if it is already high, try **lowering** it ([details](#raising-edtseed-threshold-doesnt-seem-to-help)) |
 | One cell split into several labels | **Lower Seed threshold** |
 
 ```{note}
@@ -83,14 +83,14 @@ ConvPaint has two strategies (**Strategy:** dropdown, or the tab's **↳ Cell ty
 
 | Symptom | Fix |
 |---|---|
-| Touching cells merged into one label | **Raise EDT threshold** (the default `1.0` px splits nothing) |
+| Touching cells merged into one label | **Raise EDT threshold** (the default `1.0` px splits nothing); if it is already high, try **lowering** it ([details](#raising-edtseed-threshold-doesnt-seem-to-help)) |
 | One cell split into several labels | **Lower EDT threshold** |
 
 **If you're using "ConvPaint Probability + Watershed":**
 
 | Symptom | Fix |
 |---|---|
-| Touching cells merged into one label | **Raise Seed threshold** |
+| Touching cells merged into one label | **Raise Seed threshold**; if it is already high, try **lowering** it ([details](#raising-edtseed-threshold-doesnt-seem-to-help)) |
 | One cell split into several labels | **Lower Seed threshold** |
 
 See [Common post-processing problems](#common-post-processing-problems-any-method) below for Mask threshold, Min size, Opening, and the "no sweet spot found" issue.
@@ -114,7 +114,7 @@ Pixel Classifier always uses the EDT/Watershed mechanism — there is no strateg
 
 | Symptom | Fix |
 |---|---|
-| Touching cells merged into one label | **Raise EDT threshold** |
+| Touching cells merged into one label | **Raise EDT threshold**; if it is already high, try **lowering** it ([details](#raising-edtseed-threshold-doesnt-seem-to-help)) |
 | One cell split into several labels | **Lower EDT threshold** |
 
 See [Common post-processing problems](#common-post-processing-problems-any-method) below for Min size and Opening.
@@ -157,9 +157,9 @@ These parameters mean the same thing regardless of method — but not all of the
 
 | Symptom | Fix |
 |---|---|
-| Background labelled as cells | **Raise Mask threshold** (Probability Map strategy only), or add more background labels |
-| Real cells lost at the edges | **Lower Mask threshold** (Probability Map strategy only) |
-| Object has a hole / donut-shaped gap in the middle | **Enable Fill holes** (Mask + EDT/Watershed strategy only — Probability Map always leaves holes unfilled, there's no toggle for it) |
+| Background labelled as cells | **Paint more background** where background is called foreground (the [probability map](index.md#reading-the-probability-map) shows where it reads high) and retrain. Last resort: **raise Mask threshold** (Probability Map strategy only); aim to keep the default `0.5` |
+| Real cells lost at the edges | **Paint more foreground** along the cell edges where the [probability map](index.md#reading-the-probability-map) reads low and retrain. Last resort: **lower Mask threshold** (Probability Map strategy only); aim to keep the default `0.5` |
+| Object has a hole / donut-shaped gap in the middle | **Paint more foreground** in the object centres where the [probability map](index.md#reading-the-probability-map) reads low and retrain. With Mask + EDT/Watershed you can also **enable Fill holes** (Probability Map always leaves holes unfilled; there's no toggle for it) |
 | Tiny speckles appear as labels | **Raise Min size** (both strategies) |
 | Real small cells dropped | **Lower Min size** (both strategies) |
 | Fuzzy / jagged boundaries, stray voxels | **Raise Opening px** (both strategies) |

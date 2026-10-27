@@ -56,7 +56,7 @@ The numbers below are the section numbers shown in the tab.
 | Knob | What it does |
 |---|---|
 | **EDT threshold** / **Seed threshold** | splits touching objects — **raise** to split more, **lower** to keep them merged (EDT threshold ≤ 1 px, or Seed ≤ Mask threshold, splits nothing) |
-| **Mask threshold** | foreground cutoff (probability strategies) — **lower** to keep dim cells |
+| **Mask threshold** | foreground cutoff (probability strategies), default `0.5` — fix wrong foreground/background with more labels first; change it only as a last resort (**lower** keeps dim cells, **raise** drops background) |
 | **Min size** | drops segments smaller than this (noise filter) |
 | **Opening px** | smooths boundaries / removes speckles |
 
