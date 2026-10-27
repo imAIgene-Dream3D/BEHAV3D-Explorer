@@ -915,9 +915,9 @@ class CellTypeFeaturePanel(QWidget):
             "around each segment's border; any other-cell-type segment "
             "found within this distance sets '{type}_contact_on_distance' "
             "= True and adds its TrackID to 'touching_{type}s'.\n\n"
-            "This value also defines the neighbourhood used by the Organoid "
-            "Invasiveness calculation and by the Active Killing contact/target "
-            "matching.",
+            "This value also defines what counts as 'in contact' for the "
+            "Organoid Invasiveness calculation and for the Active Killing "
+            "contact/target matching.",
         )
         contact_row.addLayout(contact_help)
         self._contact_unit_mgr.register(
@@ -930,24 +930,34 @@ class CellTypeFeaturePanel(QWidget):
         if self.category == "immune" and "invasiveness" in self.feature_checks:
             inv_cb = self.feature_checks["invasiveness"]
             inv_cb.setToolTip(
-                "Count how many immune voxels lie inside organoid masks at each "
-                "timepoint. Requires both immune segments and organoid masks; "
-                "automatically aggregated downstream."
+                "Percentage (0-100%) of the immune cell's boundary voxels that lie "
+                "within the Contact Threshold of an organoid, at each timepoint. "
+                "Requires both immune segments and organoid masks, and Contact."
             )
             contact_row.addWidget(inv_cb)
             contact_row.addWidget(HelpButton(
                 "Organoid Invasiveness (Advanced)",
                 "Per-timepoint measure of how much of this immune cell's surface\n"
-                "is embedded in an organoid, not a voxel count inside the mask.\n\n"
-                "'Surface' pixels are those within 2 µm of the immune cell's\n"
-                "segment boundary. Of those, the fraction that also lies within\n"
-                "the Contact Threshold distance of an organoid segment gives\n"
-                "'{organoid}_invasiveness_perc' (0-100%).\n\n"
+                "is engaged with an organoid, not a voxel count inside the mask.\n\n"
+                "The cell's 'surface' is its own outermost voxels (its segment\n"
+                "minus a one-voxel erosion). The share of those surface voxels that\n"
+                "lie within the Contact Threshold distance of an organoid segment\n"
+                "gives '{organoid}_invasiveness_perc'. It is always between 0 and\n"
+                "100% and uses the same distance as '{organoid}_contact_on_distance',\n"
+                "so a cell with no contact scores 0%.\n\n"
+                "A Contact Threshold of 0 counts only surface voxels that overlap\n"
+                "the organoid segment. A larger threshold also counts voxels that\n"
+                "are merely close to an organoid, so the percentage rises with the\n"
+                "threshold. Choose it with that in mind.\n\n"
                 "'{organoid}_invasiveness' (bool) is True when that percentage is\n"
                 "≥ 50%. 'any_org_invasiveness[_perc]' aggregates across all\n"
                 "organoid types (max / any).\n\n"
                 "Requires both immune segments and organoid masks; only available "
-                "when Contact is enabled."
+                "when Contact is enabled.\n\n"
+                "Features extracted with earlier versions used a different surface\n"
+                "definition and could exceed 100%. Re-run them with Overwrite to\n"
+                "regenerate the combined table. Stale per-sample contact files are\n"
+                "recomputed automatically when this option is checked."
             ))
         contact_row.addStretch()
 

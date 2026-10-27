@@ -1,6 +1,6 @@
 # 🫳 Invasiveness Analysis
 
-Where Interaction Analysis looks at *contact*, Invasiveness measures how much of each **immune** cell's surface is engaging an organoid — the same **Organoid Invasiveness** feature computed during [Feature Extraction](../feature_extraction) (percentage of the immune cell's surface within contact distance of an organoid; "invasive" once that reaches ≥ 50 %). This step has its **own** immune-cell picker and target checkboxes, independent of the target/effector selectors above.
+Where Interaction Analysis looks at *contact*, Invasiveness measures how much of each **immune** cell's surface is engaging an organoid — the same **Organoid Invasiveness** feature computed during [Feature Extraction](../feature_extraction) (percentage, 0–100, of the immune cell's boundary voxels within the Contact Threshold of an organoid; "invasive" once that reaches ≥ 50 %). The percentage rises with the Contact Threshold, so choose it deliberately (see [Organoid Invasiveness](../feature_extraction)). This step has its **own** immune-cell picker and target checkboxes, independent of the target/effector selectors above.
 
 ```{important}
 Invasiveness Analysis only works if you ran Feature Extraction for the immune cell type with the **Organoid Invasiveness** family enabled (which also requires **Contact**). Without the `{target}_invasiveness_perc` columns there is nothing to plot.

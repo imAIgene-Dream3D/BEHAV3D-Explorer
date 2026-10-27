@@ -72,7 +72,7 @@ Each sub-tab exposes the following spinboxes:
 
 | Control | Default | Range | Units | Meaning |
 |---|---|---|---|---|
-| **Contact Threshold** | 0.0 | 0.0 – 500.0 | µm | Maximum distance between two cells to be counted as "in contact" (used for distance-based contact columns and `touching_*`). Pixel contact is fixed at one-voxel-diagonal (≈ 1.73 px). Visible only when Contact is checked. |
+| **Contact Threshold** | 0.0 | 0.0 – 500.0 | µm | Maximum distance between two cells to be counted as "in contact" (used for distance-based contact columns, `touching_*`, and Organoid Invasiveness). Pixel contact is fixed at one-voxel-diagonal (≈ 1.73 px). Visible only when Contact is checked. |
 | **Dead mask % threshold** | 10 % (stored as 0.1) | 0 – 100 % | percent shown, fraction stored | Minimum share of the cell's voxels that must overlap the dead mask before the cell is flagged as dead. The spinbox is shown as a **percentage** (default 10 %), but the value is saved to `behav3d_parameters.yml` and compared as a **0–1 fraction** — 10 % is stored and compared as `0.1`, directly against `percentage_dead_mask` (itself a 0–1 fraction). Set to **0** to skip dead classification entirely. |
 | **Preview sample** | first sample | dropdown | — | Sample used by the dead-threshold preview button. |
 | **Workers** | balanced default | 1 – (CPU cores − 1) | cores | Parallel workers for image-based computations (morphology / intensity / contact / dead mask). |
@@ -291,7 +291,7 @@ When checked (and Contact is also on), for each organoid type `{org}`:
 
 | Column | Meaning |
 |---|---|
-| `<org>_invasiveness_perc` | Percentage of the immune cell's *surface voxels* (within ~2 µm of its boundary) that are within Contact Threshold of an `<org>` cell |
+| `<org>_invasiveness_perc` | Percentage (0–100) of the immune cell's *boundary voxels* that are within the Contact Threshold of an `<org>` cell. It is 0 whenever `<org>_contact_on_distance` is `False` |
 | `<org>_invasiveness` | `True` when `<org>_invasiveness_perc ≥ 50%` |
 | `any_org_invasiveness_perc` | Maximum across all organoid types |
 | `any_org_invasiveness` | `True` when any organoid type's invasiveness is ≥ 50% |
@@ -306,7 +306,13 @@ $$
 \text{invasive} = \big(\text{invasiveness\_perc} \ge 50\%\big)
 $$
 
-where "surface voxels" are the immune cell's boundary shell (within ~2 µm of its edge).
+where "surface voxels" are the immune cell's own outermost voxels (its mask minus a one-voxel erosion), and "contacting" uses the same Contact Threshold and real (µm) distance as `<org>_contact_on_distance`.
+
+```{note}
+Because invasiveness uses the Contact Threshold, the threshold sets how generous the measure is: a Contact Threshold of 0 µm counts only surface voxels that overlap the organoid mask, and the percentage rises as the threshold grows. If your cell and organoid masks do not overlap or touch (a small gap between segmentations is common), a very small threshold gives almost no contact and invasiveness stays near 0. Check the contact fraction at the threshold you choose.
+
+Features extracted with earlier versions used a different surface definition (a ~2 µm shell, which could exceed 100%). Re-run Feature Extraction with **Overwrite** to regenerate the combined feature table. The per-sample contact files from older versions are detected automatically and recomputed whenever Organoid Invasiveness is checked, even if you choose Skip.
+```
 
 ### Death (when a dead channel exists and the family is checked)
 
@@ -343,7 +349,7 @@ A **fluctuating** reporter that goes on and off, such as calcium, is a different
 - **Always use the Dead Threshold preview before running.** The green/red overlay is the fastest way to catch a wrong threshold — much faster than rerunning extraction and inspecting a CSV.
 - **Use Apply to all category for multi-sample experiments.** Once one organoid sub-tab is correctly tuned, propagate the settings to the others; otherwise it is easy to forget a sub-tab and end up with inconsistent features.
 - **Workers parallelise image-based work, not movement.** Movement and death-flag calculation are CPU-cheap and serial. The bulk of wall time is in morphology + intensity + contact + dead-mask measurement, which is what the worker count actually speeds up.
-- **Reruns are incremental.** Per-sample intermediate CSVs (intensity, contact, morphology, dead mask) are reused if they already exist on disk and you choose **Skip** in the overwrite dialog — useful when you only need to recompute one feature family. Choose **Overwrite** when you change a threshold and need a clean recompute.
+- **Reruns are incremental.** Per-sample intermediate CSVs (intensity, contact, morphology, dead mask) are reused if they already exist on disk and you choose **Skip** in the overwrite dialog — useful when you only need to recompute one feature family. Choose **Overwrite** when you change a threshold and need a clean recompute. As a safeguard, each per-sample contact file is saved with a small `.meta.json` sidecar recording the Contact Threshold (and the invasiveness definition used); if you change the Contact Threshold, or the file predates the current invasiveness definition, the contact step is recomputed automatically rather than reusing stale values.
 - **Active Killing is opt-in for a reason.** Baseline Feature Extraction is fast; Active Killing has to scan every contact event for every immune track per sample and is much slower. Run it only when you actually need killing-event analysis.
 - **Active Killing always reads the *raw*, unfiltered combined feature CSV** — never the filtered one, even if [Filtering](filtering.md) has already been run. This is deliberate: [Filtering](filtering.md) reads Active Killing's advanced-features CSV as its own input when one exists (so the killing columns survive filtering), which would make the two steps each other's upstream dependency if Active Killing also preferred Filtering's output — each could end up refusing to run because the other's file looked newer or older. Reading raw always succeeds. If a filtered CSV for this cell type already exists, Active Killing will print a warning (and the GUI will pop up a reminder) that you should **re-run Filtering afterwards** so the filtered table picks up the fresh killing columns.
 
