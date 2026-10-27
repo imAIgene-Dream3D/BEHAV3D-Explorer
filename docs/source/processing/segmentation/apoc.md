@@ -23,20 +23,25 @@ The **Strategy:** dropdown at the top of the training area controls how a traine
 The plugin opens on **APOC Probability Map + Watershed**: it places the split between touching objects using the classifier's confidence, which helps when boundaries are fuzzy. **Direct Instance Segmentation** is the simplest and fastest, but assumes your cells are already well separated by the pixel classifier alone. The watershed variants exist because biological cells in 3D very often touch — pick the one whose post-processing matches your object morphology and tune its parameters in each cell-type tab. Switch to **APOC Mask + EDT/Watershed Resegmentation** if the probability-map split isn't clean.
 ```
 
+## Workflow at a glance
+
+1. **Open the Segmentation tab** and pick **APOC (GPU)** from the **Method:** dropdown.
+2. [Pick the GPU](#1--gpu-device) from the **GPU Device:** dropdown.
+3. [Pick a strategy](#2--strategy--training) in the **Strategy:** dropdown (default **APOC Probability Map + Watershed**; see [Strategies](#strategies)).
+4. [Generate and label the training data](#2--strategy--training):
+   1. Set **Examples/sample** (default `3`) and click **Generate Training Data**. The viewer loads evenly spaced timepoints of every sample as `Channel …` image layers plus one empty `User Provided Labels (<Cell type>)` layer per cell type (see [Generate Training Data](./index.md#common-structure-of-the-pixel-classifier-pages)).
+   2. Paint a few foreground and background pixels on the label layer of each cell type, using the **Annotation legend** buttons (see [Labeling foreground and background](./index.md#labeling-foreground-and-background)).
+   3. (Optional) [Reuse training data](#5--reusing-training-data-import--export) from a previous experiment.
+5. [Review each cell-type tab](#3--per-cell-type-tab): **Image Channel Inputs**, **Preset:** / **Tune Features** and the Random Forest parameters. Defaults are sensible; the most common change is unchecking irrelevant channels. Use **⬇ Apply config to all tabs** to copy one tab's settings to the others.
+6. [Train and preview](#4--train--preview): click **▶ Train <Cell type> classifier** for the active tab, or **▶▶ Train ALL classifiers**. The prediction appears as `<Cell type> Segments` and a **Classifier Statistics** window opens.
+7. [Tune the result](#tuning-the-parameters) and repeat steps 4–6 until it holds up:
+   - For the watershed strategies, adjust the **Instance Segmentation Preview** group and click **Run instance segmentation** to re-apply it without retraining.
+   - With **APOC (Direct Instance Segmentation)** there is nothing to tune after the classifier; switch to a watershed strategy if you need splitting.
+8. [Batch segmentation](#6--batch-segmentation): choose the timepoint range, then click **▶ Run APOC Batch Segmentation** to run now or **+🛒** to queue. To (re)segment just one cell type, use **▶ Run <Cell type> Segmentation**.
+
+Each numbered step is described in the sections below.
+
 ## Step-by-step in the napari plugin
-
-A full session usually goes like this:
-
-1. **Open the Segmentation tab** → pick **APOC (GPU)** from the **Method:** dropdown.
-2. **Pick the GPU** from the **GPU Device:** dropdown (see section 1 below).
-3. **Pick a strategy** in the **Strategy:** dropdown. The default is **APOC Probability Map + Watershed**.
-4. **Set Examples/sample** (default `3`) and click **Generate Training Data**. The viewer loads evenly spaced timepoints of every sample as `Channel …` image layers plus one empty `User Provided Labels (<Cell type>)` layer per cell type (see [Generate Training Data](./index.md#common-structure-of-the-pixel-classifier-pages)).
-5. **Paint a few foreground and background pixels** on the label layer of each cell type, using the **Annotation legend** buttons — see [Labeling foreground and background](./index.md#labeling-foreground-and-background).
-6. **Review each cell-type tab** (one tab per cell type, plus **Dead** when a dead channel is declared): **Image Channel Inputs**, **Preset:** / **Tune Features**, and the Random Forest parameters. These appear once training data is loaded. Defaults are sensible; the most common change is unchecking irrelevant channels in **Image Channel Inputs**.
-7. **Click ▶ Train <Cell type> classifier** to fit the classifier of the active tab, or **▶▶ Train ALL classifiers** to train every tab. Use **⬇ Apply config to all tabs** beforehand if you want one tab's channels/features/forest settings copied to the others.
-8. **Check the result.** After training, the prediction appears as `<Cell type> Segments` and a **Classifier Statistics** window opens (see *Show classifier statistics* under [Tuning the parameters](#tuning-the-parameters)). For the watershed strategies, adjust the parameters in the tab's **Instance Segmentation Preview** group and click **Run instance segmentation** to re-apply them without retraining.
-9. **Iterate.** If touching cells are merged, single cells split, or noise appears, see [Tuning the parameters](#tuning-the-parameters). With **APOC (Direct Instance Segmentation)** there is nothing to tune after the classifier — switch to a watershed strategy if you need splitting.
-10. **Batch segmentation** → choose the timepoint range → click **▶ Run APOC Batch Segmentation** for an immediate run, or **+🛒** to queue. To (re)segment just one cell type, use **▶ Run <Cell type> Segmentation** (see section 6 below).
 
 ### 1 · GPU device
 

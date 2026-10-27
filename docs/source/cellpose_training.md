@@ -27,6 +27,19 @@ flowchart LR
     E --> F["6. Check predictions<br/>in napari"]
 ```
 
+## Workflow at a glance
+
+1. Check the [requirements](#requirements) and have your training images and masks in two folders (train and validation).
+2. In the notebook, run the cells from top to bottom:
+   1. [Load the packages](#step-1--load-packages).
+   2. [Pick the model type](#step-2--pick-the-model-type): **Organoid** or **Immune cells/Other cell types**.
+   3. [Set the training and validation folders](#step-3--set-training--validation-folders) and the image and mask identifiers.
+   4. [Set the image and channel settings](#step-4--image-and-channel-settings) (pixel sizes, dimension order, channels).
+   5. [Train](#step-5--train) the model on one channel.
+   6. [Check the predictions in napari](#step-6--check-the-predictions-in-napari) and, if they look bad, improve the training masks and train again.
+3. [Find your custom model](#output-your-custom-model) in the `models/` folder next to the notebook.
+4. [Use the model](#after-training-use-the-model) in the plugin's Cellpose segmentation.
+
 ## Requirements
 
 | Requirement | Detail |

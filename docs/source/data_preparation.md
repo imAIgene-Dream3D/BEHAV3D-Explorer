@@ -9,6 +9,23 @@ Tab 1 of the BEHAV3D EXPLORER dock widget. This is where every experiment starts
 
 The tab is a vertical list of six numbered sections, with a **Log** box at the bottom.
 
+## Workflow at a glance
+
+1. [Set the output directory](#1--output-directory) **before** saving or loading metadata.
+2. Get a metadata.csv:
+   - **New project:** [build it in the Metadata Builder](#2--metadata-builder):
+     1. Set the number of samples and the number of organoid, immune and other populations (and tick **Include dead channel** if you have a live/dead dye).
+     2. Click **Configure Cell Types** and name the populations.
+     3. Click **Create Sample Forms**, fill in [the sample fields](#sample-form-fields) for Sample 1 and use **Fill All from Sample 1**.
+     4. Click **Save Metadata CSV**.
+   - **Existing project:** skip the builder and use the loader below (you can [edit an existing metadata.csv](#editing-an-existing-metadatacsv) in the builder).
+3. [Load the metadata](#3--metadata-loader) with **Load Metadata**; every other tab receives it.
+4. [Check the metadata overview](#4--metadata-overview) (the first 10 rows) for paths and values.
+5. (Optional) [Check or change the dimension order](#5--dimension-order-optional) of each raw image.
+6. [Convert the raw images to Zarr](#6--convert-to-zarr), optionally clipping the timepoints to a common range first.
+
+The [metadata schema reference](#metadata-schema-reference) at the end of the page describes every column.
+
 ## 1 · Output Directory
 
 ```{important}

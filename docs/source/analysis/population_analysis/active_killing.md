@@ -12,6 +12,17 @@ Where Death Dynamics asks how a population's signal rises overall, **Active Kill
 Nothing in the calculation depends on the population being immune. The prefix is a **processing category, not a biological claim**: if your killer is a neutrophil, a non-immune cytotoxic line, a parasite, or anything else that engages and damages another object, declare it with the `im_` prefix and Active Killing works normally.
 ```
 
+## Workflow at a glance
+
+1. Run [Feature Extraction](../feature_extraction.md) first for the immune type and the targets, with **Contact** and the death features (dead channel) on.
+2. Open the **▶ 🧬  Extended Analysis — Active Killing (Immune Cells)** section in the Feature Extraction tab.
+3. Set the [parameters](#parameters), choosing the window and the threshold as described in [Choosing the window and threshold](#choosing-the-window-and-threshold).
+4. [Run it](#running-it) with **▶ Run Active Killing Analysis**, or queue it with **+🛒**.
+5. [Check the results in the viewer](#checking-the-results-in-the-viewer) with **👁 Load Top Killers in Viewer** and **🎞 Export Killing GIFs**.
+6. Re-run [Filtering](../filtering.md) so the killing columns reach the filtered table, and read the [outputs](#-active-killing-outputs).
+
+Background for these steps: [how it works in plain terms](#how-it-works-in-plain-terms) and [the killing rule](#the-killing-rule-how-it-is-computed).
+
 ## How it works in plain terms
 
 First the detector finds **contact events**: continuous stretches where the effector is touching at least one of the selected targets. An event has to last at least the **minimum contact duration** to be considered at all.

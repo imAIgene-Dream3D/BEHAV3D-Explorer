@@ -13,6 +13,23 @@ it). Both steps run together in the same tracking run. Choose btrack when object
 biological identity (see [Tracking overview](index.md)). It is the method pre-selected for
 immune (🔵) cell types in a fresh project.
 
+## Workflow at a glance
+
+1. **Open the Tracking tab** and pick the sub-tab for the cell type you want to track.
+2. From the **Method:** dropdown, pick **btrack (Bayesian)**.
+3. [Configure Step 1 — Kalman Filter Tracking](#step-1--kalman-filter-tracking-parameters) (always used):
+   1. **Config preset**: start with **Cell (bundled)**; try **Particle (bundled)** or your own file only if Cell gives poor results.
+   2. **Max search radius**: measure the fastest plausible one-frame displacement, then add a 10–25 % margin.
+   3. **Update method**: keep **EXACT**; switch to **APPROXIMATE** only if tracking is too slow.
+   4. **Step size (frames)**: leave at `100`; it only sets how often progress is reported.
+   5. **Use visual features**: tick to add size, shape and intensity as linking cues (needs the raw image).
+4. (Optional) [Configure Step 2 — Global Hypothesis Optimizer](#step-2--global-hypothesis-optimizer-parameters):
+   1. Tick **Enable global track optimization**.
+   2. Tick only the hypotheses your data needs (`P_branch` for division; keep `P_init` / `P_term` so tracks can start and end, e.g. at the field borders).
+   3. Derive **Distance threshold** / **Time threshold** from the largest spatial and missing-frame gaps that should be bridged.
+5. **Click *Run … Tracking*** (the green button at the bottom of the sub-tab, named after the cell type) and inspect the result in the Visualization tab.
+6. [Iterate](#tuning-the-parameters). For batch or queued runs, see [Generic workflow](index.md#generic-workflow-per-sub-tab).
+
 ## The two steps
 
 - **Step 1 — Kalman Filter Tracking** — links detections between frames using the motion
@@ -67,20 +84,6 @@ edges or the start and end of the movie.
 | **P_merge — Track merging** | "Hypothesis that two tracklets merge into one tracklet." |
 
 `P_link` and `P_branch` are limited by the distance and time thresholds.
-
-## Step-by-step in the napari plugin
-
-1. **Open the Tracking tab** and pick the sub-tab for the cell type you want to track.
-2. From the **Method:** dropdown, pick **btrack (Bayesian)**.
-3. **Configure Step 1** (always used):
-   - **Config preset**: start with **Cell (bundled)**; try **Particle (bundled)** or your own file only if Cell gives poor results.
-   - **Max search radius**: measure the fastest plausible one-frame displacement, then add a 10–25 % margin.
-   - **Update method**: keep **EXACT**; switch to **APPROXIMATE** only if tracking is too slow.
-   - **Step size (frames)**: leave at `100`; it only sets how often progress is reported.
-   - **Use visual features**: tick to add size, shape and intensity as linking cues (needs the raw image).
-4. **Optionally configure Step 2**: tick **Enable global track optimization**, tick only the hypotheses your data needs (`P_branch` for division; keep `P_init`/`P_term` so tracks can start and end, e.g. at the field borders), and derive **Distance threshold** / **Time threshold** from the largest spatial and missing-frame gaps that should be bridged.
-5. **Click *Run … Tracking*** (the green button at the bottom of the sub-tab, named after the cell type) and **inspect the result** in the Visualization tab.
-6. **Iterate** (see [Tuning the parameters](#tuning-the-parameters)). For batch or queued runs, see [Generic workflow](index.md#generic-workflow-per-sub-tab).
 
 ## Tuning the parameters
 

@@ -8,6 +8,17 @@ For method choice across all six segmentation options (including when Cellpose-S
 Cellpose-SAM segments **one population at a time**, from the channel(s) you select for it. T cells and organoids cannot be predicted in a single pass — run the tool once per population, or tick **Run all cell types in one batch** to loop through every population automatically.
 ```
 
+## Workflow at a glance
+
+1. [Set up the Cellpose-SAM environment](#section-1--cellpose-sam-environment-one-time-setup) (one-time, per BEHAV3D EXPLORER Python environment).
+2. [Choose what to segment](#section-2--what-to-segment): the **Cell type:** (or **Run all cell types in one batch**), its channel selection and the timepoint range.
+3. [Pick the device](#section-3--device) (GPU or **Force CPU-only processing**).
+4. [Set the segmentation settings](#section-4--segmentation-settings): the defaults are tested, and the [advanced settings](#advanced-normalization-filters) (normalization, filters) can be left as they are.
+5. [Preview and set the size filter](#section-5--size-filter-preview-before-batch):
+   1. Click **👁 Preview segmentation** on a representative sample and timepoint.
+   2. Adjust **Min size:** / **Max size:** until debris is removed but real cells are kept (the preview re-filters instantly).
+6. [Run](#run): click **▶ Run Cellpose-SAM** to segment now, or **+🛒** to queue it. If the result is not right, see [Tuning the result](#tuning-the-result).
+
 ## Section 1 · Cellpose-SAM Environment (one-time setup)
 
 Cellpose-SAM needs **cellpose v4**, which cannot share a Python environment with the **cellpose v3** that the rest of BEHAV3D EXPLORER (and your classic Cellpose models) uses. BEHAV3D EXPLORER therefore installs cellpose v4 in a small **side ("sidecar") environment**.

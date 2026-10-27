@@ -16,24 +16,26 @@ For each cell type the plugin:
 2. Fits a binary Random Forest (50 trees, max depth 20) on the pixels you painted. The forest settings are **not exposed in the GUI**.
 3. Predicts a foreground mask, post-processes it (fill holes → morphological opening → distance transform, measured within each Z slice → watershed → size filter), and writes the resulting instance labels to disk.
 
-## Step-by-step in the napari plugin
+## Workflow at a glance
 
-The widget is organised in three numbered group-boxes. A full session usually goes like this:
+The widget is organised in three numbered group-boxes: [Labeling & Training](#1--labeling--training), [Fine-tune Segmentation Parameters](#2--fine-tune-segmentation-parameters-optional--per-cell-type) and [Batch Segmentation](#3--batch-segmentation).
 
-1. **Open the Segmentation tab** → pick **Pixel Classifier (Random Forest)** from the **Method:** dropdown.
-2. **Set Examples/sample** (default `3`).
-3. **Click Generate Training Data.** Images and features are prepared in the background (progress bar; napari stays responsive and the other tabs are locked meanwhile), then the viewer clears and loads evenly spaced timepoints of every sample as `Channel …` image layers plus one empty label layer per cell type, named `User Provided Labels (<Cell type>)` (and `User Provided Labels (Dead)` when a dead channel is declared). See [Generate Training Data](./index.md#common-structure-of-the-pixel-classifier-pages).
-4. **Paint a few foreground (`2`) and background (`1`) pixels** on the label layer of each cell type, using the **Annotation legend** buttons. See [Labeling foreground and background](./index.md#labeling-foreground-and-background) for the painting convention and tips.
-5. **Click Save Labels** to save your work to disk (do this often).
-6. **Click Train Classifier.** Labels are saved, one classifier per cell type (and dead channel) is trained, and the result on all loaded training frames appears as `Pixel Classification (<Cell type>)` (the foreground mask) and `<Cell type> Segments` (the instances, using the current parameters of section 2).
-7. **Section 2 (Fine-tune Segmentation Parameters)** → for each cell type, check **EDT:**, **Min size:**, **Opening:**, **Fill holes**. Defaults depend on the cell-type category (organoid / immune / other) and usually only need small adjustments — see also [Advice: large vs small objects](./index.md#advice-large-vs-small-objects).
-8. **Click Test Segmentation Parameters** to re-segment the **currently displayed timepoint** with the new parameters (no retraining). The `<Cell type> Segments` layers are updated for that timepoint — toggle them on/off to compare with the raw image.
-9. **Inspect the result.** If cells are merged together, split apart, or contain noise, see [Tuning the parameters](#tuning-the-parameters) below. Adjust → re-test → repeat.
-10. **Section 3 (Batch Segmentation)** → pick the timepoint range → click **Run Batch Segmentation** to run now, or **+🛒** to queue the segmentation step in the [Processing Queue](../../plugin_essentials/processing_queue.md).
+1. **Open the Segmentation tab** and pick **Pixel Classifier (Random Forest)** from the **Method:** dropdown.
+2. [Generate and label the training data](#1--labeling--training):
+   1. Set **Examples/sample** (default `3`) and click **Generate Training Data**. Images and features are prepared in the background (progress bar; napari stays responsive and the other tabs are locked meanwhile), then the viewer loads evenly spaced timepoints of every sample as `Channel …` image layers plus one empty `User Provided Labels (<Cell type>)` layer per cell type (and `User Provided Labels (Dead)` when a dead channel is declared). See [Generate Training Data](./index.md#common-structure-of-the-pixel-classifier-pages).
+   2. Paint a few foreground (`2`) and background (`1`) pixels on the label layer of each cell type, using the **Annotation legend** buttons (see [Labeling foreground and background](./index.md#labeling-foreground-and-background)).
+   3. Click **Save Labels** to save your work to disk (do this often).
+3. [Train](#1--labeling--training): click **Train Classifier**. Labels are saved, one classifier per cell type (and dead channel) is trained, and the result on all loaded training frames appears as `Pixel Classification (<Cell type>)` (the foreground mask) and `<Cell type> Segments` (the instances, using the current parameters of step 4).
+4. [Fine-tune the segmentation parameters](#2--fine-tune-segmentation-parameters-optional--per-cell-type) for each cell type: **EDT:**, **Min size:**, **Opening:**, **Fill holes**. Defaults depend on the cell-type category (organoid / immune / other) and usually only need small adjustments (see also [Advice: large vs small objects](./index.md#advice-large-vs-small-objects)).
+5. Click **Test Segmentation Parameters** to re-segment the **currently displayed timepoint** with the new parameters (no retraining). Toggle the `<Cell type> Segments` layers on and off to compare with the raw image.
+6. [Inspect and iterate](#tuning-the-parameters): if cells are merged together, split apart, or contain noise, adjust and re-test, or paint more labels and retrain.
+7. [Batch segmentation](#3--batch-segmentation): pick the timepoint range, then click **Run Batch Segmentation** to run now, or **+🛒** to queue the step in the [Processing Queue](../../plugin_essentials/processing_queue.md).
 
 ```{tip}
 Iteration is cheap: re-training is quick and **Test Segmentation Parameters** re-segments a single timepoint. A typical first pass is *paint → train → test → paint more on the worst-looking regions → retrain*.
 ```
+
+## Step-by-step in the napari plugin
 
 ### 1 · Labeling & Training
 

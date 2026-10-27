@@ -2,6 +2,19 @@
 
 Tab 5 of the BEHAV3D EXPLORER dock widget. Feature Extraction takes your **tracked segments** plus the **raw image** and computes, for every cell at every timepoint, a panel of biological measurements (movement, intensity, morphology, contact with neighbours, death). The result is the table that [Filtering](filtering.md) — and through it every downstream analysis — reads from.
 
+## Workflow at a glance
+
+1. Open the [sub-tab of a cell type](#per-cell-type-sub-tabs).
+2. [Choose the feature families](#the-six-feature-families) to extract (greyed-out ones are always extracted).
+3. [Set the parameters](#parameters): the contact threshold and **Workers:**, and, only when the metadata declares a dead channel, the **Dead mask % threshold:**.
+4. (Dead channel only) [Preview the dead threshold in the viewer](#preview-dead-threshold-in-viewer) and adjust it until the green/red split matches the dead cells you see.
+5. (Optional) [Copy the settings to the other sub-tabs](#apply-run-queue) with **Apply to all <Category>** or **Apply to all**.
+6. [Run](#apply-run-queue) **Run <Cell type> Feature Extraction**, **Run Batch Feature Extraction (All Cell Types)**, or queue it with **+🛒**.
+7. (Optional, immune types) Run [Active Killing](#active-killing) once the baseline extraction has finished.
+8. [Run Filtering](filtering.md): every downstream analysis reads the filtered table. If you change the dead threshold later, [re-run the death classification](#changing-the-dead-threshold-later) and then Filtering again.
+
+Each cell-type sub-tab shows, from top to bottom: **Features to extract**, **Death Threshold** and **⚙ Advanced Configuration** (both only with a dead channel), **Workers**, the **Apply to all …** buttons and the run button.
+
 ## What this tab produces
 
 For each cell type, Feature Extraction writes one combined table:

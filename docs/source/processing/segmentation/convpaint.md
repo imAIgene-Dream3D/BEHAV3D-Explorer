@@ -18,25 +18,28 @@ The **Strategy:** dropdown controls how the classifier output becomes instance l
 | **ConvPaint Probability + Watershed** | Uses the cell type's probability map: a mask threshold defines foreground, a higher seed threshold defines watershed seeds. |
 | **Advanced (per cell type)** | Each cell-type tab gets its own **↳ Cell type strategy:** dropdown with the two strategies above. |
 
-## Step-by-step in the napari plugin
+## Workflow at a glance
 
-A full session usually goes like this:
+1. **Open the Segmentation tab** and pick **ConvPaint (DL pixel classifier)** from the **Method:** dropdown.
+2. [Pick a device](#1--device) in **Device:** (CUDA GPU strongly preferred).
+3. [Pick a strategy](#2--strategy--training-data). Start with **ConvPaint Mask + EDT/Watershed** (default); switch to **ConvPaint Probability + Watershed** only if the mask boundary is noisy or uncertain (see [Strategies](#strategies)). The strategy and the per-cell-type post-processing parameters can be set as soon as metadata is loaded; the feature-extractor and classifier settings stay greyed out until training data is loaded.
+4. [Generate and label the training data](#2--strategy--training-data):
+   1. Set **Examples/sample** (default `3`) and click **Generate Training Data**. The viewer loads evenly spaced timepoints of every sample as `Channel …` image layers plus **one** `User Provided Labels` layer (and `User Provided Labels (Dead)` when a dead channel is declared). See [Generate Training Data](./index.md#common-structure-of-the-pixel-classifier-pages).
+   2. Open the **Annotation legend** (under **Generate Training Data**) to see which label value maps to which cell type (`1` = background, `2` = first cell type, `3` = next, …). Click a row to paint that class.
+   3. Paint each class on the single label layer. A few hundred pixels per class is usually enough; bias your strokes toward boundaries and confusing regions.
+5. [Set the feature extractor](#3--feature-extractor-applies-to-all-cell-types): usually leave it on **VGG16 (default)** + **Multichannel** + **Normalize stack** + Downsample `1`. Try a richer model only if the classes keep being confused.
+6. (Optional) [Set the classifier (CatBoost)](#4--classifier-catboost): start from the defaults (`100` iterations, depth `5`, learning rate `0.1`, **Balanced (default)** class weights).
+7. [Train and preview](#6--train--preview): click **▶ Train Classifier**. This trains the multi-class classifier from `User Provided Labels` (and the separate binary death classifier if dead labels are present), runs it on all loaded training frames and builds a preview for every cell type.
+8. [Inspect and tune](#5--annotation--segmentation-tabs) the post-processing in each cell-type tab and click its **Run instance segmentation**. This re-applies only the post-processing to the stored classifier output (no feature extraction), so it is fast. Retrain after changing labels or the feature-extractor or classifier settings (see [Tuning the parameters](#tuning-the-parameters)).
+9. [Batch segmentation](#7--batch-segmentation): choose the timepoint range, then click **▶ Run ConvPaint Batch Segmentation** to run now or **+🛒** to queue.
 
-1. **Open the Segmentation tab** → pick **ConvPaint (DL pixel classifier)** from the **Method:** dropdown.
-2. **Pick a device** in **Device:** (CUDA GPU strongly preferred).
-3. **Pick a strategy.** Start with **ConvPaint Mask + EDT/Watershed** (default). Switch to **ConvPaint Probability + Watershed** only if the mask boundary is noisy/uncertain. The strategy and the per-cell-type post-processing parameters can be set as soon as metadata is loaded; the feature-extractor and classifier settings stay greyed out until training data is loaded.
-4. **Set Examples/sample** (default `3`) and click **Generate Training Data**. The viewer loads evenly spaced timepoints of every sample as `Channel …` image layers plus **one** `User Provided Labels` layer (and `User Provided Labels (Dead)` when a dead channel is declared). See [Generate Training Data](./index.md#common-structure-of-the-pixel-classifier-pages).
-5. **Open the Annotation legend** (shown under **Generate Training Data**) to see which label value maps to which cell type (`1` = background, `2` = first cell type, `3` = next, …). Click a row to paint that class.
-6. **Paint each class on the single label layer.** A few hundred pixels per class is usually enough; bias your strokes toward boundaries and confusing regions.
-7. **Feature Extractor** group: usually leave it on **VGG16 (default)** + **Multichannel** + **Normalize stack** + Downsample `1`. Try a richer model only if the classes keep being confused (see [Tuning the parameters](#tuning-the-parameters)).
-8. **(Optional) Classifier (CatBoost)** group: start from the defaults (`100` iterations, depth `5`, learning rate `0.1`, **Balanced (default)** class weights).
-9. **Click ▶ Train Classifier.** This trains the multi-class classifier from `User Provided Labels` (and the separate binary death classifier if dead labels are present), then runs it on all loaded training frames and builds a preview for every cell type.
-10. **Inspect and tune.** Adjust a tab's post-processing parameters and click its **Run instance segmentation** — this re-applies only the post-processing to the stored classifier output (no feature extraction), so it is fast. Retrain after changing labels, feature-extractor or classifier settings.
-11. **Batch segmentation** → choose the timepoint range → click **▶ Run ConvPaint Batch Segmentation** for an immediate run, or **+🛒** to queue.
+Each numbered step is described in the sections below.
 
 ```{warning}
 Changing the feature extractor **Model:** invalidates the trained classifier. You **must** retrain after switching models.
 ```
+
+## Step-by-step in the napari plugin
 
 ### 1 · Device
 

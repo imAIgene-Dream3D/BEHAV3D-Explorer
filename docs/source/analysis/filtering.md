@@ -10,6 +10,22 @@ Tab 6 of the BEHAV3D EXPLORER dock widget. The Filtering tab restricts the data 
 **Filtering must be run even if you apply no filters at all.** The filtered table it writes is the input of Population Dynamics and the preferred input of Feature Backprojection and Single Cell. Re-run Filtering whenever Feature Extraction (or **🔄  Re-run death**, or Active Killing) has produced new results for that cell type.
 ```
 
+## Workflow at a glance
+
+1. Open the [sub-tab of a cell type](#per-cell-type-sub-tabs).
+2. (Optional) [Preview the track lengths](#preview-track-lengths) to choose **Min length** and **Max length**.
+3. Choose [the filters](#the-filters) (each has its own checkbox; they are applied in this order):
+   1. [Restrict to a timepoint range](#restrict-to-a-timepoint-range) (shared by all cell types).
+   2. [Trim the full time series to a maximum number of timepoints](#trim-full-time-series-to-max-timepoints).
+   3. [Filter by minimum size at the first timepoint](#filter-by-minimum-size-at-the-first-timepoint).
+   4. [Filter short tracks](#filter-short-tracks).
+   5. [Trim long tracks to a maximum length](#trim-long-tracks-to-max-length).
+   6. [Filter dead cells at the first timepoint](#filter-dead-cells-at-the-first-timepoint) (only with a dead channel).
+   7. Pick the [unit for time-based filters](#unit-for-time-based-filters).
+4. (Optional) [Copy the settings to the other sub-tabs](#apply-run-queue) with **Apply to all <Category>** or **Apply to all**.
+5. [Run](#apply-run-queue) **Filter <Cell type> Tracks & Summarize**, **Run Batch Filtering (All Cell Types)**, or queue it with **+🛒**. Run it even if you apply no filters at all.
+6. [Check the outputs](#outputs): the filtered and summarised tables and the [quality-control PDFs](#quality-control-pdfs).
+
 ## Per-cell-type sub-tabs
 
 Filtering is organised as sub-tabs per cell type along the left side, with the usual colour code:
