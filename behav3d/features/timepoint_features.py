@@ -172,7 +172,7 @@ import json
 from scipy.ndimage import binary_erosion, distance_transform_edt, find_objects
 from scipy.spatial.distance import cdist
 
-from skimage.measure import regionprops_table
+from skimage.measure import regionprops_table, marching_cubes, mesh_surface_area
 import argparse
 import yaml
 from pathlib import Path
@@ -261,20 +261,23 @@ def _segment_touches_border(mask=None, *, slices=None, stack_shape=None):
     )
 
 
-def _voxel_surface_area(mask, voxel_spacing):
-    """Estimate surface area from exposed voxel faces in physical units."""
+def _mesh_surface_area(mask, voxel_spacing):
+    """Estimate surface area from a closed marching-cubes mesh in physical units."""
     mask = np.asarray(mask, dtype=bool)
     if mask.ndim != 3 or not np.any(mask):
         return np.nan
 
-    vz, vy, vx = map(float, voxel_spacing)
+    # Pad so the mesh is closed where the mask touches the crop border.
     padded = np.pad(mask, 1, mode="constant", constant_values=False)
-
-    z_faces = np.count_nonzero(padded[1:, :, :] != padded[:-1, :, :])
-    y_faces = np.count_nonzero(padded[:, 1:, :] != padded[:, :-1, :])
-    x_faces = np.count_nonzero(padded[:, :, 1:] != padded[:, :, :-1])
-
-    return float((z_faces * vy * vx) + (y_faces * vz * vx) + (x_faces * vz * vy))
+    try:
+        verts, faces, _, _ = marching_cubes(
+            padded.astype(np.float32),
+            level=0.5,
+            spacing=tuple(map(float, voxel_spacing)),
+        )
+        return float(mesh_surface_area(verts, faces))
+    except (ValueError, RuntimeError):
+        return np.nan
 
 
 def _principal_axis_metrics(coords, voxel_spacing):
@@ -2597,7 +2600,7 @@ def _calculate_morphology_single_timepoint(args):
                 _segment_touches_border(slices=slices, stack_shape=stack_shape)
             ))
 
-            surface_area = _voxel_surface_area(mask, voxel_spacing)
+            surface_area = _mesh_surface_area(mask, voxel_spacing)
             surface_areas.append(surface_area)
 
             if np.isfinite(surface_area) and surface_area > 0 and np.isfinite(volume) and volume > 0:

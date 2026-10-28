@@ -232,7 +232,7 @@ When Morphology is on, the following are added. Units: volumes in µm³, lengths
 | `extent` | Volume divided by the **oriented** bounding-box volume (`axis1 × axis2 × axis3`) |
 | `oblateness` | Flatness: `1 − axis3/axis1` (0 = not flattened, →1 = disc-like) |
 | `prolateness` | Elongation: `1 − axis2/axis1` (0 = not elongated, →1 = cigar-like) |
-| `surface_area` | Physical surface area from exposed voxel faces (µm²) |
+| `surface_area` | Physical surface area from a marching-cubes mesh of the mask (µm²) |
 | `sphericity` | How sphere-like the object is (1 = perfect sphere); from volume and surface area |
 | `surface_to_volume_ratio` | `surface_area / volume` |
 | `convex_volume` | Volume of the convex hull (`volume / solidity`) |
@@ -244,7 +244,7 @@ When Morphology is **unchecked**, only the cheap `nr_pixels` and `volume` column
 
 #### How the morphology features are computed
 
-Let $V$ be the object's physical volume and $A$ its surface area. **Surface area** is measured directly from the voxelised mask by counting the exposed faces (each internal face between a foreground and a background voxel), weighted by the physical area of that face — not a smoothed mesh. **Sphericity** compares the object's surface area to that of a sphere of equal volume:
+Let $V$ be the object's physical volume and $A$ its surface area. **Surface area** is measured on a triangle mesh of the object's boundary: the mask is padded by one empty voxel so the surface is closed, a marching-cubes surface is traced halfway between object and background voxels using the physical voxel spacing, and the areas of all triangles are summed. **Sphericity** compares the object's surface area to that of a sphere of equal volume:
 
 $$
 \begin{aligned}
@@ -254,7 +254,7 @@ $$
 \end{aligned}
 $$
 
-$\Psi = 1$ for a perfect sphere and decreases as the object becomes more irregular or elongated.
+$\Psi = 1$ for a perfect sphere and decreases as the object becomes more irregular or elongated. A round cell scores below 1, because the mesh still follows the voxel steps of the mask: about 0.92 with isotropic voxels, dropping to about 0.85 when the Z step is 4× the XY pixel size. Compare sphericity between cells imaged at the same voxel size. Objects only 1–2 voxels thick are too coarsely sampled for a reliable surface, so treat their `surface_area`, `sphericity` and `surface_to_volume_ratio` with caution.
 
 The three **principal axes** ($a \ge b \ge c$ = `axis1` ≥ `axis2` ≥ `axis3`) come from a principal-component analysis of the mask's voxel coordinates in physical units. The shape descriptors are then:
 
