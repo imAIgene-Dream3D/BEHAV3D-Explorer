@@ -1067,8 +1067,8 @@ class CellTypeTrackingPanel(QWidget):
         # Info banner
         _bt_info = QLabel(
             "<b>btrack</b> \u2014 Bayesian multi-object tracker.<br>"
-            "<b>Step 1</b> (Kalman filter): always runs \u2014 tune and validate first.<br>"
-            "<b>Step 2</b> (optimizer): opt-in \u2014 enable only once Step 1 looks correct.<br>"
+            "<b>Step 1</b> (Kalman filter): always runs.<br>"
+            "<b>Step 2</b> (optimizer): optional \u2014 tick <i>Enable global track optimization</i> to include it.<br>"
             "See the <b>btrack (Bayesian)</b> page of the documentation (Tracking) for the full parameter reference."
         )
         _bt_info.setWordWrap(True)
@@ -1227,8 +1227,7 @@ class CellTypeTrackingPanel(QWidget):
         self.bt_use_optimize.setToolTip(
             "Step 2 runs a global integer-programming optimizer\n"
             "to join broken tracks and resolve divisions and false positives.\n\n"
-            "Recommended: first tune Step 1 without optimization,\n"
-            "then enable this for refinement."
+            "Optional: it runs together with Step 1 in the same run."
         )
         step2_lay.addWidget(self.bt_use_optimize)
 

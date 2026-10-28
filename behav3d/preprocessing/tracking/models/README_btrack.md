@@ -8,7 +8,7 @@ btrack uses a **Kalman filter** to predict object motion frame-by-frame, and opt
 
 ### Step 1 — Kalman filter linking (always runs)
 
-Run **without the optimizer first** and validate the result before enabling Step 2.
+Step 2 is optional. Looking at the Step 1 result on its own first can help you see what the optimizer changes when you turn it on.
 
 | Parameter | What it controls | When to change |
 |---|---|---|
@@ -25,7 +25,7 @@ Check the result in napari before proceeding:
 ### Step 2 — Global hypothesis optimizer (opt-in)
 
 Resolves false positives, track starts/ends, and gap-bridging globally.
-Only enable once Step 1 looks correct.
+It works on the track pieces left by Step 1, so it tends to give the best results when Step 1 is already reasonable.
 
 | Parameter | What it controls |
 |---|---|
