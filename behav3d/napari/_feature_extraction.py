@@ -3018,7 +3018,7 @@ class ActiveKillingPanel(QWidget):
 
     # ── Helpers ──────────────────────────────────────────────────────────────
     def _on_abs_toggle(self, state):
-        enabled = (state == Qt.Checked)
+        enabled = self.check_abs_threshold.isChecked()
         self.spin_abs_threshold.setEnabled(enabled)
         self.spin_threshold_mult.setEnabled(not enabled)
         self._update_abs_hint()
