@@ -90,10 +90,7 @@ Standard tracking outputs (tracked zarr + tracks CSV) — see [Tracking overview
 - **Set Search range = the maximum reasonable single-frame displacement** — too small = fragmented tracks; too large = ID swaps between neighbouring cells.
 - **Memory (frames) recovers brief segmentation gaps.** Start at 2; raise it if TrackIDs flip when a cell briefly disappears.
 - **No division handling.** For dividing cells, see [btrack](btrack.md) (**P_branch**) or LapTrack (**Splitting cost**).
-
-## Things this page does **not** claim
-
-- That TrackPy is faster or more accurate than LapTrack — this depends on your data. Measure on your own data.
+- **TrackPy vs LapTrack:** neither is reliably faster or more accurate; it depends on your data. If you are unsure, run both on one sample and compare the tracks.
 
 ## See also
 

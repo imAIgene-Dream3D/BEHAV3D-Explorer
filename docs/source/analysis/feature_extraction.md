@@ -231,9 +231,9 @@ When Morphology is on, the following are added. Units: volumes in µm³, lengths
 | `elongation` | $\mathrm{axis1\_length} / \mathrm{axis2\_length}$ — longest over middle axis |
 | `extent` | Volume divided by the **oriented** bounding-box volume ($\text{axis1} \times \text{axis2} \times \text{axis3}$) |
 | `oblateness` | $1 - \text{axis3} / \text{axis1}$ (0 = all axes equal; →1 when the shortest axis is much shorter than the longest, as in discs and in cigars; use `prolateness` to tell them apart) |
-| `prolateness` | Elongation: $1 - \text{axis2} / \text{axis1}$ (0 = not elongated, →1 = cigar-like) |
+| `prolateness` |$1 - \text{axis2} / \text{axis1}$ (0 = not elongated, →1 = cigar-like) |
 | `surface_area` | Physical surface area from exposed voxel faces (µm²) |
-| `sphericity` | How sphere-like the object is (higher = rounder; a perfectly round cell scores about 0.65, see below) |
+| `sphericity` | How sphere-like the object is (higher = rounder) |
 | `surface_to_volume_ratio` | $\mathrm{surface\_area} / \text{volume}$ |
 | `convex_volume` | Volume of the convex hull |
 | `solidity` | $\text{volume} / \mathrm{convex\_volume}$ — how much the object fills its convex hull (1 = convex) |

@@ -95,11 +95,7 @@ Standard tracking outputs (tracked zarr + tracks CSV) — see [Tracking overview
 - **The defaults are a generic starting point**, not a tuned recommendation — look at the result and tune for the failure modes above.
 - **Too small Track cost = fragmented tracks; too large = false links across cells.**
 - **Keep merging / splitting at 0 unless you actually see fusion / division events** — every detected event ends the track and starts new TrackIDs, so false events fragment your tracks.
-- **LapTrack gets expensive on very dense data** (thousands of cells per timepoint); consider btrack (`APPROXIMATE` update) there.
-
-## Things this page does **not** claim
-
-- Specific per-sample runtimes — they depend on cell count per frame and total frame count. Profile your own data.
+- **LapTrack gets expensive on very dense data** (thousands of cells per timepoint); consider btrack (`APPROXIMATE` update) there. Runtime grows with cells per frame and number of frames, so time one sample before running the whole batch.
 
 ## See also
 

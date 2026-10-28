@@ -131,11 +131,7 @@ Because Cellpose-SAM is zero-shot, tuning is mostly choosing **3-D vs 2-D + stit
 - **CUDA out of memory** → lower **Batch size:** first.
 - **Objects over-split in Z** → check the pixel sizes in your metadata (they set the Z scaling); with very anisotropic data, try 2-D + stitch.
 - **Other populations detected too** → check **Channel Selection**: tick only the channel(s) of the population you segment.
-
-## Things this page does **not** claim
-
-- Specific runtimes — they depend strongly on your GPU, volume size, number of channels and 3-D vs 2-D + stitch. Profile your own data.
-- That `cpsam_v2` always beats `cpsam` — compare them on your data.
+- **Runtime** depends on GPU, volume size, number of channels and 3-D vs 2-D + stitch, so time one sample before running the batch.
 
 ## See also
 

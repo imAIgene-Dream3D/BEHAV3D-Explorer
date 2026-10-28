@@ -17,7 +17,7 @@ Two pretrained models are available, one for **organoids** (`cellpose_organoids_
 - **[BEHAV3D EXPLORER pretrained Cellpose models on Zenodo](https://zenodo.org/records/18872978)** — the imaging conditions they were trained on are documented there;
 - or the copies that come with BEHAV3D EXPLORER: in the **Browse…** dialog, open the folder where you downloaded BEHAV3D EXPLORER, then `behav3d` → `preprocessing` → `segmentation` → `models`.
 
-If none of them fits your sample, train your own with the [Cellpose Training Notebook](../../cellpose_training.md).
+The models work best on data imaged under those conditions. On different data (another microscope, magnification or stain), check the result on one sample first. If none of them fits your sample, train your own with the [Cellpose Training Notebook](../../cellpose_training.md).
 
 ## Step-by-step in the napari plugin
 
@@ -116,7 +116,7 @@ Tuning Cellpose therefore means choosing a model or **retraining one on your own
 **Inference is very slow**
 
 - Check that the GPU is used (GPU load in your task manager). On CPU, 3-D Cellpose is slow.
-- Test on a short timepoint range first, then launch the full batch.
+- Runtime depends on GPU, volume size and number of objects, so test on a short timepoint range first, then launch the full batch.
 
 **The dead mask looks wrong (too dim or too noisy)**
 
@@ -131,11 +131,6 @@ Tuning Cellpose therefore means choosing a model or **retraining one on your own
 | Dead mask (Otsu, if run) | `<output_dir>/images/<sample>/<sample>_mask_dead.zarr` |
 
 The paths are written into metadata.csv (the population's `…_segments_image_path` column and `dead_mask_path`). Model files are **not** stored under `<output_dir>`; they stay wherever you downloaded or trained them.
-
-## Things this page does **not** claim
-
-- That the pretrained models work on every dataset — they were trained on the imaging conditions documented in the Zenodo deposit.
-- Specific runtimes — these depend on GPU, volume size and number of objects. Profile your own data.
 
 ## See also
 

@@ -134,12 +134,8 @@ Standard tracking outputs (tracked zarr + tracks CSV) — see [Tracking overview
 ## Good practices & tips
 
 - **Set Max search radius carefully.** The optimiser (Step 2) cannot fix a poorly tuned search radius.
-- **Use EXACT unless tracking is too slow.**
+- **Use EXACT unless tracking is too slow.** Runtime depends on cells per frame, number of frames and the optimiser's hypothesis set, so time one sample first.
 - **Workers are capped at one less than your CPU core count**, so the computer stays responsive.
-
-## Things this page does **not** claim
-
-- Specific per-sample runtimes — they depend on cells per frame, number of frames and the optimiser's hypothesis set.
 
 ## See also
 

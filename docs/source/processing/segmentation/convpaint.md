@@ -165,16 +165,11 @@ Standard batch controls in the **🚀 Batch Segmentation** group — see [Batch 
 
 ## Good practices & tips
 
-- **Start with VGG16.** It is the default and runs fastest. Switch to a heavier extractor only if classes stay confused after more labels — these are slower and need more GPU memory.
+- **Start with VGG16.** It is the default and runs fastest. Switch to a heavier extractor only if classes stay confused after more labels — these are slower and need more GPU memory. No extractor is best on every dataset; if VGG16 struggles, compare DINOv2 on the same labels before deciding.
 - **Start from the CatBoost defaults** (100 iterations, depth 5, learning rate 0.1); see [Tuning the parameters](#tuning-the-parameters) for when to change them.
-- **Downsample > 1 if GPU memory is tight.** Prediction time scales with the number of feature vectors; a downsample of 2 cuts the work roughly 4× per plane. The predictions are scaled back to full size at the end.
+- **Downsample > 1 if GPU memory is tight.** Prediction time scales with the number of feature vectors; a downsample of 2 cuts the work roughly 4× per plane. The predictions are scaled back to full size at the end. Inference time per timepoint depends on GPU, volume size, extractor and downsample, so time a short timepoint range before queuing a full batch.
 - **Switching feature extractors invalidates the model.** Retrain after any change to **Model:**.
 - **Save labels before switching method** — switching to another method removes the training layers without asking (leaving the tab does ask).
-
-## Things this page does **not** claim
-
-- That DINOv2 always beats VGG16 (or vice versa) — this depends on your data. Compare the extractors on your own images.
-- Specific per-timepoint inference numbers — these depend strongly on GPU, volume size, model, and downsample. Profile your own data.
 
 ## See also
 
