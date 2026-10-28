@@ -22,6 +22,7 @@ from behav3d.analysis.behavior.utils import (
     _handle_nan_in_distance_matrix,
     _save_adata_obs_csv,
 )
+from behav3d.core.thread_limits import openmp_thread_cap
 from behav3d.core.utils import expand_column_patterns, format_time, rmtree_ignore_missing
 
 
@@ -487,9 +488,10 @@ def cluster_umap(
     df_umap = pd.merge(df_tracks_summarized, umap_embedding, how="left")
 
     kmeans = KMeans(n_clusters=nr_of_clusters, n_init=100, random_state=random_state)
-    df_umap["ClusterID"] = kmeans.fit_predict(
-        df_umap[umap_embedding.columns.difference(df_tracks_summarized.columns)]
-    )
+    with openmp_thread_cap():  # KMeans crashes on >128 CPUs without it
+        df_umap["ClusterID"] = kmeans.fit_predict(
+            df_umap[umap_embedding.columns.difference(df_tracks_summarized.columns)]
+        )
     df_umap["ClusterID"] = df_umap["ClusterID"] + 1
     df_umap["ClusterID"] = df_umap["ClusterID"].astype("category")
 
