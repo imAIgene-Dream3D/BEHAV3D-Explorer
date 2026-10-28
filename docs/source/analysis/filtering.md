@@ -70,7 +70,12 @@ Filters are applied in this order, each one seeing only what the previous ones l
 
 Keeps only the rows inside the inclusive **Start**–**End** window. These are **absolute positions in the movie** (e.g. "timepoints 20 to 80"), not per-track durations. Tracks that overlap the window only partially are **kept and cropped** — **Min length** then drops those that end up too short. **End** must be greater than **Start**, otherwise the run is refused.
 
-```{important}
+
+```{tip}
+If you already know you will never need the frames outside the window, you can instead cut the images themselves with **Clip timepoints (select range)** in [Data Preparation → Convert to Zarr](../data_preparation.md#6--convert-to-zarr). Segmentation, tracking and every analysis then work on those timepoints only, and the steps run faster. 
+```
+
+```{warning}
 **One range for all cell types.** The range appears on every sub-tab and editing it on one updates all the others. It cannot differ between cell types because every cross-cell-type analysis (interaction, invasiveness, multi-organoid death dynamics) lines the cell types up on the timepoint axis; different windows would silently give wrong percentages and invented data.
 
 **Original timepoints are preserved.** `position_t` keeps its original values, so plots of a 56–78 window read 56–78, not 1–23.
@@ -86,7 +91,7 @@ The **minimal size** and **dead at first timepoint** filters normally test each 
 
 | Setting | What it cuts | Re-run cost |
 |---|---|---|
-| **Data Preparation → Clip timepoints (select range)** | The *images*, before segmentation and tracking | Everything downstream |
+| [**Data Preparation → Clip timepoints (select range)**](../data_preparation.md#6--convert-to-zarr) | The *images*, before segmentation and tracking | Everything downstream |
 | **Filtering → Restrict analysis to a timepoint range** (this one) | An already extracted feature table | Filtering and the analyses |
 | **Analysis → Custom time range** | One analysis' view of the data | That analysis only |
 
@@ -97,6 +102,10 @@ Active Killing deliberately scans the **full, unfiltered** movie so it never has
 > ☑ **Trim full time series to max timepoints** — **Max timepoints:** `350`
 
 Keeps only the first **Max timepoints** frames of the movie and drops every later row, for all tracks. Typical use: cut off the tail of a movie where the dye has bleached or the signal has degraded.
+
+```{tip}
+If you already know you will never need the frames outside the window, you can instead cut the images themselves with **Clip timepoints (select range)** in [Data Preparation → Convert to Zarr](../data_preparation.md#6--convert-to-zarr). Segmentation, tracking and every analysis then work on those timepoints only, and the steps run faster. 
+```
 
 ### Filter short tracks
 
@@ -214,7 +223,7 @@ Always written, one folder per cell type:
 
 - **Organoids** are usually tracked accurately and rarely need filtering — at most a small minimum length to drop fragments, or a large one (close to the experiment duration) to keep only organoids followed from start to end.
 - **T cells / immune cells:** drop tracks shorter than roughly **10–30 timepoints**; these short fragments are typically junk.
-- **Avoid the legacy fixed-length trim.** Old BEHAV3D set both a minimum *and* a maximum length around 100 so every track was exactly 100 frames — a workaround for fragmented tracking. With accurate tracking that throws data away: untick **Trim tracks to maximum length** (on by default) unless you deliberately need equal-length tracks.
+- **Often tracks are not trimmed to max length at filtering already.** At some analysis steps you can choose to also trim the tracks, so you can use full length tracks for other analysis steps where full tracks are needed
 - **Trim full time series** is the right tool when the dead dye bleaches or the signal degrades late in the movie.
 ```
 

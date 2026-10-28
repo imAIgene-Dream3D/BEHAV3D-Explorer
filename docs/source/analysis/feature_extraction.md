@@ -242,7 +242,7 @@ When Morphology is on, the following are added. Units: volumes in µm³, lengths
 
 #### How the morphology features are computed
 
-Let $V$ be the object's physical volume and $A$ its surface area. **Surface area** is measured directly from the voxelised mask by summing the physical area of every voxel face between the object and the background (no smoothed mesh). **Sphericity** compares the object's surface area to that of a sphere of equal volume:
+Let $V$ be the object's physical volume and $A$ its surface area. **Surface area** is measured directly from the voxelised mask by summing the physical area of every voxel face between the object and the background. **Sphericity** compares the object's surface area to that of a sphere of equal volume:
 
 $$
 \begin{aligned}
@@ -252,7 +252,7 @@ $$
 \end{aligned}
 $$
 
-$\Psi$ decreases as the object becomes more irregular or elongated. Because the surface area is counted from voxel faces (a staircase surface), even a perfectly round cell scores only about $0.65$, never $1$, and `surface_to_volume_ratio` is about 1.5 times the value for a smooth surface. Compare cells with each other rather than with 1.
+$\Psi$ decreases as the object becomes more irregular or elongated. Because the surface area is counted from voxel faces, a perfectly round cell scores only about $0.65$. Compare cells with each other to find differences in morphology.
 
 The three **principal axes** ($a \ge b \ge c$ = `axis1` ≥ `axis2` ≥ `axis3`) are found by a principal-component analysis of the mask's voxel coordinates in physical units; each axis length is the object's full extent along that direction. The shape descriptors are then:
 

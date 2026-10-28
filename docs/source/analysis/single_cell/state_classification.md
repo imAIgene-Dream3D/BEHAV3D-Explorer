@@ -399,7 +399,7 @@ The classified table has, for every cell and timepoint (`sample_name`, `TrackID`
 ## Tips & best practices
 
 - **Choose features deliberately.** States are only as meaningful as the features you feed in; begin small and expand only if states are blurry.
-- **Treat curation as iterative:** fit → inspect QC → rename intrinsic states → review full states → backproject questionable classes → rename or merge again.
+- **Treat curation as iterative.** Fit the model, then check each state in the diagnostic PDFs and in backprojection. Rename the intrinsic states, review the resulting full states, backproject any that still look doubtful, and rename or merge again until every state means something clear in both the plots and the images.
 - **Keep the seed fixed** (or note it) so re-runs and collaborators get the same states.
 - **Reuse a trusted model** on new experiments with **Apply existing behavioral state classification**, so states stay comparable.
 - **Let images overrule labels.** If a name sounds convincing in the PDFs but not in backprojection, trust the images.

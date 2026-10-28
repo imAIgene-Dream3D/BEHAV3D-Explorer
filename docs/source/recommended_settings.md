@@ -113,12 +113,9 @@ observation window as a duration and convert it to timepoints
 These names do not prove the signal represents death; keep your own biological
 definition.
 
-Behavioral State can classify any immune or other population (organoid types are
-analysed in Population Dynamics). Decide whether states should
-represent movement, contact, morphology, channel intensity, or a combination. Derive
-**Window size (timepoints):** and **Smooth window (timepoints):** from event duration and
-acquisition cadence (the real time is shown below each) rather than keeping the bare
-default of `5` frames.
+For Behavioral State and State Trajectory, see
+[Behavioral state classification](#behavioral-state-classification) and
+[Track classification](#track-classification-state-trajectory) below.
 
 ## Filtering
 
@@ -132,3 +129,45 @@ the other analyses use it whenever it exists.
 For how many cells survive a given minimum length, use the QueenB **Cell counts** quick
 action, which counts them from the unfiltered Feature Extraction table, rather than
 estimating ([Filtering](analysis/filtering.md#preview-track-lengths)).
+
+## Behavioral state classification
+
+Behavioral State can classify any immune or other population (organoid types are
+analysed in Population Dynamics). States are only as meaningful as the features they are
+fitted on, so start from features your data can actually measure
+([Behavioral State](analysis/single_cell/state_classification.md)):
+
+- **Movement** (`speed`, and the window feature `net_displacement`; both defaults): the
+  basis for motile cells. Needs a frame interval short enough for reliable tracking;
+  otherwise speed mostly reflects noise. Add `straightness` for directional questions.
+- **Morphology** (`elongation`, `sphericity`, `extent`, `solidity`; defaults): only when
+  the XY and Z resolution capture the cell's shape. A cell spanning only a few pixels or
+  Z slices gives noisy shape values; then untick these and cluster on movement alone.
+- **Intensity**: add a reporter channel when it defines the state (e.g. activation or
+  calcium). For single-frame events, keep the window and smoothing short.
+- **Binary groups**: `dead` (if death is measured) and `organoid_contact` (to follow
+  engagement). They are not fitted but split each state afterwards, so every extra flag
+  multiplies the number of states to curate.
+
+Start with about `4` states and refine from there
+([Choose a number of states](analysis/single_cell/state_classification.md#choose-a-number-of-states)).
+
+## Track classification (State Trajectory)
+
+Choose the basis from what should make two tracks alike
+([Choosing a clustering basis](analysis/single_cell/track_classification.md#choosing-a-clustering-basis)):
+
+- **State-based** (once behavioural states are curated): groups tracks by the order and
+  proportion of states they pass through. It inherits the feature choices above, so the
+  clusters are easy to interpret.
+- **Feature-based**: when no behavioural states exist, or for a quick first look over
+  full tracks. The defaults `speed`, `net_displacement_tracklet`, `percentage_dead_mask`
+  and `any_organoid_contact` suit a killing assay; drop death or contact features when
+  the dataset has no death channel or no organoids, and the same resolution caveat for
+  morphology applies.
+
+**Trajectory size (timepoints)** must fit your filtered tracks: shorter tracks are
+discarded, and [Filtering](#filtering) trims tracks to `30` timepoints by default.
+Tick **Divide long tracks** to split longer tracks into consecutive windows of
+*Trajectory size* instead of trimming them, so their later timepoints are clustered too
+rather than thrown away.
