@@ -7473,7 +7473,7 @@ class APOCWidget(QWidget):
         btn.setText(f"▶ Run {ct.capitalize()} Segmentation")
 
     # ── Helper: unify organoid settings ────────────────────────
-    def _on_unify_organoids_changed(self, state):
+    def _on_unify_organoids_changed(self, *_):
         """When toggled ON, do an initial full sync from the first organoid tab."""
         self._unify_organoids = self._check_unify_organoids.isChecked()
         if not self._unify_organoids or self._training_widget is None:

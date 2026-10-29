@@ -291,8 +291,8 @@ When ticked, for each organoid type `<org>`:
 
 | Column | Meaning |
 |---|---|
-| `<org>_invasiveness_perc` | The `<org>` voxels lying inside the immune cell or within the contact threshold of it, as a percentage of the cell's own voxels plus those within 2 µm outside its boundary |
-| `<org>_invasiveness` | `True` when `<org>_invasiveness_perc ≥ 50 %` |
+| `<org>_invasiveness_perc` | Percentage (0–100) of the immune cell's *boundary voxels* that are within the Contact Threshold of an `<org>` cell. It is 0 whenever `<org>_contact_on_distance` is `False` |
+| `<org>_invasiveness` | `True` when `<org>_invasiveness_perc ≥ 50%` |
 | `any_org_invasiveness_perc` | Maximum across all organoid types |
 | `any_org_invasiveness` | `True` when the cell is invasive for any organoid type |
 
@@ -300,7 +300,14 @@ This is a **percentage relative to the cell's own size**, not a raw voxel count.
 
 ### Death
 
-Requires a dead channel in the metadata and the dead mask from [Segmentation](../processing/segmentation/index.md).
+where "surface voxels" are the immune cell's own outermost voxels (its mask minus a one-voxel erosion), and "contacting" uses the same Contact Threshold and real (µm) distance as `<org>_contact_on_distance`.
+
+```{note}
+Because invasiveness uses the Contact Threshold, the threshold sets how generous the measure is: a Contact Threshold of 0 µm counts only surface voxels that overlap the organoid mask, and the percentage rises as the threshold grows. If your cell and organoid masks do not overlap or touch (a small gap between segmentations is common), a very small threshold gives almost no contact and invasiveness stays near 0. Check the contact fraction at the threshold you choose.
+
+```
+
+### Death (when a dead channel exists and the family is checked)
 
 | Column | Meaning |
 |---|---|
@@ -323,10 +330,11 @@ The death signals capture death differently: `percentage_dead_mask` is **size-in
 ## Tips & best practices
 
 - **Always use the dead-threshold preview before running.** The green/red overlay catches a wrong threshold much faster than inspecting a CSV.
-- **Use Apply to all <Category> for multi-type experiments**, so no sub-tab is left with different settings.
+- **Use Apply to all category for multi-sample experiments.** Once one organoid sub-tab is correctly tuned, propagate the settings to the others.
 - **Workers speed up the image measurements only.** If a run stops with an out-of-memory error, lower **Workers** and run again — finished samples and cached measurements are reused.
 - **Check the Log for "skipping" messages.** A sample is skipped (with a warning) when its tracked image or tracks CSV is missing, or when Death is requested but the sample has no dead mask.
 - **Re-run the downstream steps after a new extraction.** A new combined table makes existing Filtering (and Active Killing) results stale; re-run them in that order.
+- **Reruns are incremental.** Per-sample intermediate CSVs (intensity, contact, morphology, dead mask) are reused if they already exist on disk and you choose **Skip** in the overwrite dialog — useful when you only need to recompute one feature family. Choose **Overwrite** when you change a threshold and need a clean recompute. As a safeguard, each per-sample contact file is saved with a small `.meta.json` sidecar recording the Contact Threshold (and the invasiveness definition used); if you change the Contact Threshold, or the file predates the current invasiveness definition, the contact step is recomputed automatically rather than reusing stale values.
 
 ## See also
 

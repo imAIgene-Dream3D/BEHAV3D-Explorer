@@ -44,7 +44,9 @@ DYNAMIC CONTACT FEATURES (generated for ALL cell types in metadata):
 
 INVASIVENESS FEATURES (immune vs organoids):
 - {org_type}_invasiveness           (bool) - True if >= 50% surface in contact
-- {org_type}_invasiveness_perc      (float) - Percentage (0-100) of surface in contact
+- {org_type}_invasiveness_perc      (float) - Percentage (0-100) of the cell's boundary voxels within
+                                               contact_threshold of an organoid (same contact definition
+                                               as {org_type}_contact_on_distance)
 - any_org_invasiveness              (bool) - True if invasive against any organoid type
 - any_org_invasiveness_perc         (float) - Max invasiveness percentage across organoid types
 
@@ -161,8 +163,9 @@ import numpy as np
 import pandas as pd
 
 import warnings
+import json
 
-from scipy.ndimage import distance_transform_edt, find_objects
+from scipy.ndimage import binary_erosion, distance_transform_edt, find_objects
 from scipy.spatial.distance import cdist
 
 from skimage.measure import regionprops_table
@@ -1071,6 +1074,13 @@ def calculate_image_based_track_features(
         should_calculate_invasiveness = "invasiveness" in features_choice and cell_type in immune_segments_paths.keys()
         
         cache_valid = df_contacts_outpath.exists() and not overwrite
+        if cache_valid:
+            usable, reason = _contact_cache_status(
+                df_contacts_outpath, contact_threshold, should_calculate_invasiveness
+            )
+            if not usable:
+                print(f"Contact .csv is stale ({reason}). Recomputing contact information...")
+                cache_valid = False
         if cache_valid and should_calculate_invasiveness:
             cached_cols = pd.read_csv(df_contacts_outpath, nrows=0).columns
             if not any(c.endswith("_invasiveness_perc") for c in cached_cols):
@@ -1100,6 +1110,7 @@ def calculate_image_based_track_features(
             )
             if df_contacts_outpath != "":
                 df_contacts.to_csv(df_contacts_outpath, sep=",", index=False)
+                _write_contact_cache_meta(df_contacts_outpath, contact_threshold, should_calculate_invasiveness)
         df_contacts = _normalize_merge_keys(df_contacts, keys=merge_keys)
         df_tracks = pd.merge(df_tracks, df_contacts, how="left", on=merge_keys)
         if "invasiveness" in features_choice:
@@ -1672,6 +1683,65 @@ def calculate_cell_distance(
     return(df_dist)
 
 
+# Bump when the invasiveness definition changes. Contact CSVs written with an older
+# version are recomputed when invasiveness is requested.
+INVASIVENESS_VERSION = 2
+
+
+def _surface_contact_percentage(cell_mask, org_cutout, sampling, contact_threshold):
+    """
+    Percentage (0-100) of a cell's boundary voxels within contact_threshold um of an organoid.
+
+    The surface is the cell's own outermost voxels. border_value=1 stops a cell clipped by the
+    cutout border from getting a spurious surface there. Distances use physical spacing, so a
+    voxel counts as in contact exactly when the contact check on distance would.
+    """
+    surface = cell_mask & ~binary_erosion(cell_mask, border_value=1)
+    n_surface = np.count_nonzero(surface)
+    if n_surface == 0 or not np.any(org_cutout):
+        return 0.0
+    d_org = distance_transform_edt(org_cutout == 0, sampling=sampling)
+    return 100.0 * np.count_nonzero(d_org[surface] <= contact_threshold) / n_surface
+
+
+def _contact_cache_meta_path(csv_path):
+    return csv_path.with_name(csv_path.stem + ".meta.json")
+
+
+def _write_contact_cache_meta(csv_path, contact_threshold, has_invasiveness):
+    meta = {
+        "contact_threshold": float(contact_threshold),
+        "invasiveness_version": INVASIVENESS_VERSION,
+        "has_invasiveness": bool(has_invasiveness),
+    }
+    with open(_contact_cache_meta_path(csv_path), "w") as fh:
+        json.dump(meta, fh, indent=2)
+
+
+def _contact_cache_status(csv_path, contact_threshold, want_invasiveness):
+    """
+    Return (usable, reason) for an existing contact CSV.
+
+    A CSV without a sidecar was written by an older version. It is only recomputed when
+    invasiveness is requested, so existing contact data is not redone otherwise.
+    """
+    meta_path = _contact_cache_meta_path(csv_path)
+    if not meta_path.exists():
+        if want_invasiveness:
+            return False, "no metadata sidecar (written by an older version)"
+        return True, None
+    try:
+        with open(meta_path) as fh:
+            meta = json.load(fh)
+    except (OSError, ValueError):
+        return False, "unreadable metadata sidecar"
+    if not math.isclose(float(meta.get("contact_threshold", float("nan"))), float(contact_threshold)):
+        return False, f"contact threshold changed to {contact_threshold} um"
+    if want_invasiveness and meta.get("invasiveness_version") != INVASIVENESS_VERSION:
+        return False, "invasiveness definition changed"
+    return True, None
+
+
 def _calculate_contact_single_timepoint(args):
     """
     Calculate contacts between current cell type and ALL other cell types.
@@ -1761,6 +1831,7 @@ def _calculate_contact_single_timepoint(args):
         }
         any_org_contact = []
         any_org_contact_on_distance = []
+        org_real_contact = {}
         any_immune_contact = []
         any_immune_contact_on_distance = []
         
@@ -1776,7 +1847,8 @@ def _calculate_contact_single_timepoint(args):
                 org_contacts = [x for x in org_contacts if x != str(segment_id)]
             
             real_org_contact = len(org_contacts) > 0
-            
+            org_real_contact[org_type] = real_org_contact
+
             pix_org_contacts = [
                 str(x) for x in np.unique(org_cutout[pix_distances <= 1.73]) if x != 0
             ]
@@ -1848,46 +1920,34 @@ def _calculate_contact_single_timepoint(args):
         contact_data['any_immune_cell_contact'] = any(any_immune_contact)
         contact_data['any_immune_cell_contact_on_distance'] = any(any_immune_contact_on_distance)
         
-        # Calculate invasiveness for immune cells (only if requested and organoids exist)
+        # Calculate invasiveness for immune cells (only if requested and organoids exist).
+        # Uses the same contact definition as {org}_contact_on_distance: an organoid type
+        # with no contact on distance gets 0%, so the two columns always agree.
         if calculate_invasiveness and organoid_segments_dict:
-            # Define "surface" as pixels within 2 µm of cell boundary
-            surface_threshold = 2.0  # µm
-            surface_mask = real_distances <= surface_threshold
-            total_surface_pixels = np.sum(surface_mask)
-            
-            if total_surface_pixels > 0:
-                any_invasiveness_list = []
-                invasiveness_perc_list = []
-                
-                # Calculate invasiveness for each organoid type
-                for org_type, org_segments in organoid_segments_dict.items():
-                    org_cutout = org_segments[slicer]
-                    
-                    # Count surface pixels in contact with this organoid type
-                    org_contact_mask = (real_distances <= contact_threshold) & (org_cutout != 0)
-                    contacted_surface_pixels = np.sum(org_contact_mask)
-                    
-                    # Calculate percentage
-                    invasiveness_perc = (contacted_surface_pixels / total_surface_pixels) * 100.0
-                    
-                    # Boolean: invasive if >= 50% of surface is in contact
-                    invasiveness_bool = invasiveness_perc >= 50.0
-                    
-                    contact_data[f'{org_type}_invasiveness'] = invasiveness_bool
-                    contact_data[f'{org_type}_invasiveness_perc'] = invasiveness_perc
-                    any_invasiveness_list.append(invasiveness_bool)
-                    invasiveness_perc_list.append(invasiveness_perc)
-                
-                # Add aggregate: True if invasive against ANY organoid type
-                contact_data['any_org_invasiveness'] = any(any_invasiveness_list)
-                contact_data['any_org_invasiveness_perc'] = max(invasiveness_perc_list) if invasiveness_perc_list else 0.0
-            else:
-                # No surface detected, set invasiveness to False/0
-                for org_type in organoid_segments_dict.keys():
-                    contact_data[f'{org_type}_invasiveness'] = False
-                    contact_data[f'{org_type}_invasiveness_perc'] = 0.0
-                contact_data['any_org_invasiveness'] = False
-                contact_data['any_org_invasiveness_perc'] = 0.0
+            cell_mask = seg_cutout == segment_id
+            sampling = [element_size_z, element_size_y, element_size_x]
+            any_invasiveness_list = []
+            invasiveness_perc_list = []
+
+            for org_type, org_segments in organoid_segments_dict.items():
+                if org_real_contact[org_type]:
+                    invasiveness_perc = _surface_contact_percentage(
+                        cell_mask, org_segments[slicer], sampling, contact_threshold
+                    )
+                else:
+                    invasiveness_perc = 0.0
+
+                # Boolean: invasive if >= 50% of surface is in contact
+                invasiveness_bool = invasiveness_perc >= 50.0
+
+                contact_data[f'{org_type}_invasiveness'] = invasiveness_bool
+                contact_data[f'{org_type}_invasiveness_perc'] = invasiveness_perc
+                any_invasiveness_list.append(invasiveness_bool)
+                invasiveness_perc_list.append(invasiveness_perc)
+
+            # Add aggregate: True if invasive against ANY organoid type
+            contact_data['any_org_invasiveness'] = any(any_invasiveness_list)
+            contact_data['any_org_invasiveness_perc'] = max(invasiveness_perc_list) if invasiveness_perc_list else 0.0
 
         df_contacts.append(pd.DataFrame([contact_data]))
 
