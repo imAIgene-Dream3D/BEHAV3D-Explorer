@@ -58,11 +58,9 @@ def _label_to_channel_from_stored_map(stored: dict | None) -> dict[str, int]:
         out[str(label)] = int(ch_idx)
     return out
 
-# ``cellpose`` (and the ``torch`` it drags in) costs ~5 s to import, so it is
-# loaded inside ``run_cellpose_prediction`` rather than at module scope. The
-# napari GUI imports this module on every metadata load just to reach the
-# pure-Python ``_label_to_channel_from_stored_map`` above, and used to pay
-# that 5 s on the Qt main thread for the privilege.
+# ``cellpose`` (and ``torch``) take ~5 s to import, so they are loaded inside
+# ``run_cellpose_prediction``. The napari GUI imports this module on every
+# metadata load for ``_label_to_channel_from_stored_map``.
 
 
 def _import_cellpose():
@@ -666,8 +664,6 @@ def run_otsu_threshold_segmentation_from_zarr(
         masks = np.zeros((T_total,) + spatial_shape, dtype=np.uint8)
 
         # Apply thresholding
-        # To be efficient and follow user 1-point-at-a-time pattern, we'll process timepoints
-        # but compute a global threshold if possible or use the requested range.
         
         # Select single channel for relevant timepoints: (T_subset, Z, Y, X)
         channel_img_subset = images[t_slice, death_channel]

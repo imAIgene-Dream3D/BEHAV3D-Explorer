@@ -527,7 +527,7 @@ def plot_per_movie_summary(
 
 
 # ---------------------------------------------------------------------------
-# New violin-by-fate plots: cross-reference immune invasiveness with organoid
+# Violin-by-fate plots: cross-reference immune invasiveness with organoid
 # death outcome.  Faceted per sample, user selects target(s).
 # ---------------------------------------------------------------------------
 
@@ -1045,7 +1045,7 @@ def run_invasiveness_analysis(
         )
 
     # ------------------------------------------------------------------
-    # NEW: Violin-by-fate plots (cross-referencing with organoid death)
+    # Violin-by-fate plots (cross-referencing with organoid death)
     # ------------------------------------------------------------------
     fate_plot_keys = []
     if organoid_types:

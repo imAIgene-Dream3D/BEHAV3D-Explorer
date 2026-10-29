@@ -86,8 +86,9 @@ _SEED_TUTORIAL_STEPS = [
     TutorialStep(
         "1. Select the label to edit",
         "seed_step1_select_label.png",
-        "Click the cell you want to split/create from in the viewer "
-        "(or type its ID above). It becomes the active label.",
+        "Split: click the cell you want to split in the viewer "
+        "(or type its ID above). It becomes the active label. "
+        "Create needs no selection — skip this step.",
     ),
     TutorialStep(
         "2. Click “Add seed points”",
@@ -98,9 +99,12 @@ _SEED_TUTORIAL_STEPS = [
     TutorialStep(
         "3. Place seeds, one per sub-region",
         "seed_step3_place_seeds.png",
-        "Click inside the label for each seed. Move the Z slider between "
+        "Split: click inside the label, one seed per sub-region. Create: "
+        "click on unlabelled voxels (bright ones when a channel is "
+        "selected), one seed per new label. Move the Z slider between "
         "clicks if you want seeds on different planes — seeds don't "
-        "need to share a Z-slice, they just need to land inside the label.",
+        "need to share a Z-slice, but they must all be on the current "
+        "timepoint.",
     ),
     TutorialStep(
         "4. Preview",
@@ -113,7 +117,8 @@ _SEED_TUTORIAL_STEPS = [
         "5. Apply",
         "seed_step5_apply.png",
         "Happy with the preview? Click Apply to commit it and propagate "
-        "the result forward and backward across the track's lifetime.",
+        "the result forward and backward through the chosen time range "
+        "(a split stops at the first frame where the label is missing).",
     ),
 ]
 
@@ -361,7 +366,7 @@ class TrackedSegmentEditor(QWidget):
         self.input_label_id.setFixedWidth(80)
         self.input_label_id.setToolTip(
             "Type a TrackID and press Enter to add it to the selection (use\n"
-            "this when you already know the ID; clicking the layer also works)."
+            "this when you already know the ID; Shift-clicking the layer also adds)."
         )
         self.input_label_id.returnPressed.connect(self._add_label_by_id)
         sel_row.addWidget(self.input_label_id)
@@ -370,7 +375,7 @@ class TrackedSegmentEditor(QWidget):
         sel_row.addWidget(self.btn_clear_sel)
         layout.addLayout(sel_row)
         sel_hint = QLabel(
-            "Tip: left-click adds a label, Shift-click adds another, right-click removes it."
+            "Tip: left-click selects a label (replaces the selection), Shift-click adds/removes one, right-click removes it."
         )
         sel_hint.setStyleSheet("color:#888; font-size:10px; font-style:italic;")
         layout.addWidget(sel_hint)
@@ -536,7 +541,8 @@ class TrackedSegmentEditor(QWidget):
         lay.setContentsMargins(2, 2, 2, 2)
         info = QLabel(
             "Drop ≥ 2 seed points on the selected label, then Apply.\n"
-            "Sub-labels propagate forward and backward across the track's lifetime."
+            "Sub-labels propagate forward and backward through the chosen time range,\n"
+            "stopping at the first frame where the label is missing (re-split after a gap)."
         )
         info.setWordWrap(True)
         info.setStyleSheet("color:#555; font-style:italic;")
@@ -588,7 +594,7 @@ class TrackedSegmentEditor(QWidget):
         lay = QVBoxLayout(page)
         lay.setContentsMargins(2, 2, 2, 2)
         info = QLabel(
-            "Pick 2 or more labels (left-click on the layer) and choose a target\n"
+            "Pick 2 or more labels (click one, Shift-click the others) and choose a target\n"
             "ID — every other selected label is rewritten to the target."
         )
         info.setWordWrap(True)
@@ -666,7 +672,8 @@ class TrackedSegmentEditor(QWidget):
         lay = QVBoxLayout(page)
         lay.setContentsMargins(2, 2, 2, 2)
         info = QLabel(
-            "Dilate / expand the selected label with a 3D isotropic ball.\n"
+            "Dilate / expand the selected label by the XY radius in-plane and the\n"
+            "matching number of Z slices (physically isotropic extent).\n"
             "Expansion never crosses into another label."
         )
         info.setWordWrap(True)
@@ -741,8 +748,8 @@ class TrackedSegmentEditor(QWidget):
         lay.addWidget(sep)
         self.cb_delete_short = QCheckBox("Delete all labels shorter than")
         self.cb_delete_short.setToolTip(
-            "Scan the entire volume and delete every track whose total lifetime\n"
-            "(number of timepoints present) is shorter than the threshold below.\n"
+            "Scan the entire volume and delete every track whose span (first to\n"
+            "last timepoint it appears, gaps included) is shorter than the threshold below.\n"
             "The current time range selection is ignored — full lifetime is always used."
         )
         short_row = QHBoxLayout()

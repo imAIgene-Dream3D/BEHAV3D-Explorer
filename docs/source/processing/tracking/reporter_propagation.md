@@ -10,13 +10,17 @@ Instead of linking detections frame to frame, it works across the whole movie at
 once:
 
 1. It pools **every** segment detected at **every** timepoint.
-2. It groups together any segments that **spatially overlap** each other, regardless
-   of how far apart in time they were detected.
+2. It groups together segments that **spatially overlap**, regardless of how far
+   apart in time they were detected: each segment is compared with the largest
+   instance found so far for each object.
 3. For each group it takes the **single largest** detected instance and uses that
    one shape as the object's mask, **stamped onto every timepoint** unchanged.
 
 Because the same static mask is reused at every frame, an intensity trace can be
 read for each object even at the timepoints where it was not segmentable on its own.
+This also applies to objects first detected part-way through the movie: they get an
+ID and their mask is present at every timepoint, including those before they
+appeared. There are no linking or gap parameters: grouping is purely spatial.
 
 ```{important}
 Reporter Propagation reuses **one static shape** for every timepoint, so it assumes
@@ -32,36 +36,27 @@ position are both required for this method.
 
 ## Parameters
 
-The Tracking sub-tab exposes two parameters for this method:
-
 | Control | Default | Range | What it does |
 |---|---|---|---|
-| **Min overlap fraction** | 0.1 | 0.0 – 1.0 | Minimum spatial overlap — as a fraction of the **smaller** segment's area/volume — required for two segments (from any two timepoints, however far apart) to be grouped as the same object. `0` means any shared pixel counts. |
-| **Min segment size** | 100 | ≥ 1 (voxels) | Minimum segment size in voxels. Segments smaller than this are ignored entirely (treated as noise), both as candidates for the "largest instance" and when grouping. |
-
-Both descriptions are the definitions shown in the widget's own help text. Raising
-**Min overlap fraction** is the control for the case where unrelated nearby objects
-are being grouped together as one.
+| **Min overlap fraction** | `0.10` | 0.00–1.00 | Minimum spatial overlap between a segment and an object's largest instance so far (from any timepoint, however far apart) — as a fraction of the **smaller** of the two volumes — for the segment to join that object. `0` means any shared pixel counts. Raise it if unrelated nearby objects are being grouped together. |
+| **Min segment size** | `100` | ≥ 1 (voxels) | Segments smaller than this are ignored entirely (treated as noise), both as candidates for the "largest instance" and when grouping. |
 
 ## Step-by-step in the napari plugin
 
 1. **Open the Tracking tab** and pick the sub-tab for the cell type you want to track.
-2. From the **Method** dropdown, pick **Reporter Propagation**.
+2. From the **Method:** dropdown, pick **Reporter Propagation**.
 3. Set **Min overlap fraction** and **Min segment size** if the defaults need adjusting.
 4. Click **Run *Cell type* Tracking** (the green button at the bottom of the sub-tab),
-   or queue it with the tab-level **+🛒** button — see
-   [Generic workflow](./index.md#generic-workflow-per-sub-tab).
-5. **Inspect the result** in the [Visualization](../../plugin_essentials/visualization) tab.
+   or use the batch / queue controls — see
+   [Generic workflow](index.md#generic-workflow-per-sub-tab).
+5. **Inspect the result** in the [Visualization](../../plugin_essentials/visualization.md) tab.
 
 ## Outputs
 
-Standard BEHAV3D EXPLORER tracking outputs:
-
-- `<output_dir>/images/<sample>/<sample>_<cell_type>_tracked.zarr`
-- `<output_dir>/trackdata/<sample>/<cell_type>/<sample>_<cell_type>_tracks.csv`
+Standard tracking outputs (tracked zarr + tracks CSV) — see [Tracking overview](index.md).
 
 ## See also
 
-- [Tracking overview](index).
-- [Fragmentation propagation](fragmentation_tracking) — overlap-based tracking for objects
+- [Tracking overview](index.md).
+- [Fragmentation Propagation](fragmentation_tracking.md) — overlap-based tracking for objects
   that are segmented reliably at every timepoint.

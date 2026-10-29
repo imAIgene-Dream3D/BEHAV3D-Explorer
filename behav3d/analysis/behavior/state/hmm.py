@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 
 from hmmlearn.hmm import GaussianHMM
 
+from behav3d.core.thread_limits import openmp_thread_cap
+
 
 def run_hmm_state_classification(
     df_features,
@@ -184,7 +186,8 @@ def run_hmm_state_classification(
 
             for k in range(int(k_min), int(k_max) + 1):
                 m = _build_model(k)
-                with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+                # fit() starts with KMeans -> cap OpenMP threads (crash on >128 CPUs)
+                with np.errstate(divide="ignore", over="ignore", invalid="ignore"), openmp_thread_cap():
                     m.fit(X_all, lengths=lengths)
                 if hasattr(m, "monitor_") and not m.monitor_.converged:
                     warnings.warn(
@@ -209,7 +212,7 @@ def run_hmm_state_classification(
             selection_df = pd.DataFrame(rows)
         else:
             model = _build_model(int(n_states))
-            with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            with np.errstate(divide="ignore", over="ignore", invalid="ignore"), openmp_thread_cap():
                 model.fit(X_all, lengths=lengths)
             if hasattr(model, "monitor_") and not model.monitor_.converged:
                 warnings.warn(

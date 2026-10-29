@@ -110,13 +110,9 @@ def fire_extra_callback(extra_callbacks, key: str, *args) -> None:
 # ---------------------------------------------------------------------------
 # Global "is something running?" state
 # ---------------------------------------------------------------------------
-# Every BackgroundOperation lives on its own widget and used to know only about
-# itself, so nothing could tell the user (or a click handler) that *another*
-# tab was still busy. Starting a second heavy job -- or switching to a tab whose
-# showEvent imports torch / reads an h5ad -- while the first was still running is
-# the main source of crashes and freezes. The helpers below aggregate the busy
-# state of all live operations on demand (no separate registry to keep in sync),
-# plus two opt-outs:
+# The helpers below combine the busy state of all live BackgroundOperations
+# (on any tab), so the UI can warn before a second heavy job starts. They are
+# computed on demand (no separate registry), with two opt-outs:
 #
 # * ``silent=True`` instances (automatic background scans/preloads) are never
 #   counted as "work the user must wait for" and are never blocked themselves.

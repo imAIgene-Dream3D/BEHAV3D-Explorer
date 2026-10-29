@@ -1136,19 +1136,35 @@ def run_categorical_dtaidistance_trajectory_clustering(
     they never change the distance matrix or the cluster assignments.
     """
     started = time.perf_counter()
-    if bool(clear_outputs):
-        existing_paths = _resolve_track_paths(output_dir, cell_type, output_subdir_name=output_subdir_name)
-        if existing_paths.outfolder.exists():
-            shutil.rmtree(existing_paths.outfolder, ignore_errors=True)
-            if bool(verbose):
-                _winfo("trajectory-dtai", f"cleared previous outputs: {existing_paths.outfolder}")
-    paths = _resolve_track_paths(output_dir, cell_type, output_subdir_name=output_subdir_name)
     if adata_full_path is None:
         adata_full_path = _default_behavioral_states_path(output_dir, cell_type)
     adata_full_path = Path(adata_full_path).expanduser()
     if not adata_full_path.exists():
         # Stored absolute path goes stale when the project folder is moved.
         adata_full_path = relocate_path(adata_full_path, output_dir) or adata_full_path
+    if bool(clear_outputs):
+        existing_paths = _resolve_track_paths(output_dir, cell_type, output_subdir_name=output_subdir_name)
+        outfolder = existing_paths.outfolder
+        if outfolder.exists():
+            # The input h5ad may live inside the outfolder (e.g. the feature-based
+            # trajectory_features/ file); keep the child that holds it.
+            try:
+                keep = outfolder.resolve() / adata_full_path.resolve().relative_to(outfolder.resolve()).parts[0]
+            except (ValueError, IndexError):
+                keep = None
+            if keep is None:
+                shutil.rmtree(outfolder, ignore_errors=True)
+            else:
+                for child in outfolder.iterdir():
+                    if child.resolve() == keep:
+                        continue
+                    if child.is_dir() and not child.is_symlink():
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        child.unlink(missing_ok=True)
+            if bool(verbose):
+                _winfo("trajectory-dtai", f"cleared previous outputs: {outfolder}")
+    paths = _resolve_track_paths(output_dir, cell_type, output_subdir_name=output_subdir_name)
     if not adata_full_path.exists():
         raise FileNotFoundError(f"Could not find behavioral-state h5ad: {adata_full_path}")
 

@@ -964,7 +964,7 @@ class CellTypeConvPaintTab(QWidget):
             layout.addLayout(self._pair_row(
                 QLabel("Opening px:"), self.opening_nr_pixels_spin,
                 HelpButton("Morphological opening",
-                    "Number of erosion-then-dilation iterations applied to the mask.\n"
+                    "Radius (in pixels) of the disk used to open the mask, slice by slice in Z.\n"
                     "Smooths boundaries and removes small speckles. Set to 0 to disable."),
                 QLabel("Min size:"), self.segment_size_min_spin,
                 HelpButton("Minimum segment size",
@@ -1021,7 +1021,7 @@ class CellTypeConvPaintTab(QWidget):
                 _edt_help,
                 QLabel("Opening px:"), self.opening_nr_pixels_spin,
                 HelpButton("Morphological opening",
-                    "Number of erosion-then-dilation iterations applied to the mask.\n"
+                    "Radius (in pixels) of the disk used to open the mask, slice by slice in Z.\n"
                     "Smooths boundaries and removes small speckles. Set to 0 to disable."),
             ))
 
@@ -1345,9 +1345,11 @@ class ConvPaintTrainingWidget(QWidget):
         r.addWidget(HelpButton(
             "Feature extractor model",
             "Pre-trained deep network used to extract per-pixel features.\n"
-            "  • VGG-16 (default): fast and lightweight; good general baseline.\n"
-            "  • DINOv2 / DINOv3: stronger feature representations from "
-            "self-supervised vision transformers; slower but often more accurate.\n"
+            "  • VGG16 (default): fast and lightweight; good general baseline. "
+            "VGG16 Medium / Large add deeper layers and scales (richer, slower).\n"
+            "  • DINOv2: transformer features with broader context but coarser "
+            "boundaries; JAFAR DINOv2 restores full resolution (both slower).\n"
+            "  • Gaussian, Cellpose, Ilastik: other feature extractors.\n"
             "Switching models invalidates the trained CatBoost classifier — "
             "retrain after changing this."
         ))
@@ -1370,7 +1372,8 @@ class ConvPaintTrainingWidget(QWidget):
             "How the input channels are fed to the feature extractor:\n"
             "  • multi: each channel processed separately and concatenated "
             "(more features, more memory).\n"
-            "  • single (mean) / RGB: channels are mixed before extraction.\n"
+            "  • Single channel: for one-channel input.\n"
+            "  • RGB: exactly three channels fed together as one colour image.\n"
             "When in doubt keep 'multi' for multi-channel fluorescence."
         ))
         fe_layout.addLayout(r)
@@ -1407,8 +1410,8 @@ class ConvPaintTrainingWidget(QWidget):
         r.addWidget(self.smooth_spin)
         r.addWidget(HelpButton(
             "Segmentation smoothening",
-            "Number of post-classification smoothing iterations applied to the "
-            "predicted label map.\n"
+            "Radius of a majority filter applied to the predicted class map in "
+            "each Z slice (0 and 1 = no smoothing).\n"
             "Reduces single-pixel noise but can erode thin structures."
         ))
         fe_layout.addLayout(r)
@@ -1557,7 +1560,7 @@ class ConvPaintTrainingWidget(QWidget):
             "Applies to prediction (Run instance segmentation / Re-run "
             "preview / batch processing) \u2014 available whether or not "
             "training images are currently loaded.\n\n"
-            "Splits the image into ~1000\u00d71000 px blocks with a 50 px "
+            "Splits the image into ~1000\u00d71000 px blocks with an "
             "overlap margin, extracts features and classifies each block "
             "separately, then stitches the results back together.\n\n"
             "Lower peak memory (only one block's features are held at a "

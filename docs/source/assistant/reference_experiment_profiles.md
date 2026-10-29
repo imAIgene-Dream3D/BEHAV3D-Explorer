@@ -11,7 +11,7 @@ Record these properties for each processing population:
 | Property | Evidence to request |
 |---|---|
 | Object scale | Approximate diameter in micrometres or cell widths |
-| Sampling | XY pixel size, Z spacing, and time between frames |
+| Sampling | XY pixel size, Z spacing, and time between frames (**Pixel XY (μm)**, **Pixel Z (μm)**, **Time interval** and **Time unit** in the metadata) |
 | One-frame motion | Measured displacement or whether the object still overlaps itself |
 | Shape | Stable, protrusive, elongated, dividing, or fragmenting |
 | Topology | Isolated, touching, temporarily merged, or confluent |
@@ -33,14 +33,17 @@ Often approximately one cell diameter (around 10 micrometres as an initial sizin
 reference). Use observed frame-to-frame overlap to choose tracking:
 
 - retained overlap: Fragmentation Propagation or Bounded Propagation may work;
-- lost overlap: use btrack and derive the search radius from measured displacement;
-- division: enable the btrack branching hypothesis;
-- entry or exit at the field boundary: retain initialization and termination hypotheses.
+- lost overlap: use **btrack (Bayesian)** and derive **Max search radius** from the
+  measured displacement;
+- division: tick **Enable global track optimization** and add the `P_branch`
+  hypothesis;
+- entry or exit at the field boundary: keep the `P_init` and `P_term` hypotheses
+  (ticked by default).
 
 ### Large, plastic or protrusive single objects
 
 Diameter alone is a poor mask model when the object extends processes or changes
-shape. Use boundary annotations and a permissive size threshold. If touching
+shape. Use boundary annotations and a permissive **Min size**. If touching
 segmentations join while motion remains small, Bounded Propagation prevents one
 track ID from spreading across disconnected regions. If detections lose overlap,
 use btrack.
@@ -49,13 +52,17 @@ use btrack.
 
 Ask how many roughly 10 micrometre cell widths span the structure. Ten to thirty
 cells across (roughly 100-300 micrometres) is a sanity-check range, not a default.
-Use the actual answer and each sample's XY/Z sampling to derive segmentation scales,
-minimum size, and EDT starting points.
+Use the actual answer and each sample's XY/Z sampling to derive the segmentation
+filter scales (or Cellpose diameter), **Min size**, and **EDT threshold** starting
+points.
 
 For near-static or slowly drifting structures that overlap between frames, use
-Fragmentation Propagation. Track multiple distinguishable structure populations in one
-run when they coexist and need a shared overlap-based track space; preserve their
-origin labels. Explants and much larger structures require their own measured scale.
+Fragmentation Propagation. When several organoid populations coexist and need one
+shared overlap-based track space, keep **Track all organoids together** ticked (the
+default): they are tracked in one run in the **🟣 All Organoids** sub-tab, each track
+keeps its population name, and per-population results are still written. Untick it
+when the populations must be tracked independently or need different methods.
+Explants and much larger structures require their own measured scale.
 
 ### Static objects with an intermittent reporter
 
@@ -79,7 +86,8 @@ Bounded Propagation with btrack.
 ## Tracking decision tree
 
 1. Does the object remain spatially overlapping between consecutive frames?
-   - No: use btrack.
+   - No: use a centroid-based method, normally **btrack (Bayesian)** (LapTrack and
+     TrackPy are alternatives).
    - Yes: continue.
 2. Is the signal intermittent while the physical object is static?
    - Yes: use Reporter Propagation.
@@ -89,16 +97,19 @@ Bounded Propagation with btrack.
    - No: use Fragmentation Propagation.
 4. When two methods are plausible, explain the topology difference and preview both.
 
-For btrack, derive the maximum search radius from the fastest plausible measured
-one-frame displacement plus a modest margin. Derive optimizer distance and time
-thresholds from the largest spatial and missing-frame gaps that should be bridged.
-Never import a numeric value from a named population or another experiment.
+For btrack, derive **Max search radius** from the fastest plausible measured
+one-frame displacement plus a modest margin. If **Enable global track optimization**
+is used, derive its **Distance threshold** and **Time threshold** from the largest
+spatial and missing-frame gaps that should be bridged. Never import a numeric value
+from a named population or another experiment.
 
 ## Signal-to-analysis mapping
 
 - A signal that rises and remains positive can drive Death Dynamics and, when tied
-  to contact, Active Killing or Interaction Analysis. Call it death only when the
-  reporter has been biologically validated as a death signal.
+  to contact, Active Killing or Interaction Analysis. Its channel is declared as the
+  dead channel (**Include dead channel** and **Dead ch #** in the Metadata Builder).
+  Call it death only when the reporter has been biologically validated as a death
+  signal.
 - A fluctuating signal can be a Behavioral State or State Trajectory feature.
 - Contact, movement, morphology, and channel intensity can all define single-cell
   states. Ask what the researcher wants the state profile to represent.
@@ -110,9 +121,10 @@ Never import a numeric value from a named population or another experiment.
 - A processing population is an object or signal distinguishable in the image and
   requiring its own segmentation and track IDs.
 - Line records biological identity or source; Condition records treatment or state.
-- Multicolor means one biological population was intentionally split across colors
+- Multicolor means one immune population was intentionally split across colors
   to reduce density, then segmented/tracked separately and recombined. Every color
-  must share population, line, and condition.
+  must share population, line, and condition. It is declared by ticking
+  **Multicolor** next to the immune population name after **Configure Cell Types**.
 - Different populations or biological identities are not Multicolor, even if color
   distinguishes them.
 - With already acquired data, recognize the acquisition design that exists; do not

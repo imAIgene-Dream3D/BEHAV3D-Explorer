@@ -1,7 +1,3 @@
-### TODO Perhaps set a "static" speed based on quantiles of mean_speed to define static and actively interacting cells
-### However this excludes a lot of cells to actively interact, now we take the fastest of the contacting T cells as actively interacting
-
-### TODO WHy is tcell_cntact TRUE everywhere?
 """
 This script calculates the features of tracks for BEHAV3D analysis.
 
@@ -619,9 +615,6 @@ def run_feature_extraction(
                         if pd.notna(sample_metadata[col]) and Path(sample_metadata[col]).exists():
                             other_segments_paths[other_type] = sample_metadata[col]
 
-            # Old: Construct dead_mask_path from output directory (kept for reference)
-            # dead_mask_path = Path(img_outdir, f"{sample_name}_mask_dead.zarr")
-            
             # Dead mask path is metadata-driven only (no hidden fallbacks).
             dead_mask_path = None
             if 'dead_mask_path' in sample_metadata.index and pd.notna(sample_metadata['dead_mask_path']):
@@ -822,23 +815,6 @@ def run_feature_extraction(
                         threshold_column="percentage_dead_mask",
                         propagate=propagate_dead_signal,
                     )
-                
-            # if "contact" in features_choice:    
-            #     # Calculate active contact for ALL cell types that have touching columns
-            #     for col in df_tracks.columns:
-            #         if col.startswith('touching_') and col.endswith('s'):
-            #             # Extract target cell type from column name
-            #             target_type = col[len('touching_'):-1]
-            #             contact_col = f'{target_type}_contact'
-            #             if contact_col in df_tracks.columns:
-            #                 print(f"{get_current_time()} - Calculating active contact features for {cell_type} vs {target_type}...")
-            #                 df_tracks = calculate_active_contact_features(
-            #                     df_tracks,
-            #                     cell_type=target_type
-            #                 )
-            #             else:
-            #                 print(f"{get_current_time()} - Skipping active contact for {target_type}: no {contact_col} column found")
-           
                 
             tracks_out_path = Path(track_outdir, f"{sample_name}_{cell_type}_track_features.csv")
             print(f"{get_current_time()} - Writing output to {tracks_out_path}")
@@ -2185,35 +2161,6 @@ def calculate_relative_increase(df, column, nr_timepoints_back, groupby="TrackID
 
     return df.groupby(groupby).apply(relative_increase, include_groups=False).reset_index(drop=True).values
 
-# def calculate_relative_increase(df, column, nr_timepoints_back, groupby):
-#     """
-#     Calculate the percentage increase of a column compared to the value
-#     """
-#     df = df.sort_values(by=[groupby, "position_t"]).copy()
-
-#     def compute_increase(group):
-#         values = group[column].values
-#         increases = []
-#         for i in range(len(values)):
-#             if i >= nr_timepoints_back:
-#                 ref = values[i - nr_timepoints_back]
-#             else:
-#                 ref = values[0]
-#             current = values[i]
-#             if ref == 0:
-#                 increase = float('inf') if current > 0 else 0.0
-#             else:
-#                 increase = (current - ref) / ref
-#             increases.append(increase)
-#         return pd.Series(increases, index=group.index)
-
-#     # Use `transform`-like behavior by resetting the index before recombining
-#     result = df.groupby(groupby).apply(compute_increase)
-#     if isinstance(result.index, pd.MultiIndex):
-#         result.index = result.index.droplevel(0)
-
-#     return result
-
 def calculate_fold_change_over_baseline(df, intensity_cols, baseline_percentile=10, groupby=("sample_name", "TrackID")):
     """Per-track fold change of each intensity column over that track's own baseline.
 
@@ -2705,13 +2652,3 @@ def calculate_morphology_features(segments_path, voxel_spacing=(1.0, 1.0, 1.0), 
         results = [_calculate_morphology_single_timepoint(args) for args in tqdm(args_list)]
 
     return pd.concat(results, ignore_index=True)
-
-# if __name__ == "__main__":
-#     parser = argparse.ArgumentParser()
-#     parser = argparse.ArgumentParser(description='Input parameters for automatic data transfer.')
-#     parser.add_argument('-c', '--config', type=str, help='path to a config.yml file that stores all required paths', required=False)
-#     args = parser.parse_args()
-#     with open(args.config, "r") as parameters:
-#         config=yaml.load(parameters, Loader=yaml.SafeLoader)
-#     metadata = pd.read_csv(config["metadata_csv_path"])
-#     run_behav3d_feature_extraction(config, metadata)

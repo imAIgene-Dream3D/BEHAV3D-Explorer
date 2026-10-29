@@ -490,9 +490,7 @@ def run_organoid_analysis(
         # many of those carry the dead flag right now. Deliberately not the same
         # quantity as the combined page-1 curve: an organoid that dies and then
         # stops being tracked leaves both numerator and denominator here, so
-        # this fraction can go down over time. `nr_organoids_present` used to be
-        # called `nr_organoids_t0`, which was simply wrong - it never held the
-        # t=0 count.
+        # this fraction can go down over time.
         df_experiment_sample = df_tracks_sample.groupby(["sample_name", "position_t"]).agg(
             nr_organoids_present=("TrackID", lambda x: x.nunique()),
             nr_dead=("TrackID", lambda x: x[df_tracks_sample.loc[x.index, "dead"]].nunique()),

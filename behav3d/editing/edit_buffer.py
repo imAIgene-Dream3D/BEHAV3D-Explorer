@@ -250,15 +250,14 @@ class EditBuffer:
         self._lifetime_cache.pop(int(label_id), None)
 
     # ------------------------------------------------------------------
-    # Commit (replaces the old apply/undo/redo)
+    # Commit
     # ------------------------------------------------------------------
     def commit(self, op: OpResult) -> None:
         """Apply an :class:`OpResult` from a primitive to the dirty set.
 
-        Unlike the old ``apply()`` method, **no undo snapshot is stored**,
-        which keeps RAM usage proportional only to the number of dirty
-        frames (not the number of operations performed).  To recover from
-        an unwanted edit, use :meth:`discard` to revert all unsaved changes.
+        No undo snapshot is stored, so RAM usage scales with the number of
+        dirty frames, not the number of operations. To recover from an
+        unwanted edit, use :meth:`discard` to revert all unsaved changes.
 
         Empty ops (``op.new_frames`` is empty) are ignored.
         """

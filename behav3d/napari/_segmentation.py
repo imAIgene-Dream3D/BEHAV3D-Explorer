@@ -938,7 +938,7 @@ class PixelClassifierWidget(QWidget):
         self.param_layout.addLayout(self.workers_form)
 
         self.btn_resegment = QPushButton("Test Segmentation Parameters")
-        self.btn_resegment.setToolTip("Re-runs segmentation on the current slice/time point using current parameters.")
+        self.btn_resegment.setToolTip("Re-segments the whole 3D volume of the currently displayed timepoint (all cell types) with the current parameters, without retraining.")
         self.btn_resegment.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; border-radius: 4px; padding: 6px;")
         self.btn_resegment.clicked.connect(self._on_resegment_clicked)
         
@@ -1086,13 +1086,19 @@ class PixelClassifierWidget(QWidget):
                 w_edt,
                 "EDT (Distance Transform Threshold)",
                 "Controls sensitivity for separating touching objects.\n\n"
-                "Lower values → more sensitive, splits objects more aggressively.\n"
-                "Higher values → less splitting, objects stay merged.\n\n"
+                "Seeds are the parts of the mask at least this far (in-plane "
+                "distance, per Z slice) from the background; an object with two "
+                "or more seeds is split between them.\n\n"
+                "Higher values → seeds shrink to each object's core, so touching "
+                "objects are split more.\n"
+                "Lower values → less splitting, objects stay merged. Values up to "
+                "1 px split nothing; very high values merge again once fewer than "
+                "two seeds survive.\n\n"
                 "Shown in the unit selected above (µm by default; converted "
                 "using the image's pixel size). Typical values in pixels:\n"
                 "  • Organoids: 8–15 px\n"
                 "  • Immune cells: 1.5–4.0 px\n"
-                "  • Disable: 0.0 (not recommended, leads to under-segmentation)"
+                "  • No splitting: 1.0 or less (not recommended, leads to under-segmentation)"
             ))
 
             w_size = QSpinBox()
@@ -1117,8 +1123,11 @@ class PixelClassifierWidget(QWidget):
             ct_form.addRow("Opening:", make_help_row(
                 w_open,
                 "Morphological Opening (pixels)",
-                "Radius of morphological opening applied to the mask.\n\n"
-                "Smooths edges and removes small protrusions/noise.\n"
+                "Radius (pixels) of the morphological opening applied to the "
+                "mask in each Z slice, and to your painted foreground before "
+                "training.\n\n"
+                "Smooths edges and removes protrusions/noise narrower than about "
+                "twice the radius.\n"
                 "0 = no opening applied.\n\n"
                 "Increase for smoother boundaries; keep low for small objects."
             ))
@@ -1129,8 +1138,9 @@ class PixelClassifierWidget(QWidget):
             fill_row.addWidget(w_fill)
             fill_row.addWidget(HelpButton(
                 "Fill Holes",
-                "When checked, internal gaps or holes within segmented "
-                "objects are automatically filled.\n\n"
+                "When checked, gaps fully enclosed by an object in each Z "
+                "slice are filled (in the predicted mask and in your painted "
+                "foreground).\n\n"
                 "Recommended ON for most use cases."
             ))
             fill_row.addStretch()
@@ -2235,17 +2245,7 @@ class PixelClassifierWidget(QWidget):
                 # Get prediction for current timepoint
                 # Expected shape (Z, Y, X)
                 mask_t = pred_data[t_idx]
-                
-                # Check for content
-                # Background=1, Foreground=2 (usually)
-                # But let's check values
-                
-                # Get parameters for this target
-                # If 'Dead', use defaults or specific widget if added (currently Dead doesn't have params widget in UI logic above, need check)
-                # The UI logic in _refresh_params_ui iterates over self.all_cell_types only.
-                # So 'Dead' might not have adjustable params in UI. 
-                # Let's skip 'Dead' if not in param_widgets or use defaults.
-                
+
                 cell_type_key = target.lower()
                 if cell_type_key == 'dead':
                      # Use defaults for dead
@@ -2264,12 +2264,7 @@ class PixelClassifierWidget(QWidget):
 
                 self.log(f"  Segmenting {target} (EDT={edt}, Size={size}, Open={opening})...")
                 
-                # Preprocess mask (Postprocess prediction)
-                # logic from napari_pixelclassifier.segment_and_update:
-                # mask_t has labels: 0=background, 1=background_label, 2=foreground
-                # extract fg (2)
-                
-                # Postprocess the prediction mask
+                # Prediction labels: 0=background, 1=background label, 2=foreground
                 fg_mask = (mask_t == 2).astype(bool)
                 
                 if np.any(fg_mask):
@@ -2289,13 +2284,8 @@ class PixelClassifierWidget(QWidget):
 
                 # Update 'Segments' layer
                 seg_layer_name = f'{target} Segments' # e.g. "Organoid1 Segments"
-                # "Dead" usually doesn't have a segments layer in the original code snippet 
-                # (only 'User Provided' and 'Pixel Classification' for Dead).
-                # But let's check create_layers logic. 
-                # In _on_load_training_clicked:
-                # self.viewer.add_labels(..., name=f'{cell_type.capitalize()} Segments', ...) for cell types
-                # Not for Dead.
-                
+
+                # Dead has no Segments layer (only User Provided / Pixel Classification).
                 if target == 'Dead':
                      continue 
                 
@@ -3469,7 +3459,8 @@ class CellposeSAMWidget(QWidget):
             "reuses this environment's PyTorch install, so it only adds a few "
             "MB -- your existing cellpose 3 install and trained models are left "
             "completely untouched.\n\n"
-            "You only need to do this once per computer."
+            "You only need to do this once per BEHAV3D Python environment "
+            "(redo it after reinstalling BEHAV3D into a new environment)."
         ))
         env_layout.addLayout(env_row)
         content_layout.addWidget(env_group)
@@ -3624,8 +3615,10 @@ class CellposeSAMWidget(QWidget):
         set_form.addRow("Diameter (0=auto):", make_help_row(
             self.spin_diameter,
             "Diameter",
-            "0 = automatic. Cellpose-SAM was trained on object diameters "
-            "7.5-120 px (mean 30 px) and is robust to size, so leave at 0 "
+            "0 = no rescaling (Cellpose-SAM does not estimate a diameter; "
+            "images are segmented at their native resolution). It was trained "
+            "on object diameters 7.5-120 px (mean 30 px) and is robust to "
+            "size, so leave at 0 "
             "unless your objects are far outside that range.\n\n"
             "Shown in the unit selected above (um by default; converted "
             "using this sample's pixel size)."
@@ -3665,8 +3658,8 @@ class CellposeSAMWidget(QWidget):
         do_3d_row.addWidget(HelpButton(
             "3D Segmentation (do_3D)",
             "On: cellpose averages flows over YX/ZY/XZ slices and runs "
-            "dynamics in 3D. This is the more accurate mode but is slower "
-            "(roughly 10-15x, measured on this dataset).\n\n"
+            "dynamics in 3D. This is the more accurate mode but is much slower "
+            "(often several times slower, depending on your volume size).\n\n"
             "Off: each Z slice is segmented in 2D and stitched across slices "
             "by IoU (see 'Stitch threshold' below) -- much faster, and useful "
             "when the ZY/XZ views are unusable (e.g. very anisotropic data)."
@@ -3758,7 +3751,9 @@ class CellposeSAMWidget(QWidget):
             "On: intensity normalization is computed once for the entire 3D "
             "stack.\n\n"
             "Off: each Z slice is normalized independently -- useful if "
-            "brightness drifts a lot between slices."
+            "brightness drifts a lot between slices.\n\n"
+            "Only takes effect in 2D + stitch mode: cellpose always "
+            "normalizes the whole stack when 3D segmentation is on."
         ))
         norm3d_row.addStretch()
         self.check_norm3d.setChecked(bool(cfg.get("norm3D", True)))
@@ -3902,7 +3897,8 @@ class CellposeSAMWidget(QWidget):
             "Preview Sample / Timepoint",
             "The single sample and timepoint that 'Preview segmentation' "
             "below runs on. Pick one that's representative of your data so "
-            "the size histogram reflects real object/artifact sizes."
+            "the object-size statistics (min/median/max volume, kept/removed "
+            "counts) reflect real object/artifact sizes."
         ))
         filt_layout.addLayout(prev_row)
 
@@ -5490,8 +5486,8 @@ class APOCWidget(QWidget):
         force_cpu_row.addWidget(HelpButton(
             "Force CPU-only Processing",
             "Overrides the GPU Device selection above and asks pyclesperanto "
-            "to run APOC (pixel classification + EDT/watershed) on the CPU "
-            "instead of the GPU.\n\n"
+            "to run APOC pixel classification on the CPU instead of the GPU "
+            "(the EDT/watershed post-processing always runs on the CPU).\n\n"
             "Requires an OpenCL CPU runtime to be installed (e.g. the Intel "
             "CPU Runtime for OpenCL). If none is found, pyclesperanto silently "
             "falls back to whatever OpenCL device it can find and a warning "
@@ -5507,8 +5503,6 @@ class APOCWidget(QWidget):
         self.training_layout = QVBoxLayout(self.training_group)
         self.training_layout.setContentsMargins(4, 4, 4, 4)
 
-        # Strategy config is now inside APOCTrainingWidget
-        
         train_ctrl_lay = QHBoxLayout()
         train_ctrl_lay.addWidget(QLabel("Examples/sample:"))
         self.spin_examples = QSpinBox()
@@ -5530,7 +5524,8 @@ class APOCWidget(QWidget):
         import_ctrl_lay = QHBoxLayout()
         self.btn_import_training = QPushButton("Import Training Data")
         self.btn_import_training.setToolTip(
-            "Select a training_metadata.yml file from a previous BEHAV3D experiment.\n"
+            "Select a training bundle (.zip from 'Export Training Bundle…') or a\n"
+            "training_metadata.yml from a previous BEHAV3D experiment.\n"
             "Features and sigma values will be locked to match the imported classifier."
         )
         self.btn_import_training.setStyleSheet(
@@ -5543,21 +5538,24 @@ class APOCWidget(QWidget):
         import_ctrl_lay.addWidget(self.btn_import_training)
         self._btn_import_help = HelpButton(
             "Import Training Data",
-            "Select a training_metadata.yml file from a previous BEHAV3D experiment to reuse its "
+            "Select a training bundle (.zip from 'Export Training Bundle…') or a "
+            "training_metadata.yml from a previous BEHAV3D experiment to reuse its "
             "labeled training data (pixel features + labels).\n\n"
             "⚠️ Features and sigma values will be locked to match the imported classifier. "
             "This is required because the classifier was trained on a specific set of features "
             "computed at specific scales (sigma values) — changing them would make the classifier "
             "incompatible with the imported labels.\n\n"
-            "⚠️ Even when importing, you must first click 'Generate Training Data' to load this "
-            "experiment's images into the viewer. Importing replaces the need to manually label "
-            "pixels — but the viewer session must be active first."
+            "⚠️ Importing adds labelled pixels; it does not load images or replace labeling. "
+            "Click 'Generate Training Data' first, then paint at least a few labels on each cell "
+            "type you want to train — the imported pixels are combined with them when you click "
+            "Train (a cell type with no new labels is skipped)."
         )
         self._btn_import_help.setToolTip(
-            "Requires: training_metadata.yml from a previous BEHAV3D experiment.\n"
+            "Requires: a training bundle (.zip) or training_metadata.yml from a previous BEHAV3D experiment.\n"
             "Locks features and sigma values to match the imported classifier — because the "
             "classifier was trained on those exact features and cannot be used with different ones.\n"
-            "Note: click 'Generate Training Data' first — importing replaces labeling, not image loading."
+            "Note: click 'Generate Training Data' first and still paint a few labels per cell type — "
+            "imported pixels are added to them at training time."
         )
         self._btn_import_help.setVisible(False)
         import_ctrl_lay.addWidget(self._btn_import_help)
@@ -5613,8 +5611,6 @@ class APOCWidget(QWidget):
         self.training_placeholder.setStyleSheet("color:#888; font-style:italic; padding:10px;")
         self.training_layout.addWidget(self.training_placeholder)
         layout.addWidget(self.training_group)
-
-        # (Strategy selector is now inside training_group above)
 
         # ── Batch controls ──────────────────────────────────────
         batch_group = QGroupBox("🚀 Batch Segmentation")
@@ -6473,9 +6469,9 @@ class APOCWidget(QWidget):
             )
             self._check_unify_organoids.setChecked(self._unify_organoids)
             self._check_unify_organoids.setToolTip(
-                "When checked, clicking will immediately mirror the first organoid tab's\n"
-                "config (features, strategy, params) to all other organoid tabs.\n"
-                "Toggle again to re-sync after making further changes."
+                "When checked, copies the first organoid tab's config (features,\n"
+                "strategy, params) to the other organoid tabs and keeps mirroring\n"
+                "later edits on any organoid tab. Uncheck to edit tabs independently."
             )
             self._check_unify_organoids.stateChanged.connect(self._on_unify_organoids_changed)
             unify_row.addWidget(self._check_unify_organoids)
@@ -6485,10 +6481,9 @@ class APOCWidget(QWidget):
                 "immediately copies the first organoid tab's configuration "
                 "(selected channels/features, strategy, and EDT/opening/min "
                 "size/fill-holes parameters) to all other organoid tabs.\n\n"
-                "It only syncs once at the moment you check it \u2014 further edits "
-                "to any organoid tab are NOT automatically propagated. Toggle "
-                "the checkbox off and back on to re-sync after making more "
-                "changes.\n\n"
+                "While it stays checked, any later edit on an organoid tab is "
+                "mirrored to the other organoid tabs (the edited tab becomes the "
+                "source). Uncheck it to tune organoid tabs independently.\n\n"
                 "Immune and other non-organoid cell types are not affected."
             ))
             unify_widget = QWidget()
@@ -6590,9 +6585,11 @@ class APOCWidget(QWidget):
             "background-color:#1976D2; color:white; font-weight:bold; padding:6px 12px;"
         )
         self._global_run_instance_btn.setToolTip(
-            "Run the full batch segmentation (all samples, using the timepoint range\n"
-            "below) for the currently active cell-type tab only. Other cell types are\n"
-            "not loaded or modified; the Dead tab runs only the death mask.\n"
+            "Run the full batch segmentation (all samples, using the 'Process all\n"
+            "timepoints' / From t–to t setting just above this button, not the Batch\n"
+            "Segmentation range) for the currently active cell-type tab only. Other\n"
+            "cell types are not re-segmented (multicolor overlap cleanup still updates\n"
+            "the whole family); the Dead tab runs only the death mask.\n"
             "Uses the strategy and parameters configured in that tab."
         )
         self._global_run_instance_btn.clicked.connect(self._on_global_run_instance)
@@ -7478,9 +7475,6 @@ class APOCWidget(QWidget):
     # ── Helper: unify organoid settings ────────────────────────
     def _on_unify_organoids_changed(self, *_):
         """When toggled ON, do an initial full sync from the first organoid tab."""
-        # Same int-vs-enum trap as ActiveKillingPanel._on_abs_toggle: under
-        # PyQt6, Qt.CheckState is a plain Enum, so comparing stateChanged's
-        # int payload to Qt.Checked is always False.
         self._unify_organoids = self._check_unify_organoids.isChecked()
         if not self._unify_organoids or self._training_widget is None:
             return

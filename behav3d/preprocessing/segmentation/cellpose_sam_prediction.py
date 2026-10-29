@@ -332,9 +332,9 @@ def _build_job(**kwargs) -> dict:
 
 # ── resume journal ──────────────────────────────────────────────────────────
 #
-# The mechanism now lives in
-# :mod:`behav3d.preprocessing.segmentation.segment_journal` so APOC and ConvPaint
-# share it. Only the payload assembled for the fingerprint is specific to this
+# The journal mechanism is shared with APOC and ConvPaint in
+# :mod:`behav3d.preprocessing.segmentation.segment_journal`. Only the payload
+# assembled for the fingerprint is specific to this
 # backend; the schema, the atomic write and the staleness rules are common.
 
 

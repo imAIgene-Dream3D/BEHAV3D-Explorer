@@ -1,8 +1,19 @@
 # 🧪 Feature Extraction
 
-Tab 5 of the BEHAV3D EXPLORER dock widget. Feature Extraction takes your **tracked segments** plus the **raw image** and computes, for every cell at every timepoint, a panel of biological measurements (movement, intensity, morphology, contact with neighbours, death). The result is the table that every downstream analysis — Filtering, Death Dynamics, Interaction, and behavioural-state classification — reads from.
+Tab 5 of the BEHAV3D EXPLORER dock widget. Feature Extraction takes your **tracked segments** plus the **raw image** and computes, for every cell at every timepoint, a panel of biological measurements (movement, intensity, morphology, contact with neighbours, death). The result is the table that [Filtering](filtering.md) — and through it every downstream analysis — reads from.
 
-![Feature Extraction tab](../_static/screenshots/feature_extraction_tab.png)
+## Workflow at a glance
+
+1. Open the [sub-tab of a cell type](#per-cell-type-sub-tabs).
+2. [Choose the feature families](#the-six-feature-families) to extract (greyed-out ones are always extracted).
+3. [Set the parameters](#parameters): the contact threshold and **Workers:**, and, only when the metadata declares a dead channel, the **Dead mask % threshold:**.
+4. (Dead channel only) [Preview the dead threshold in the viewer](#preview-dead-threshold-in-viewer) and adjust it until the green/red split matches the dead cells you see.
+5. (Optional) [Copy the settings to the other sub-tabs](#apply-run-queue) with **Apply to all <Category>** or **Apply to all**.
+6. [Run](#apply-run-queue) **Run <Cell type> Feature Extraction**, **Run Batch Feature Extraction (All Cell Types)**, or queue it with **+🛒**.
+7. (Optional, immune types) Run [Active Killing](#active-killing) once the baseline extraction has finished.
+8. [Run Filtering](filtering.md): every downstream analysis reads the filtered table. If you change the dead threshold later, [re-run the death classification](#changing-the-dead-threshold-later) and then Filtering again.
+
+Each cell-type sub-tab shows, from top to bottom: **Features to extract**, **Death Threshold** and **⚙ Advanced Configuration** (both only with a dead channel), **Workers**, the **Apply to all …** buttons and the run button.
 
 ## What this tab produces
 
@@ -13,27 +24,13 @@ For each cell type, Feature Extraction writes one combined table:
     BEHAV3D_<cell_type>_combined_track_features.csv
 ```
 
-Each row in that CSV = one cell (`TrackID`) at one timepoint (`position_t`). The columns are grouped into six families (see [below](#the-six-feature-families)). Per-sample intermediate CSVs are also written under `trackdata/<sample>/<cell_type>/`.
+Each row = one cell (`TrackID`) at one timepoint (`position_t`); the columns are grouped into the feature families [below](#the-six-feature-families). Per-sample tables are also written to `trackdata/<sample>/<cell_type>/`, together with an `intermediate_results/` folder (intensity, contact, morphology and dead-mask measurements) that is reused on later runs.
 
-Optionally, an **Active Killing** detector can run on top of the immune-cell features to flag the timepoints at which an immune cell appears to kill a target. That produces several extra files in `analysis/<immune_type>/active_killing/`.
-
-```{important}
-The main **▶ Run Feature Extraction** step writes CSVs only — no plot PDFs. Other tabs produce most QC and behavioural figures ([Filtering](filtering.md), [State Classification](single_cell/state_classification.md), etc.).
-
-Graphics from **this** tab are limited to:
-
-- **Preview Dead Threshold in Viewer** — live napari overlay only (not saved).
-- **Active Killing** (immune panel, after baseline extraction) — when you run the analysis or **Display Existing Results**:
-  - Per sample: `plots/<sample>/killing_kinetics_summary_<sample>.png` (four panels: efficiency, kinetics, cumulative events, events per cell).
-  - All samples: `plots/combined_killing_efficiency_distribution.png`.
-  - Top killers: `gallery/<sample>/killing_event_*.gif` (Event GIFs of cropped 3D views (maximum-intensity projections) around each top killing event; count set by **Top-N killers to display**).
-
-See [Active Killing](population_analysis/active_killing.md) for file names and how to read the plots.
-```
+The main run writes CSVs only — no plots. The only graphics produced on this tab are the live [dead-threshold preview](#preview-dead-threshold-in-viewer) and the optional [Active Killing](population_analysis/active_killing.md) outputs. Like the other processing tabs, the lower half of the tab is the shared [📄 Results panel](../plugin_essentials/results_panel.md), where the new CSVs appear as soon as a run finishes.
 
 ## Per-cell-type sub-tabs
 
-Like the Tracking tab, Feature Extraction is organised as **sub-tabs per cell type** along the left side. Each cell type declared in the metadata gets its own sub-tab, colour-coded by category:
+Feature Extraction is organised as **sub-tabs per cell type** along the left side, colour-coded by category:
 
 | Icon | Category |
 |---|---|
@@ -43,96 +40,98 @@ Like the Tracking tab, Feature Extraction is organised as **sub-tabs per cell ty
 
 Multicolor channel splits (e.g. `tcell_1_multicolor`) are **not** shown as separate sub-tabs — the merged track set is used instead.
 
-**Active Killing** becomes available once at least one immune cell type is present.
+Each sub-tab has, from top to bottom: **Features to extract**, **Death Threshold** (only when the metadata declares a dead channel), **⚙ Advanced Configuration** (same condition), **Workers**, the **Apply to all …** buttons and the run button.
 
 ## The six feature families
 
-Each sub-tab exposes the same six feature-family checkboxes. Some are **mandatory** for certain cell types (the checkbox is forced ON and greyed out, because downstream analyses depend on them):
+Each sub-tab lists the feature families as checkboxes. Families that downstream analyses depend on are **always extracted** for that cell type: their checkbox is ticked and greyed out (*"Greyed-out features are always extracted for this cell type."*). On a fresh project the optional families are ticked too.
 
-| Family | What it measures | Mandatory for |
+| Family | What it measures | Always extracted for |
 |---|---|---|
-| **Movement** | Step length, cumulative distance, mean square displacement, speed, directional persistence | Immune, Other |
-| **Intensity** | Mean intensity of each raw channel inside each cell's mask | All cell types |
+| **Contact** | Which neighbouring cells (of any cell type) each cell touches or is close to | All cell types |
+| **Invasiveness** | How much organoid lies in and right around an immune cell (0–100 %) | Optional; **immune sub-tabs only**, shown next to Contact |
+| **Movement** | Step length, distance travelled, mean square displacement, speed, directional persistence | Immune, Other |
+| **Intensity** | Per-channel intensity inside each cell's mask, plus self-normalised fold changes | All cell types |
 | **Morphology** | Volume, shape descriptors, surface area, principal axes, orientation | Optional |
-| **Contact** | Which neighbours (of any cell type) each cell is touching or close to | All cell types |
-| **Organoid Invasiveness** | How much of the immune cell’s surface is in contact with an organoid (0–100%; “invasive” when ≥ about half) | Optional, **immune only**, requires Contact |
-| **Death** | Fraction of the cell's mask that overlaps the dead mask, plus a sticky alive/dead flag | Whenever a dead channel exists |
+| **Death** | Share of the cell's mask covered by the dead mask, and an alive/dead flag | All cell types — **only listed when a dead channel is declared** |
 
 ### Per-category summary
 
 | Cell type | Always on (greyed) | Optional |
 |---|---|---|
-| Organoid | Intensity, Contact (+ Death if dead channel) | Movement, Morphology |
-| Immune | Intensity, Contact, Movement (+ Death if dead channel) | Morphology, Organoid Invasiveness |
-| Other | Intensity, Contact, Movement (+ Death if dead channel) | Morphology |
+| Organoid | Contact, Intensity (+ Death if dead channel) | Movement, Morphology |
+| Immune | Contact, Movement, Intensity (+ Death if dead channel) | Invasiveness, Morphology |
+| Other | Contact, Movement, Intensity (+ Death if dead channel) | Morphology |
 
 ## Parameters
 
-Each sub-tab exposes the following spinboxes:
-
-| Control | Default | Range | Units | Meaning |
-|---|---|---|---|---|
-| **Contact Threshold** | 0.0 | 0.0 – 500.0 | µm | Maximum distance between two cells to be counted as "in contact" (used for distance-based contact columns, `touching_*`, and Organoid Invasiveness). Pixel contact is fixed at one-voxel-diagonal (≈ 1.73 px). Visible only when Contact is checked. |
-| **Dead mask % threshold** | 10 % (stored as 0.1) | 0 – 100 % | percent shown, fraction stored | Minimum share of the cell's voxels that must overlap the dead mask before the cell is flagged as dead. The spinbox is shown as a **percentage** (default 10 %), but the value is saved to `behav3d_parameters.yml` and compared as a **0–1 fraction** — 10 % is stored and compared as `0.1`, directly against `percentage_dead_mask` (itself a 0–1 fraction). Set to **0** to skip dead classification entirely. |
-| **Preview sample** | first sample | dropdown | — | Sample used by the dead-threshold preview button. |
-| **Workers** | balanced default | 1 – (CPU cores − 1) | cores | Parallel workers for image-based computations (morphology / intensity / contact / dead mask). |
+| Control | Default | What it does |
+|---|---|---|
+| **Contact units:** `px` ⇄ `µm` | `µm` | Display unit of the contact threshold. Contact is always computed in µm; a value typed in px is converted with the sample's voxel size. Disabled when the metadata has no pixel size. |
+| Contact threshold (number box next to **Contact**) | `0.00` µm | Distance within which another cell counts as "in contact" for the `*_contact_on_distance` and `touching_*` columns. Also defines the neighbourhood used by **Invasiveness** and by Active Killing. |
+| **Dead mask % threshold:** | `10.0 %` | Share of a cell's voxels that must overlap the dead mask for that timepoint to count as dead. Range 0–100 %, saved to `behav3d_parameters.yml` as a fraction (10 % → `0.1`). Set to **0** to skip the alive/dead classification (no `dead` column). *Only with a dead channel.* |
+| **🔄  Re-run death** | — | Re-classifies alive/dead in the existing combined table with the current threshold, without re-measuring anything. Visible once the combined CSV exists; active only when the threshold differs from the one used. See [Changing the dead threshold later](#changing-the-dead-threshold-later). |
+| **Preview sample:** | first sample | Sample loaded by the preview button below. |
+| **👁  Preview Dead Threshold in Viewer** | — | Green/red alive/dead overlay — see [below](#preview-dead-threshold-in-viewer). |
+| **⚙ Advanced Configuration → Propagate dead signal** | `on` for organoids, `off` for immune / other | **On:** once a track crosses the threshold it stays dead for the rest of the track. **Off:** only timepoints at/above threshold are dead, so the cell can return to alive — appropriate for immune cells that transiently pick up dead dye while killing. *Only with a dead channel.* |
+| **Workers:** | half the CPU cores (at least 4), never more than cores − 1 | Parallel workers for the image-based measurements (morphology, intensity, contact, dead mask). Range 1 – (cores − 1). Set per cell type, not linked to the shared [Workers](../plugin_essentials/running_steps.md#workers) setting of the other tabs. |
 
 ```{important}
-The **Dead mask % threshold** is **shared across all organoid sub-tabs**. If you change it on one organoid sub-tab, every other organoid sub-tab updates to the same value in real time. Immune and Other cell types each have their own independent threshold.
+The **Dead mask % threshold** is **shared across all organoid sub-tabs** (*"One threshold applies to ALL organoid types equally"*): changing it on one organoid sub-tab updates every other organoid sub-tab. Immune and Other cell types each have their own threshold.
 ```
 
 ## Preview Dead Threshold in Viewer
 
-The **👁 Preview Dead Threshold in Viewer** button (only visible when Death is enabled — death channel exists ) is the quickest way to set a sensible Dead threshold for a dataset. It:
+**👁  Preview Dead Threshold in Viewer** is the quickest way to pick a sensible dead threshold. It:
 
-1. Clears the napari viewer.
-2. Loads, for the selected preview sample, the raw channels, the dead mask, and the tracked segments of every cell type.
-3. Overlays each cell of the current sub-tab's cell type with a colour based on its dead-fraction:
+1. Clears the napari viewer (after asking for confirmation if layers are open).
+2. Loads, for the **Preview sample**, the raw channels, the dead mask and the tracked segments of every cell type.
+3. Colours each cell of the current sub-tab's cell type by its dead-mask overlap at the current timepoint:
 
 | Colour | Meaning |
 |---|---|
-| 🟢 Green | **Alive** — dead-mask overlap **below** threshold |
-| 🔴 Red | **Dead** — dead-mask overlap **at or above** threshold |
+| 🟢 Green | **Alive** — overlap **below** the threshold |
+| 🔴 Red | **Dead** — overlap **at or above** the threshold |
 
-The overlay updates **live** as you drag the Dead mask % threshold spinner. Hover over any cell to see its track ID and exact dead percentage in the napari status bar.
+The overlay updates live when you change **Dead mask % threshold** or move the time slider. Hover over a cell to see its track ID (plus its cell type on organoid sub-tabs) and exact dead percentage in the status bar. On organoid sub-tabs all organoid types are merged into a single overlay.
 
-For organoid sub-tabs, all organoid types are merged into a single overlay so you can see them together.
-
-```{tip}
-Picking the dead threshold is dataset-specific, but use these starting points (the value is the fraction of the mask that must overlap the dead signal):
-
-- **Organoids ≈ 0.05** (about 5 % of the mask). It sounds low, but organoids are large 3-D objects, so a few dead cells are only a small volume fraction.
-- **T cells ≈ 0.1** (about 10 %, the default). For a clean dead-dye signal there is a clear central red dot.
-
-Adjust from there until the green/red split visually matches the dead cells in your raw image at a timepoint you trust. The binary alive/dead flag is stored alongside the actual intensity and percentage, so you can re-tune later with **▶ Re-run death**.
+```{note}
+For organoid and other (non-immune) cell types, dead-mask voxels that lie inside **immune cells** are ignored — both in the preview and in the real extraction — so dye-positive immune cells crawling over or into an organoid do not make the organoid look dead.
 ```
 
-If you already ran extraction with one threshold and want another, change Dead mask % threshold and run ▶ Re-run death
+```{tip}
+Starting points (fraction of the mask that must overlap the dead signal):
 
-## Active Killing detection
+- **Organoids ≈ 5 %**. It sounds low, but organoids are large 3-D objects, so a few dead cells are only a small volume fraction.
+- **T cells ≈ 10 %** (the default). With a clean dead-dye signal there is a clear central red dot.
 
-**▶ Extended Analysis — Active Killing (Immune Cells)** detects, for each effector cell, the timepoints at which the target it touched shows a signal rise large enough to count as killing.
+Adjust until the green/red split matches the dead cells you see in the raw image at a timepoint you trust.
+```
 
-**It is configured and run here, but explained with the population analyses.** It lives in this tab because it needs the per-timepoint contact and signal columns while they are being computed, and it writes its results back into the effector's own feature table. Conceptually it belongs with Death Dynamics, Interaction and Invasiveness, because it is about targets, effectors and contact.
+### Changing the dead threshold later
 
-Active Killing requires at least one **immune** cell type in the metadata and that cell type's combined feature CSV — so run baseline Feature Extraction for it first.
+The measured overlap is stored next to the alive/dead flag, so you never need to re-measure to try another threshold. Change **Dead mask % threshold** and click **🔄  Re-run death** (on organoid sub-tabs this re-runs all organoid types, since they share one threshold). The current **Propagate dead signal** setting is applied too. A reminder then asks you to re-run [Filtering](filtering.md): every analysis reads the *filtered* table, which still holds the old classification until you do.
 
-**Full explanation, parameters, calibration and outputs: [Active Killing](population_analysis/active_killing.md).**
+## Active Killing
+
+The collapsible **🧬  Extended Analysis — Active Killing (Immune Cells)** section below the batch button appears when the metadata has at least one immune (`im_`) population, which plays the effector. It detects, for each effector cell, the contacts after which the target's death signal rises enough to count as a kill. It is configured and run here but explained with the population analyses: **[Active Killing](population_analysis/active_killing.md)**. Run baseline Feature Extraction for the immune type first.
 
 ## Apply, Run, Queue
 
 Each sub-tab has:
 
-- **Apply to all <Category>s** — copy this sub-tab's settings (feature checkboxes, contact threshold, workers, and the non-organoid dead threshold) to every other sub-tab of the same category.
-- **Apply to all** — same but across all cell types.
-- **▶ Run <CellType> Feature Extraction** — runs feature extraction for this cell type across every sample. If the combined CSV already exists you'll be asked to **Overwrite** or **Skip**.
+- **Apply to all <Category>** (e.g. **Apply to all Organoids**, **Apply to all Other types**) — copies this sub-tab's feature checkboxes, contact threshold, workers, **Propagate dead signal** and dead threshold to every sub-tab of the same category (the dead threshold only to immune and other sub-tabs; organoid sub-tabs already share one).
+- **Apply to all** — the same across all cell types.
+- **Run <Cell type> Feature Extraction** — runs this cell type for every sample.
 
-The main tab (above the sub-tabs) has:
+Below the sub-tabs:
 
-- **▶ Run Batch Feature Extraction (All Cell Types)** — runs every cell type sequentially.
-- **+🛒** — queues a Feature Extraction step in the [Processing Queue](../plugin_essentials/processing_queue). The queue snapshots the current GUI state and applies it at run time.
+- **Run Batch Feature Extraction (All Cell Types)** — runs every cell type in turn.
+- **+🛒** — adds a Feature Extraction step to the [Processing Queue](../plugin_essentials/processing_queue.md).
 
-Progress is reported in the **Log** and in the console (progress bars per per-sample loop).
+A progress bar and a **Log** box report progress (see [Running Steps](../plugin_essentials/running_steps.md#background-execution)). If results already exist, the **Existing Feature Data** dialog offers the usual choices (see [When results already exist](../plugin_essentials/running_steps.md#when-results-already-exist)). Here **Overwrite All** also discards the cached intermediate measurements, and when a dead threshold changed an extra **Re-run death only** button (batch: **Re-run death only (changed thresholds)**) re-classifies alive/dead without recomputing anything else.
+
+When the run finishes, a **Feature Extraction Complete** reminder offers **Run Filtering with current setup**, **Go to Filtering tab** or **OK** (tick **Don't remind me this session** to silence it).
 
 ## Column reference
 
@@ -144,33 +143,33 @@ The combined CSV always contains a base set of identity columns, plus whatever t
 |---|---|
 | `sample_name` | Sample identifier |
 | `TrackID` | Stable track identifier across timepoints |
-| `SegmentID` | Per-timepoint segment label (NaN on interpolated rows) |
-| `position_t` | Timepoint index |
+| `SegmentID` | Per-timepoint segment label (empty on interpolated rows) |
+| `position_t` | Timepoint index (0-based) |
 | `position_x` / `_y` / `_z` | Centroid in µm |
 | `relative_time` | Time within this track, starting at 1 |
 | `time` | Real time in hours |
 | `distance_unit`, `time_unit` | Always `"um"` / `"h"` |
 | `interpolated` | `True` if this row was filled in to bridge a missing frame |
+| `nr_pixels`, `volume` | Voxel count and physical volume (µm³) — always computed, even without Morphology |
 
-Any extra metadata columns you have in the tracks CSV (e.g. `well`, `condition`) are carried over too.
+Missing frames inside a track are filled in before the movement features are computed: numeric values are interpolated linearly, flags and text are copied from the previous timepoint. Any extra columns in your tracks CSV (e.g. `well`, `condition`) are carried over.
 
-### Movement (when checked)
+### Movement
 
-All measurements are in µm and hours. Movement is computed only after missing timepoints are interpolated, so all columns are continuous along each track.
+All measurements are in µm and hours.
 
 | Column | Meaning |
 |---|---|
 | `displacement` | Step length from the previous timepoint (µm) |
 | `cumulative_displacement` | Running total of step lengths up to this timepoint |
-| `displacement_from_origin` | Straight-line distance from the cell's first position |
-| `mean_square_displacement` | Mean squared distance between the current position and every earlier position on the track (a diffusion measure) |
-| `directional_persistence` | Cosine of the angle between consecutive step vectors (−1 = U-turn, 0 = right-angle turn, +1 = straight ahead) |
-| `speed` | Step length divided by the time between frames (µm/h) |
-| `mean_speed` | Speed averaged over the last 10 frames (rolling window); also used to decide `active_*_contact` |
+| `displacement_from_origin` | Straight-line distance from the track's first position |
+| `mean_square_displacement` | Mean squared distance between the current position and every earlier position on the track |
+| `directional_persistence` | Cosine of the angle between consecutive steps (−1 = U-turn, 0 = right-angle turn, +1 = straight ahead) |
+| `speed` | Step length divided by the frame interval (µm/h) |
 
 #### How the movement features are computed
 
-Let $\mathbf{p}(t) = (x, y, z)$ be a cell's centroid at timepoint $t$ (in µm), $\Delta t$ the frame interval (in hours), and $\mathbf{s}(t) = \mathbf{p}(t) - \mathbf{p}(t-1)$ the step vector between consecutive frames.
+Let $\mathbf{p}(t) = (x, y, z)$ be a cell's centroid at timepoint $t$ (in µm), $\Delta t$ the frame interval (in hours), and $\mathbf{s}(t) = \mathbf{p}(t) - \mathbf{p}(t-1)$ the step vector between consecutive frames. Here $t$ counts frames from the track's first position ($t = 0$), and $\mathbf{s}(0) = \mathbf{0}$, so displacement and speed are 0 at a track's first timepoint.
 
 $$
 \text{displacement}(t) = \lVert \mathbf{s}(t) \rVert
@@ -180,8 +179,8 @@ $$
 
 $$
 \begin{aligned}
-\text{cumulative\_displacement}(t) &= \sum_{i \le t} \lVert \mathbf{s}(i) \rVert \\[4pt]
-\text{displacement\_from\_origin}(t) &= \lVert \mathbf{p}(t) - \mathbf{p}(0) \rVert
+\mathrm{cumulative\_displacement}(t) &= \sum_{i \le t} \lVert \mathbf{s}(i) \rVert \\[4pt]
+\mathrm{displacement\_from\_origin}(t) &= \lVert \mathbf{p}(t) - \mathbf{p}(0) \rVert
 \end{aligned}
 $$
 
@@ -193,7 +192,7 @@ $$
 
 MSD grows roughly linearly in time for random (diffusive) motion and quadratically for directed motion, so its shape distinguishes wandering cells from cells under a directional cue.
 
-**Directional persistence** is the cosine similarity of successive step vectors (clipped to $[-1, 1]$, and 0 wherever a step has zero length):
+**Directional persistence** is the cosine similarity of successive step vectors (0 wherever a step has zero length, and at the first two timepoints of a track):
 
 $$
 \text{persistence}(t) = \frac{\mathbf{s}(t-1) \cdot \mathbf{s}(t)}{\lVert \mathbf{s}(t-1) \rVert \, \lVert \mathbf{s}(t) \rVert}
@@ -202,61 +201,60 @@ $$
 A value near +1 means the cell keeps heading the same way (persistent, directed migration); near 0 means each step's direction is independent of the last (random walk); near −1 means it reverses.
 
 ```{note}
-The Feature Extraction tab does not produce the broader rolling-window motility statistics used by the state classifier (e.g. straightness, net displacement over a window, median turning angle, run-length summaries). Those are computed later from this table by [State Classification](single_cell/state_classification) when you run the HMM — they are not extra columns in the Feature Extraction CSV.
+Windowed motility statistics (net displacement, straightness and MSD over a sliding window) and the full-tracklet net-displacement descriptors are **not** columns of this table. They are computed from it later, in the [Single Cell](single_cell/index.md) analyses ([Behavioral State](single_cell/state_classification.md) and [State Trajectory](single_cell/track_classification.md)).
 ```
 
-### Intensity (when checked)
-
-One column per raw channel:
+### Intensity
 
 | Column pattern | Meaning |
 |---|---|
 | `mean_intensity_ch<N>` | Mean intensity of channel *N* inside the cell's mask |
-| `mean_dead_dye` | Convenience alias for the dead channel's mean intensity (only when the metadata declares a `dead_channel`) |
+| `mean_dead_dye` | The dead channel's mean intensity (replaces its `mean_intensity_ch<N>` column when the metadata declares a dead channel) |
+| `mean_intensity_ch<N>_fold_change` | Mean intensity divided by the track's own baseline (its 10th-percentile value over time), so a cell that never changes stays ≈ 1 |
+| `q75_mean_intensity_ch<N>`, `q90_mean_intensity_ch<N>` | Mean of the brightest 25 % / 10 % of the cell's voxels — follows a bright sub-region (e.g. a granule or local flash) that the whole-cell mean dilutes |
+| `q75_…_fold_change`, `q90_…_fold_change` | The above divided by the track's own low baseline (median of its 5 lowest values) |
+| `q75_…_fold_change_prevframe`, `q90_…_fold_change_prevframe` | Ratio to the previous timepoint of the same track (the denominator never drops below the track's low baseline) |
+| `q75_…_flicker_score`, `q90_…_flicker_score` | The previous-frame ratio clipped to 1–3: 1 = no rise, 3 = a jump to three-fold or more — a bounded score for brief flashes |
 
-Only **mean** intensity is computed per channel.
+The fold-change columns compare each cell with itself, which makes cells of different absolute brightness comparable and is the natural choice for fluctuating reporters (e.g. calcium).
 
-### Morphology (when checked)
+### Morphology
 
 When Morphology is on, the following are added. Units: volumes in µm³, lengths in µm, surface area in µm².
 
 | Column | Meaning |
 |---|---|
-| `nr_pixels` | Voxel count of the mask |
-| `volume` | Physical volume = voxel count × voxel volume (µm³) |
 | `bbox_volume` | Volume of the axis-aligned bounding box |
 | `equivalent_diameter` | Diameter of a sphere with the same volume |
-| `axis1_length` / `axis2_length` / `axis3_length` | Longest / middle / shortest principal-axis length (from PCA of the mask's voxel coordinates, spacing-aware) |
+| `axis1_length` / `axis2_length` / `axis3_length` | Longest / middle / shortest principal-axis length (spacing-aware) |
 | `major_axis_length`, `minor_axis_length` | The longest (`axis1`) and shortest (`axis3`) principal axis |
-| `elongation` | `axis1_length / axis2_length` — longest over middle axis |
-| `extent` | Volume divided by the **oriented** bounding-box volume (`axis1 × axis2 × axis3`) |
-| `oblateness` | Flatness: `1 − axis3/axis1` (0 = not flattened, →1 = disc-like) |
-| `prolateness` | Elongation: `1 − axis2/axis1` (0 = not elongated, →1 = cigar-like) |
+| `elongation` | $\mathrm{axis1\_length} / \mathrm{axis2\_length}$ — longest over middle axis |
+| `extent` | Volume divided by the **oriented** bounding-box volume ($\text{axis1} \times \text{axis2} \times \text{axis3}$) |
+| `oblateness` | $1 - \text{axis3} / \text{axis1}$ (0 = all axes equal; →1 when the shortest axis is much shorter than the longest, as in discs and in cigars; use `prolateness` to tell them apart) |
+| `prolateness` |$1 - \text{axis2} / \text{axis1}$ (0 = not elongated, →1 = cigar-like) |
 | `surface_area` | Physical surface area from exposed voxel faces (µm²) |
-| `sphericity` | How sphere-like the object is (1 = perfect sphere); from volume and surface area |
-| `surface_to_volume_ratio` | `surface_area / volume` |
-| `convex_volume` | Volume of the convex hull (`volume / solidity`) |
-| `solidity` | `volume / convex_volume` — how much the object fills its convex hull (1 = convex) |
+| `sphericity` | How sphere-like the object is (higher = rounder) |
+| `surface_to_volume_ratio` | $\mathrm{surface\_area} / \text{volume}$ |
+| `convex_volume` | Volume of the convex hull |
+| `solidity` | $\text{volume} / \mathrm{convex\_volume}$ — how much the object fills its convex hull (1 = convex) |
 | `orientation_vector` | Unit vector of the longest principal axis (the cell's 3-D orientation) |
-| `border_touching_segment` | `True` when the mask touches the edge of the image volume (a QC flag — border objects are partially cropped, so their morphology is unreliable) |
-
-When Morphology is **unchecked**, only the cheap `nr_pixels` and `volume` columns are kept (the others are skipped to save time).
+| `border_touching_segment` | `True` when the mask touches the edge of the image volume — border objects are cropped, so their morphology is unreliable |
 
 #### How the morphology features are computed
 
-Let $V$ be the object's physical volume and $A$ its surface area. **Surface area** is measured directly from the voxelised mask by counting the exposed faces (each internal face between a foreground and a background voxel), weighted by the physical area of that face — not a smoothed mesh. **Sphericity** compares the object's surface area to that of a sphere of equal volume:
+Let $V$ be the object's physical volume and $A$ its surface area. **Surface area** is measured directly from the voxelised mask by summing the physical area of every voxel face between the object and the background. **Sphericity** compares the object's surface area to that of a sphere of equal volume:
 
 $$
 \begin{aligned}
 \Psi &= \frac{\pi^{1/3}\,(6V)^{2/3}}{A} \\[4pt]
-\text{surface\_to\_volume\_ratio} &= \frac{A}{V} \\[4pt]
-\text{equivalent\_diameter} &= \left(\frac{6V}{\pi}\right)^{1/3}
+\mathrm{surface\_to\_volume\_ratio} &= \frac{A}{V} \\[4pt]
+\mathrm{equivalent\_diameter} &= \left(\frac{6V}{\pi}\right)^{1/3}
 \end{aligned}
 $$
 
-$\Psi = 1$ for a perfect sphere and decreases as the object becomes more irregular or elongated.
+$\Psi$ decreases as the object becomes more irregular or elongated. Because the surface area is counted from voxel faces, a perfectly round cell scores only about $0.65$. Compare cells with each other to find differences in morphology.
 
-The three **principal axes** ($a \ge b \ge c$ = `axis1` ≥ `axis2` ≥ `axis3`) come from a principal-component analysis of the mask's voxel coordinates in physical units. The shape descriptors are then:
+The three **principal axes** ($a \ge b \ge c$ = `axis1` ≥ `axis2` ≥ `axis3`) are found by a principal-component analysis of the mask's voxel coordinates in physical units; each axis length is the object's full extent along that direction. The shape descriptors are then:
 
 $$
 \begin{aligned}
@@ -267,51 +265,46 @@ $$
 
 **Solidity** ($V / V_{\text{convex}}$) measures how much of the object's convex hull it actually fills — low solidity flags protrusions or concavities.
 
-### Contact (always on — mandatory)
+### Contact
 
-For each other cell type `{type}` present in the metadata, two contact columns and a list:
+For every cell type in the metadata — including the cell's own type, i.e. contact with *other* cells of the same type:
 
 | Column pattern | Meaning |
 |---|---|
-| `<type>_contact` | `True` if this cell is **pixel-touching** at least one cell of `<type>` (within ~1.7 px) |
-| `<type>_contact_on_distance` | `True` if at least one cell of `<type>` is within the **Contact Threshold (µm)** you set |
-| `touching_<type>s` | Comma-separated list of `TrackID`s of `<type>` cells within the distance threshold |
+| `<type>_contact` | `True` if this cell is **touching** at least one `<type>` cell (masks within one voxel diagonal, ≈ 1.73 px) |
+| `<type>_contact_on_distance` | `True` if at least one `<type>` cell is within the **contact threshold** |
+| `touching_<type>s` | Comma-separated `TrackID`s of the `<type>` cells within the contact threshold |
 | `any_organoid_contact` / `any_organoid_contact_on_distance` | Aggregated over every organoid type |
 | `any_immune_cell_contact` / `any_immune_cell_contact_on_distance` | Aggregated over every immune type |
 
 ```{tip}
-The `*_contact` columns answer **"is it touching?"** (pixel-adjacency, ~1.73 px diagonal — always computed) and the `*_contact_on_distance` columns answer **"is it close enough to interact?"** (within the **Contact Threshold** in µm). The default Contact Threshold is 0 µm, which makes the two nearly equivalent — masks essentially have to touch. Increase it to 1–5 µm to capture near-contact / proximity relationships between cells that don't physically touch.
+`*_contact` answers **"is it touching?"** and `*_contact_on_distance` answers **"is it close enough to interact?"**. With the default threshold of 0 µm, `*_contact_on_distance` and `touching_*` only count segments that **overlap** the cell (possible between cell types, which are segmented separately, never within one type), so a neighbour that merely touches is flagged by `*_contact` alone. Raise the threshold by a few µm to also capture near-contacts between cells that don't physically touch.
 
-**Contact Threshold is not a cheap parameter to sweep interactively:** it feeds the downstream interaction analysis, and changing it requires **re-running Feature Extraction** (it changes the contact columns themselves). Plan any tuning as a batch/offline step rather than trial-and-error in a live session.
+Changing the contact threshold changes the contact columns themselves, so it needs a new extraction with **Overwrite All** (Skip / Resume would reuse the cached contact measurements). Plan it as a deliberate re-run rather than interactive trial and error.
 ```
 
-### Organoid Invasiveness (immune only, optional)
+### Invasiveness (immune populations)
 
-When checked (and Contact is also on), for each organoid type `{org}`:
+Offered on immune (`im_`) sub-tabs only and measured against every organoid type. The prefix is a processing category, not a biological claim: to measure it for any effector population, declare that population as immune ([Population categories](../data_preparation.md#population-categories)).
+
+When ticked, for each organoid type `<org>`:
 
 | Column | Meaning |
 |---|---|
 | `<org>_invasiveness_perc` | Percentage (0–100) of the immune cell's *boundary voxels* that are within the Contact Threshold of an `<org>` cell. It is 0 whenever `<org>_contact_on_distance` is `False` |
 | `<org>_invasiveness` | `True` when `<org>_invasiveness_perc ≥ 50%` |
 | `any_org_invasiveness_perc` | Maximum across all organoid types |
-| `any_org_invasiveness` | `True` when any organoid type's invasiveness is ≥ 50% |
+| `any_org_invasiveness` | `True` when the cell is invasive for any organoid type |
 
-This is a **surface-contact fraction**, not a strict "immune voxels inside organoid volume" check — it measures how much of the immune cell's boundary is wrapped by organoid tissue:
+This is a **percentage relative to the cell's own size**, not a raw voxel count. With the default contact threshold of `0` µm it is the part of the immune cell that lies inside an organoid mask; a larger threshold also counts organoid tissue just outside the cell. It is analysed in [Invasiveness](population_analysis/invasiveness.md).
 
-$$
-\text{invasiveness\_perc} = 100 \times \frac{\#\{\text{immune surface voxels contacting the organoid}\}}{\#\{\text{immune surface voxels}\}}
-$$
-
-$$
-\text{invasive} = \big(\text{invasiveness\_perc} \ge 50\%\big)
-$$
+### Death
 
 where "surface voxels" are the immune cell's own outermost voxels (its mask minus a one-voxel erosion), and "contacting" uses the same Contact Threshold and real (µm) distance as `<org>_contact_on_distance`.
 
 ```{note}
 Because invasiveness uses the Contact Threshold, the threshold sets how generous the measure is: a Contact Threshold of 0 µm counts only surface voxels that overlap the organoid mask, and the percentage rises as the threshold grows. If your cell and organoid masks do not overlap or touch (a small gap between segmentations is common), a very small threshold gives almost no contact and invasiveness stays near 0. Check the contact fraction at the threshold you choose.
 
-Features extracted with earlier versions used a different surface definition (a ~2 µm shell, which could exceed 100%). Re-run Feature Extraction with **Overwrite** to regenerate the combined feature table. The per-sample contact files from older versions are detected automatically and recomputed whenever Organoid Invasiveness is checked, even if you choose Skip.
 ```
 
 ### Death (when a dead channel exists and the family is checked)
@@ -319,43 +312,33 @@ Features extracted with earlier versions used a different surface definition (a 
 | Column | Meaning |
 |---|---|
 | `percentage_dead_mask` | Fraction (0–1) of the cell's voxels that overlap the dead mask |
-| `nr_dead_mask_pixels` | Absolute voxel count of overlap = `nr_pixels × percentage_dead_mask` |
-| `increase_dead_mask` | Change in `nr_dead_mask_pixels` compared to the same cell 10 timepoints earlier — a simple death-rate proxy |
-| `smoothed_percentage_dead_mask`, `smoothed_nr_dead_mask_pixels`, `smoothed_increase_dead_mask` | Rolling-mean-smoothed versions of the death signals (≈10-minute window), used by Death Dynamics to damp single-frame segmentation noise |
-| `dead` | Boolean flag. Once `percentage_dead_mask` crosses the threshold for the first time, the cell is marked dead from that timepoint onward — the flag is **sticky** and never flips back to alive |
-
-`percentage_dead_mask` is the fraction of the cell's own voxels that overlap the dead mask, and the pixel count scales it by the cell size:
+| `nr_dead_mask_pixels` | Number of overlapping voxels = $\mathrm{nr\_pixels} \times \mathrm{percentage\_dead\_mask}$ |
+| `increase_dead_mask` | Change in `nr_dead_mask_pixels` compared with the same cell 10 timepoints earlier (with the track's first value during its first 10 timepoints) — a simple death-rate proxy |
+| `smoothed_percentage_dead_mask`, `smoothed_nr_dead_mask_pixels`, `smoothed_increase_dead_mask` | Rolling means of the three signals over ≈ 10 minutes (unsmoothed copies when frames are more than 10 min apart), to damp single-frame noise. Death Dynamics does not read these: it recomputes its own smoothing (see [Death Dynamics](population_analysis/death_dynamics.md#reading-the-tables)) |
+| `dead` | Alive/dead flag: `percentage_dead_mask` ≥ **Dead mask % threshold**. With **Propagate dead signal** on, the flag stays `True` from the first crossing onward. Not written when the threshold is 0 |
 
 $$
-\text{percentage\_dead\_mask} = \frac{\#\{\text{cell voxels overlapping the dead mask}\}}{\#\{\text{cell voxels}\}}
+\mathrm{percentage\_dead\_mask} = \frac{\#\{\text{cell voxels overlapping the dead mask}\}}{\#\{\text{cell voxels}\}}
 $$
 
-$$
-\text{nr\_dead\_mask\_pixels} = \text{nr\_pixels} \times \text{percentage\_dead\_mask}
-$$
-
-The three death signals capture death differently: `percentage_dead_mask` is **size-independent** (good when objects differ in size) but saturates; `nr_dead_mask_pixels` is an **absolute** count (cannot go negative, pairs well with an absolute threshold — see [Active Killing](population_analysis/active_killing.md)); and `mean_dead_dye` (from the Intensity family) is the **mean dead-channel intensity** across the whole mask, which is the right choice when you have no dead-cell segmentation, or when the dye is diffuse and fills the whole cell rather than forming a discrete region.
-
-If you set the threshold to 0, the `dead` column is not added.
+The death signals capture death differently: `percentage_dead_mask` is **size-independent** (good when objects differ in size) but saturates; `nr_dead_mask_pixels` is an **absolute** count (pairs well with an absolute threshold — see [Active Killing](population_analysis/active_killing.md)); and `mean_dead_dye` (Intensity family) is the **mean dead-channel intensity** over the whole mask — the right choice when there is no dead-cell segmentation, or when the dye is diffuse rather than forming a discrete region.
 
 ```{note}
-**The dead channel does not have to carry a death dye.** These columns measure how much of an object is occupied by, or how brightly it carries, whatever signal you declared as `dead_channel`. Any reporter that **switches on and stays on** — a differentiation marker, an activation or stress reporter — works here, and the downstream [Death Dynamics](population_analysis/index) and Active Killing analyses work unchanged. Read "dead" as "past the threshold you set".
-
-A **fluctuating** reporter that goes on and off, such as calcium, is a different case: a sticky flag is meaningless for it. Keep its channel out of `dead_channel`, and use its intensity as a behavioural feature in [Single Cell](single_cell/index) analysis instead.
+**The dead channel does not have to carry a death dye.** Any reporter that switches on and stays on works here; read "dead" as "past the threshold you set". A fluctuating reporter such as calcium does not belong in `dead_channel` (see [Population Dynamics](population_analysis/index.md)).
 ```
 
 ## Tips & best practices
 
-- **Always use the Dead Threshold preview before running.** The green/red overlay is the fastest way to catch a wrong threshold — much faster than rerunning extraction and inspecting a CSV.
-- **Use Apply to all category for multi-sample experiments.** Once one organoid sub-tab is correctly tuned, propagate the settings to the others; otherwise it is easy to forget a sub-tab and end up with inconsistent features.
-- **Workers parallelise image-based work, not movement.** Movement and death-flag calculation are CPU-cheap and serial. The bulk of wall time is in morphology + intensity + contact + dead-mask measurement, which is what the worker count actually speeds up.
+- **Always use the dead-threshold preview before running.** The green/red overlay catches a wrong threshold much faster than inspecting a CSV.
+- **Use Apply to all category for multi-sample experiments.** Once one organoid sub-tab is correctly tuned, propagate the settings to the others.
+- **Workers speed up the image measurements only.** If a run stops with an out-of-memory error, lower **Workers** and run again — finished samples and cached measurements are reused.
+- **Check the Log for "skipping" messages.** A sample is skipped (with a warning) when its tracked image or tracks CSV is missing, or when Death is requested but the sample has no dead mask.
+- **Re-run the downstream steps after a new extraction.** A new combined table makes existing Filtering (and Active Killing) results stale; re-run them in that order.
 - **Reruns are incremental.** Per-sample intermediate CSVs (intensity, contact, morphology, dead mask) are reused if they already exist on disk and you choose **Skip** in the overwrite dialog — useful when you only need to recompute one feature family. Choose **Overwrite** when you change a threshold and need a clean recompute. As a safeguard, each per-sample contact file is saved with a small `.meta.json` sidecar recording the Contact Threshold (and the invasiveness definition used); if you change the Contact Threshold, or the file predates the current invasiveness definition, the contact step is recomputed automatically rather than reusing stale values.
-- **Active Killing is opt-in for a reason.** Baseline Feature Extraction is fast; Active Killing has to scan every contact event for every immune track per sample and is much slower. Run it only when you actually need killing-event analysis.
-- **Active Killing always reads the *raw*, unfiltered combined feature CSV** — never the filtered one, even if [Filtering](filtering.md) has already been run. This is deliberate: [Filtering](filtering.md) reads Active Killing's advanced-features CSV as its own input when one exists (so the killing columns survive filtering), which would make the two steps each other's upstream dependency if Active Killing also preferred Filtering's output — each could end up refusing to run because the other's file looked newer or older. Reading raw always succeeds. If a filtered CSV for this cell type already exists, Active Killing will print a warning (and the GUI will pop up a reminder) that you should **re-run Filtering afterwards** so the filtered table picks up the fresh killing columns.
 
 ## See also
 
-- [Filtering](filtering.md) — the next step. Drops low-quality tracks and produces QC plots.
-- [Population Dynamics](population_analysis/index) — uses the signal and contact columns for population dynamics, interaction, invasiveness and active killing.
-- [Single Cell](single_cell/index) — classifies per-cell behavioural states from the movement / contact / morphology table.
-- [Output Directory & File Layout](../plugin_essentials/output_layout) — where the CSVs live.
+- [Filtering](filtering.md) — the next step: drops low-quality tracks and produces QC plots.
+- [Population Dynamics](population_analysis/index.md) — death dynamics, interaction, invasiveness and active killing from the contact and death columns.
+- [Single Cell](single_cell/index.md) — classifies per-cell behavioural states from this table.
+- [Output Directory & File Layout](../plugin_essentials/output_layout.md) — where the CSVs live.

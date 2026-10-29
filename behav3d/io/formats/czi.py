@@ -135,7 +135,8 @@ def load_elsizes_czi(path):
         actual = get_actual_time_intervals_czi(path)
         time_interval = actual["mean_interval"]
     except Exception:
-        ### Interval unit does not make sense as it seems to be in seconds but "defaultunit is minutes"
+        # Fallback to the configured interval. Note: the value appears to be in
+        # seconds even when DefaultUnitFormat says minutes.
         try:
             time_interval = float(metadata["Metadata"]["Experiment"]["ExperimentBlocks"]["AcquisitionBlock"]["TimeSeriesSetup"]["Switches"]["Switch"]["SwitchAction"]["SetIntervalAction"]["Interval"]["TimeSpan"]["Value"]["Value"])
             interval_unit = metadata["Metadata"]["Experiment"]["ExperimentBlocks"]["AcquisitionBlock"]["TimeSeriesSetup"]["Switches"]["Switch"]["SwitchAction"]["SetIntervalAction"]["Interval"]["TimeSpan"]["DefaultUnitFormat"]["DefaultUnitFormat"]

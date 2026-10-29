@@ -195,10 +195,8 @@ def filter_median(image, use_dimensions=3, radius=None, filter_shape=None, elsiz
         if filter_shape is None and radius:
             filter_shape=[radius]*3
         k = draw_ellipsoid(shape=filter_shape)
-    # !!!! Change shape here!!!
     while k.ndim < image.ndim:
         k = expand_selem(k, img_dim)
-    # print(f"Performing median smoothing with a ellipsoid of shape {k.shape}")
     data_smooth = median(image=image, footprint=k)
     return(data_smooth)
 

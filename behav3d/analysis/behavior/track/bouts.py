@@ -1664,7 +1664,7 @@ def run_state_based_analysis(
     plot_dpi=300,
     heatmap_figsize=(25, 20),
     matrixplot_figsize=(20, 40),
-    umap_size=1,
+    umap_size=None,
     umap_alpha=0.5,
 
     # Exemplar track plotting
@@ -1988,6 +1988,11 @@ def run_state_based_analysis(
             pd.Series(raw_labels, index=adata_state_features.obs.index).astype(str).map(label_map).astype(str)
         )
         _vdone(verbose, "trajectory-clustering", "Agglomerative clustering", clustering_started)
+
+    # Keep the post-clustering labels so the rename dialog can reset to them.
+    adata_state_features.obs[f"{cluster_key}_raw"] = _categorical_natural_sorted(
+        adata_state_features.obs[cluster_key].astype(str)
+    )
 
     if isinstance(relabel_mapping, dict) and len(relabel_mapping) > 0:
         _vinfo(verbose, "trajectory-clustering", f"apply relabel mapping ({len(relabel_mapping)} entries)")

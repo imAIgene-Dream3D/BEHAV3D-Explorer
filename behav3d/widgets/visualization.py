@@ -103,7 +103,6 @@ class BackprojectionPanel:
             self.sample_dd, self.celltype_dd, self.mode_tb, self.feature_dd,
             widgets.HBox([self.behavior_cb, self.save_cb]),
             widgets.HBox([self.status_html, self.refresh_btn]),
-            # self.selection_container is now less critical as we use the dropdown
             widgets.HBox([self.btn_run, self.spinner_html]),
             self.out
         ])
@@ -113,11 +112,11 @@ class BackprojectionPanel:
         return {"cell_type": cell_type, "mode": "mean", "save": False, "columns_input_time": [], "columns_input_mean": []}
 
     def _build_time_selection_box(self):
-        # Implementation simplified for migration
+        # Placeholder: per-timepoint feature selection not implemented.
         return widgets.HTML("<i>Time selection UI placeholder</i>")
 
     def _rebuild_mean_selection_from_file(self):
-        # Implementation simplified for migration
+        # Placeholder: mean feature selection not implemented.
         self.selection_container.children = [widgets.HTML("<i>Mean selection UI placeholder</i>")]
 
     def _swap_ui(self):

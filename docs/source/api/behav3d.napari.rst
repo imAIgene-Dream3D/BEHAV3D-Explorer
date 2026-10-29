@@ -77,3 +77,27 @@ behav3d.napari._segment_editor
    :members:
    :undoc-members:
    :show-inheritance:
+
+behav3d.napari._analysis
+------------------------
+
+.. automodule:: behav3d.napari._analysis
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+behav3d.napari._single_cell
+---------------------------
+
+.. automodule:: behav3d.napari._single_cell
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+behav3d.napari._feature_backprojection
+--------------------------------------
+
+.. automodule:: behav3d.napari._feature_backprojection
+   :members:
+   :undoc-members:
+   :show-inheritance:

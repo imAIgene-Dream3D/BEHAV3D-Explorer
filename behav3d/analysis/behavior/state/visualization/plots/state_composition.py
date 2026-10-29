@@ -1846,12 +1846,9 @@ def save_state_composition_report(
             plot_component="overall_summary"
         ),
     ]
-    # The PDF's grouped pages come from relative_by_group/overall_by_group, but
-    # the CSV previously only ever included the plain per-sample tables above -
-    # a group_cols selection changed what the PDF showed with no matching
-    # breakdown in the CSV at all. Add the same grouped data here, with each
-    # requested group column broken back out (via the group label each row was
-    # built from) so it can be filtered/pivoted directly.
+    # Also export the grouped data behind the PDF's grouped pages
+    # (relative_by_group/overall_by_group), with each group column split back
+    # out so the CSV can be filtered/pivoted directly.
     if len(valid_group_cols) > 0:
         group_label_lookup = (
             df.assign(_group_label=_make_group_label(df, valid_group_cols).values)

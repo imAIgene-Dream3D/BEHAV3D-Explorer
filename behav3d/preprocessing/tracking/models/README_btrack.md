@@ -8,16 +8,12 @@ btrack uses a **Kalman filter** to predict object motion frame-by-frame, and opt
 
 ### Step 1 — Kalman filter linking (always runs)
 
-Run **without the optimizer first** and validate the result before enabling Step 2.
+Step 2 is optional. Looking at the Step 1 result on its own first can help you see what the optimizer changes when you turn it on.
 
 | Parameter | What it controls | When to change |
 |---|---|---|
-<<<<<<< HEAD
-| **Config preset** | Bundled motion + hypothesis model | *Cell* for T cells/organoids; *Particle* for small fast objects; *Custom* for your own JSON |
-=======
 | **Config preset** | Bundled tracking preset | *Cell* for motion-only cell tracking; *Particle* for small fast objects; *Custom* for your own JSON |
 | **Use visual features** | Whether to use raw-image-derived appearance features during linking | Enable this when you want btrack to use `area`, `major_axis_length`, `minor_axis_length`, and per-channel mean intensities from `raw_image_path` |
->>>>>>> dev
 | **Max search radius (px)** | Maximum per-frame displacement allowed | Increase if cells move fast; decrease to avoid false links |
 | **Update method** | EXACT (default) vs APPROXIMATE | Switch to APPROXIMATE only for >1000 objects/frame |
 | **Step size (frames)** | Batch size for iterative linking | Leave at 100 unless memory is an issue |
@@ -29,7 +25,7 @@ Check the result in napari before proceeding:
 ### Step 2 — Global hypothesis optimizer (opt-in)
 
 Resolves false positives, track starts/ends, and gap-bridging globally.
-Only enable once Step 1 looks correct.
+It works on the track pieces left by Step 1, so it tends to give the best results when Step 1 is already reasonable.
 
 | Parameter | What it controls |
 |---|---|
@@ -62,11 +58,8 @@ Bundled JSON configs are in this folder (`behav3d/preprocessing/tracking/models/
 
 Copy and edit either file to create a custom config. Select *Custom JSON* in the GUI and browse to your file.
 
-<<<<<<< HEAD
-=======
 When **Use visual features** is enabled, BEHAV3D adds these skimage-derived features to each object before tracking and then runs btrack with `tracking_updates=["motion", "visual"]`. Any valid btrack JSON can be used with or without visual features; the JSON itself does not decide that. The output tracks CSV stays the standard BEHAV3D schema.
 
->>>>>>> dev
 ### Key JSON fields (inside `"TrackerConfig"`)
 
 ```json

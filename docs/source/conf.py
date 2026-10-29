@@ -66,6 +66,8 @@ autodoc_mock_imports = [
     "aicspylibczi",
     "readlif",
     "ilastik",
+    "tqdm",
+    "hmmlearn",
 ]
 
 myst_enable_extensions = [
@@ -92,7 +94,8 @@ master_doc = "index"
 language = "en"
 
 templates_path = ["_templates"]
-exclude_patterns: list[str] = []
+# assistant/ holds background notes read by the QueenB assistant, not wiki pages.
+exclude_patterns: list[str] = ["assistant/*"]
 
 # Be lenient about cross-references while content is still landing.
 nitpicky = False
@@ -119,6 +122,9 @@ napoleon_google_docstring = True
 napoleon_numpy_docstring = True
 napoleon_include_init_with_doc = False
 napoleon_include_private_with_doc = False
+# Render "Attributes" sections as :ivar: fields so dataclass fields are not
+# documented twice (once by napoleon, once by autodoc).
+napoleon_use_ivar = True
 
 # ── Intersphinx ────────────────────────────────────────────────────────────
 intersphinx_mapping = {

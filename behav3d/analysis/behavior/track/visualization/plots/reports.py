@@ -2047,7 +2047,7 @@ def generate_track_clustering_report_pdfs(
     cluster_key="ClusterID",
     heatmap_figsize=(25, 20),
     matrixplot_figsize=(20, 40),
-    umap_size=1,
+    umap_size=None,
     umap_alpha=0.5,
     plot_dpi=300,
     filename_suffix="",
@@ -2059,6 +2059,9 @@ def generate_track_clustering_report_pdfs(
     - page 2: heatmap
     - page 3: matrixplot
     - page 4: cluster occurrence ranking
+
+    ``umap_size=None`` scales the UMAP dot size with the number of tracks
+    (fewer tracks -> larger dots); pass a number to fix it.
     """
     outfolder = Path(outfolder)
     outfolder.mkdir(parents=True, exist_ok=True)
@@ -2112,6 +2115,11 @@ def generate_track_clustering_report_pdfs(
             )
         else:
             fig, ax_umap = plt.subplots(1, 1, figsize=(10, 8.5))
+
+        if umap_size is None:
+            # scanpy's auto-size rule (120000 / n_obs), clipped so small
+            # datasets don't become blobs and large ones stay visible.
+            umap_size = float(np.clip(120000 / max(int(adata_tracks.n_obs), 1), 8, 200))
 
         sc.pl.umap(
             adata_tracks,

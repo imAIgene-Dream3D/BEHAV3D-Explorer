@@ -221,14 +221,13 @@ class CellTypeFilterPanel(QWidget):
             "the window is judged there, and one that appears part-way "
             "through is judged at the frame it appears. No track is skipped.\n\n"
             "Unlike the range itself, this is per cell type.\n\n"
-            "This changes only which row the filters look at. Timepoint "
-            "numbering is never rewritten - 'position_t' and 'relative_time' "
-            "keep their original values, so result plots still show the "
-            "original timepoints of the movie."
+            "This changes only which row the filters look at. 'position_t' "
+            "is never rewritten - it keeps its original values, so result "
+            "plots still show the original timepoints of the movie."
         ))
 
         range_note = QLabel(
-            "Timepoint numbering is never rewritten: results keep the original "
+            "'position_t' is never rewritten: results keep the original "
             "timepoints, so plots of a 56-78 window read 56-78, not 1-23."
         )
         range_note.setWordWrap(True)
@@ -256,11 +255,11 @@ class CellTypeFilterPanel(QWidget):
         exp_row.addWidget(self.en_exp_duration)
         exp_row.addWidget(HelpButton(
             "Trim Full Time Series",
-            "When enabled, every row with a timepoint beyond 'Max timepoints' "
-            "is permanently dropped before any other filter runs (this is the "
-            "first filtering step). It applies to the whole dataset, not just "
-            "individual tracks, so it also caps what 'Min length'/'Max length' "
-            "see afterwards.\n\n"
+            "When enabled, only the first 'Max timepoints' frames of the movie "
+            "are kept; every later row is permanently dropped, right after the "
+            "timepoint range and before the size and length filters. It applies "
+            "to the whole dataset, not just individual tracks, so it also caps "
+            "what 'Min length'/'Max length' see afterwards.\n\n"
             "Measured in frames ('position_t'); displayed in frames or hours "
             "per the unit toggle at the bottom of this panel.\n\n"
             "When disabled, no timepoint cutoff is applied and the full "
@@ -280,10 +279,10 @@ class CellTypeFilterPanel(QWidget):
         dur_form.addRow("Max timepoints:", make_help_row(
             self.spin_exp_duration,
             "Max Experiment Duration",
-            "Rows whose timepoint is greater than this value are removed "
-            "(rows at exactly this value are kept). Runs first, before the "
-            "min-size, min-length and max-length filters below, so it also "
-            "limits the span those filters can measure.\n\n"
+            "Keeps the first N frames of the movie ('position_t' 0 to N-1) "
+            "and removes every later row, e.g. 350 keeps 0-349. Runs right "
+            "after the timepoint range, before the min-size, min-length and "
+            "max-length filters, so it also limits the span they measure.\n\n"
             "Unit follows the frames/hours toggle at the bottom of this "
             "panel; the underlying filter always runs on frames."
         ))
@@ -303,11 +302,11 @@ class CellTypeFilterPanel(QWidget):
         min_row.addWidget(self.en_min_length)
         min_row.addWidget(HelpButton(
             "Filter Short Tracks",
-            "When enabled, whole tracks are dropped if their span (last "
-            "timepoint minus first timepoint, after the 'Max timepoints' "
-            "trim above and the 'Min size at t1' filter have already run) "
-            "is shorter than 'Min length'. Tracks whose span is exactly "
-            "'Min length' are kept.\n\n"
+            "When enabled, whole tracks are dropped if they cover fewer than "
+            "'Min length' timepoints (last − first + 1, counted after the "
+            "'Max timepoints' trim above and the 'Min size at t1' filter have "
+            "already run). A track of exactly 'Min length' timepoints is "
+            "kept.\n\n"
             "This removes short, unreliable tracks entirely (not just their "
             "extra timepoints) — use it before the 'Max length' trim/split "
             "below.\n\n"
@@ -327,8 +326,8 @@ class CellTypeFilterPanel(QWidget):
         min_form.addRow("Min length:", make_help_row(
             self.spin_min_length,
             "Minimum Track Length",
-            "Tracks whose duration (last timepoint − first timepoint) is "
-            "shorter than this value are removed entirely.\n\n"
+            "Tracks covering fewer than this many timepoints (last − first "
+            "+ 1) are removed entirely.\n\n"
             "Helps eliminate short, unreliable tracks. Unit follows the "
             "frames/hours toggle below; the underlying filter always runs "
             "on frames."
