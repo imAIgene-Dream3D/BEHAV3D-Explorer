@@ -786,11 +786,15 @@ class AssistantDock(QWidget):
             blocks.append(streaming)
         try:
             self.transcript.setMarkdown("\n\n".join(blocks))
-            if style:
-                self._style_blocks()
         except Exception:
             # Fallback for any Qt build lacking setMarkdown.
             self.transcript.setPlainText("\n\n".join(blocks))
+        else:
+            if style:
+                try:
+                    self._style_blocks()
+                except Exception:
+                    pass  # spacing only; keep the rendered markdown
         sb = self.transcript.verticalScrollBar()
         sb.setValue(sb.maximum())
 
@@ -814,6 +818,9 @@ class AssistantDock(QWidget):
             )
         except Exception:
             return
+        # Qt 6 takes the line-height type as an int, which PyQt6 enums are not.
+        proportional = getattr(QTextBlockFormat.ProportionalHeight, "value",
+                               QTextBlockFormat.ProportionalHeight)
         doc = self.transcript.document()
         block = doc.begin()
         role = None
@@ -823,7 +830,7 @@ class AssistantDock(QWidget):
             previous_role = role
             role = transcript_block_role(block.text(), role)
             is_role_label = role != previous_role
-            bf.setLineHeight(140, QTextBlockFormat.ProportionalHeight)  # 1.4× line spacing
+            bf.setLineHeight(140, proportional)  # 1.4× line spacing
             bf.setTopMargin(8.0 if is_role_label else 2.0)
             bf.setBottomMargin(5.0)
             if role in _CHAT_ROLE_COLORS:
@@ -1434,6 +1441,9 @@ class AssistantDock(QWidget):
          "question": "How many immune cell types do you have?"},
         {"kind": "count", "field": "n_other",
          "question": "How many other (non-organoid, non-immune) cell types do you have?"},
+        {"kind": "yes_no", "field": "include_dead",
+         "question": "Do your images include a dead channel, a separate death or viability "
+                     "marker such as a live/dead dye? (yes/no)"},
     ]
 
     def _begin_metadata_wizard(self):
@@ -1523,18 +1533,22 @@ class AssistantDock(QWidget):
             try:
                 value = int("".join(ch for ch in text if (ch.isdigit() or ch == "-")))
             except ValueError:
-                # Not a number — treat as a free-form question: exit the wizard and
-                # hand the message to the assistant instead of forcing a number.
-                self._md_current = None
-                self._md_queue = []
-                self._md_phase = None
-                self._send_message(text, show_as_user=False)
-                return
+                value = None
+        elif item["kind"] == "yes_no":
+            value = self._md_yes_no(text)
         else:  # name
             value = text.strip()
             if not value:
                 self._append_md(f"**BEHAV3D Assistant**\n\n{item['question']}")
                 return  # re-ask; keep _md_current
+        if value is None:
+            # Not an answer — treat as a free-form question: exit the wizard and
+            # hand the message to the assistant instead of forcing one.
+            self._md_current = None
+            self._md_queue = []
+            self._md_phase = None
+            self._send_message(text, show_as_user=False)
+            return
         self._md_current = None
         self._md_apply_value(item["field"], value, item.get("index", 0))
         self.refresh_context_bar()
@@ -1546,6 +1560,16 @@ class AssistantDock(QWidget):
         return any(phrase in normalized for phrase in (
             "help", "not sure", "what does", "what counts", "how do i know",
         ))
+
+    @staticmethod
+    def _md_yes_no(text: str) -> bool | None:
+        words = (text or "").strip().lower().split()
+        first = words[0].strip(".,!") if words else ""
+        if first in ("yes", "y", "yeah", "yep", "sure"):
+            return True
+        if first in ("no", "n", "nope", "none"):
+            return False
+        return None
 
     @staticmethod
     def _md_help_text(item: dict) -> str:
@@ -1566,6 +1590,11 @@ class AssistantDock(QWidget):
             "n_other": (
                 "Count any additional cell populations that are neither organoids "
                 "nor immune cells. Use 0 if there are none."
+            ),
+            "include_dead": (
+                "A dead channel is a separate imaging channel with a death or viability "
+                "marker, such as a live/dead dye. Answer yes if your images have one: "
+                "each sample form then gets a Dead ch # field and an optional dead mask path."
             ),
         }
         return help_by_field.get(
@@ -1592,9 +1621,12 @@ class AssistantDock(QWidget):
         self._md_queue = []
         self._md_phase = None
         self._guided_flow_active = False
+        dp = getattr(self.main_widget, "data_prep_tab", None)
+        dead_cb = getattr(dp, "include_dead_cb", None)
+        dead_field = ", **Dead ch #**" if dead_cb is not None and dead_cb.isChecked() else ""
         self._append_md(
             "All set — the cell-type fields and per-sample forms are ready below. "
-            "For each sample, fill in the **image path** and acquisition settings; use "
+            f"For each sample, fill in the **image path**{dead_field} and acquisition settings; use "
             "**Fill All from Sample 1** to copy shared values (pixel size, time interval), "
             "then **Save Metadata CSV** and click **Load Metadata**. Ask me about any "
             "field you're unsure of."

@@ -1939,6 +1939,64 @@ def test_action_tray_is_bounded_deduplicated_and_resettable():
     assert qt_app is not None
 
 
+def test_finished_reply_keeps_rendered_markdown():
+    from types import SimpleNamespace
+    from qtpy.QtWidgets import QApplication
+
+    qt_app = QApplication.instance() or QApplication([])
+    dock = AssistantDock(SimpleNamespace())
+    dock._append_user("What are the main steps?")
+    dock._streaming_text = "1. **Data Preparation** - load metadata\n2. **Segmentation**"
+    dock._finalize_streaming()
+    dock._render()
+    text = dock.transcript.toPlainText()
+    assert "Data Preparation" in text and "**" not in text
+    assert dock.transcript.document().begin().blockFormat().lineHeight() == 140
+
+
+def test_metadata_wizard_asks_for_the_dead_channel_after_counts():
+    from types import SimpleNamespace
+    from qtpy.QtWidgets import QApplication
+
+    qt_app = QApplication.instance() or QApplication([])
+    dock = AssistantDock(SimpleNamespace())
+    dock.main_widget = SimpleNamespace(
+        data_prep_tab=SimpleNamespace(include_dead_cb=_FakeCheck(True))
+    )
+    applied, sent = [], []
+    dock._md_apply_value = lambda field, value, index=0: applied.append((field, value))
+    dock._md_apply_structural = lambda field: applied.append((field, None)) or True
+    dock._send_message = lambda text, **kwargs: sent.append(text)
+    dock.refresh_context_bar = lambda: None
+
+    def start():
+        dock._md_phase = "counts"
+        dock._md_queue = [dict(step) for step in AssistantDock._MD_COUNT_STEPS]
+        dock._md_ask_next()
+        for answer in ("2", "1", "1", "0"):
+            dock._md_handle_answer(answer)
+
+    start()
+    assert dock._md_current["field"] == "include_dead"
+    assert "dead channel" in dock._md_log[-1]
+    dock._md_handle_answer("What counts as a dead channel?")
+    assert "live/dead dye" in dock._md_log[-1]
+    assert dock._md_current["field"] == "include_dead"
+    dock._md_handle_answer("Yes")
+    assert applied.index(("include_dead", True)) < applied.index(
+        ("configure_cell_types", None)
+    )
+    assert dock._md_current is None and "**Dead ch #**" in dock._md_log[-1]
+
+    applied.clear()
+    start()
+    dock._md_handle_answer("no")
+    assert ("include_dead", False) in applied
+    start()
+    dock._md_handle_answer("maybe later")
+    assert sent == ["maybe later"] and dock._md_current is None
+
+
 def test_metadata_structure_correction_rebuilds_forms_and_preserves_values():
     from types import SimpleNamespace
 
@@ -3205,7 +3263,7 @@ def test_prompt_encodes_pi_feedback_scenarios():
     assert "Seed threshold is the main splitting lever" in sp
     assert "Mask threshold primarily defines the foreground contour" in sp
     assert "With plain Mask + EDT/Watershed, raise EDT" in sp
-    assert "With Peak EDT/Watershed, lower EDT" in sp
+    assert "With Peak EDT/Watershed" not in sp
     assert "do not infer motion from a label" in sp
     assert "use Bounded Propagation" in sp
     assert "use btrack when consecutive detections no longer overlap" in sp
@@ -3925,7 +3983,7 @@ def test_edt_recommendations_use_per_sample_xy_resolution():
     text = format_edt_recommendations(result, "tcell")
     assert "Well_A1" in text and "global starting value" in text
     assert "higher EDT values generally split touching objects more" in text
-    assert "On Peak EDT/Watershed, the direction is reversed" in text
+    assert "Peak EDT" not in text
     assert "Lower EDT values split touching objects more aggressively" not in text
 
     organoid = calculate_edt_recommendations(
@@ -3935,6 +3993,79 @@ def test_edt_recommendations_use_per_sample_xy_resolution():
     )
     assert organoid["object_diameter_um"] == 50
     assert organoid["rows"][0]["object_diameter_px"] == 100
+
+
+def test_developer_options_reach_queenb_only_in_dev_mode():
+    from types import SimpleNamespace
+    import app
+    from guidance import is_developer_only, select_guidance_cards
+
+    def hmm_control_ids(dev_mode):
+        state = SimpleNamespace(
+            spin_hmm_n_states=_FakeSpin(4),
+            combo_hmm_n_states_mode=_FakeCombo(["fixed", "auto"]),
+            spin_hmm_k_min=_FakeSpin(2), spin_hmm_k_max=_FakeSpin(8),
+            chk_hmm_sticky=_FakeCheck(False),
+            _timepoint_checkboxes={}, _logscale_checkboxes={}, _bingrp_checkboxes={},
+            _dev_mode=dev_mode,
+        )
+        main = SimpleNamespace(analysis_tab=SimpleNamespace(single_cell_tab=SimpleNamespace(
+            cell_type_combo=_FakeCombo(["tcell"]), state_tab=state,
+        )))
+        return {item["id"] for item in control_registry(main)}
+
+    prefix = "analysis.state_classification.tcell."
+    hidden = {prefix + "state_selection_mode", prefix + "minimum_states",
+              prefix + "maximum_states", prefix + "sticky.enabled"}
+    assert prefix + "number_of_states" in hmm_control_ids(False)
+    assert not hidden & hmm_control_ids(False)
+    assert hidden <= hmm_control_ids(True)
+
+    edt = calculate_edt_recommendations([
+        {"sample_name": "A1", "pixel_distance_xy": 0.5, "distance_unit": "um"},
+    ])
+    previous = os.environ.pop("BEHAV3D_DEV_MODE", None)
+    try:
+        capabilities = _interface_capabilities([])
+        assert capabilities["developer_options"] is False
+        assert "peak_edt_direction" not in capabilities["segmentation"]["apoc"]
+        os.environ["BEHAV3D_DEV_MODE"] = "1"
+        capabilities = _interface_capabilities([])
+        assert capabilities["developer_options"] is True
+        assert "peak_edt_direction" in capabilities["segmentation"]["apoc"]
+        assert "On Peak EDT/Watershed" in format_edt_recommendations(edt, "tcell")
+    finally:
+        os.environ.pop("BEHAV3D_DEV_MODE", None)
+        if previous is not None:
+            os.environ["BEHAV3D_DEV_MODE"] = previous
+
+    off = {"current_step": "segmentation", "ui_state": {"controls": []}}
+    on = {**off, "interface_capabilities": {"developer_options": True}}
+    assert not app.developer_options_enabled(off)
+    assert app.developer_options_enabled(on)
+
+    def apoc_card(developer_options):
+        cards = select_guidance_cards(off, "APOC splitting",
+                                      developer_options=developer_options)
+        return next(card["text"] for card in cards if card["id"] == "apoc")
+
+    assert "Peak EDT" not in apoc_card(False)
+    assert "In Peak EDT, lower EDT splits more" in apoc_card(True)
+    sticky = {"source": "schema:behavioral_state_classification",
+              "title": "behavioral_state_classification.defaults.hmm_sticky"}
+    smoothing = {"source": "schema:behavioral_state_classification",
+                 "title": "behavioral_state_classification.defaults.hmm_feature_smoothing_window"}
+    assert is_developer_only(sticky) and not is_developer_only(smoothing)
+
+    prompt_off = app.build_system_prompt(off, [], [])
+    prompt_on = app.build_system_prompt(on, [], [])
+    assert "This installation does not offer Peak EDT" in prompt_off
+    assert "This installation does not offer" not in prompt_on
+    assert "With Peak EDT/Watershed" not in prompt_off
+    assert "With Peak EDT/Watershed, lower EDT" in prompt_on
+    question = [{"role": "user", "content": "Which EDT direction splits more?"}]
+    assert "Peak EDT" not in app.edt_direction_guidance(off, question)
+    assert "Peak EDT/Watershed" in app.edt_direction_guidance(on, question)
 
 
 def test_streamed_assistant_text_uses_researcher_facing_labels():
@@ -4273,10 +4404,11 @@ def test_feedback_guidance_fixtures():
 
     fixture = Path(__file__).parent / "fixtures" / "assistant_feedback_transcripts.json"
     cases = json.loads(fixture.read_text(encoding="utf-8"))
-    assert KNOWLEDGE_VERSION == "2026.10.30.1"
+    assert KNOWLEDGE_VERSION == "2026.10.30.2"
     for case in cases:
         cards = select_guidance_cards(
-            {"current_step": case["step"]}, case["user"], case.get("intent"))
+            {"current_step": case["step"]}, case["user"], case.get("intent"),
+            developer_options=case.get("developer_options", False))
         text = " ".join(card["text"] for card in cards).lower()
         for required in case.get("required", []):
             assert required.lower() in text, (case["id"], required)
