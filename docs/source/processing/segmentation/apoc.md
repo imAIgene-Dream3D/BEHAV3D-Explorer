@@ -176,6 +176,9 @@ Typical pattern on the **organoid** tab:
 
 - Check the channel(s) where **organoids** are.
 - Also check a channel where **confounders** stand out — e.g. a **T-cell** channel — so the model learns that T-cell voxels are **not** organoid foreground. Without that cue, organoid foreground can spill into space occupied by T cells.
+- If dying organoids lose their own marker while the dead-cell dye still lights them up, also check the **dead channel**: the classifier then keeps segmenting the fading, fragmenting remnants instead of losing each organoid as it dies. Add it only when you see this in the images. A dead cell is still part of its population, so the dead channel is not needed to mark dead cells as background.
+
+On **multicolor** tabs whose colours are dye combinations (for example dye A only, dye B only, and both together), check every dye channel on every colour's tab: a double-labelled cell can only be told apart from a single-labelled one when the classifier sees both channels bright in the same place.
 
 Practical steps:
 

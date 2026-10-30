@@ -331,6 +331,15 @@ they are phrased in measurable image/behavior properties.
 If local experiment README or YAML formats need new parsing, update
 `_experiment_reference_context()` and `_compact_experiment_config()`.
 
+Experiment notes share a 32,000-character budget, enough for a complete dataset
+README written as assistant context. A note that does not fit is cut at a line
+boundary and lists its `omitted_sections`; a note that gets no budget at all is
+listed in `omitted_notes`, and either case adds a `truncation_caveat`. The saved
+configuration keeps only settings in effect: the selected tracking method's block,
+the State Trajectory keys that apply to the saved clustering basis and method, and
+the contact-analysis definitions. Notebook-era `behavioral_*` template blocks are
+dropped once the per-cell-type block exists.
+
 Keep paths, large feature arrays, and irrelevant defaults out of model context.
 The assistant may use a reference supplied for the current dataset, but must ask
 for current measurements before proposing an edit when the reference does not

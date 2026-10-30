@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 
-KNOWLEDGE_VERSION = "2026.08.20.1"
+KNOWLEDGE_VERSION = "2026.10.30.1"
 
 
 GUIDANCE_CARDS = {
@@ -108,7 +108,11 @@ GUIDANCE_CARDS = {
         "channels when they contain useful target signal or context. Do not add a dead channel merely "
         "as a negative class, to exclude dead cells, or to identify background: a dead target is still "
         "the same target population. Include it only when the researcher confirms that its signal is "
-        "genuinely informative for that target model. If channel checkboxes are not ready, that means "
+        "genuinely informative for that target model. One valid case is a large target whose own marker "
+        "fades as it dies while the dead dye still marks its remnants; the dead channel then keeps those "
+        "remnants segmented. When Multicolor colors are dye combinations, give every color model every "
+        "dye channel: a double-labeled cell is recognized only when both channels are bright together. "
+        "If channel checkboxes are not ready, that means "
         "training data is not "
         "loaded; it does not mean APOC always uses every channel. Configure channels and classifier "
         "features before training, even when saved annotations already exist. Small structures is the "

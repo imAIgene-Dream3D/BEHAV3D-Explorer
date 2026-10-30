@@ -223,6 +223,7 @@ Always written, one folder per cell type:
 
 - **Organoids** are usually tracked accurately and rarely need filtering — at most a small minimum length to drop fragments, or a large one (close to the experiment duration) to keep only organoids followed from start to end.
 - **T cells / immune cells:** drop tracks shorter than roughly **10–30 timepoints**; these short fragments are typically junk.
+- **Keep the minimum permissive for Behavioral State.** A strict minimum length mostly removes the cells that are hardest to follow continuously (fast-moving, or only briefly in contact) and keeps the easy ones (often static or dead), which shifts per-timepoint state proportions. Drop only fragments here; when an analysis needs fixed-length windows, let [State Trajectory](single_cell/track_classification.md#track-clustering-controls) cut them with **Divide long tracks**.
 - **Often tracks are not trimmed to max length at filtering already.** At some analysis steps you can choose to also trim the tracks, so you can use full length tracks for other analysis steps where full tracks are needed
 - **Trim full time series** is the right tool when the dead dye bleaches or the signal degrades late in the movie.
 ```

@@ -80,6 +80,10 @@ Each sub-tab lists the feature families as checkboxes. Families that downstream 
 The **Dead mask % threshold** is **shared across all organoid sub-tabs** (*"One threshold applies to ALL organoid types equally"*): changing it on one organoid sub-tab updates every other organoid sub-tab. Immune and Other cell types each have their own threshold.
 ```
 
+```{tip}
+**The threshold is a share of each object's own mask, so object size matters.** In a large multicellular object a genuine death signal covers only a small part of the mask, so organoid thresholds usually end up far lower than immune-cell ones. A single cell needs a larger dead-positive share before it counts as dead, so that dye it picks up while touching a dying target is not read as its own death. Set each value with the [preview](#preview-dead-threshold-in-viewer).
+```
+
 ## Preview Dead Threshold in Viewer
 
 **👁  Preview Dead Threshold in Viewer** is the quickest way to pick a sensible dead threshold. It:

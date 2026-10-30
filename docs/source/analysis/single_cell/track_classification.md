@@ -369,6 +369,8 @@ Requires **Use contact cell classification**. For every class of the touched cel
 | **Long contact threshold** | `(off)` | Above 0, adds a page per group: among tracks that touched a class, the % with "long" vs. "short" contact. In `Percent of time window`: at least this % of the classified window in contact (gaps allowed, no time metadata needed). In `Seconds` / `Minutes` / `Hours`: longest sustained bout at least this long (needs time metadata). |
 | **Long contact unit** | Minutes | Unit of the threshold. |
 
+**Choosing the test.** Welch's test treats every track as an independent replicate, but tracks from the same sample share that sample's well, cells and imaging. When every sample contributes contacts with both classes, the **Paired t-test** with `sample_name` as pairing column makes the sample the replicate; also check that the difference points the same way in each sample rather than being driven by one. Keep the per-track result as a description of the pooled distribution.
+
 **▶ Create Contact Duration Comparison**.
 
 #### Contact Type Comparison
