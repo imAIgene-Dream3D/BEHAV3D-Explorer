@@ -1761,6 +1761,11 @@ def apoc_feature_grid_guidance(
     )
 
 
+def developer_options_enabled(context: dict) -> bool:
+    """True when the plugin runs in dev mode; clients that predate the flag do not."""
+    return bool((context.get("interface_capabilities") or {}).get("developer_options"))
+
+
 def _active_instance_strategy(context: dict) -> str:
     segmentation = context.get("segmentation", {}) or {}
     active = str(context.get("active_cell_type") or "")
@@ -1831,10 +1836,16 @@ def edt_direction_guidance(context: dict, messages: list[dict]) -> str | None:
             "response can turn back to 'merged' at that extreme, but the normal tuning "
             "direction is: raise for more splitting, lower for less."
         )
+    if developer_options_enabled(context):
+        return (
+            "I cannot give a reliable EDT direction without the exact active instance "
+            "strategy. **Mask + EDT/Watershed** and **Peak EDT/Watershed** use the field "
+            "in opposite directions. Which strategy is shown for this cell type?"
+        )
     return (
-        "I cannot give a reliable EDT direction without the exact active instance "
-        "strategy. **Mask + EDT/Watershed** and **Peak EDT/Watershed** use the field "
-        "in opposite directions. Which strategy is shown for this cell type?"
+        "EDT threshold is the splitting control of **Mask + EDT/Watershed**, where higher "
+        "EDT generally means more splitting. **Probability Map + Watershed** splits with "
+        "the Seed threshold instead. Which strategy is shown for this cell type?"
     )
 
 
@@ -3657,6 +3668,18 @@ def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict])
     validation = metadata.get("validation", []) or []
     guidance = retrieved or []
     tool_names = [tool.get("name") for tool in tools or []]
+    developer = developer_options_enabled(context)
+    developer_rule = "" if developer else (
+        "- This installation does not offer Peak EDT/Watershed strategies, automatic HMM state "
+        "selection, sticky HMM, state-shift analysis, or backprojection PDF/MP4 outputs for "
+        "exemplar tracks. Never mention, recommend, or set them, and never describe them as hidden "
+        "or developer options. If the researcher asks for one, say only that this interface does "
+        "not offer it.\n"
+    )
+    peak_edt_rule = (
+        "With Peak EDT/Watershed, lower EDT threshold because that field is a peak-height filter. "
+        if developer else ""
+    )
 
     rules = (
         "You are the BEHAV3D Assistant for researchers analysing 3D fluorescence imaging. "
@@ -3673,6 +3696,7 @@ def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict])
         "where a setting lives or how to change it, require either a matching LIVE CONTROL for that "
         "module/method or an explicit matching entry in INTERFACE CAPABILITIES or FEEDBACK-GROUNDED "
         "KNOWLEDGE. Never invent a dropdown, mode, button, field, or per-sample mapping.\n"
+        f"{developer_rule}"
         "- If the exact capability, active method, strategy, unit, or biological input needed for a "
         "factual answer is not established by those sources, say specifically what cannot be confirmed "
         "and ask one focused question. Do not fill the gap with a plausible feature from a related "
@@ -3872,8 +3896,8 @@ def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict])
         "Probability Map + Watershed, Seed threshold is the main splitting lever: raise it in small "
         "increments, keep it at least as high as Mask threshold, and watch for missing cells. Mask threshold "
         "primarily defines the foreground contour; raise it only when borders also need tightening or combined "
-        "tuning is warranted. With plain Mask + EDT/Watershed, raise EDT threshold. With Peak EDT/Watershed, "
-        "lower EDT threshold because that field is a peak-height filter. Reverse the relevant direction for "
+        "tuning is warranted. With plain Mask + EDT/Watershed, raise EDT threshold. "
+        f"{peak_edt_rule}Reverse the relevant direction for "
         "over-splitting, change only controls present in LIVE CONTROLS, and ask the user to inspect a preview. "
         "If threshold tuning is insufficient, recommend more boundary/background annotations and retraining. "
         "A Minimum size or size-preview filter excludes objects after segmentation; it never merges them. "
@@ -4310,7 +4334,10 @@ if modal is not None:
             index = VectorIndex.load(INDEX_DIR)
         except Exception:
             index = VectorIndex()
-        from guidance import KNOWLEDGE_VERSION, select_guidance_cards
+        from guidance import (
+            DEVELOPER_ONLY_PARAMETERS, KNOWLEDGE_VERSION, is_developer_only,
+            select_guidance_cards,
+        )
 
         # deepseek-v4-flash is the explicit V4 Flash id (tool-calls + streaming).
         # The older `deepseek-chat` alias also maps to it but is being deprecated.
@@ -4429,8 +4456,12 @@ if modal is not None:
                 })
 
                 query = f"{context.get('current_step','')} {user_msg}"
+                developer = developer_options_enabled(context)
                 try:
-                    retrieved = index.search(embedder.encode([query])[0], k=6)
+                    # Fetch extra results so dropping dev-only cards still leaves six.
+                    retrieved = index.search(
+                        embedder.encode([query])[0], k=6 + len(DEVELOPER_ONLY_PARAMETERS)
+                    )
                 except Exception as error:
                     print(f"RAG retrieval failed for {request_id} ({type(error).__name__}): {error}")
                     retrieved = []
@@ -4446,8 +4477,14 @@ if modal is not None:
                         ),
                     })
 
+                if not developer:
+                    retrieved = [chunk for chunk in retrieved if not is_developer_only(chunk)]
+                retrieved = retrieved[:6]
+
                 intent = (context.get("assistant_session", {}) or {}).get("intent")
-                guidance_cards = select_guidance_cards(context, user_msg, intent)
+                guidance_cards = select_guidance_cards(
+                    context, user_msg, intent, developer_options=developer
+                )
                 retrieved = guidance_cards + retrieved
                 system = build_system_prompt(context, retrieved, tools)
                 convo = [{"role": "system", "content": system}]

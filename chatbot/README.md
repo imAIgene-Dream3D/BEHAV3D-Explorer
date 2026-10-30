@@ -345,6 +345,21 @@ The assistant may use a reference supplied for the current dataset, but must ask
 for current measurements before proposing an edit when the reference does not
 establish them.
 
+### Add a developer-only option
+
+Options that the plugin shows only in dev mode (`BEHAV3D_DEV_MODE=1`, set when a
+`.behav3d_dev` file exists in the repository root) must stay out of QueenB for
+everyone else. The client reports the mode as
+`interface_capabilities.developer_options`; a client that predates the flag
+counts as dev mode off. For a new dev-only option:
+
+- Leave its controls out of the registry unless the panel runs in dev mode, as
+  `_assistant_controls.py` does for automatic state selection and sticky HMM.
+- Add its parameter names to `DEVELOPER_ONLY_PARAMETERS` in
+  `chatbot/guidance.py`, so retrieval drops their cards when dev mode is off.
+- Put guidance that only applies to it in `DEVELOPER_GUIDANCE`, and name it in
+  the developer-options rule of the system prompt in `chatbot/app.py`.
+
 ### Change the chat UI or quick buttons
 
 Edit `_assistant.py`. Quick buttons should send researcher-facing prompts and an

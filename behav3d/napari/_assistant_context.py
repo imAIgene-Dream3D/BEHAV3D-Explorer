@@ -36,6 +36,7 @@ The returned dict shape:
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any, Optional
@@ -1216,7 +1217,11 @@ def _interface_capabilities(controls: list[dict]) -> dict:
         for control in controls
         if control.get("id")
     }
+    # Dev-mode options (BEHAV3D_DEV_MODE=1, set when a .behav3d_dev file exists)
+    # are hidden in the plugin, so the assistant keeps them out of its answers.
+    developer_options = os.environ.get("BEHAV3D_DEV_MODE") == "1"
     return {
+        "developer_options": developer_options,
         "metadata_builder": {
             "owns": [
                 "processing population names",
@@ -1252,7 +1257,8 @@ def _interface_capabilities(controls: list[dict]) -> dict:
                 ],
                 "feature_scale_unit": "pixels",
                 "mask_edt_direction": "higher generally splits more",
-                "peak_edt_direction": "lower generally splits more",
+                **({"peak_edt_direction": "lower generally splits more"}
+                   if developer_options else {}),
             },
         },
         "feature_extraction": {
