@@ -3428,8 +3428,8 @@ def _check_safety_profiling_context(result: dict) -> list[str]:
     if not all(token in text for token in ("27t", "mdo", "1.5")):
         errors.append("lost the tumor/healthy identities or 1.5x definition")
     if not (
-        ("5 frame" in text or "five frame" in text)
-        and ("10 minute" in text or "ten minute" in text)
+        re.search(r"\b(?:5|five)[\s-]*frame", plain)
+        and re.search(r"\b(?:10|ten)[\s-]*min", plain)
     ):
         errors.append("lost the 5-frame / 10-minute observation window")
     if not any(word in text for word in ("exploratory", "descriptive", "small")):
@@ -3440,7 +3440,10 @@ def _check_safety_profiling_context(result: dict) -> list[str]:
         errors.append("exposed an internal analysis column name")
     if re.search(r"(?:one\s+)?target type\s*(?:is|=|:|\()\s*teg\b", plain):
         errors.append("misidentified the TEG effector as a target type")
-    if any(phrase in plain for phrase in (
+    asserted = re.sub(
+        r"(?:\bnot\b|n['’]t\b)[^.;:,\n]{0,40}already configured", "", plain,
+    )
+    if any(phrase in asserted for phrase in (
         "you've configured", "you have configured", "already configured",
         "configured this using", "your setting",
     )):
