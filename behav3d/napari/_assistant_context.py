@@ -79,7 +79,36 @@ _EXPERIMENT_CONFIG_PATTERNS = (
     "behav3d_parameters*.yml",
     "behav3d_parameters*.yaml",
 )
-_EXPERIMENT_NOTE_CHAR_LIMIT = 16_000
+# Total budget for all notes. A dataset README written as assistant context can
+# exceed 20,000 characters and usually keeps the definitions behind its main
+# analysis in the later sections, so the budget must hold a complete one.
+_EXPERIMENT_NOTE_CHAR_LIMIT = 32_000
+
+# Every saved tracking population also carries the widget defaults of the
+# methods it does not use; only the selected method's block applies.
+_TRACKING_METHOD_KEYS = {
+    "btrack": (
+        "max_search_radius", "use_visual_features", "use_optimize",
+        "hypotheses", "dist_thresh", "time_thresh", "step_size",
+    ),
+    "bounded_propagation": ("min_overlap_fraction", "segment_size_min"),
+    "reporter_propagation": ("min_overlap_fraction", "segment_size_min"),
+    "lap": (
+        "track_cost_px", "gap_close_cost_px", "gap_close_max_frames",
+        "merging_cost_px", "splitting_cost_px",
+    ),
+    "trackpy": (
+        "search_range_px", "memory_frames", "adaptive_stop", "adaptive_step",
+    ),
+}
+# btrack Step 2 (global optimization) settings, unused while it is off.
+_BTRACK_OPTIMIZER_KEYS = ("hypotheses", "dist_thresh", "time_thresh")
+_STATE_CLASSIFICATION_KEYS = (
+    "n_states", "selected_features", "binary_features_to_group",
+    "additional_window_features", "window_features_window",
+    "feature_smoothing_window", "start_offset", "covariance_type",
+    "log_scale_features", "lower_quantile_cap", "upper_quantile_cap",
+)
 
 
 def _json_value(value):
@@ -119,6 +148,55 @@ def _reference_roots(output_dir: str, parameters: dict) -> list[Path]:
         if path.is_dir() and path not in roots:
             roots.append(path)
     return roots
+
+
+def _active_track_classification_keys(values: dict) -> tuple[str, ...]:
+    """State Trajectory keys that apply to the saved clustering mode.
+
+    Mirrors the Single Cell tab: Leiden replaces N clusters and linkage, the
+    bouts basis has its own linkage and feature toggles, the legacy
+    Feature-based option always uses K-means, and the trajectory feature
+    selection only feeds the current Feature-based pipeline. An inactive
+    saved value would otherwise read as a competing setting.
+    """
+    family = str(values.get("clustering_family") or "state_based").lower()
+    legacy = family == "feature_based" and bool(values.get("run_legacy_behav3d"))
+    bouts = (
+        family == "state_based"
+        and str(values.get("trajectory_basis") or "").lower() == "bouts"
+    )
+    leiden = (
+        not legacy
+        and str(values.get("clustering_method") or "").lower() == "leiden"
+    )
+    keys = [
+        "behavioral_trajectory_size", "trajectory_trim_mode", "split_long_tracks",
+        "clustering_family", "feature_dtw_selected_columns",
+    ]
+    if family == "state_based":
+        keys.append("trajectory_basis")
+    if legacy:
+        keys += ["run_legacy_behav3d", "use_exact_original_settings"]
+    else:
+        keys.append("clustering_method")
+    if leiden:
+        keys += ["leiden_n_neighbors", "leiden_resolution"]
+    else:
+        keys.append("n_clusters")
+        if not legacy:
+            keys.append("bouts_linkage" if bouts else "linkage")
+    if bouts:
+        keys += [
+            "bouts_use_fractions", "bouts_use_bout_stats", "bouts_use_transitions",
+            "bouts_use_ngrams", "bouts_use_clr", "bouts_do_pca",
+            "bouts_log_bout_length", "bouts_block_scaling",
+        ]
+    if family == "feature_based" and not legacy:
+        keys += [
+            "trajectory_features", "include_tracklet_net_displacement",
+            "include_tracklet_net_displacement_squared",
+        ]
+    return tuple(keys)
 
 
 def _compact_experiment_config(config: dict) -> dict:
@@ -188,24 +266,24 @@ def _compact_experiment_config(config: dict) -> dict:
         for cell_type, settings in tracking.items():
             if not isinstance(settings, dict) or "method" not in settings:
                 continue
+            # The shared organoid run is unused while organoids are tracked separately.
+            if (cell_type == "all_organoids"
+                    and tracking.get("track_organoids_together") is False):
+                continue
+            method = str(settings.get("method"))
             item = {"method": _json_value(settings.get("method"))}
-            btrack = settings.get("btrack")
-            if isinstance(btrack, dict):
-                item["btrack"] = {
-                    key: _json_value(btrack[key])
-                    for key in (
-                        "max_search_radius", "use_visual_features", "use_optimize",
-                        "dist_thresh", "time_thresh", "step_size",
+            params = settings.get(method)
+            if isinstance(params, dict):
+                keys = _TRACKING_METHOD_KEYS.get(method, ())
+                if method == "btrack" and not params.get("use_optimize"):
+                    keys = tuple(
+                        key for key in keys if key not in _BTRACK_OPTIMIZER_KEYS
                     )
-                    if key in btrack
+                block = {
+                    key: _json_value(params[key]) for key in keys if key in params
                 }
-            reporter = settings.get("reporter_propagation")
-            if isinstance(reporter, dict):
-                item["reporter_propagation"] = {
-                    key: _json_value(reporter[key])
-                    for key in ("min_overlap_fraction", "segment_size_min")
-                    if key in reporter
-                }
+                if block:
+                    item[method] = block
             tracking_summary[str(cell_type)] = item
         if tracking_summary:
             summary["tracking"] = tracking_summary
@@ -291,9 +369,19 @@ def _compact_experiment_config(config: dict) -> dict:
             "trajectory_trim_mode", "linkage",
         ),
     }
+    # The Single Cell tab saves per-cell-type blocks. Once one is filled in, the
+    # notebook-widget block it replaced only carries template defaults: the
+    # plugin never reads it, and it would contradict the per-cell-type settings.
+    replacements = {
+        "behavioral_state_classification": "state_classification",
+        "behavioral_track_classification": "track_classification",
+    }
     for module, keys in module_specs.items():
         settings = config.get(module)
         if not isinstance(settings, dict):
+            continue
+        replacement = config.get(replacements[module])
+        if isinstance(replacement, dict) and any(replacement.values()):
             continue
         defaults = settings.get("defaults", settings)
         if isinstance(defaults, dict):
@@ -304,25 +392,15 @@ def _compact_experiment_config(config: dict) -> dict:
     for module in ("state_classification", "track_classification"):
         settings = config.get(module)
         if isinstance(settings, dict):
-            keys = (
-                (
-                    "n_states", "selected_features", "binary_features_to_group",
-                    "additional_window_features", "window_features_window",
-                    "feature_smoothing_window", "start_offset", "covariance_type",
-                    "log_scale_features", "lower_quantile_cap",
-                    "upper_quantile_cap",
-                )
-                if module == "state_classification" else
-                (
-                    "behavioral_trajectory_size", "n_clusters", "linkage",
-                    "trajectory_trim_mode", "split_long_tracks", "clustering_family",
-                    "use_exact_original_settings", "feature_dtw_selected_columns",
-                )
-            )
             by_cell_type = {}
             for cell_type, values in settings.items():
                 if not isinstance(values, dict):
                     continue
+                keys = (
+                    _STATE_CLASSIFICATION_KEYS
+                    if module == "state_classification"
+                    else _active_track_classification_keys(values)
+                )
                 compact = {
                     key: _json_value(values[key])
                     for key in keys if key in values
@@ -339,6 +417,44 @@ def _compact_experiment_config(config: dict) -> dict:
                 item["by_cell_type"] = by_cell_type
             summary[module] = item
 
+    # Contact analysis definitions behind the contact-duration and long-contact
+    # reports, without settings that only apply to another mode.
+    contact_summary = {}
+    reports = config.get("track_reports")
+    for cell_type, settings in (
+        reports.items() if isinstance(reports, dict) else ()
+    ):
+        if not isinstance(settings, dict):
+            continue
+        item = {}
+        contact = settings.get("contact")
+        if isinstance(contact, dict):
+            keys = ["contact_col", "min_bout_length", "use_target_class"]
+            if contact.get("use_target_class"):
+                keys.append("target_class_source")
+                source = str(contact.get("target_class_source") or "")
+                if source.lower().startswith("state"):
+                    keys.append("target_state_col")
+            compact = {
+                key: _json_value(contact[key]) for key in keys if key in contact
+            }
+            if compact:
+                item["contact"] = compact
+        duration = settings.get("contact_duration")
+        if isinstance(duration, dict):
+            keys = ["test_mode", "long_contact_unit", "long_contact_threshold"]
+            if str(duration.get("test_mode") or "").lower().startswith("paired"):
+                keys.append("pairing_cols")
+            compact = {
+                key: _json_value(duration[key]) for key in keys if key in duration
+            }
+            if compact:
+                item["contact_duration"] = compact
+        if item:
+            contact_summary[str(cell_type)] = item
+    if contact_summary:
+        summary["contact_analysis"] = contact_summary
+
     groups = config.get("cell_type_groups")
     if isinstance(groups, dict):
         summary["cell_type_groups"] = _json_value(groups)
@@ -350,6 +466,28 @@ def _compact_experiment_config(config: dict) -> dict:
             ),
         }
     return summary
+
+
+def _note_excerpt(text: str, limit: int) -> str:
+    """At most ``limit`` characters of ``text``, cut at a line boundary if possible."""
+    if len(text) <= limit:
+        return text
+    cut = text.rfind("\n", 0, limit + 1)
+    return text[:cut] if cut > 0 else text[:limit]
+
+
+def _markdown_headings(text: str, start: int = 0) -> list[str]:
+    """Headings that begin at or after ``start``, ignoring fenced code blocks."""
+    headings, fenced, offset = [], False, 0
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            fenced = not fenced
+        elif (not fenced and offset >= start
+              and re.match(r"#{1,6}\s+\S", stripped)):
+            headings.append(stripped.lstrip("#").strip())
+        offset += len(line)
+    return headings
 
 
 def _experiment_reference_context(output_dir: str, parameters: dict) -> dict | None:
@@ -370,17 +508,22 @@ def _experiment_reference_context(output_dir: str, parameters: dict) -> dict | N
 
     remaining = _EXPERIMENT_NOTE_CHAR_LIMIT
     notes = []
-    for path in note_paths:
+    omitted_notes: list[str] = []
+    for index, path in enumerate(note_paths):
         if remaining <= 0:
+            omitted_notes = [p.name for p in note_paths[index:]]
             break
         text = _safe(lambda p=path: p.read_text(encoding="utf-8"), "") or ""
-        excerpt = text[:remaining]
+        excerpt = _note_excerpt(text, remaining)
         if excerpt:
-            notes.append({
+            note = {
                 "source": path.name,
                 "text": excerpt,
                 "truncated": len(excerpt) < len(text),
-            })
+            }
+            if note["truncated"]:
+                note["omitted_sections"] = _markdown_headings(text, len(excerpt))
+            notes.append(note)
             remaining -= len(excerpt)
 
     saved_configs = []
@@ -396,7 +539,7 @@ def _experiment_reference_context(output_dir: str, parameters: dict) -> dict | N
 
     if not notes and not saved_configs:
         return None
-    return {
+    reference = {
         "notes": notes,
         "saved_configurations": saved_configs,
         "provenance": (
@@ -414,6 +557,15 @@ def _experiment_reference_context(output_dir: str, parameters: dict) -> dict | N
             "state the discrepancy and prefer live metadata until corrected."
         ),
     }
+    if omitted_notes:
+        reference["omitted_notes"] = omitted_notes
+    if omitted_notes or any(note["truncated"] for note in notes):
+        reference["truncation_caveat"] = (
+            "Part of the reference exceeded the context budget and was not loaded "
+            "(see truncated, omitted_sections and omitted_notes). Do not infer what "
+            "the missing part says; name it and ask the researcher if it is needed."
+        )
+    return reference
 
 
 def validate_metadata_records(records: list[dict]) -> list[dict]:

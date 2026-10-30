@@ -107,6 +107,8 @@ $$
 $$
 
 e.g. a ~10 µm cell with 1 µm XY pixels and 2 µm Z spacing is about 260 voxels if the whole cell fills with dye (a single slice through its centre shows $\pi \times 5^2 \approx 80$ pixels). "One dead cell" could therefore mean anywhere from ~25 voxels (partial staining, smaller cells, coarser resolution) to ~260+ voxels (full-cell fill, larger cells, finer resolution). Use this as a starting point, then fine-tune by eye against a timepoint you trust.
+
+To see what you are tuning, paint `nr_dead_mask_pixels` onto the targets with [Feature Backprojection](../feature_backprojection.md) and step through a few contacts. Choose the threshold and the **Observation window** together, so that they match the rises in dead signal you actually see after contact.
 ```
 
 ## Running it

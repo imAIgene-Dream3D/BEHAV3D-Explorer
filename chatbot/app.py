@@ -1531,7 +1531,9 @@ def apoc_channel_selection_guidance(
         + "A dead cell is still a member of its target population, so the dead "
         "channel should not be treated as a separate negative/background class. "
         "Include it only if you confirm that its signal is genuinely informative for "
-        "that specific target model."
+        "that specific target model, for example when a dying target loses its own "
+        "marker while the dead dye still marks its remnants, so including the dead "
+        "channel keeps those remnants segmented."
     )
 
 

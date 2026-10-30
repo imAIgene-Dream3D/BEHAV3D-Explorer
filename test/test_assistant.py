@@ -2893,6 +2893,224 @@ def test_experiment_reference_discovers_calcium_and_compacts_historical_settings
     assert "/private/results" not in str(reference)
 
 
+def test_experiment_reference_keeps_a_complete_dataset_readme(tmp_path=None):
+    import tempfile
+    from pathlib import Path
+
+    root = Path(tmp_path or tempfile.mkdtemp())
+    background = "\n".join(
+        f"- Acquisition and processing detail {index}." for index in range(600)
+    )
+    text = (
+        "# Dataset context\n" + background
+        + "\n## Main analysis definitions\n"
+        "A long contact covers at least a set share of the window.\n"
+    )
+    assert len(text) > 20_000
+    (root / "README_BEHAV3D_Example.md").write_text(text, encoding="utf-8")
+
+    reference = _experiment_reference_context(str(root), {})
+    note = reference["notes"][0]
+    assert note["truncated"] is False
+    assert note["text"] == text
+    assert "truncation_caveat" not in reference
+
+
+def test_experiment_reference_names_what_did_not_fit(tmp_path=None):
+    import tempfile
+    from pathlib import Path
+
+    base = Path(tmp_path or tempfile.mkdtemp())
+    rows = [f"Detail row {index:05d} of the acquisition log." for index in range(1300)]
+    text = (
+        "# Context\n" + "\n".join(rows[:650])
+        + "\n## Main definitions\n" + "\n".join(rows[650:])
+        + "\n```bash\n# a shell comment, not a heading\n```\n## Glossary\nTerms.\n"
+    )
+    long_root = base / "long"
+    long_root.mkdir()
+    (long_root / "README_BEHAV3D_Long.md").write_text(text, encoding="utf-8")
+
+    reference = _experiment_reference_context(str(long_root), {})
+    note = reference["notes"][0]
+    excerpt = note["text"]
+    assert note["truncated"] is True
+    assert text.startswith(excerpt) and text[len(excerpt)] == "\n"
+    assert "## Main definitions" in excerpt
+    assert note["omitted_sections"] == ["Glossary"]
+    assert "Do not infer" in reference["truncation_caveat"]
+
+    # A note that exactly fills the budget leaves no room for the next one.
+    full_root = base / "full"
+    full_root.mkdir()
+    (full_root / "README_BEHAV3D_A.md").write_text(
+        "# A\n" + "x" * 31_996, encoding="utf-8",
+    )
+    (full_root / "README_BEHAV3D_B.md").write_text("# B\n", encoding="utf-8")
+    reference = _experiment_reference_context(str(full_root), {})
+    assert [note["source"] for note in reference["notes"]] == ["README_BEHAV3D_A.md"]
+    assert reference["notes"][0]["truncated"] is False
+    assert reference["omitted_notes"] == ["README_BEHAV3D_B.md"]
+    assert "truncation_caveat" in reference
+
+
+def test_experiment_reference_reports_only_settings_in_effect(tmp_path=None):
+    import tempfile
+    from pathlib import Path
+
+    root = Path(tmp_path or tempfile.mkdtemp())
+    (root / "behav3d_parameters.yml").write_text(
+        "\n".join([
+            "tracking:",
+            "  track_organoids_together: false",
+            "  all_organoids:",
+            "    method: propagation_all_organoids",
+            "  organoid:",
+            "    method: propagation",
+            "    propagation: {}",
+            "    btrack: {max_search_radius: 100, use_optimize: false}",
+            "  myeloid:",
+            "    method: bounded_propagation",
+            "    bounded_propagation: {min_overlap_fraction: 0.0, segment_size_min: 20}",
+            "    reporter_propagation: {min_overlap_fraction: 0.1, segment_size_min: 100}",
+            "    btrack: {max_search_radius: 100, use_optimize: false}",
+            "  tcell:",
+            "    method: btrack",
+            "    btrack:",
+            "      max_search_radius: 150",
+            "      use_optimize: true",
+            "      hypotheses: [P_FP, P_init, P_term, P_link]",
+            "      dist_thresh: 100",
+            "      time_thresh: 5",
+            "    reporter_propagation: {min_overlap_fraction: 0.1, segment_size_min: 100}",
+            "  tcell_control:",
+            "    method: btrack",
+            "    btrack: {max_search_radius: 80, use_optimize: false,"
+            " dist_thresh: 60, time_thresh: 3}",
+            "behavioral_state_classification:",
+            "  defaults: {hmm_n_states: 4}",
+            "state_classification:",
+            "  tcell: {n_states: 6, start_offset: 1}",
+            "track_classification:",
+            "  tcell:",
+            "    behavioral_trajectory_size: 50",
+            "    clustering_family: state_based",
+            "    trajectory_basis: dtw",
+            "    clustering_method: leiden",
+            "    leiden_n_neighbors: 60",
+            "    leiden_resolution: 1.0",
+            "    n_clusters: 15",
+            "    linkage: average",
+            "    bouts_linkage: ward",
+            "  myeloid:",
+            "    clustering_family: state_based",
+            "    trajectory_basis: bouts",
+            "    clustering_method: agglomerative",
+            "    n_clusters: 4",
+            "    linkage: average",
+            "    bouts_linkage: ward",
+            "    bouts_use_fractions: true",
+            "    leiden_resolution: 1.5",
+            "  tcell_control:",
+            "    clustering_family: feature_based",
+            "    clustering_method: leiden",
+            "    leiden_n_neighbors: 30",
+            "    leiden_resolution: 1.0",
+            "    n_clusters: 9",
+            "    trajectory_basis: dtw",
+            "    trajectory_features: {features: [speed],"
+            " binary_features: [organoid_contact]}",
+            "    include_tracklet_net_displacement: true",
+            "    use_exact_original_settings: false",
+            "track_reports:",
+            "  tcell:",
+            "    exemplars: {n_per_cluster: 10}",
+            "    contact:",
+            "      contact_col: myeloid_contact",
+            "      min_bout_length: 1",
+            "      use_target_class: true",
+            "      target_class_source: Track classification",
+            "      target_state_col: full_behavioral_state",
+            "      group_x: (none)",
+            "    contact_duration:",
+            "      test_mode: Welch's t-test (unpaired)",
+            "      pairing_cols: []",
+            "      long_contact_unit: Percent of time window",
+            "      long_contact_threshold: 30.0",
+            "      comparisons_per_page: 12",
+            "  myeloid:",
+            "    exemplars: {n_per_cluster: 10}",
+        ]),
+        encoding="utf-8",
+    )
+
+    settings = _experiment_reference_context(str(root), {})[
+        "saved_configurations"][0]["settings"]
+    tracking = settings["tracking"]
+    assert "all_organoids" not in tracking
+    assert tracking["organoid"] == {"method": "propagation"}
+    assert tracking["myeloid"] == {
+        "method": "bounded_propagation",
+        "bounded_propagation": {"min_overlap_fraction": 0.0, "segment_size_min": 20},
+    }
+    assert tracking["tcell"] == {
+        "method": "btrack",
+        "btrack": {
+            "max_search_radius": 150, "use_optimize": True,
+            "hypotheses": ["P_FP", "P_init", "P_term", "P_link"],
+            "dist_thresh": 100, "time_thresh": 5,
+        },
+    }
+    assert tracking["tcell_control"] == {
+        "method": "btrack",
+        "btrack": {"max_search_radius": 80, "use_optimize": False},
+    }
+
+    assert "behavioral_state_classification" not in settings
+    trajectories = settings["track_classification"]["by_cell_type"]
+    assert trajectories["tcell"] == {
+        "behavioral_trajectory_size": 50,
+        "clustering_family": "state_based",
+        "trajectory_basis": "dtw",
+        "clustering_method": "leiden",
+        "leiden_n_neighbors": 60,
+        "leiden_resolution": 1.0,
+    }
+    assert trajectories["myeloid"] == {
+        "clustering_family": "state_based",
+        "trajectory_basis": "bouts",
+        "clustering_method": "agglomerative",
+        "n_clusters": 4,
+        "bouts_linkage": "ward",
+        "bouts_use_fractions": True,
+    }
+    assert trajectories["tcell_control"] == {
+        "clustering_family": "feature_based",
+        "clustering_method": "leiden",
+        "leiden_n_neighbors": 30,
+        "leiden_resolution": 1.0,
+        "trajectory_features": {
+            "features": ["speed"], "binary_features": ["organoid_contact"],
+        },
+        "include_tracklet_net_displacement": True,
+    }
+    assert settings["contact_analysis"] == {
+        "tcell": {
+            "contact": {
+                "contact_col": "myeloid_contact",
+                "min_bout_length": 1,
+                "use_target_class": True,
+                "target_class_source": "Track classification",
+            },
+            "contact_duration": {
+                "test_mode": "Welch's t-test (unpaired)",
+                "long_contact_unit": "Percent of time window",
+                "long_contact_threshold": 30.0,
+            },
+        },
+    }
+
+
 def test_prompt_scopes_experiment_reference_and_requires_result_evidence():
     import app
     reference = {
@@ -4055,7 +4273,7 @@ def test_feedback_guidance_fixtures():
 
     fixture = Path(__file__).parent / "fixtures" / "assistant_feedback_transcripts.json"
     cases = json.loads(fixture.read_text(encoding="utf-8"))
-    assert KNOWLEDGE_VERSION == "2026.08.20.1"
+    assert KNOWLEDGE_VERSION == "2026.10.30.1"
     for case in cases:
         cards = select_guidance_cards(
             {"current_step": case["step"]}, case["user"], case.get("intent"))
