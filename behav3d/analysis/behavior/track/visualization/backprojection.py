@@ -641,9 +641,14 @@ def add_track_cluster_trajectory_layers(
         # AVAILABLE_COLORMAPS`); it does not accept a raw Colormap instance
         # (which isn't hashable, and Colormap(...).name defaults to the
         # same "custom" string for every call, so it must be registered
-        # under a name unique to this class to avoid collisions).
-        cmap_name = f"behav3d_{output_col}_{label}"
-        AVAILABLE_COLORMAPS[cmap_name] = Colormap([color, color], name=cmap_name)
+        # under a name unique to this class to avoid collisions). The
+        # registry refuses to overwrite a name, so plain assignment raises
+        # on the second backprojection in a session; add_colormap_if_missing
+        # reuses the entry when the color matches, or registers an
+        # incremented name (and returns it) when the class color changed.
+        cmap_name = AVAILABLE_COLORMAPS.add_colormap_if_missing(
+            Colormap([color, color], name=f"behav3d_{output_col}_{label}")
+        )
 
         layer = viewer.add_tracks(
             data,

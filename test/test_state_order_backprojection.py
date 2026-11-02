@@ -200,6 +200,45 @@ def test_add_track_cluster_trajectory_layers_single_layer_empty_data_adds_nothin
     assert viewer.added_names == []
 
 
+def test_add_track_cluster_trajectory_layers_repeat_calls_reuse_registered_colormaps():
+    """napari's AVAILABLE_COLORMAPS refuses to overwrite a name, so re-running
+    track backprojection (e.g. on another sample) with the same class labels
+    used to raise KeyError and add no trajectory layers at all. Repeat calls
+    must succeed, and a recolored class must still render in its new color."""
+    from napari.utils.colormaps import AVAILABLE_COLORMAPS
+
+    output_col = "repeat_call_regression"
+    trajectory_data = {
+        "one": np.array([[0, 0, 0.0, 0.0], [0, 1, 1.0, 1.0]]),
+        "two": np.array([[1, 0, 2.0, 2.0], [1, 1, 3.0, 3.0]]),
+    }
+    label_map = {"1": "one", "2": "two"}
+    expected_names = [f"{output_col} trajectory: one", f"{output_col} trajectory: two"]
+
+    def _layer_hex(layer):
+        cmap = AVAILABLE_COLORMAPS[layer.kwargs["colormap"]]
+        return "#" + "".join(f"{round(c * 255):02x}" for c in cmap.colors[0][:3])
+
+    for _ in range(2):
+        viewer = _FakeViewer()
+        add_track_cluster_trajectory_layers(
+            viewer, trajectory_data=trajectory_data,
+            code_colors={"1": "#ff0000", "2": "#00ff00"},
+            label_map=label_map, output_col=output_col, tail_length=1,
+        )
+        assert viewer.added_names == expected_names
+        assert [_layer_hex(layer) for layer in viewer.added_layers] == ["#ff0000", "#00ff00"]
+
+    viewer = _FakeViewer()
+    add_track_cluster_trajectory_layers(
+        viewer, trajectory_data=trajectory_data,
+        code_colors={"1": "#0000ff", "2": "#00ff00"},
+        label_map=label_map, output_col=output_col, tail_length=1,
+    )
+    assert viewer.added_names == expected_names
+    assert [_layer_hex(layer) for layer in viewer.added_layers] == ["#0000ff", "#00ff00"]
+
+
 def test_export_behavioral_state_backprojection_zarrs_resolves_saved_order(tmp_path):
     obs = _build_obs()
     adata = ad.AnnData(obs=obs)
