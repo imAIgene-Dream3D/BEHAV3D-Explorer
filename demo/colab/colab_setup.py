@@ -48,7 +48,7 @@ ENV_URL = os.environ.get(
 #: Demo dataset bundle: raw images + metadata.csv + PRECOMPUTED output/ folder.
 DEMO_URL = os.environ.get(
     "BEHAV3D_DEMO_URL",
-    "https://zenodo.org/records/22644564/files/BEHAV3D_demo.tar.gz?download=1",
+    "https://zenodo.org/records/23983133/files/BEHAV3D_demo.tar.gz?download=1",
 )
 
 REPO_URL = os.environ.get("BEHAV3D_REPO_URL", "https://github.com/imAIgene-Dream3D/BEHAV3D-Explorer.git")
