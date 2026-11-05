@@ -1037,6 +1037,90 @@ def _apply_report_widget_value(widget, value) -> bool:
     return True
 
 
+class NodeOrderList(QWidget):
+    """Drag-to-order list of a circular diagram's nodes, active while auto-arranging is off.
+
+    Keeps the user's order while the data refreshes: states that disappear are dropped and new
+    ones go last. `Reset` returns to the saved state order, `Use last auto-arranged order` copies
+    the order of the last auto-arranged report, so a layout can be fine-tuned instead of redone.
+    """
+
+    def __init__(self, item_name, parent=None):
+        super().__init__(parent)
+        self._saved_order = []
+        self._last_auto_order = []
+        self._auto_arranging = False
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+        self.label = QLabel(
+            f"Node order - drag {item_name} to reorder (untick Auto-arrange nodes to use it). "
+            "The top item is node 1 at the bottom of the circle, then counter-clockwise:"
+        )
+        self.label.setWordWrap(True)
+        self.label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        layout.addWidget(self.label)
+        self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.list_widget.setDragDropMode(QAbstractItemView.InternalMove)
+        self.list_widget.setDefaultDropAction(Qt.MoveAction)
+        layout.addWidget(self.list_widget)
+        buttons = QHBoxLayout()
+        self.btn_reset = QPushButton("Reset to saved order")
+        self.btn_reset.clicked.connect(self.reset_to_saved_order)
+        self.btn_use_auto = QPushButton("Use last auto-arranged order")
+        self.btn_use_auto.clicked.connect(lambda: self.set_order(self._last_auto_order))
+        buttons.addWidget(self.btn_reset)
+        buttons.addWidget(self.btn_use_auto)
+        layout.addLayout(buttons)
+        self._update_height()
+        self._update_enabled()
+
+    def _update_height(self):
+        _fit_list_widget_height(self.list_widget, max_rows=10)
+
+    def _update_enabled(self):
+        manual = not self._auto_arranging
+        self.label.setEnabled(manual)
+        self.list_widget.setEnabled(manual)
+        self.btn_reset.setEnabled(manual)
+        self.btn_use_auto.setEnabled(manual and bool(self._last_auto_order))
+
+    def order(self):
+        return _list_widget_items(self.list_widget)
+
+    def set_labels(self, saved_order):
+        """Set which nodes exist, in the saved state order."""
+        self._saved_order = list(saved_order)
+        current = self.order()
+        if set(current) != set(saved_order):
+            self.set_order(current)
+
+    def set_order(self, order):
+        """Reorder the list; labels it doesn't have are ignored, and any it has but `order` leaves
+        out go last, in saved order."""
+        order = [str(label) for label in order]
+        known = set(self._saved_order)
+        ordered = [label for label in dict.fromkeys(order) if label in known]
+        ordered += [label for label in self._saved_order if label not in set(ordered)]
+        self.list_widget.clear()
+        self.list_widget.addItems(ordered)
+        self._update_height()
+
+    def reset_to_saved_order(self):
+        self.set_order(self._saved_order)
+
+    def set_last_auto_order(self, order):
+        self._last_auto_order = [str(label) for label in order or []]
+        self._update_enabled()
+
+    def set_auto_arranging(self, auto_arranging):
+        self._auto_arranging = bool(auto_arranging)
+        self._update_enabled()
+
+
 class _ReportSettingsMixin:
     """Saves the settings a report ran with to behav3d_parameters.yml, under
     ``<_REPORT_SECTION>.<cell type>.<report>``, and restores them on reload.
@@ -1048,6 +1132,31 @@ class _ReportSettingsMixin:
 
     _REPORT_SECTION = ""
     _REPORT_SETTINGS: dict = {}
+
+    def _transition_node_order_items(self):
+        return self.transition_node_order.order()
+
+    def _restore_transition_node_order(self, order) -> bool:
+        if not self.transition_node_order.order():
+            return False  # the data isn't loaded yet, so there is nothing to order
+        self.transition_node_order.set_order(order or [])
+        return True
+
+    def _refresh_transition_node_order(self, adata, cluster_col):
+        """Offer the nodes of `adata`'s `cluster_col`, in its saved state order."""
+        from behav3d.analysis.behavior.state.utils import (
+            _apply_state_order,
+            _get_classification_state_order,
+        )
+        from behav3d.analysis.behavior.utils import _natural_sort_key
+        if adata is None or cluster_col is None:
+            self.transition_node_order.set_labels([])
+            return
+        labels = {str(label).strip() for label in adata.obs[cluster_col].dropna().unique()}
+        self.transition_node_order.set_labels(_apply_state_order(
+            sorted(labels, key=_natural_sort_key),
+            _get_classification_state_order(adata, cluster_col),
+        ))
 
     def _persist_report_settings(self, ct, *reports):
         params = getattr(self.metadata_loader, "behav3d_parameters", None)
@@ -1131,12 +1240,15 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
             "time_bin_size": "spin_state_composition_time_bin",
         },
         "transition": {
+            "min_bout_length": "spin_state_transition_min_bout",
             "min_prob_percent": "spin_state_transition_min_prob",
             "emphasis_gamma": "spin_state_transition_gamma",
             "label_style": "combo_state_transition_label_style",
             "include_transition_matrix": "chk_state_transition_include_matrix",
             "include_circular_diagram": "chk_state_transition_include_circular",
             "include_self_transitions": "chk_state_transition_include_self",
+            "auto_node_order": "chk_state_transition_auto_order",
+            "node_order": ("_transition_node_order_items", "_restore_transition_node_order"),
             "include_per_cluster": "chk_state_transition_include_per_cluster",
             "include_ngram_rankings": "chk_state_transition_include_ngrams",
             "include_sankey_pairs": "chk_state_transition_include_sankey",
@@ -1168,6 +1280,16 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
             "fixed_window_length": "spin_state_shift_window_length",
             "state_col": "combo_state_shift_state_col",
             "group_cols": "list_state_contact_group_cols",
+        },
+        "killing_by_state": {
+            "state_col": "combo_state_killing_state_col",
+            "group_cols": "list_state_killing_group_cols",
+            "solo_only": "chk_state_killing_solo",
+            "full_windows_only": "chk_state_killing_full_windows",
+            "states": "list_state_killing_states",
+            "override": "chk_state_killing_override",
+            "window": "spin_state_killing_window",
+            "threshold": "spin_state_killing_threshold",
         },
     }
 
@@ -1729,6 +1851,16 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         adv_state_transition = CollapsibleSection("⚙ Advanced Configuration", expanded=True)
         st_trans_form = QFormLayout()
         st_trans_form.setSpacing(3)
+        self.spin_state_transition_min_bout = QSpinBox()
+        self.spin_state_transition_min_bout.setRange(1, 1000)
+        self.spin_state_transition_min_bout.setValue(1)
+        self.spin_state_transition_min_bout.setSuffix(" timepoints")
+        st_trans_form.addRow("Min bout length:", make_help_row(
+            self.spin_state_transition_min_bout, "Min Bout Length",
+            "Bouts shorter than this are merged into the neighbouring state before "
+            "transitions, n-grams and Sankey paths are counted, so brief flickers between "
+            "states don't count as transitions. 1 = keep every bout."
+        ))
         self.spin_state_transition_min_prob = QDoubleSpinBox()
         self.spin_state_transition_min_prob.setRange(0.0, 100.0)
         self.spin_state_transition_min_prob.setDecimals(1)
@@ -1788,6 +1920,20 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
             "including time spent not switching - drawn as a loop beside each node - which "
             "dilutes the arrows for clusters that mostly self-transition."
         ))
+        self.chk_state_transition_auto_order = QCheckBox("Auto-arrange nodes (reduce overlap)")
+        self.chk_state_transition_auto_order.setChecked(True)
+        adv_state_transition.addLayout(_make_chk_help_row(
+            self.chk_state_transition_auto_order, "Auto-Arrange Nodes",
+            "Places the circular diagram's nodes so that arrows cross and run on top of each other "
+            "as little as possible at your probability cutoff, using the same arrangement on all "
+            "circular pages. The arrangement "
+            "can change when you change the cutoff. Turn off to set the order yourself in the "
+            "node order list below."
+        ))
+        self.transition_node_order = NodeOrderList("states")
+        adv_state_transition.addWidget(self.transition_node_order)
+        self.chk_state_transition_auto_order.toggled.connect(self.transition_node_order.set_auto_arranging)
+        self.transition_node_order.set_auto_arranging(self.chk_state_transition_auto_order.isChecked())
         self.chk_state_transition_include_per_cluster = QCheckBox("Show per-cluster breakdown grid")
         self.chk_state_transition_include_per_cluster.setChecked(True)
         adv_state_transition.addLayout(_make_chk_help_row(
@@ -1888,7 +2034,7 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         g_state_comparison = QVBoxLayout(self.grp_state_comparison)
         g_state_comparison.setSpacing(4)
         g_state_comparison.addWidget(_make_info_label(
-            "Condition comparison (overall proportions, Welch's t-test): each row is one pairwise "
+            "Condition comparison (overall proportions): each row is one pairwise "
             "comparison of \"Compare condition\"'s levels; \"Group in X\" splits it into side-by-side "
             "columns from another condition. Tick \"Group conditions\" to instead pool levels into "
             "two custom groups and compare just those."
@@ -1947,6 +2093,93 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         comparison_row.addWidget(self.btn_view_condition_comparison)
         g_state_comparison.addLayout(comparison_row)
 
+        self.grp_state_killing = QGroupBox("Killing by State")
+        g_state_killing = QVBoxLayout(self.grp_state_killing)
+        g_state_killing.setSpacing(4)
+        g_state_killing.addWidget(_make_info_label(
+            "Killing efficiency per behavioral state, from Active Killing's per-timepoint values. "
+            "Descriptive only: writes the CSVs for your own statistics, plus a PDF plot. No tests are run."
+        ))
+        state_killing_form = QFormLayout()
+        state_killing_form.setSpacing(3)
+        self.combo_state_killing_state_col = QComboBox()
+        self.combo_state_killing_state_col.addItems(
+            [FULL_STATE_COL, INTRINSIC_STATE_COL, "raw_hmm_state"]
+        )
+        state_killing_form.addRow("State column:", self.combo_state_killing_state_col)
+        g_state_killing.addLayout(state_killing_form)
+        g_state_killing.addWidget(_make_info_label("Group per page (Ctrl/Cmd click for multiple):"))
+        self.list_state_killing_group_cols = QListWidget()
+        self.list_state_killing_group_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        g_state_killing.addWidget(self.list_state_killing_group_cols)
+
+        adv_state_killing = CollapsibleSection("⚙ Advanced Configuration", expanded=False)
+        self.chk_state_killing_solo = QCheckBox("Solo contacts only")
+        self.chk_state_killing_solo.setChecked(True)
+        adv_state_killing.addLayout(_make_chk_help_row(
+            self.chk_state_killing_solo, "Solo contacts only",
+            "Leaves out timepoints where another cell touches any of this cell's targets during "
+            "the observation window, so the death signal can't come from that other cell. "
+            "Timepoints without a recorded target are left out too. Cells removed by Filtering "
+            "are not counted as other cells."
+        ))
+        self.chk_state_killing_full_windows = QCheckBox("Only full windows")
+        self.chk_state_killing_full_windows.setChecked(True)
+        adv_state_killing.addLayout(_make_chk_help_row(
+            self.chk_state_killing_full_windows, "Only full windows",
+            "Leaves out timepoints closer to the end of the video than the observation window. "
+            "Their window is cut short, so they had less time to show an increase in death signal."
+        ))
+        adv_state_killing.addWidget(_make_info_label(
+            "States to include (Ctrl/Cmd click for multiple). None selected: every state with at "
+            "least one timepoint in contact with a target."
+        ))
+        self.list_state_killing_states = QListWidget()
+        self.list_state_killing_states.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        adv_state_killing.addWidget(self.list_state_killing_states)
+        self.chk_state_killing_override = QCheckBox("Override Active Killing window and threshold")
+        adv_state_killing.addLayout(_make_chk_help_row(
+            self.chk_state_killing_override, "Override window and threshold",
+            "Off: uses the window and threshold set on the Active Killing tab. On: killing "
+            "efficiency is recomputed with your values for this report only, using Active "
+            "Killing's calculation. The features table is not changed."
+        ))
+        state_killing_override_form = QFormLayout()
+        state_killing_override_form.setSpacing(3)
+        self.spin_state_killing_window = QSpinBox()
+        self.spin_state_killing_window.setRange(1, 100000)
+        self.spin_state_killing_window.setSuffix(" timepoints")
+        self.spin_state_killing_window.setMaximumWidth(140)
+        state_killing_override_form.addRow("Window:", self.spin_state_killing_window)
+        self.label_state_killing_threshold = QLabel("Threshold:")
+        self.spin_state_killing_threshold = QDoubleSpinBox()
+        self.spin_state_killing_threshold.setRange(0.0, 1e9)
+        self.spin_state_killing_threshold.setMaximumWidth(140)
+        state_killing_override_form.addRow(
+            self.label_state_killing_threshold, self.spin_state_killing_threshold
+        )
+        adv_state_killing.addLayout(state_killing_override_form)
+        g_state_killing.addWidget(adv_state_killing)
+
+        self.label_state_killing_warning = QLabel("")
+        self.label_state_killing_warning.setWordWrap(True)
+        self.label_state_killing_warning.setStyleSheet(
+            "QLabel { background: #3d1010; color: #ff8a80; border: 1px solid #d9534f; "
+            "border-radius: 4px; padding: 6px 8px; font-size: 11px; }"
+        )
+        self.label_state_killing_warning.hide()
+        g_state_killing.addWidget(self.label_state_killing_warning)
+        state_killing_row = QHBoxLayout()
+        self.btn_state_killing_report = QPushButton("▶ Create Killing by State Report")
+        _style_secondary(self.btn_state_killing_report)
+        self.btn_state_killing_report.setEnabled(False)
+        state_killing_row.addWidget(self.btn_state_killing_report, stretch=1)
+        self.btn_view_state_killing_report = _make_view_btn()
+        state_killing_row.addWidget(self.btn_view_state_killing_report)
+        g_state_killing.addLayout(state_killing_row)
+        self._state_killing_baseline = None
+        self._state_killing_error = None
+
         self.grp_state_contact = QGroupBox("Contact Analysis")
         g_state_contact = QVBoxLayout(self.grp_state_contact)
         g_state_contact.setSpacing(4)
@@ -1966,7 +2199,7 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         g_state_contact.addWidget(_make_info_label(
             "Contact type comparison — compares contacting-state proportions between "
             "selected contact columns (e.g. healthy vs. tumor organoid contact): "
-            "cluster-size difference (Welch's t-test) plus stacked composition."
+            "cluster-size difference plus stacked composition."
         ))
         state_contact_type_form = QFormLayout()
         state_contact_type_form.setSpacing(3)
@@ -2097,6 +2330,7 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         pipeline_content_lay.addWidget(self.grp_state_feature_heatmap)
         pipeline_content_lay.addWidget(self.grp_state_comparison)
         pipeline_content_lay.addWidget(self.grp_state_contact)
+        pipeline_content_lay.addWidget(self.grp_state_killing)
         pipeline_content_lay.addStretch()
         self._pipeline_scroll.setWidget(pipeline_content)
         reset_scroll_on_page_change(self._plots_stack)
@@ -2333,6 +2567,20 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         )
         self.btn_state_contact_shift.clicked.connect(self._on_state_contact_shift)
         _wire_view_btn(self.btn_view_state_contact_shift, self._on_view, "state_contact_shift")
+        self.btn_state_killing_report.clicked.connect(self._on_state_killing_report)
+        _wire_view_btn(self.btn_view_state_killing_report, self._on_view, "state_killing_report")
+        self.combo_state_killing_state_col.currentTextChanged.connect(
+            lambda _text: self._refresh_state_killing_states()
+        )
+        self.chk_state_killing_override.toggled.connect(
+            lambda _checked: self._update_state_killing_controls()
+        )
+        self.spin_state_killing_window.valueChanged.connect(
+            lambda _value: self._update_state_killing_controls()
+        )
+        self.spin_state_killing_threshold.valueChanged.connect(
+            lambda _value: self._update_state_killing_controls()
+        )
         self.btn_browse_hmm.clicked.connect(self._browse_hmm_artifact)
         self.btn_apply_hmm.clicked.connect(self._on_apply_hmm)
         self.btn_show_state_bp.clicked.connect(self._on_show_state_bp)
@@ -2439,13 +2687,17 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
             "state_feature_heatmap": {self.grp_state_feature_heatmap},
             "state_comparison": {self.grp_state_comparison},
             "state_contact": {self.grp_state_contact},
+            "state_killing": {self.grp_state_killing},
         }.get(pipeline_id, set())
         for group in (
             self.grp_state_diagnostics, self.grp_state_composition,
             self.grp_state_transition, self.grp_state_feature_heatmap, self.grp_state_comparison,
-            self.grp_state_contact,
+            self.grp_state_contact, self.grp_state_killing,
         ):
             group.setVisible(group in visible)
+        if pipeline_id == "state_killing":
+            # Active Killing may have been re-run on another tab since the last refresh.
+            self._refresh_state_killing_source()
         title = next(
             (s["title"] for s in STATE_REPORT_PIPELINES if s["id"] == pipeline_id), ""
         )
@@ -2653,6 +2905,104 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         has_full_states = bool(full_path and full_path.exists())
         self.btn_state_contact_type_comparison.setEnabled(len(contact_cols) >= 2 and has_full_states)
         self.btn_state_contact_shift.setEnabled(len(contact_cols) > 0 and has_full_states)
+        self._refresh_state_killing_source()
+
+    def _refresh_state_killing_source(self):
+        """Re-read what the Killing by State report depends on: the extracted killing features,
+        the Active Killing settings, the group columns and the state names."""
+        import pandas as pd
+        ct = self._cell_type()
+        out = self._out_dir()
+        self._state_killing_baseline = None
+        self._state_killing_error = None
+        full_path = self._full_adata_path(ct) if ct else None
+        if full_path and full_path.exists():
+            try:
+                from behav3d.analysis.behavior.state.killing_by_state import (
+                    resolve_killing_features_csv,
+                    resolve_killing_settings,
+                )
+                params = getattr(self.metadata_loader, "behav3d_parameters", None) or {}
+                table = resolve_killing_features_csv(out, ct, self._state_track_features_csv_path(ct))
+                self._state_killing_baseline = resolve_killing_settings(
+                    params.get("active_killing"), out, ct, pd.read_csv(table, nrows=0).columns,
+                )
+            except Exception as exc:
+                self._state_killing_error = str(exc)
+        _refill_list_keep_selection(
+            self.list_state_killing_group_cols, self._composition_candidate_columns()
+        )
+        _fit_list_widget_height(self.list_state_killing_group_cols)
+        self._refresh_state_killing_states()
+        self._update_state_killing_controls()
+
+    def _refresh_state_killing_states(self):
+        """Offer the labels of the chosen state column under 'States to include'."""
+        from behav3d.core.state_columns import HMM_INTRINSIC_RAW_STATE_COL
+        ct = self._cell_type()
+        full_path = self._full_adata_path(ct) if ct else None
+        labels = []
+        if full_path and full_path.exists():
+            choice = self.combo_state_killing_state_col.currentText()
+            state_col = HMM_INTRINSIC_RAW_STATE_COL if choice == "raw_hmm_state" else choice
+            try:
+                from behav3d.analysis.behavior.state.killing_by_state import read_state_labels
+                labels = read_state_labels(full_path, state_col)
+            except Exception:
+                traceback.print_exc()
+        _refill_list_keep_selection(self.list_state_killing_states, labels)
+        _fit_list_widget_height(self.list_state_killing_states, max_rows=8)
+
+    def _update_state_killing_controls(self):
+        """Keep the override fields, the warning box and the run button in line with the settings."""
+        from dataclasses import replace
+        base = self._state_killing_baseline
+        override = self.chk_state_killing_override.isChecked()
+        self.spin_state_killing_window.setEnabled(base is not None and override)
+        self.spin_state_killing_threshold.setEnabled(base is not None and override)
+        self.btn_state_killing_report.setEnabled(base is not None)
+        message = ""
+        if base is not None:
+            self.label_state_killing_threshold.setText(
+                "Threshold (multiplier):" if base.threshold_mode == "multiplier" else "Threshold (absolute):"
+            )
+            # Same precision as the Active Killing tab: rounding here would change the threshold.
+            if base.threshold_mode == "multiplier":
+                decimals, step = 2, 0.1
+            elif base.death_signal_column == "nr_dead_mask_pixels":
+                decimals, step = 0, 1.0
+            elif base.death_signal_column == "percentage_dead_mask":
+                decimals, step = 4, 0.001
+            else:
+                decimals, step = 4, 0.01
+            self.spin_state_killing_threshold.blockSignals(True)
+            self.spin_state_killing_threshold.setDecimals(decimals)
+            self.spin_state_killing_threshold.setSingleStep(step)
+            self.spin_state_killing_threshold.blockSignals(False)
+            if override:
+                used = replace(
+                    base,
+                    window=int(self.spin_state_killing_window.value()),
+                    threshold=float(self.spin_state_killing_threshold.value()),
+                )
+            else:
+                used = base
+                for spin, value in (
+                    (self.spin_state_killing_window, int(base.window)),
+                    (self.spin_state_killing_threshold, float(base.threshold)),
+                ):
+                    spin.blockSignals(True)
+                    spin.setValue(value)
+                    spin.blockSignals(False)
+            if used.differences:
+                message = (
+                    "⚠ " + " ".join(used.differences) + " Killing efficiency is recomputed for "
+                    "this report only; the features table is not changed."
+                )
+        elif self._state_killing_error:
+            message = f"⚠ {self._state_killing_error}"
+        self.label_state_killing_warning.setText(message)
+        self.label_state_killing_warning.setVisible(bool(message))
 
     def _reload(self):
         try:
@@ -3248,6 +3598,7 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
 
         self._refresh_composition_group_cols()
         self._refresh_state_heatmap_features()
+        self._refresh_transition_node_order(self._model_adata, full_col)
         self._apply_pending_report_settings()
 
     def _cluster_count(self, adata, col) -> int:
@@ -3578,6 +3929,7 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
                 self.btn_view_transition, self.btn_view_condition_comparison,
                 self.btn_view_state_feature_heatmap,
                 self.btn_view_state_contact_type_comparison, self.btn_view_state_contact_shift,
+                self.btn_view_state_killing_report,
             ):
                 btn.setEnabled(False)
             return
@@ -3603,6 +3955,9 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         )
         self.btn_view_state_contact_shift.setEnabled(
             len(self._get_view_candidates("state_contact_shift", ct)) > 0
+        )
+        self.btn_view_state_killing_report.setEnabled(
+            len(self._get_view_candidates("state_killing_report", ct)) > 0
         )
 
     def _update_bp_buttons(self):
@@ -4272,6 +4627,90 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
             on_failed=lambda e: self._log(f"❌ Contact type comparison failed: {e}"),
         )
 
+    def _on_state_killing_report(self):
+        ct = self._cell_type()
+        if not ct:
+            return
+        if self._bg.is_running():
+            QMessageBox.warning(self, "Busy", "Another operation is running.")
+            return
+        full_path = self._full_adata_path(ct)
+        if not full_path or not full_path.exists():
+            QMessageBox.warning(self, "No data", "Run state classification first.")
+            return
+        self._refresh_state_killing_source()
+        if self._state_killing_baseline is None:
+            QMessageBox.warning(
+                self, "No killing efficiency",
+                self._state_killing_error or "Run Active Killing first, then Filtering.",
+            )
+            return
+        override = self.chk_state_killing_override.isChecked()
+        window_override = int(self.spin_state_killing_window.value()) if override else None
+        threshold_override = float(self.spin_state_killing_threshold.value()) if override else None
+        solo_only = self.chk_state_killing_solo.isChecked()
+        full_windows_only = self.chk_state_killing_full_windows.isChecked()
+        states = [item.text() for item in self.list_state_killing_states.selectedItems()]
+        state_col_choice = self.combo_state_killing_state_col.currentText()
+        selected_extra_cols = [item.text() for item in self.list_state_killing_group_cols.selectedItems()]
+        params = getattr(self.metadata_loader, "behav3d_parameters", None) or {}
+        active_killing_cfg = dict(params.get("active_killing") or {})
+        preferred_csv = self._state_track_features_csv_path(ct)
+        _raw_md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
+        md_snapshot = _raw_md.copy() if _raw_md is not None else None
+        out = self._out_dir()
+        self._log(f"▶ Running Killing by State report for '{ct}'…")
+
+        def _run(**kw):
+            from behav3d.analysis.behavior.state.killing_by_state import (
+                read_killing_table,
+                resolve_killing_features_csv,
+                resolve_killing_settings,
+            )
+            from behav3d.analysis.behavior.state.utils import _resolve_state_paths
+            from behav3d.analysis.behavior.state.visualization.plots.killing_by_state_report import (
+                save_state_killing_report,
+            )
+            adata = _read_h5ad_shared(str(full_path))
+            state_col = _resolve_ui_state_col(adata, state_col_choice)
+            df_table = read_killing_table(resolve_killing_features_csv(out, ct, preferred_csv))
+            settings = resolve_killing_settings(
+                active_killing_cfg, out, ct, df_table.columns,
+                window_override=window_override, threshold_override=threshold_override,
+            )
+            state_dir = _resolve_state_paths(out, ct).state_outdir
+            _inject_known_metadata_cols(adata, md_snapshot)
+            return save_state_killing_report(
+                adata,
+                df_table,
+                state_dir,
+                output_dir=out,
+                cell_type=ct,
+                state_col=state_col,
+                settings=settings,
+                states=states or None,
+                solo_only=solo_only,
+                full_windows_only=full_windows_only,
+                extra_group_cols=selected_extra_cols or None,
+                verbose=True,
+            )
+
+        self._persist_report_settings(ct, "killing_by_state")
+        self._bg.run(
+            fn=_run,
+            desc=f"Killing by State report ({ct})…",
+            progress_row=self.progress_row,
+            buttons=[self.btn_state_killing_report],
+            viewer=self.viewer,
+            inject_progress=False,
+            on_done=lambda r: (
+                self._log(f"✅ Killing by State report done for '{ct}' ({r['counts']['used']} timepoints used)."),
+                self._update_view_buttons(),
+                self._notify_results(),
+            ),
+            on_failed=lambda e: self._log(f"❌ Killing by State report failed: {e}"),
+        )
+
     def _on_state_contact_shift(self):
         ct = self._cell_type()
         if not ct:
@@ -4356,6 +4795,7 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         out = self._out_dir()
         self._log(f"▶ Generating state transition report for '{ct}'…")
 
+        min_bout_length = self.spin_state_transition_min_bout.value()
         circular_min_prob_to_draw = self.spin_state_transition_min_prob.value() / 100.0
         circular_emphasis_gamma = self.spin_state_transition_gamma.value()
         circular_label_style = (
@@ -4364,6 +4804,8 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         include_transition_matrix = self.chk_state_transition_include_matrix.isChecked()
         include_circular_diagram = self.chk_state_transition_include_circular.isChecked()
         circular_include_self_transitions = self.chk_state_transition_include_self.isChecked()
+        circular_auto_node_order = self.chk_state_transition_auto_order.isChecked()
+        circular_custom_node_order = None if circular_auto_node_order else self.transition_node_order.order()
         include_circular_diagram_per_cluster = self.chk_state_transition_include_per_cluster.isChecked()
         include_ngram_rankings = self.chk_state_transition_include_ngrams.isChecked()
         include_sankey_pairs = self.chk_state_transition_include_sankey.isChecked()
@@ -4399,9 +4841,12 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
                 circular_emphasis_gamma=circular_emphasis_gamma,
                 circular_label_style=circular_label_style,
                 circular_include_self_transitions=circular_include_self_transitions,
+                circular_auto_node_order=circular_auto_node_order,
+                circular_custom_node_order=circular_custom_node_order,
                 include_circular_diagram_per_cluster=include_circular_diagram_per_cluster,
                 include_ngram_rankings=include_ngram_rankings,
                 include_sankey_pairs=include_sankey_pairs,
+                min_bout_length=min_bout_length,
                 verbose=True,
             )
 
@@ -4415,6 +4860,9 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
             inject_progress=False,
             on_done=lambda r: (
                 self._log(f"✅ Transition report done for '{ct}'."),
+                circular_auto_node_order and self.transition_node_order.set_last_auto_order(
+                    r.get("circular_node_order")
+                ),
                 self._update_view_buttons(),
                 self._notify_results(),
             ),
@@ -5348,6 +5796,9 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
                 (f.parent.name, f)
                 for f in sorted(contact_dir.glob("*/contact_state_shift.pdf"))
             ]
+        if kind == "state_killing_report":
+            pdf = out / "analysis" / ct / "behavioral_states" / "killing_by_state" / "killing_by_state.pdf"
+            return [("killing_by_state", pdf)] if pdf.exists() else []
         return []
 
     def _open_pdf(self, path: Path):
@@ -5842,6 +6293,8 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             "include_transition_matrix": "chk_transanalysis_include_matrix",
             "include_circular_diagram": "chk_transanalysis_include_circular",
             "include_self_transitions": "chk_transanalysis_include_self",
+            "auto_node_order": "chk_transanalysis_auto_order",
+            "node_order": ("_transition_node_order_items", "_restore_transition_node_order"),
             "include_per_cluster": "chk_transanalysis_include_per_cluster",
             "include_window_sankey": "chk_transanalysis_include_window_sankey",
         },
@@ -5876,8 +6329,6 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             "group_cols": "list_contact_group_cols",
         },
         "contact_duration": {
-            "test_mode": "combo_duration_test_mode",
-            "pairing_cols": "list_duration_pairing_cols",
             # Unit before threshold: the unit sets the threshold's range.
             "long_contact_unit": "combo_long_contact_unit",
             "long_contact_threshold": "spin_long_contact_threshold",
@@ -6927,6 +7378,20 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             "including windows spent not switching - drawn as a loop beside each node - which "
             "dilutes the arrows for clusters that mostly self-transition."
         ))
+        self.chk_transanalysis_auto_order = QCheckBox("Auto-arrange nodes (reduce overlap)")
+        self.chk_transanalysis_auto_order.setChecked(True)
+        adv_transition_analysis.addLayout(_make_chk_help_row(
+            self.chk_transanalysis_auto_order, "Auto-Arrange Nodes",
+            "Places the circular diagram's nodes so that arrows cross and run on top of each other "
+            "as little as possible at your probability cutoff, using the same arrangement on all "
+            "circular pages. The arrangement "
+            "can change when you change the cutoff. Turn off to set the order yourself in the "
+            "node order list below."
+        ))
+        self.transition_node_order = NodeOrderList("clusters")
+        adv_transition_analysis.addWidget(self.transition_node_order)
+        self.chk_transanalysis_auto_order.toggled.connect(self.transition_node_order.set_auto_arranging)
+        self.transition_node_order.set_auto_arranging(self.chk_transanalysis_auto_order.isChecked())
         self.chk_transanalysis_include_per_cluster = QCheckBox("Show per-cluster breakdown grid")
         self.chk_transanalysis_include_per_cluster.setChecked(True)
         adv_transition_analysis.addLayout(_make_chk_help_row(
@@ -6954,7 +7419,7 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         g_track_comparison = QVBoxLayout(self.grp_track_comparison)
         g_track_comparison.setSpacing(4)
         g_track_comparison.addWidget(_make_info_label(
-            "Condition comparison (overall proportions, Welch's t-test): each row is one pairwise "
+            "Condition comparison (overall proportions): each row is one pairwise "
             "comparison of \"Compare condition\"'s levels; \"Group in X\" splits it into side-by-side "
             "columns from another condition. Tick \"Group conditions\" to instead pool levels into "
             "two custom groups and compare just those."
@@ -7133,7 +7598,7 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         g_contact.addLayout(contact_composition_row)
 
         g_contact.addWidget(_make_info_label(
-            "Contact condition comparison (Welch's t-test grid of class composition between "
+            "Contact condition comparison (grid of class composition differences between "
             "contact/no-contact groups):"
         ))
         contact_condition_comparison_row = QHBoxLayout()
@@ -7160,28 +7625,6 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             "Contact duration comparison (how long tracks stay in contact with each touched class "
             "of 'Use contact cell classification', pairwise and each class vs. the rest):"
         ))
-        duration_form = QFormLayout()
-        duration_form.setSpacing(3)
-        self.combo_duration_test_mode = QComboBox()
-        self.combo_duration_test_mode.addItem("Welch's t-test (unpaired)", "welch")
-        self.combo_duration_test_mode.addItem("Paired t-test", "paired")
-        self.combo_duration_test_mode.currentIndexChanged.connect(self._on_duration_test_mode_changed)
-        duration_form.addRow("Test:", make_help_row(
-            self.combo_duration_test_mode, "Comparison test",
-            "'Welch's t-test': compares the per-track contact durations (each track's longest bout "
-            "with the class, and its contact-time fraction) between the two groups without "
-            "assuming equal variances. 'Paired t-test': averages durations within each 'Pairing "
-            "column(s)' value (combined, if more than one is selected) first, then pairs the two "
-            "groups' averages for the same value (e.g. the same sample) — pairing units missing "
-            "either side are dropped."
-        ))
-        g_contact.addLayout(duration_form)
-        self.label_duration_pairing_cols = QLabel("Pairing column(s) (Ctrl/Cmd click for multiple):")
-        self.label_duration_pairing_cols.setWordWrap(True)
-        g_contact.addWidget(self.label_duration_pairing_cols)
-        self.list_duration_pairing_cols = QListWidget()
-        self.list_duration_pairing_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        g_contact.addWidget(self.list_duration_pairing_cols)
         duration_form2 = QFormLayout()
         duration_form2.setSpacing(3)
         self.spin_duration_comparisons_per_page = QSpinBox()
@@ -7223,12 +7666,10 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.btn_view_duration_comparison = _make_view_btn()
         duration_row.addWidget(self.btn_view_duration_comparison)
         g_contact.addLayout(duration_row)
-        self._on_duration_test_mode_changed()
 
         g_contact.addWidget(_make_info_label(
             "Contact type comparison (mean contact fraction per cluster, side by side across "
-            "selected contact columns — e.g. healthy vs. tumor organoid contact; purely "
-            "descriptive, no significance test):"
+            "selected contact columns — e.g. healthy vs. tumor organoid contact):"
         ))
         g_contact.addWidget(_make_info_label("Contact columns to compare (Ctrl/Cmd click for 2+):"))
         self.list_contact_type_compare_cols = QListWidget()
@@ -8689,6 +9130,8 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         self._refresh_track_proportion_group_cols()
         self._refresh_contact_columns()
         self._refresh_feature_heatmap_features()
+        from behav3d.napari._rename_dialog import _track_cluster_col
+        self._refresh_transition_node_order(self._track_adata, _track_cluster_col(self._track_adata))
         self._apply_pending_report_settings()
 
     def _set_feature_heatmap_picked(self, picked):
@@ -8858,17 +9301,6 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.combo_track_comparison_condition_col.blockSignals(False)
         self._sync_track_comparison_group_y_text()
         self._refresh_track_comparison_group_levels()
-
-        # Pairing column(s) for the paired contact-duration test: "sample_name" is always offered
-        # first (the common case, matching a typical R paired-t-test workflow) even though it's
-        # not itself one of the condition-like candidate_cols above, and is pre-selected by
-        # default so a fresh list behaves like the old single-select combo box did.
-        pairing_options = ["sample_name"] + [c for c in candidate_cols if c != "sample_name"]
-        _refill_list_keep_selection(self.list_duration_pairing_cols, pairing_options)
-        _fit_list_widget_height(self.list_duration_pairing_cols)
-        if not self.list_duration_pairing_cols.selectedItems():
-            for item in self.list_duration_pairing_cols.findItems("sample_name", Qt.MatchExactly):
-                item.setSelected(True)
 
     def _on_track_proportion_group_x_changed(self, _text):
         self._refresh_track_proportion_group_x_levels()
@@ -9088,11 +9520,6 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             and use_target
             and available
         )
-
-    def _on_duration_test_mode_changed(self, *_args):
-        is_paired = self.combo_duration_test_mode.currentData() == "paired"
-        self.label_duration_pairing_cols.setVisible(is_paired)
-        self.list_duration_pairing_cols.setVisible(is_paired)
 
     def _on_long_contact_unit_changed(self, *_args):
         unit = self.combo_long_contact_unit.currentData()
@@ -10626,6 +11053,8 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         include_transition_matrix = self.chk_transanalysis_include_matrix.isChecked()
         include_circular_diagram = self.chk_transanalysis_include_circular.isChecked()
         circular_include_self_transitions = self.chk_transanalysis_include_self.isChecked()
+        auto_node_order = self.chk_transanalysis_auto_order.isChecked()
+        custom_node_order = None if auto_node_order else self.transition_node_order.order()
         include_circular_diagram_per_cluster = self.chk_transanalysis_include_per_cluster.isChecked()
         include_window_sankey = self.chk_transanalysis_include_window_sankey.isChecked()
         include_pooled = (
@@ -10670,6 +11099,8 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
                     include_transition_matrix=include_transition_matrix,
                     include_circular_diagram=include_circular_diagram,
                     circular_include_self_transitions=circular_include_self_transitions,
+                    auto_node_order=auto_node_order,
+                    custom_node_order=custom_node_order,
                     include_circular_diagram_per_cluster=include_circular_diagram_per_cluster,
                     verbose=True,
                 )
@@ -10696,6 +11127,9 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             inject_progress=False,
             on_done=lambda r: (
                 self._log(f"✅ Transition analysis done for '{ct}'."),
+                auto_node_order and self.transition_node_order.set_last_auto_order(
+                    r.get("transition_analysis", {}).get("circular_node_order")
+                ),
                 self._update_view_buttons(),
                 self._notify_results(),
             ),
@@ -11350,15 +11784,6 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         if not csv_path or not csv_path.exists():
             self._contact_warn_or_skip(chain_next, "No data", "Track-features CSV not found. Run feature extraction first.")
             return
-        test_mode = self.combo_duration_test_mode.currentData()
-        pairing_cols = []
-        if test_mode == "paired":
-            pairing_cols = [item.text() for item in self.list_duration_pairing_cols.selectedItems()]
-            if not pairing_cols:
-                self._contact_warn_or_skip(
-                    chain_next, "Missing selection", "Select at least one pairing column for the paired t-test.",
-                )
-                return
         from behav3d.core.utils import minutes_per_frame_from_metadata
         long_contact_threshold_raw = self.spin_long_contact_threshold.value()
         long_contact_unit = self.combo_long_contact_unit.currentData()
@@ -11400,7 +11825,7 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             contact_dir = _resolve_track_paths(str(out) if out else "", ct).outfolder
 
             cols_to_merge = [
-                c for c in pairing_cols + selected_extra_cols
+                c for c in selected_extra_cols
                 if c not in track_adata.obs.columns
             ]
             if cols_to_merge and md is not None:
@@ -11433,8 +11858,6 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
                 touching_col=touching_col,
                 time_varying=time_varying,
                 target_cell_type_label=target_ct,
-                test_mode=test_mode,
-                pairing_col=pairing_cols or None,
                 minutes_per_frame=minutes_per_frame if minutes_valid else None,
                 long_contact_threshold=long_contact_threshold,
                 long_contact_unit=long_contact_unit,

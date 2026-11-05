@@ -185,9 +185,8 @@ def test_save_state_contact_type_comparison_diff_and_stacked_outputs(tmp_path):
     assert row_a["diff"] == pytest.approx(tumor_mean_a - healthy_mean_a)
     assert row_a["n_a"] == 3 and row_a["n_b"] == 3
 
-    # This is a Welch's-t-test cluster-size-difference comparison, not the old purely
-    # descriptive mean-fraction bar chart — no chi-square columns should leak in.
-    assert not {"chi2", "cramers_v"} & set(diff_df.columns)
+    assert "se_diff" in diff_df.columns
+    assert not {"chi2", "cramers_v", "t_stat", "p_value", "stars", "ci95_diff"} & set(diff_df.columns)
 
 
 def _build_df_timepoints_mixed_two_samples():

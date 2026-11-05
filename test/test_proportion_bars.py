@@ -6,6 +6,7 @@ from pathlib import Path
 os.environ.setdefault("MPLCONFIGDIR", "/private/tmp/behav3d-mpl-cache")
 
 import matplotlib
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -261,3 +262,54 @@ def test_plot_condition_time_series_grid_empty_class_order_writes_placeholder(tm
     pypdf = pytest.importorskip("pypdf")
     reader = pypdf.PdfReader(result["pdf_path"])
     assert len(reader.pages) == 1
+
+
+def test_class_diff_rows_report_the_difference_and_its_standard_error_only():
+    panel_a = pd.DataFrame({"rest": [0.2, 0.4, 0.6]})
+    panel_b = pd.DataFrame({"rest": [0.5, 0.7]})
+
+    row = proportion_bars._class_diff_rows(["rest"], panel_a, panel_b)[0]
+
+    assert row["diff"] == pytest.approx(0.6 - 0.4)
+    assert row["se_diff"] == pytest.approx(np.sqrt(0.04 / 3 + 0.02 / 2))
+    assert not {"t_stat", "p_value", "stars", "ci95_diff"} & set(row)
+
+
+def test_class_diff_rows_leave_the_standard_error_empty_with_one_sample():
+    panel_a = pd.DataFrame({"rest": [0.2]})
+    panel_b = pd.DataFrame({"rest": [0.5, 0.7]})
+
+    row = proportion_bars._class_diff_rows(["rest"], panel_a, panel_b)[0]
+
+    assert row["diff"] == pytest.approx(0.4)
+    assert np.isnan(row["se_diff"])
+
+
+def test_draw_diff_barh_extends_the_whisker_by_the_standard_error_with_no_text_marks():
+    diff_df = pd.DataFrame([{"class": "rest", "diff": 0.10, "se_diff": 0.02}])
+    fig, ax = plt.subplots()
+
+    proportion_bars.draw_diff_barh(ax, ["rest"], diff_df, {"rest": "#336699"})
+
+    cap = [line for line in ax.get_lines() if line.get_marker() == "|"]
+    assert len(cap) == 1
+    assert cap[0].get_xdata()[0] == pytest.approx(12.0)
+    assert len(ax.texts) == 0
+    plt.close(fig)
+
+
+def test_feature_box_draws_boxes_without_test_marks():
+    from behav3d.analysis.behavior.general.visualization.plots.feature_box import plot_feature_box_by_group
+
+    df = pd.DataFrame({
+        "ClusterID": ["a"] * 5 + ["b"] * 5,
+        "value": [0.0, 0.1, 0.2, 0.3, 0.4, 5.0, 5.1, 5.2, 5.3, 5.4],
+    })
+
+    fig = plot_feature_box_by_group(df, "value", "ClusterID", group_order=["a", "b"])
+
+    assert len(fig.axes[0].texts) == 0
+    footnote = "\n".join(text.get_text() for text in fig.texts)
+    assert "Box = median" in footnote
+    assert "Mann-Whitney" not in footnote and "p<" not in footnote
+    plt.close(fig)

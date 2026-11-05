@@ -648,7 +648,7 @@ class TrackClassificationPanel:
             title="Condition comparison plot",
             description=(
                 "Per-cluster overall track-class proportion difference between every pairwise "
-                "combination of a condition's levels (Welch's t-test), shown as one row per "
+                "combination of a condition's levels, shown as one row per "
                 "pairwise comparison."
             ),
             run_row=widgets.HBox(

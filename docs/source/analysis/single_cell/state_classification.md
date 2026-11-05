@@ -22,7 +22,7 @@ It runs on the cell type chosen in the dropdown at the top of [Single Cell](inde
    2. [Rename the intrinsic states first](#rename-intrinsic-states-first) as broad behaviours, in the [rename dialogs](#the-rename-dialogs).
    3. [Then review the full behavioral states](#then-review-the-full-behavioral-states) and [decide which binary flag takes precedence](#decide-which-binary-flag-takes-precedence).
    4. [Backproject](#backprojection) the classes you are unsure about and repeat steps 2–3 until the states hold up.
-4. [Reports](#reports): composition, transitions, feature heatmap and condition comparison, plus [Contact Analysis](#contact-analysis).
+4. [Reports](#reports): composition, transitions, feature heatmap and condition comparison, plus [Contact Analysis](#contact-analysis) and [Killing by State](#killing-by-state).
 5. [Backprojection](#backprojection): paint the states back onto the images to validate them, or [find tracks that show a given sequence of states](#find-a-behavior).
 
 The settings page shows, from top to bottom: the **Apply existing behavioral state classification** checkbox, the **Behavioral state clustering** section (steps 2–3), the **Reports & Plots** card, the **Backprojection** box, and the progress bar and **Log**.
@@ -239,12 +239,15 @@ Which full behavioural states cells switch between, and how often. Settings are 
 
 | Control | Default | What it does |
 |---|---|---|
-| **Min probability cutoff:** | `0.0 %` | In the circular diagram, transitions below this probability are dropped, so rare transitions do not clutter the plot. |
+| **Min bout length:** | `1 timepoints` | Bouts shorter than this many timepoints are merged into the neighbouring state before anything is counted, so brief flickers do not show up as transitions. Applies to the whole report: matrices, circular diagrams, sequence rankings and Sankey diagrams. `1` keeps every bout. |
+| **Min probability cutoff:** | `0.0 %` | In the circular diagram, transitions below this probability are dropped, so rare transitions do not clutter the plot. The remaining arrows keep the same thickness. |
 | **Emphasis (gamma):** | `1.0` (0.5–5) | How fast line width and opacity fall off for weaker transitions; `1.0` is linear, 2–3 makes the strongest transitions stand out. |
 | **Node labels:** | `Side legend` | State names written **On dots**, or in a numbered **Side legend** (better for long names or many states). |
 | **Transition matrix heatmap** | on | Adds the transition matrix page. |
 | **Circular transition diagram** | on | Adds the circular diagram pages. |
 | **Include self-transitions** | off | Off: arrows show how a state's *switches* are split between the other states (no self-loops). On: staying in the same state is drawn as a loop beside each node and every arrow shows its share of all timepoints, which makes arrows thin for states that rarely switch. |
+| **Auto-arrange nodes (reduce overlap)** | on | Places the nodes so that arrows cross and run on top of each other as little as possible at your cutoff, in the same arrangement on all circular pages. The arrangement can change when you change the cutoff, and the legend numbers follow it. Turn off to set the order yourself in the node order list. |
+| **Node order** | your saved state order | Used when **Auto-arrange nodes** is off. Drag the states into the order you want: the top state is node 1 at the bottom of the circle, and the rest follow counter-clockwise. **Reset to saved order** undoes your changes. **Use last auto-arranged order** starts from the layout of your last auto-arranged report, so you can move just a node or two. Applies to all circular pages. |
 | **Show per-cluster breakdown grid** | on | Adds two pages with one small diagram per state (outgoing and incoming), useful when the overlaid diagram is too busy. |
 | **N-gram rankings** | on | Adds rankings of the most common state sequences. |
 | **Sankey diagrams (all state pairs)** | off | Adds Sankey diagrams of the paths cells take from each state to each other state. The slowest part of the report. |
@@ -278,7 +281,7 @@ A heatmap of states × features: the mean of each selected per-timepoint feature
 
 ### Condition Comparison Report
 
-Tests whether the proportions of the full behavioural states differ between the levels of one metadata column (e.g. organoid lines).
+Compares the proportions of the full behavioural states between the levels of one metadata column (e.g. organoid lines).
 
 | Control | Default | What it does |
 |---|---|---|
@@ -290,12 +293,12 @@ Tests whether the proportions of the full behavioural states differ between the 
 
 **▶ Condition Comparison Report** writes one PDF and its CSVs:
 
-- **Proportion difference per state** — a signed bar for each pair of levels, with Welch's t-test stars (`*` to `****`), using each sample as a replicate.
-- **Prevalence over time** — each state's prevalence for each level, as lines with a standard-error band. Descriptive only, with no test; the underlying values are saved as CSVs so you can test them yourself.
+- **Proportion difference per state** — a signed bar for each pair of levels, with a whisker for the standard error of the difference, using each sample as a replicate.
+- **Prevalence over time** — each state's prevalence for each level, as lines with a standard-error band. The underlying values are saved as CSVs.
 
 ## Contact Analysis
 
-Found as the **Contact analysis** card in the report list. It needs only this classification and the features table, not State Trajectory. It compares the **state composition of contacting timepoints** between contact columns, e.g. *for T cells touching organoids, does the mix of behaviours differ between healthy and tumour organoids?* This is the statistically tested counterpart of State Trajectory's descriptive [Contact Type Comparison](track_classification.md#contact-type-comparison).
+Found as the **Contact analysis** card in the report list. It needs only this classification and the features table, not State Trajectory. It compares the **state composition of contacting timepoints** between contact columns, e.g. *for T cells touching organoids, does the mix of behaviours differ between healthy and tumour organoids?* This is the behavioural-state counterpart of State Trajectory's [Contact Type Comparison](track_classification.md#contact-type-comparison).
 
 | Control | Default | What it does |
 |---|---|---|
@@ -303,7 +306,59 @@ Found as the **Contact analysis** card in the report list. It needs only this cl
 | **State column:** | `full_behavioral_state` | `full_behavioral_state`, `hmm_intrinsic_behavioral_state` or `raw_hmm_state` (original numbered states). |
 | **Contact columns to compare (Ctrl/Cmd click for 2+):** | none | The contact columns of the features table; select at least two. |
 
-**▶ Create Contact Type Comparison** (enabled when the table has at least two contact columns) writes a PDF with per-state differences between contact columns (Welch's t-test, one row per pair) and the stacked state composition per contact column, plus two CSVs. Each combination of columns gets its own folder, so different comparisons do not overwrite each other.
+**▶ Create Contact Type Comparison** (enabled when the table has at least two contact columns) writes a PDF with per-state differences between contact columns (one row per pair) and the stacked state composition per contact column, plus two CSVs. Each combination of columns gets its own folder, so different comparisons do not overwrite each other.
+
+## Killing by State
+
+Found as the **Killing by state** card in the report list. It links each contact timepoint's killing efficiency from [Active Killing](../population_analysis/active_killing.md) to the cell's behavioural state at that moment, to show how much killing goes with each state. It is **descriptive only: no statistical tests are run.** Its main output is a set of CSVs ready for your own statistics, plus a PDF plot of the same numbers.
+
+Run [Active Killing](../population_analysis/active_killing.md) first, then [Filtering](../filtering.md) so the features table has the killing values. Without them the button stays greyed out and a red box says what to run.
+
+| Control | Default | What it does |
+|---|---|---|
+| **State column:** | `full_behavioral_state` | `full_behavioral_state`, `hmm_intrinsic_behavioral_state` or `raw_hmm_state` (original numbered states). |
+| **Group per page** list | none | Repeats the plot per group and adds the group columns to the CSVs. |
+
+**⚙ Advanced Configuration** (collapsed):
+
+| Control | Default | What it does |
+|---|---|---|
+| **Solo contacts only** | on | Leaves out timepoints where another cell touches any of this cell's targets during the observation window, so the death signal can't come from that other cell. Timepoints without a recorded target are left out too. |
+| **Only full windows** | on | Leaves out timepoints closer to the end of the video than the observation window, because they had less time to show an increase in death signal. |
+| **States to include** | none selected | With nothing selected, every state with at least one timepoint in contact with a target is included. A `Dead` state is therefore included when it has contact timepoints, unless you select the states you want. |
+| **Override Active Killing window and threshold** | off | Off: **Window** and **Threshold** show the values from the Active Killing tab. On: you can change them, and the threshold follows the tab's mode (absolute or multiplier). |
+
+Only timepoints in contact with a target are analysed, whichever states you include.
+
+When the window or threshold differs from what your extracted features were made with, a red box says so. Killing efficiency is then recomputed for this report only, with Active Killing's own calculation; your features table and Active Killing results stay as they are. The difference is also stated on the plot. The box also appears if the Active Killing tab's saved values no longer match the extracted features, for example when a queued run hasn't finished yet.
+
+### Plot
+
+`killing_by_state.pdf` shows two bar plots side by side, with one page per group if you group. Running the report again replaces the PDF and CSVs of the previous run, so copy them elsewhere to keep them. The window, threshold and filters a run used are printed at the top of the plot.
+
+- **Killing efficiency per cell (cell means):** each cell gives one value, the mean of its timepoints in that state. `n` is the number of cells.
+- **Killing efficiency per timepoint:** each timepoint gives one value, so cells that stay longer in a state weigh more. `n` is the number of timepoints.
+
+In both, the bar is the mean and the error bar is the SEM of the panel's values.
+
+The two panels have **separate y-axes**, because single timepoints reach much higher values than cell means. Compare states within a panel, not heights across panels.
+
+A large difference between the two panels' means tells you that a few long-staying cells are driving the per-timepoint result.
+
+### CSVs for your own statistics
+
+| File | One row per | Use |
+|---|---|---|
+| `csv/killing_timepoints.csv` | contact timepoint | The table to analyse. All contact timepoints of the included states are kept, with `solo`, `full_window` and `used` flags, so you can change the filters afterwards. |
+| `csv/killing_cell_state.csv` | cell in a state | Mean killing efficiency and number of timepoints. |
+| `csv/killing_image_state.csv` | image and state | The cell mean and timepoint mean per image. |
+| `csv/killing_state_summary.csv` | state | Numbers of timepoints, cells and images, both means, SEM, SD, and the fraction of timepoints with active killing. |
+
+Timepoints of one cell aren't independent, and cells of one image aren't either, so a mixed model suits this table. In R with `lmerTest`, on the rows where `used` is true:
+
+```r
+lmer(killing_efficiency ~ state + (1 | sample_name) + (1 | cell_id) + (1 | cell_state_id), data = d)
+```
 
 ## Backprojection
 
@@ -391,6 +446,7 @@ Everything is written under the cell type's `behavioral_states` folder (see [Out
 │   └── sankey_all_pairs.pdf                      # only with Sankey ticked
 ├── state_feature_heatmaps/state_feature_heatmap_<state column>.pdf (+ _cluster_means.csv)
 ├── contact_analysis/contact_type_comparison/<columns joined by _vs_>/contact_type_comparison.pdf (+ csv/)
+├── killing_by_state/killing_by_state.pdf (+ csv/)
 └── backprojection/<sample>_<cell_type>_behavioral_states.zarr
 ```
 

@@ -145,3 +145,5 @@ Written under `analysis/<immune_type>/active_killing/<target>/` for each selecte
 | `gallery/<sample>/killing_event_<sample>_T<track>_start<t>.gif` | Written by **🎞 Export Killing GIFs** (in the `<target>` folder, or `combined` when several targets are selected). |
 
 The per-timepoint and contact-event tables also feed the active-killing dashboard of the [Interaction Overview](interaction_analysis.md), which reads the `combined` folder when it exists, otherwise a single target's.
+
+To see how much killing goes with each behavioural state, use the [Killing by State](../single_cell/state_classification.md#killing-by-state) report.

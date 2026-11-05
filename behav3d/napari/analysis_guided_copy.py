@@ -207,7 +207,7 @@ STATE_REPORTS_ENTRY = {
     "concept": None,
     "what_get": (
         "A choice of report PDFs: clustering diagnostics, state composition, "
-        "state transitions, and/or a two-condition statistical comparison."
+        "state transitions, and/or a condition comparison."
     ),
     "decide": [],
     "start_label": "Generate analysis and plots  ▸",
@@ -329,29 +329,23 @@ STATE_FEATURE_HEATMAP = {
 STATE_COMPARISON_REPORT = {
     "id": "state_comparison",
     "title": "Condition Comparison Report",
-    "subtitle": "Do state proportions differ significantly between conditions?",
+    "subtitle": "How do state proportions differ between conditions?",
     "color": "#4a90d9",
     "what_does": (
         "Compares overall state proportions between every pair of levels of "
-        "a condition column (or two custom pooled groups) using Welch's "
-        "t-test, optionally split by another column."
+        "a condition column (or two custom pooled groups), optionally split by "
+        "another column."
     ),
-    "concept": {
-        "term": "Welch's t-test",
-        "text": (
-            "compares two group means without assuming equal variances — "
-            "safer than a standard t-test when group sizes or spreads differ."
-        ),
-    },
-    "what_get": "A condition-comparison PDF with significance annotations.",
+    "concept": None,
+    "what_get": "A condition-comparison PDF showing the mean difference for each pair of levels.",
     "decide": [
         _decide("Which condition column to compare (optionally pooled into two groups)", _ONLY_YOU),
         _decide("Column to split by", _SUGGESTED),
     ],
     "has_params": True,
     "seed": (
-        "Explain the BEHAV3D state Condition Comparison Report: what "
-        "Welch's t-test compares here and how to choose condition/levels/facet."
+        "Explain the BEHAV3D state Condition Comparison Report: what the "
+        "difference bars show and how to choose condition/levels/facet."
     ),
 }
 
@@ -368,7 +362,7 @@ STATE_CONTACT_ANALYSIS = {
     ),
     "concept": None,
     "what_get": (
-        "A contact-type comparison PDF (per-state differences with Welch's t-test, "
+        "A contact-type comparison PDF (per-state differences, "
         "plus stacked composition) and its CSVs."
     ),
     "decide": [
@@ -380,6 +374,33 @@ STATE_CONTACT_ANALYSIS = {
         "Explain the BEHAV3D state Contact analysis: the contact-type comparison, "
         "which compares behavioral-state composition of contacting timepoints "
         "between selected contact columns."
+    ),
+}
+
+STATE_KILLING_REPORT = {
+    "id": "state_killing",
+    "title": "Killing by state",
+    "subtitle": "How much killing goes with each behavioral state?",
+    "color": "#4a90d9",
+    "what_does": (
+        "Links each contact timepoint's Active Killing efficiency to the cell's behavioral "
+        "state at that moment, by default using only solo contacts with a full observation "
+        "window. Descriptive only: no statistical tests are run."
+    ),
+    "concept": None,
+    "what_get": (
+        "CSVs per timepoint, cell, image and state, ready for your own statistics, plus "
+        "a PDF with bar plots per cell and per timepoint side by side."
+    ),
+    "decide": [
+        _decide("Which state column to use", _SUGGESTED),
+        _decide("Which states and contacts to include", _SUGGESTED),
+    ],
+    "has_params": True,
+    "seed": (
+        "Explain the BEHAV3D Killing by State report: how killing efficiency is linked to "
+        "behavioral states, why solo contacts and full windows are the default, and the "
+        "difference between the per-cell and per-timepoint plots."
     ),
 }
 
@@ -522,29 +543,23 @@ TRACK_TRANSITION_ANALYSIS = {
 TRACK_COMPARISON_REPORT = {
     "id": "track_comparison",
     "title": "Condition Comparison Report",
-    "subtitle": "Do track-cluster proportions differ significantly between conditions?",
+    "subtitle": "How do track-cluster proportions differ between conditions?",
     "color": "#c98a2c",
     "what_does": (
         "Compares overall track cluster proportions between every pair of "
-        "levels of a condition column (or two custom pooled groups) using "
-        "Welch's t-test, optionally split by another column."
+        "levels of a condition column (or two custom pooled groups), "
+        "optionally split by another column."
     ),
-    "concept": {
-        "term": "Welch's t-test",
-        "text": (
-            "compares two group means without assuming equal variances — "
-            "safer than a standard t-test when group sizes or spreads differ."
-        ),
-    },
-    "what_get": "A condition-comparison PDF with significance annotations.",
+    "concept": None,
+    "what_get": "A condition-comparison PDF showing the mean difference for each pair of levels.",
     "decide": [
         _decide("Which condition column to compare (optionally pooled into two groups)", _ONLY_YOU),
         _decide("Column to split by", _SUGGESTED),
     ],
     "has_params": True,
     "seed": (
-        "Explain the BEHAV3D track Condition Comparison Report: what "
-        "Welch's t-test compares here and how to choose condition/levels/facet."
+        "Explain the BEHAV3D track Condition Comparison Report: what the "
+        "difference bars show and how to choose condition/levels/facet."
     ),
 }
 
@@ -608,7 +623,7 @@ TRACK_EXEMPLAR_TRACKS = {
 # Level-1 pipeline lists, in display order (matches existing widget order).
 STATE_REPORT_PIPELINES = [
     STATE_DIAGNOSTICS, STATE_COMPOSITION_REPORT, STATE_TRANSITION_REPORT, STATE_FEATURE_HEATMAP,
-    STATE_COMPARISON_REPORT, STATE_CONTACT_ANALYSIS,
+    STATE_COMPARISON_REPORT, STATE_CONTACT_ANALYSIS, STATE_KILLING_REPORT,
 ]
 TRACK_PLOT_PIPELINES = [
     TRACK_DIAGNOSTICS, TRACK_EXEMPLAR_TRACKS, TRACK_FEATURE_HEATMAP, TRACK_PROPORTIONS,

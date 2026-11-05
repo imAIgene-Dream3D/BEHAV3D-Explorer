@@ -9,7 +9,6 @@ import scanpy as sc
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from sklearn.metrics import silhouette_score
-from scipy.stats import chi2_contingency, ttest_rel, wilcoxon
 
 from behav3d.core.h5_access import write_adata
 from behav3d.core.portable_paths import relocate_path
@@ -104,18 +103,6 @@ def _resolve_diagnostics_replicate_col(adata_tracks, replicate_col=None, exclude
     return None
 
 
-def _chi2_group_cluster_test(df, *, cluster_key, group_col):
-    """Chi-square test of independence between cluster membership and group_col."""
-    table = pd.crosstab(df[cluster_key], df[group_col])
-    if table.shape[0] < 2 or table.shape[1] < 2 or table.to_numpy().sum() == 0:
-        return {"n_tracks": int(table.to_numpy().sum()), "chi2": np.nan, "p_value": np.nan, "dof": np.nan, "cramers_v": np.nan}
-    chi2, p, dof, _ = chi2_contingency(table)
-    n = table.to_numpy().sum()
-    min_dim = min(table.shape) - 1
-    cramers_v = float(np.sqrt((chi2 / n) / min_dim)) if min_dim > 0 and n > 0 else np.nan
-    return {"n_tracks": int(n), "chi2": float(chi2), "p_value": float(p), "dof": int(dof), "cramers_v": cramers_v}
-
-
 def _full_replicate_cluster_group_counts(df, *, replicate_col, cluster_key, group_col):
     """Cross-tab of (replicate, cluster, group) counts, with zero-count combinations filled in."""
     full_index = pd.MultiIndex.from_product(
@@ -136,59 +123,6 @@ def _full_replicate_cluster_group_counts(df, *, replicate_col, cluster_key, grou
     denom = counts.groupby([replicate_col, group_col], observed=True)["n_tracks"].transform("sum")
     counts["frac_within_replicate_group"] = np.where(denom > 0, counts["n_tracks"] / denom, 0.0)
     return counts
-
-
-def _paired_group_stats_by_replicate(replicate_group_counts, *, cluster_key, group_col, replicate_col):
-    """For exactly two groups, compare per-cluster group fractions across replicates (paired)."""
-    group_values = sorted(replicate_group_counts[group_col].unique().tolist())
-    if len(group_values) != 2:
-        return None
-    grp_a, grp_b = group_values
-    cluster_order = sorted(
-        replicate_group_counts[cluster_key].unique().tolist(),
-        key=lambda x: (0, int(x)) if str(x).isdigit() else (1, str(x)),
-    )
-
-    rows = []
-    for cluster in cluster_order:
-        pivot = (
-            replicate_group_counts[replicate_group_counts[cluster_key] == cluster]
-            .pivot(index=replicate_col, columns=group_col, values="frac_within_replicate_group")
-            .reindex(columns=group_values, fill_value=0.0)
-        )
-        vals_a = pivot[grp_a].to_numpy(dtype=float)
-        vals_b = pivot[grp_b].to_numpy(dtype=float)
-        n_rep = len(pivot)
-        row = {
-            cluster_key: cluster,
-            "n_replicates": n_rep,
-            f"mean_frac_{grp_a}": float(np.mean(vals_a)) if n_rep > 0 else np.nan,
-            f"mean_frac_{grp_b}": float(np.mean(vals_b)) if n_rep > 0 else np.nan,
-            "mean_diff": float(np.mean(vals_a - vals_b)) if n_rep > 0 else np.nan,
-            "std_diff": float(np.std(vals_a - vals_b, ddof=1)) if n_rep > 1 else np.nan,
-            "paired_ttest_stat": np.nan,
-            "paired_ttest_p": np.nan,
-            "wilcoxon_stat": np.nan,
-            "wilcoxon_p": np.nan,
-        }
-        if n_rep >= 2 and not np.allclose(vals_a, vals_b):
-            try:
-                t_stat, t_p = ttest_rel(vals_a, vals_b)
-                row["paired_ttest_stat"] = float(t_stat)
-                row["paired_ttest_p"] = float(t_p)
-            except Exception:
-                pass
-            try:
-                w_stat, w_p = wilcoxon(vals_a, vals_b)
-                row["wilcoxon_stat"] = float(w_stat)
-                row["wilcoxon_p"] = float(w_p)
-            except Exception:
-                pass
-        rows.append(row)
-    result = pd.DataFrame(rows)
-    result.attrs["group_a"] = grp_a
-    result.attrs["group_b"] = grp_b
-    return result
 
 
 def _save_diagnostics(
@@ -246,10 +180,6 @@ def _save_diagnostics(
     resolved_replicate_col = None
     replicate_group_counts = None
     replicate_group_counts_csv = None
-    chi2_stats = None
-    chi2_stats_csv = None
-    paired_stats = None
-    paired_stats_csv = None
     if resolved_group_col is not None:
         resolved_replicate_col = _resolve_diagnostics_replicate_col(adata_tracks, exclude={resolved_group_col})
     if resolved_group_col is not None and resolved_replicate_col is not None:
@@ -271,33 +201,6 @@ def _save_diagnostics(
             outfolder / f"dtaidistance_cluster_counts_by_{resolved_group_col}_by_{resolved_replicate_col}.csv"
         )
         replicate_group_counts.to_csv(replicate_group_counts_csv, index=False)
-
-        overall_chi2 = _chi2_group_cluster_test(rep_df, cluster_key=cluster_key, group_col=resolved_group_col)
-        overall_chi2["scope"] = "overall"
-        chi2_rows = [overall_chi2]
-        for rep_val, sub in rep_df.groupby(resolved_replicate_col, observed=True):
-            row = _chi2_group_cluster_test(sub, cluster_key=cluster_key, group_col=resolved_group_col)
-            row["scope"] = str(rep_val)
-            chi2_rows.append(row)
-        chi2_stats = pd.DataFrame(chi2_rows)[
-            ["scope", "n_tracks", "chi2", "dof", "p_value", "cramers_v"]
-        ]
-        chi2_stats_csv = (
-            outfolder / f"dtaidistance_{resolved_group_col}_vs_cluster_chi2_by_{resolved_replicate_col}.csv"
-        )
-        chi2_stats.to_csv(chi2_stats_csv, index=False)
-
-        paired_stats = _paired_group_stats_by_replicate(
-            replicate_group_counts,
-            cluster_key=cluster_key,
-            group_col=resolved_group_col,
-            replicate_col=resolved_replicate_col,
-        )
-        if paired_stats is not None:
-            paired_stats_csv = (
-                outfolder / f"dtaidistance_{resolved_group_col}_paired_by_{resolved_replicate_col}.csv"
-            )
-            paired_stats.to_csv(paired_stats_csv, index=False)
 
     medoid_cols = [
         c
@@ -511,46 +414,6 @@ def _save_diagnostics(
                 pdf.savefig(fig, bbox_inches="tight")
                 plt.close(fig)
 
-            if chi2_stats is not None:
-                fig, ax = plt.subplots(figsize=(8.27, 11.69))
-                ax.axis("off")
-                lines = [
-                    f"{resolved_group_col} vs {cluster_key} — chi-square test of independence",
-                    "",
-                ]
-                for _, row in chi2_stats.iterrows():
-                    lines.append(
-                        f"{str(row['scope']):>16s}:  n={int(row['n_tracks'])}, chi2={row['chi2']:.3g}, "
-                        f"dof={row['dof']}, p={row['p_value']:.3g}, Cramer's V={row['cramers_v']:.3g}"
-                    )
-                if paired_stats is not None and len(paired_stats) > 0:
-                    grp_a = paired_stats.attrs.get("group_a", "group_a")
-                    grp_b = paired_stats.attrs.get("group_b", "group_b")
-                    max_n_rep = int(paired_stats["n_replicates"].max())
-                    lines += [
-                        "",
-                        f"Paired comparison across {resolved_replicate_col} ({grp_a} vs {grp_b}, "
-                        "fraction of that well's population per cluster):",
-                        "",
-                    ]
-                    for _, row in paired_stats.iterrows():
-                        lines.append(
-                            f"{str(cluster_key)} {row[cluster_key]}: "
-                            f"mean {grp_a}={row[f'mean_frac_{grp_a}']:.3f}, "
-                            f"mean {grp_b}={row[f'mean_frac_{grp_b}']:.3f}, "
-                            f"diff={row['mean_diff']:.3f}, "
-                            f"paired-t p={row['paired_ttest_p']:.3g}, wilcoxon p={row['wilcoxon_p']:.3g}"
-                        )
-                    lines += [
-                        "",
-                        f"Caveat: only {max_n_rep} replicate(s) ({resolved_replicate_col}) available — "
-                        "treat these p-values as indicative, not confirmatory.",
-                    ]
-                ax.text(0.02, 0.98, "\n".join(lines), va="top", ha="left", fontsize=9, family="monospace")
-                fig.tight_layout()
-                pdf.savefig(fig, bbox_inches="tight")
-                plt.close(fig)
-
         n = distances.shape[0]
         if n > 0:
             rng = np.random.default_rng(int(random_state))
@@ -583,8 +446,6 @@ def _save_diagnostics(
         "cluster_counts_by_group_by_replicate_csv": (
             str(replicate_group_counts_csv) if replicate_group_counts_csv is not None else None
         ),
-        "group_vs_cluster_chi2_csv": str(chi2_stats_csv) if chi2_stats_csv is not None else None,
-        "group_paired_by_replicate_csv": str(paired_stats_csv) if paired_stats_csv is not None else None,
     }
 
 

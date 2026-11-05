@@ -443,9 +443,7 @@ def _compact_experiment_config(config: dict) -> dict:
                 item["contact"] = compact
         duration = settings.get("contact_duration")
         if isinstance(duration, dict):
-            keys = ["test_mode", "long_contact_unit", "long_contact_threshold"]
-            if str(duration.get("test_mode") or "").lower().startswith("paired"):
-                keys.append("pairing_cols")
+            keys = ["long_contact_unit", "long_contact_threshold"]
             compact = {
                 key: _json_value(duration[key]) for key in keys if key in duration
             }

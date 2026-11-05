@@ -14,8 +14,7 @@ from behav3d.analysis.behavior.general.visualization.plots.proportion_bars impor
     compute_class_by_stack_proportions,
     draw_stacked_proportion_barv,
     draw_diff_barh,
-    SIGNIFICANCE_LEGEND_TEXT,
-    _welch_diff_rows,
+    _class_diff_rows,
 )
 from behav3d.analysis.behavior.state.visualization.plots.state_composition import (
     compute_relative_state_time_matrix,
@@ -82,7 +81,6 @@ def _plot_contact_state_shift_page(
     ax_header = fig.add_subplot(outer[0, :])
     ax_header.axis("off")
     ax_header.text(0.0, 0.5, params_text, ha="left", va="center", fontsize=8, family="monospace")
-    ax_header.text(1.0, 0.5, SIGNIFICANCE_LEGEND_TEXT, ha="right", va="center", fontsize=8)
 
     long_rows = []
 
@@ -104,20 +102,20 @@ def _plot_contact_state_shift_page(
         after_df = group_fractions[group_fractions["period"] == AFTER_LABEL][state_order]
 
         if len(before_df) > 0 and len(after_df) > 0:
-            diff_rows = _welch_diff_rows(state_order, before_df, after_df)
+            diff_rows = _class_diff_rows(state_order, before_df, after_df)
             diff_df = pd.DataFrame(diff_rows)
             draw_diff_barh(ax, state_order, diff_df, colors)
             for row in diff_rows:
                 long_rows.append({
                     "panel": "diff_bar", "contact_group": group, "state": row["class"],
                     "mean_before": row["mean_a"], "mean_after": row["mean_b"],
-                    "diff": row["diff"], "t_stat": row["t_stat"], "p_value": row["p_value"],
-                    "stars": row["stars"], "n_before": row["n_a"], "n_after": row["n_b"],
+                    "diff": row["diff"], "se_diff": row["se_diff"],
+                    "n_before": row["n_a"], "n_after": row["n_b"],
                 })
         else:
             ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
             ax.axis("off")
-        ax.set_title(f"{_CONTACT_GROUP_TITLES[group]}\nBefore → After state change", fontsize=10)
+        ax.set_title(f"{_CONTACT_GROUP_TITLES[group]}\nBefore → After state change (whisker = SEM)", fontsize=10)
 
         ax2 = fig.add_subplot(outer[3, c])
         state_tp = state_timepoints_df[state_timepoints_df["contact_group"] == group]

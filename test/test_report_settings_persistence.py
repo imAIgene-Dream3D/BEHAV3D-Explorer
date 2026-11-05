@@ -106,7 +106,73 @@ def test_track_report_settings_saved_and_restored():
         assert tab3.spin_transanalysis_gamma.value() == 2.0
 
 
+def _state_tab(params, out_dir, cell_type="tcells"):
+    from behav3d.napari._single_cell import StateClassificationSubTab
+    loader = SimpleNamespace(output_dir=str(out_dir), behav3d_parameters=params, metadata=None)
+    return StateClassificationSubTab(
+        viewer=None, metadata_loader=loader, cell_type_getter=lambda: cell_type
+    )
+
+
+def test_auto_node_order_saved_restored_and_on_for_older_projects():
+    _app()
+    for make_tab, checkbox in (
+        (_state_tab, "chk_state_transition_auto_order"),
+        (_track_tab, "chk_transanalysis_auto_order"),
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            tab = make_tab({}, out)
+            assert getattr(tab, checkbox).isChecked()
+            getattr(tab, checkbox).setChecked(False)
+            tab._persist_report_settings("tcells", "transition")
+
+            saved = yaml.safe_load((out / "behav3d_parameters.yml").read_text())
+            assert saved[tab._REPORT_SECTION]["tcells"]["transition"]["auto_node_order"] is False
+
+            reloaded = make_tab(saved, out)
+            reloaded._queue_report_settings_restore("tcells")
+            reloaded._apply_pending_report_settings()
+            assert not getattr(reloaded, checkbox).isChecked()
+
+            # Settings saved before this option existed leave it at its default.
+            del saved[tab._REPORT_SECTION]["tcells"]["transition"]["auto_node_order"]
+            older = make_tab(saved, out)
+            older._queue_report_settings_restore("tcells")
+            older._apply_pending_report_settings()
+            assert getattr(older, checkbox).isChecked()
+
+
+def test_node_order_restored_once_the_data_is_loaded():
+    _app()
+    import anndata as ad
+    import pandas as pd
+
+    obs = pd.DataFrame({"ClusterID": list("abc")}, index=list("123"))
+    adata = ad.AnnData(obs=obs)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        tab = _track_tab({}, out)
+        tab._refresh_transition_node_order(adata, "ClusterID")
+        tab.transition_node_order.set_order(list("cab"))
+        tab._persist_report_settings("tcells", "transition")
+
+        saved = yaml.safe_load((out / "behav3d_parameters.yml").read_text())
+        assert saved["track_reports"]["tcells"]["transition"]["node_order"] == list("cab")
+
+        reloaded = _track_tab(saved, out)
+        reloaded._queue_report_settings_restore("tcells")
+        reloaded._apply_pending_report_settings()  # nothing to order yet: must wait, not lose it
+        assert reloaded.transition_node_order.order() == []
+        reloaded._refresh_transition_node_order(adata, "ClusterID")
+        assert reloaded.transition_node_order.order() == list("abc")
+        reloaded._apply_pending_report_settings()
+        assert reloaded.transition_node_order.order() == list("cab")
+
+
 if __name__ == "__main__":
     test_widget_value_round_trip()
     test_track_report_settings_saved_and_restored()
+    test_auto_node_order_saved_restored_and_on_for_older_projects()
+    test_node_order_restored_once_the_data_is_loaded()
     print("ok")
