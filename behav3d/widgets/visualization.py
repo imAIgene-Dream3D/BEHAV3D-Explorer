@@ -6,8 +6,7 @@ import traceback
 import fnmatch
 from copy import deepcopy
 from .utils import (
-    _cfg_get, 
-    _DEFAULT_CONFIG,
+    _cfg_get,
     spinning_loader
 )
 from behav3d.analysis.backprojection import (

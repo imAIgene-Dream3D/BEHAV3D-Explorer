@@ -1,5 +1,45 @@
 [
   {
+    "key": "zarr_conversion",
+    "title": "zarr_conversion",
+    "step": "zarr_conversion",
+    "category": null,
+    "type": "dict",
+    "default": {},
+    "choices": null,
+    "description": "BEHAV3D parameter 'zarr_conversion' (type dict, default {})."
+  },
+  {
+    "key": "timepoint_range.enabled",
+    "title": "enabled",
+    "step": "filtering",
+    "category": null,
+    "type": "bool",
+    "default": false,
+    "choices": null,
+    "description": "Whether to restrict the analysis to an absolute timepoint window before any other filter runs. Global: it applies to every cell type, because cross-cell-type analyses break silently when cell types cover different spans."
+  },
+  {
+    "key": "timepoint_range.start",
+    "title": "start",
+    "step": "filtering",
+    "category": null,
+    "type": "int",
+    "default": 0,
+    "choices": null,
+    "description": "First timepoint to keep (inclusive) when the timepoint-range restriction is enabled."
+  },
+  {
+    "key": "timepoint_range.end",
+    "title": "end",
+    "step": "filtering",
+    "category": null,
+    "type": "int",
+    "default": 0,
+    "choices": null,
+    "description": "Last timepoint to keep (inclusive) when the timepoint-range restriction is enabled."
+  },
+  {
     "key": "seed",
     "title": "seed",
     "step": "general",
@@ -55,179 +95,6 @@
       "YX"
     ],
     "description": "Dimension order of the raw images (e.g. TCZYX = time, channel, z, y, x). Used to interpret every input image unless overridden per sample."
-  },
-  {
-    "key": "signal_unmixing.sink_channel",
-    "title": "sink_channel",
-    "step": "preprocessing",
-    "category": null,
-    "type": "int",
-    "default": 2,
-    "choices": null,
-    "description": "BEHAV3D parameter 'signal_unmixing.sink_channel' (type int, default 2)."
-  },
-  {
-    "key": "signal_unmixing.source_channels",
-    "title": "source_channels",
-    "step": "preprocessing",
-    "category": null,
-    "type": "str",
-    "default": "0, 1",
-    "choices": null,
-    "description": "BEHAV3D parameter 'signal_unmixing.source_channels' (type str, default '0, 1')."
-  },
-  {
-    "key": "signal_unmixing.train_z",
-    "title": "train_z",
-    "step": "preprocessing",
-    "category": null,
-    "type": "str",
-    "default": "4,5,6",
-    "choices": null,
-    "description": "BEHAV3D parameter 'signal_unmixing.train_z' (type str, default '4,5,6')."
-  },
-  {
-    "key": "signal_unmixing.train_t",
-    "title": "train_t",
-    "step": "preprocessing",
-    "category": null,
-    "type": "str",
-    "default": "1,3,6",
-    "choices": null,
-    "description": "BEHAV3D parameter 'signal_unmixing.train_t' (type str, default '1,3,6')."
-  },
-  {
-    "key": "signal_unmixing.bg_percentile",
-    "title": "bg_percentile",
-    "step": "preprocessing",
-    "category": null,
-    "type": "int",
-    "default": 1,
-    "choices": null,
-    "description": "BEHAV3D parameter 'signal_unmixing.bg_percentile' (type int, default 1)."
-  },
-  {
-    "key": "signal_unmixing.median_size",
-    "title": "median_size",
-    "step": "preprocessing",
-    "category": null,
-    "type": "int",
-    "default": 3,
-    "choices": null,
-    "description": "BEHAV3D parameter 'signal_unmixing.median_size' (type int, default 3)."
-  },
-  {
-    "key": "signal_unmixing.gaussian_sigma",
-    "title": "gaussian_sigma",
-    "step": "preprocessing",
-    "category": null,
-    "type": "int",
-    "default": 4,
-    "choices": null,
-    "description": "BEHAV3D parameter 'signal_unmixing.gaussian_sigma' (type int, default 4)."
-  },
-  {
-    "key": "signal_unmixing.visualize_napari",
-    "title": "visualize_napari",
-    "step": "preprocessing",
-    "category": null,
-    "type": "bool",
-    "default": true,
-    "choices": null,
-    "description": "BEHAV3D parameter 'signal_unmixing.visualize_napari' (type bool, default True)."
-  },
-  {
-    "key": "signal_unmixing.training_log",
-    "title": "training_log",
-    "step": "preprocessing",
-    "category": null,
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'signal_unmixing.training_log' (type bool, default False)."
-  },
-  {
-    "key": "signal_unmixing.timepoints",
-    "title": "timepoints",
-    "step": "preprocessing",
-    "category": null,
-    "type": "int",
-    "default": 0,
-    "choices": null,
-    "description": "BEHAV3D parameter 'signal_unmixing.timepoints' (type int, default 0)."
-  },
-  {
-    "key": "signal_unmixing.use_all_timepoints",
-    "title": "use_all_timepoints",
-    "step": "preprocessing",
-    "category": null,
-    "type": "bool",
-    "default": true,
-    "choices": null,
-    "description": "Process every timepoint. Disable to restrict to a [tp_start, tp_end] range."
-  },
-  {
-    "key": "signal_unmixing.use_range",
-    "title": "use_range",
-    "step": "preprocessing",
-    "category": null,
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'signal_unmixing.use_range' (type bool, default False)."
-  },
-  {
-    "key": "signal_unmixing.start_t",
-    "title": "start_t",
-    "step": "preprocessing",
-    "category": null,
-    "type": "int",
-    "default": 0,
-    "choices": null,
-    "description": "BEHAV3D parameter 'signal_unmixing.start_t' (type int, default 0)."
-  },
-  {
-    "key": "signal_unmixing.end_t",
-    "title": "end_t",
-    "step": "preprocessing",
-    "category": null,
-    "type": "int",
-    "default": 0,
-    "choices": null,
-    "description": "BEHAV3D parameter 'signal_unmixing.end_t' (type int, default 0)."
-  },
-  {
-    "key": "signal_unmixing.use_unmix_path",
-    "title": "use_unmix_path",
-    "step": "preprocessing",
-    "category": null,
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'signal_unmixing.use_unmix_path' (type bool, default False)."
-  },
-  {
-    "key": "signal_unmixing.channel_colors",
-    "title": "channel_colors",
-    "step": "preprocessing",
-    "category": null,
-    "type": "list",
-    "default": [
-      "cyan",
-      "yellow",
-      "red",
-      "green",
-      "magenta",
-      "blue",
-      "gray",
-      "turbo",
-      "viridis",
-      "plasma",
-      "inferno",
-      "twilight"
-    ],
-    "choices": null,
-    "description": "BEHAV3D parameter 'signal_unmixing.channel_colors' (type list, default ['cyan', 'yellow', 'red', 'green', 'magenta', 'blue', 'gray', 'turbo', 'viridis', 'plasma', 'inferno', 'twilight'])."
   },
   {
     "key": "pixel_classifier.examples_per_sample",
@@ -1408,69 +1275,6 @@
     "description": "btrack time threshold (frames) for candidate links."
   },
   {
-    "key": "tracking_visualization.sample_name",
-    "title": "sample_name",
-    "step": "visualization",
-    "category": null,
-    "type": "none",
-    "default": null,
-    "choices": null,
-    "description": "BEHAV3D parameter 'tracking_visualization.sample_name' (type none, default None)."
-  },
-  {
-    "key": "tracking_visualization.use_range",
-    "title": "use_range",
-    "step": "visualization",
-    "category": null,
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'tracking_visualization.use_range' (type bool, default False)."
-  },
-  {
-    "key": "tracking_visualization.start_t",
-    "title": "start_t",
-    "step": "visualization",
-    "category": null,
-    "type": "int",
-    "default": 0,
-    "choices": null,
-    "description": "BEHAV3D parameter 'tracking_visualization.start_t' (type int, default 0)."
-  },
-  {
-    "key": "tracking_visualization.end_t",
-    "title": "end_t",
-    "step": "visualization",
-    "category": null,
-    "type": "int",
-    "default": 0,
-    "choices": null,
-    "description": "BEHAV3D parameter 'tracking_visualization.end_t' (type int, default 0)."
-  },
-  {
-    "key": "tracking_visualization.channel_colors",
-    "title": "channel_colors",
-    "step": "visualization",
-    "category": null,
-    "type": "list",
-    "default": [
-      "cyan",
-      "yellow",
-      "red",
-      "green",
-      "magenta",
-      "blue",
-      "gray",
-      "turbo",
-      "viridis",
-      "plasma",
-      "inferno",
-      "twilight"
-    ],
-    "choices": null,
-    "description": "BEHAV3D parameter 'tracking_visualization.channel_colors' (type list, default ['cyan', 'yellow', 'red', 'green', 'magenta', 'blue', 'gray', 'turbo', 'viridis', 'plasma', 'inferno', 'twilight'])."
-  },
-  {
     "key": "features.immune.features_choice",
     "title": "features_choice",
     "step": "feature_extraction",
@@ -1604,6 +1408,16 @@
     "description": "Re-run and overwrite existing outputs instead of skipping completed samples."
   },
   {
+    "key": "track_filtering.immune.first_timepoint_from_range",
+    "title": "first_timepoint_from_range",
+    "step": "filtering",
+    "category": "immune",
+    "type": "bool",
+    "default": false,
+    "choices": null,
+    "description": "Per cell type. When a timepoint range is active, measure the min-size and dead first-timepoint filters at each track's first timepoint inside the range instead of its first frame of the whole movie. While off, those two filters are disabled."
+  },
+  {
     "key": "track_filtering.immune.exp_duration",
     "title": "exp_duration",
     "step": "filtering",
@@ -1662,6 +1476,16 @@
     "default": true,
     "choices": null,
     "description": "Whether the maximum-track-length filter is active."
+  },
+  {
+    "key": "track_filtering.organoid.first_timepoint_from_range",
+    "title": "first_timepoint_from_range",
+    "step": "filtering",
+    "category": "organoid",
+    "type": "bool",
+    "default": false,
+    "choices": null,
+    "description": "Per cell type. When a timepoint range is active, measure the min-size and dead first-timepoint filters at each track's first timepoint inside the range instead of its first frame of the whole movie. While off, those two filters are disabled."
   },
   {
     "key": "track_filtering.organoid.exp_duration_enabled",
@@ -1724,6 +1548,16 @@
     "description": "Trim retained tracks to this common length for analyses that require uniform trajectory windows."
   },
   {
+    "key": "track_filtering.other.first_timepoint_from_range",
+    "title": "first_timepoint_from_range",
+    "step": "filtering",
+    "category": "other",
+    "type": "bool",
+    "default": false,
+    "choices": null,
+    "description": "Per cell type. When a timepoint range is active, measure the min-size and dead first-timepoint filters at each track's first timepoint inside the range instead of its first frame of the whole movie. While off, those two filters are disabled."
+  },
+  {
     "key": "track_filtering.other.exp_duration",
     "title": "exp_duration",
     "step": "filtering",
@@ -1784,651 +1618,6 @@
     "description": "Whether the maximum-track-length filter is active."
   },
   {
-    "key": "analysis.immune.seed",
-    "title": "seed",
-    "step": "analysis",
-    "category": "immune",
-    "type": "int",
-    "default": 42,
-    "choices": null,
-    "description": "Random seed for reproducible clustering / UMAP / sampling."
-  },
-  {
-    "key": "analysis.immune.umap_min_dist",
-    "title": "umap_min_dist",
-    "step": "analysis",
-    "category": "immune",
-    "type": "float",
-    "default": 0.1,
-    "choices": null,
-    "description": "UMAP min_dist: lower packs clusters tighter, higher spreads points out (0\u20131)."
-  },
-  {
-    "key": "analysis.immune.umap_n_neighbors",
-    "title": "umap_n_neighbors",
-    "step": "analysis",
-    "category": "immune",
-    "type": "int",
-    "default": 15,
-    "choices": null,
-    "description": "UMAP neighbourhood size: low = local structure, high = global structure."
-  },
-  {
-    "key": "analysis.immune.nr_of_clusters",
-    "title": "nr_of_clusters",
-    "step": "analysis",
-    "category": "immune",
-    "type": "int",
-    "default": 5,
-    "choices": null,
-    "description": "Number of behavioural clusters to extract."
-  },
-  {
-    "key": "analysis.immune.feature_scaling_preset",
-    "title": "feature_scaling_preset",
-    "step": "analysis",
-    "category": "immune",
-    "type": "none",
-    "default": null,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.immune.feature_scaling_preset' (type none, default None)."
-  },
-  {
-    "key": "analysis.immune.min_track_length_enabled",
-    "title": "min_track_length_enabled",
-    "step": "analysis",
-    "category": "immune",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "Whether the minimum-track-length filter is active."
-  },
-  {
-    "key": "analysis.immune.min_track_length",
-    "title": "min_track_length",
-    "step": "analysis",
-    "category": "immune",
-    "type": "int",
-    "default": 1,
-    "choices": null,
-    "description": "Optionally discard tracks shorter than this many timepoints. State analysis supports unequal lengths, but removing short tracks can reduce noise and computation."
-  },
-  {
-    "key": "analysis.immune.max_track_length_enabled",
-    "title": "max_track_length_enabled",
-    "step": "analysis",
-    "category": "immune",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "Whether the maximum-track-length filter is active."
-  },
-  {
-    "key": "analysis.immune.max_track_length",
-    "title": "max_track_length",
-    "step": "analysis",
-    "category": "immune",
-    "type": "int",
-    "default": 999999,
-    "choices": null,
-    "description": "Trim retained tracks to this common length for analyses that require uniform trajectory windows."
-  },
-  {
-    "key": "analysis.immune.feature_dtw_napari_backprojection_workers",
-    "title": "feature_dtw_napari_backprojection_workers",
-    "step": "analysis",
-    "category": "immune",
-    "type": "int",
-    "default": 4,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.immune.feature_dtw_napari_backprojection_workers' (type int, default 4)."
-  },
-  {
-    "key": "analysis.immune.dtw_feature_groups_enabled.morphology",
-    "title": "morphology",
-    "step": "analysis",
-    "category": "immune",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.immune.dtw_feature_groups_enabled.morphology' (type bool, default False)."
-  },
-  {
-    "key": "analysis.immune.dtw_feature_groups_enabled.movement",
-    "title": "movement",
-    "step": "analysis",
-    "category": "immune",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.immune.dtw_feature_groups_enabled.movement' (type bool, default False)."
-  },
-  {
-    "key": "analysis.immune.dtw_feature_groups_enabled.intensity",
-    "title": "intensity",
-    "step": "analysis",
-    "category": "immune",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.immune.dtw_feature_groups_enabled.intensity' (type bool, default False)."
-  },
-  {
-    "key": "analysis.immune.dtw_feature_groups_enabled.death",
-    "title": "death",
-    "step": "analysis",
-    "category": "immune",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.immune.dtw_feature_groups_enabled.death' (type bool, default False)."
-  },
-  {
-    "key": "analysis.immune.dtw_feature_groups_enabled.contact",
-    "title": "contact",
-    "step": "analysis",
-    "category": "immune",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.immune.dtw_feature_groups_enabled.contact' (type bool, default False)."
-  },
-  {
-    "key": "analysis.immune.dtw_features_input",
-    "title": "dtw_features_input",
-    "step": "analysis",
-    "category": "immune",
-    "type": "list",
-    "default": [],
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.immune.dtw_features_input' (type list, default [])."
-  },
-  {
-    "key": "analysis.immune.dtw_features_resolved",
-    "title": "dtw_features_resolved",
-    "step": "analysis",
-    "category": "immune",
-    "type": "list",
-    "default": [],
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.immune.dtw_features_resolved' (type list, default [])."
-  },
-  {
-    "key": "analysis.immune.z_normalize",
-    "title": "z_normalize",
-    "step": "analysis",
-    "category": "immune",
-    "type": "dict",
-    "default": {},
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.immune.z_normalize' (type dict, default {})."
-  },
-  {
-    "key": "analysis.organoid.seed",
-    "title": "seed",
-    "step": "analysis",
-    "category": "organoid",
-    "type": "int",
-    "default": 42,
-    "choices": null,
-    "description": "Random seed for reproducible clustering / UMAP / sampling."
-  },
-  {
-    "key": "analysis.organoid.umap_min_dist",
-    "title": "umap_min_dist",
-    "step": "analysis",
-    "category": "organoid",
-    "type": "float",
-    "default": 0.1,
-    "choices": null,
-    "description": "UMAP min_dist: lower packs clusters tighter, higher spreads points out (0\u20131)."
-  },
-  {
-    "key": "analysis.organoid.umap_n_neighbors",
-    "title": "umap_n_neighbors",
-    "step": "analysis",
-    "category": "organoid",
-    "type": "int",
-    "default": 15,
-    "choices": null,
-    "description": "UMAP neighbourhood size: low = local structure, high = global structure."
-  },
-  {
-    "key": "analysis.organoid.nr_of_clusters",
-    "title": "nr_of_clusters",
-    "step": "analysis",
-    "category": "organoid",
-    "type": "int",
-    "default": 3,
-    "choices": null,
-    "description": "Number of behavioural clusters to extract."
-  },
-  {
-    "key": "analysis.organoid.feature_scaling_preset",
-    "title": "feature_scaling_preset",
-    "step": "analysis",
-    "category": "organoid",
-    "type": "none",
-    "default": null,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.organoid.feature_scaling_preset' (type none, default None)."
-  },
-  {
-    "key": "analysis.organoid.min_track_length_enabled",
-    "title": "min_track_length_enabled",
-    "step": "analysis",
-    "category": "organoid",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "Whether the minimum-track-length filter is active."
-  },
-  {
-    "key": "analysis.organoid.min_track_length",
-    "title": "min_track_length",
-    "step": "analysis",
-    "category": "organoid",
-    "type": "int",
-    "default": 1,
-    "choices": null,
-    "description": "Optionally discard tracks shorter than this many timepoints. State analysis supports unequal lengths, but removing short tracks can reduce noise and computation."
-  },
-  {
-    "key": "analysis.organoid.max_track_length_enabled",
-    "title": "max_track_length_enabled",
-    "step": "analysis",
-    "category": "organoid",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "Whether the maximum-track-length filter is active."
-  },
-  {
-    "key": "analysis.organoid.max_track_length",
-    "title": "max_track_length",
-    "step": "analysis",
-    "category": "organoid",
-    "type": "int",
-    "default": 999999,
-    "choices": null,
-    "description": "Trim retained tracks to this common length for analyses that require uniform trajectory windows."
-  },
-  {
-    "key": "analysis.organoid.feature_dtw_napari_backprojection_workers",
-    "title": "feature_dtw_napari_backprojection_workers",
-    "step": "analysis",
-    "category": "organoid",
-    "type": "int",
-    "default": 4,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.organoid.feature_dtw_napari_backprojection_workers' (type int, default 4)."
-  },
-  {
-    "key": "analysis.organoid.dtw_feature_groups_enabled.morphology",
-    "title": "morphology",
-    "step": "analysis",
-    "category": "organoid",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.organoid.dtw_feature_groups_enabled.morphology' (type bool, default False)."
-  },
-  {
-    "key": "analysis.organoid.dtw_feature_groups_enabled.movement",
-    "title": "movement",
-    "step": "analysis",
-    "category": "organoid",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.organoid.dtw_feature_groups_enabled.movement' (type bool, default False)."
-  },
-  {
-    "key": "analysis.organoid.dtw_feature_groups_enabled.intensity",
-    "title": "intensity",
-    "step": "analysis",
-    "category": "organoid",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.organoid.dtw_feature_groups_enabled.intensity' (type bool, default False)."
-  },
-  {
-    "key": "analysis.organoid.dtw_feature_groups_enabled.death",
-    "title": "death",
-    "step": "analysis",
-    "category": "organoid",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.organoid.dtw_feature_groups_enabled.death' (type bool, default False)."
-  },
-  {
-    "key": "analysis.organoid.dtw_feature_groups_enabled.contact",
-    "title": "contact",
-    "step": "analysis",
-    "category": "organoid",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.organoid.dtw_feature_groups_enabled.contact' (type bool, default False)."
-  },
-  {
-    "key": "analysis.organoid.dtw_features_input",
-    "title": "dtw_features_input",
-    "step": "analysis",
-    "category": "organoid",
-    "type": "list",
-    "default": [],
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.organoid.dtw_features_input' (type list, default [])."
-  },
-  {
-    "key": "analysis.organoid.dtw_features_resolved",
-    "title": "dtw_features_resolved",
-    "step": "analysis",
-    "category": "organoid",
-    "type": "list",
-    "default": [],
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.organoid.dtw_features_resolved' (type list, default [])."
-  },
-  {
-    "key": "analysis.organoid.z_normalize",
-    "title": "z_normalize",
-    "step": "analysis",
-    "category": "organoid",
-    "type": "dict",
-    "default": {},
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.organoid.z_normalize' (type dict, default {})."
-  },
-  {
-    "key": "analysis.other.seed",
-    "title": "seed",
-    "step": "analysis",
-    "category": "other",
-    "type": "int",
-    "default": 42,
-    "choices": null,
-    "description": "Random seed for reproducible clustering / UMAP / sampling."
-  },
-  {
-    "key": "analysis.other.umap_min_dist",
-    "title": "umap_min_dist",
-    "step": "analysis",
-    "category": "other",
-    "type": "float",
-    "default": 0.1,
-    "choices": null,
-    "description": "UMAP min_dist: lower packs clusters tighter, higher spreads points out (0\u20131)."
-  },
-  {
-    "key": "analysis.other.umap_n_neighbors",
-    "title": "umap_n_neighbors",
-    "step": "analysis",
-    "category": "other",
-    "type": "int",
-    "default": 15,
-    "choices": null,
-    "description": "UMAP neighbourhood size: low = local structure, high = global structure."
-  },
-  {
-    "key": "analysis.other.nr_of_clusters",
-    "title": "nr_of_clusters",
-    "step": "analysis",
-    "category": "other",
-    "type": "int",
-    "default": 5,
-    "choices": null,
-    "description": "Number of behavioural clusters to extract."
-  },
-  {
-    "key": "analysis.other.feature_scaling_preset",
-    "title": "feature_scaling_preset",
-    "step": "analysis",
-    "category": "other",
-    "type": "none",
-    "default": null,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.other.feature_scaling_preset' (type none, default None)."
-  },
-  {
-    "key": "analysis.other.min_track_length_enabled",
-    "title": "min_track_length_enabled",
-    "step": "analysis",
-    "category": "other",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "Whether the minimum-track-length filter is active."
-  },
-  {
-    "key": "analysis.other.min_track_length",
-    "title": "min_track_length",
-    "step": "analysis",
-    "category": "other",
-    "type": "int",
-    "default": 1,
-    "choices": null,
-    "description": "Optionally discard tracks shorter than this many timepoints. State analysis supports unequal lengths, but removing short tracks can reduce noise and computation."
-  },
-  {
-    "key": "analysis.other.max_track_length_enabled",
-    "title": "max_track_length_enabled",
-    "step": "analysis",
-    "category": "other",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "Whether the maximum-track-length filter is active."
-  },
-  {
-    "key": "analysis.other.max_track_length",
-    "title": "max_track_length",
-    "step": "analysis",
-    "category": "other",
-    "type": "int",
-    "default": 999999,
-    "choices": null,
-    "description": "Trim retained tracks to this common length for analyses that require uniform trajectory windows."
-  },
-  {
-    "key": "analysis.other.feature_dtw_napari_backprojection_workers",
-    "title": "feature_dtw_napari_backprojection_workers",
-    "step": "analysis",
-    "category": "other",
-    "type": "int",
-    "default": 4,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.other.feature_dtw_napari_backprojection_workers' (type int, default 4)."
-  },
-  {
-    "key": "analysis.other.dtw_feature_groups_enabled.morphology",
-    "title": "morphology",
-    "step": "analysis",
-    "category": "other",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.other.dtw_feature_groups_enabled.morphology' (type bool, default False)."
-  },
-  {
-    "key": "analysis.other.dtw_feature_groups_enabled.movement",
-    "title": "movement",
-    "step": "analysis",
-    "category": "other",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.other.dtw_feature_groups_enabled.movement' (type bool, default False)."
-  },
-  {
-    "key": "analysis.other.dtw_feature_groups_enabled.intensity",
-    "title": "intensity",
-    "step": "analysis",
-    "category": "other",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.other.dtw_feature_groups_enabled.intensity' (type bool, default False)."
-  },
-  {
-    "key": "analysis.other.dtw_feature_groups_enabled.death",
-    "title": "death",
-    "step": "analysis",
-    "category": "other",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.other.dtw_feature_groups_enabled.death' (type bool, default False)."
-  },
-  {
-    "key": "analysis.other.dtw_feature_groups_enabled.contact",
-    "title": "contact",
-    "step": "analysis",
-    "category": "other",
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.other.dtw_feature_groups_enabled.contact' (type bool, default False)."
-  },
-  {
-    "key": "analysis.other.dtw_features_input",
-    "title": "dtw_features_input",
-    "step": "analysis",
-    "category": "other",
-    "type": "list",
-    "default": [],
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.other.dtw_features_input' (type list, default [])."
-  },
-  {
-    "key": "analysis.other.dtw_features_resolved",
-    "title": "dtw_features_resolved",
-    "step": "analysis",
-    "category": "other",
-    "type": "list",
-    "default": [],
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.other.dtw_features_resolved' (type list, default [])."
-  },
-  {
-    "key": "analysis.other.z_normalize",
-    "title": "z_normalize",
-    "step": "analysis",
-    "category": "other",
-    "type": "dict",
-    "default": {},
-    "choices": null,
-    "description": "BEHAV3D parameter 'analysis.other.z_normalize' (type dict, default {})."
-  },
-  {
-    "key": "backprojection.mode",
-    "title": "mode",
-    "step": "analysis",
-    "category": null,
-    "type": "str",
-    "default": "mean",
-    "choices": [
-      "mean",
-      "max",
-      "median",
-      "sum"
-    ],
-    "description": "BEHAV3D parameter 'backprojection.mode' (type str, default 'mean')."
-  },
-  {
-    "key": "backprojection.save",
-    "title": "save",
-    "step": "analysis",
-    "category": null,
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'backprojection.save' (type bool, default False)."
-  },
-  {
-    "key": "backprojection.last_sample",
-    "title": "last_sample",
-    "step": "analysis",
-    "category": null,
-    "type": "none",
-    "default": null,
-    "choices": null,
-    "description": "BEHAV3D parameter 'backprojection.last_sample' (type none, default None)."
-  },
-  {
-    "key": "backprojection.feature_groups_enabled.morphology",
-    "title": "morphology",
-    "step": "analysis",
-    "category": null,
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'backprojection.feature_groups_enabled.morphology' (type bool, default False)."
-  },
-  {
-    "key": "backprojection.feature_groups_enabled.movement",
-    "title": "movement",
-    "step": "analysis",
-    "category": null,
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'backprojection.feature_groups_enabled.movement' (type bool, default False)."
-  },
-  {
-    "key": "backprojection.feature_groups_enabled.intensity",
-    "title": "intensity",
-    "step": "analysis",
-    "category": null,
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'backprojection.feature_groups_enabled.intensity' (type bool, default False)."
-  },
-  {
-    "key": "backprojection.feature_groups_enabled.death",
-    "title": "death",
-    "step": "analysis",
-    "category": null,
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'backprojection.feature_groups_enabled.death' (type bool, default False)."
-  },
-  {
-    "key": "backprojection.feature_groups_enabled.contact",
-    "title": "contact",
-    "step": "analysis",
-    "category": null,
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'backprojection.feature_groups_enabled.contact' (type bool, default False)."
-  },
-  {
-    "key": "backprojection.columns_input",
-    "title": "columns_input",
-    "step": "analysis",
-    "category": null,
-    "type": "list",
-    "default": [],
-    "choices": null,
-    "description": "BEHAV3D parameter 'backprojection.columns_input' (type list, default [])."
-  },
-  {
-    "key": "backprojection.columns_resolved",
-    "title": "columns_resolved",
-    "step": "analysis",
-    "category": null,
-    "type": "list",
-    "default": [],
-    "choices": null,
-    "description": "BEHAV3D parameter 'backprojection.columns_resolved' (type list, default [])."
-  },
-  {
     "key": "active_killing.observation_window",
     "title": "observation_window",
     "step": "feature_extraction",
@@ -2452,6 +1641,16 @@
     "description": "Death or reporter signal. Dead-mask pixel count with an absolute threshold is the general default; percentage assumes comparable target sizes, and mean intensity suits diffuse reporters."
   },
   {
+    "key": "active_killing.persistent_death_signal",
+    "title": "persistent_death_signal",
+    "step": "feature_extraction",
+    "category": null,
+    "type": "bool",
+    "default": true,
+    "choices": null,
+    "description": "Reads each target's death signal as a running maximum over its track before scoring, so segmentation flicker (a dead-mask segment dropping in/out of frame) can't be misread as a target un-dying. Turn off only to inspect the raw, possibly non-monotonic signal."
+  },
+  {
     "key": "active_killing.killing_threshold_multiplier",
     "title": "killing_threshold_multiplier",
     "step": "feature_extraction",
@@ -2470,6 +1669,16 @@
     "default": 1,
     "choices": null,
     "description": "Minimum effector-target contact timepoints required for active killing. Choose it from biological plausibility and acquisition cadence."
+  },
+  {
+    "key": "active_killing.contact_column",
+    "title": "contact_column",
+    "step": "feature_extraction",
+    "category": null,
+    "type": "str",
+    "default": "contact",
+    "choices": null,
+    "description": "BEHAV3D parameter 'active_killing.contact_column' (type str, default 'contact')."
   },
   {
     "key": "active_killing.use_absolute_threshold",
@@ -2530,522 +1739,6 @@
     "default": 0.1,
     "choices": null,
     "description": "Fraction of dead-mask pixels above which a cell is considered dead."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.hmm_n_states_mode",
-    "title": "hmm_n_states_mode",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "str",
-    "default": "fixed",
-    "choices": null,
-    "description": "Use a fixed HMM state count for routine analysis; automatic selection has not performed well."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.hmm_n_states",
-    "title": "hmm_n_states",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "int",
-    "default": 4,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_state_classification.defaults.hmm_n_states' (type int, default 4)."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.hmm_k_min",
-    "title": "hmm_k_min",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "int",
-    "default": 2,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_state_classification.defaults.hmm_k_min' (type int, default 2)."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.hmm_k_max",
-    "title": "hmm_k_max",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "int",
-    "default": 8,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_state_classification.defaults.hmm_k_max' (type int, default 8)."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.hmm_covariance_type",
-    "title": "hmm_covariance_type",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "str",
-    "default": "full",
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_state_classification.defaults.hmm_covariance_type' (type str, default 'full')."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.hmm_n_iter",
-    "title": "hmm_n_iter",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "int",
-    "default": 500,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_state_classification.defaults.hmm_n_iter' (type int, default 500)."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.hmm_tol",
-    "title": "hmm_tol",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "float",
-    "default": 0.001,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_state_classification.defaults.hmm_tol' (type float, default 0.001)."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.hmm_sticky",
-    "title": "hmm_sticky",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_state_classification.defaults.hmm_sticky' (type bool, default False)."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.hmm_stickiness_kappa",
-    "title": "hmm_stickiness_kappa",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "float",
-    "default": 8.0,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_state_classification.defaults.hmm_stickiness_kappa' (type float, default 8.0)."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.hmm_transmat_alpha",
-    "title": "hmm_transmat_alpha",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "float",
-    "default": 1.0,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_state_classification.defaults.hmm_transmat_alpha' (type float, default 1.0)."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.hmm_min_covar",
-    "title": "hmm_min_covar",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "float",
-    "default": 0.001,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_state_classification.defaults.hmm_min_covar' (type float, default 0.001)."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.hmm_feature_smoothing_window",
-    "title": "hmm_feature_smoothing_window",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "int",
-    "default": 5,
-    "choices": null,
-    "description": "Feature smoothing window. Usually match the rolling feature window; use 1 for true single-frame events."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.hmm_smoothing_min_periods",
-    "title": "hmm_smoothing_min_periods",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "int",
-    "default": 1,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_state_classification.defaults.hmm_smoothing_min_periods' (type int, default 1)."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.hmm_start_offset",
-    "title": "hmm_start_offset",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "int",
-    "default": 1,
-    "choices": null,
-    "description": "Initial timepoints skipped before HMM assignment. Keep at 1 because first-frame speed is undefined."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.hmm_start_offset_fill_mode",
-    "title": "hmm_start_offset_fill_mode",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "str",
-    "default": "backfill",
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_state_classification.defaults.hmm_start_offset_fill_mode' (type str, default 'backfill')."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.hmm_backprojection_workers",
-    "title": "hmm_backprojection_workers",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "int",
-    "default": 4,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_state_classification.defaults.hmm_backprojection_workers' (type int, default 4)."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.hmm_window_features",
-    "title": "hmm_window_features",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "list",
-    "default": [
-      "net_displacement"
-    ],
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_state_classification.defaults.hmm_window_features' (type list, default ['net_displacement'])."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.hmm_window_features_window",
-    "title": "hmm_window_features_window",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "int",
-    "default": 5,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_state_classification.defaults.hmm_window_features_window' (type int, default 5)."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.hmm_log_scale_features",
-    "title": "hmm_log_scale_features",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "list",
-    "default": [
-      "speed",
-      "net_displacement"
-    ],
-    "choices": null,
-    "description": "Features selectively log-transformed after inspecting a strongly right-skewed non-negative distribution; do not apply blanket log scaling."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.feature_quantile_capping_low_percentile",
-    "title": "feature_quantile_capping_low_percentile",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "str",
-    "default": "",
-    "choices": null,
-    "description": "Optional lower percentile clipping. Not recommended routinely because clipping has degraded HMM results."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.feature_quantile_capping_high_percentile",
-    "title": "feature_quantile_capping_high_percentile",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "str",
-    "default": "",
-    "choices": null,
-    "description": "Optional upper percentile clipping. Not recommended routinely because clipping has degraded HMM results."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.apply_hmm_deployment_artifact_path",
-    "title": "apply_hmm_deployment_artifact_path",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "str",
-    "default": "",
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_state_classification.defaults.apply_hmm_deployment_artifact_path' (type str, default '')."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.selected_features",
-    "title": "selected_features",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "list",
-    "default": [
-      "elongation",
-      "extent",
-      "solidity",
-      "sphericity",
-      "speed"
-    ],
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_state_classification.defaults.selected_features' (type list, default ['elongation', 'extent', 'solidity', 'sphericity', 'speed'])."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.binary_features_to_group",
-    "title": "binary_features_to_group",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "list",
-    "default": [
-      "any_immune_cell_contact",
-      "any_organoid_contact",
-      "dead",
-      "is_active_killing"
-    ],
-    "choices": null,
-    "description": "Binary event features applied after HMM fitting to split motion states; they are not inputs to the HMM."
-  },
-  {
-    "key": "behavioral_state_classification.defaults.random_state",
-    "title": "random_state",
-    "step": "behavioral_state_classification",
-    "category": null,
-    "type": "int",
-    "default": 12345,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_state_classification.defaults.random_state' (type int, default 12345)."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.behavioral_trajectory_size",
-    "title": "behavioral_trajectory_size",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "int",
-    "default": 100,
-    "choices": null,
-    "description": "Trajectory window size for clustering; it cannot exceed the track trim length set in Filtering."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.n_clusters",
-    "title": "n_clusters",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "int",
-    "default": 6,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.n_clusters' (type int, default 6)."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.n_per_cluster",
-    "title": "n_per_cluster",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "int",
-    "default": 10,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.n_per_cluster' (type int, default 10)."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.random_state",
-    "title": "random_state",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "int",
-    "default": 12345,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.random_state' (type int, default 12345)."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.trajectory_trim_mode",
-    "title": "trajectory_trim_mode",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "str",
-    "default": "last",
-    "choices": null,
-    "description": "Whether trajectory clustering keeps the first or last requested timepoints. This duplicates optional trimming in Filtering."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.linkage",
-    "title": "linkage",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "str",
-    "default": "average",
-    "choices": null,
-    "description": "Agglomerative linkage for trajectory clustering. Average is the default, Complete is a reasonable comparison, and Single performs poorly."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.missing_policy",
-    "title": "missing_policy",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "str",
-    "default": "keep",
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.missing_policy' (type str, default 'keep')."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.parallel",
-    "title": "parallel",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "bool",
-    "default": true,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.parallel' (type bool, default True)."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.save_distance_matrix",
-    "title": "save_distance_matrix",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.save_distance_matrix' (type bool, default False)."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.window",
-    "title": "window",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "str",
-    "default": "",
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.window' (type str, default '')."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.max_dist",
-    "title": "max_dist",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "str",
-    "default": "",
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.max_dist' (type str, default '')."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.max_length_diff",
-    "title": "max_length_diff",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "str",
-    "default": "",
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.max_length_diff' (type str, default '')."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.penalty",
-    "title": "penalty",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "str",
-    "default": "",
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.penalty' (type str, default '')."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.psi",
-    "title": "psi",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "str",
-    "default": "",
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.psi' (type str, default '')."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.make_overview_statebars",
-    "title": "make_overview_statebars",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "bool",
-    "default": true,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.make_overview_statebars' (type bool, default True)."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.make_backprojection_pdf",
-    "title": "make_backprojection_pdf",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.make_backprojection_pdf' (type bool, default False)."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.make_backprojection_mp4",
-    "title": "make_backprojection_mp4",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "bool",
-    "default": false,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.make_backprojection_mp4' (type bool, default False)."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.classifier_n_estimators",
-    "title": "classifier_n_estimators",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "int",
-    "default": 100,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.classifier_n_estimators' (type int, default 100)."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.classifier_min_samples_leaf",
-    "title": "classifier_min_samples_leaf",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "int",
-    "default": 1,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.classifier_min_samples_leaf' (type int, default 1)."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.classifier_min_samples_split",
-    "title": "classifier_min_samples_split",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "int",
-    "default": 2,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.classifier_min_samples_split' (type int, default 2)."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.classifier_max_features",
-    "title": "classifier_max_features",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "str",
-    "default": "sqrt",
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.classifier_max_features' (type str, default 'sqrt')."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.classifier_max_depth",
-    "title": "classifier_max_depth",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "str",
-    "default": "",
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.classifier_max_depth' (type str, default '')."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.classifier_test_size",
-    "title": "classifier_test_size",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "float",
-    "default": 0.2,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.classifier_test_size' (type float, default 0.2)."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.classifier_n_jobs",
-    "title": "classifier_n_jobs",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "int",
-    "default": -1,
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.classifier_n_jobs' (type int, default -1)."
-  },
-  {
-    "key": "behavioral_track_classification.defaults.classifier_artifact_path",
-    "title": "classifier_artifact_path",
-    "step": "behavioral_track_classification",
-    "category": null,
-    "type": "str",
-    "default": "",
-    "choices": null,
-    "description": "BEHAV3D parameter 'behavioral_track_classification.defaults.classifier_artifact_path' (type str, default '')."
   },
   {
     "key": "viewer_display.channels",

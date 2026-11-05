@@ -92,6 +92,78 @@ except ImportError:
 # trigger a recompute/YAML write on every intermediate value.
 THRESHOLD_DEBOUNCE_SECONDS = 1.2
 
+# Per-category defaults for the notebook feature-DTW analysis panel. Kept here
+# rather than in _DEFAULT_CONFIG: the napari plugin does not use this section,
+# so it should not be written into every behav3d_parameters.yml.
+_ANALYSIS_PANEL_DEFAULTS = {
+    "immune": {
+        "seed": 42,
+        "umap_min_dist": 0.1,
+        "umap_n_neighbors": 15,
+        "nr_of_clusters": 5,
+        "feature_scaling_preset": None,
+        "min_track_length_enabled": False,
+        "min_track_length": 1,
+        "max_track_length_enabled": False,
+        "max_track_length": 999999,
+        "feature_dtw_napari_backprojection_workers": 4,
+        "dtw_feature_groups_enabled": {
+            "morphology": False,
+            "movement": False,
+            "intensity": False,
+            "death": False,
+            "contact": False,
+        },
+        "dtw_features_input": [],
+        "dtw_features_resolved": [],
+        "z_normalize": {},
+    },
+    "organoid": {
+        "seed": 42,
+        "umap_min_dist": 0.1,
+        "umap_n_neighbors": 15,
+        "nr_of_clusters": 3,
+        "feature_scaling_preset": None,
+        "min_track_length_enabled": False,
+        "min_track_length": 1,
+        "max_track_length_enabled": False,
+        "max_track_length": 999999,
+        "feature_dtw_napari_backprojection_workers": 4,
+        "dtw_feature_groups_enabled": {
+            "morphology": False,
+            "movement": False,
+            "intensity": False,
+            "death": False,
+            "contact": False,
+        },
+        "dtw_features_input": [],
+        "dtw_features_resolved": [],
+        "z_normalize": {},
+    },
+    "other": {
+        "seed": 42,
+        "umap_min_dist": 0.1,
+        "umap_n_neighbors": 15,
+        "nr_of_clusters": 5,
+        "feature_scaling_preset": None,
+        "min_track_length_enabled": False,
+        "min_track_length": 1,
+        "max_track_length_enabled": False,
+        "max_track_length": 999999,
+        "feature_dtw_napari_backprojection_workers": 4,
+        "dtw_feature_groups_enabled": {
+            "morphology": False,
+            "movement": False,
+            "intensity": False,
+            "death": False,
+            "contact": False,
+        },
+        "dtw_features_input": [],
+        "dtw_features_resolved": [],
+        "z_normalize": {},
+    },
+}
+
 def _filter_track_image_to_ids(track_img, track_ids):
     track_ids = np.asarray(list(track_ids), dtype=np.int64)
     if hasattr(track_img, "chunks"):
@@ -3592,7 +3664,7 @@ class MotileCellAnalysisPanel:
         self.category = detect_cell_type_category(self.cell_type, metadata_loader.metadata)
         
         params = dict(self.metadata_loader.behav3d_parameters or {})
-        self._panel_cfg = params.setdefault("analysis", {}).setdefault(self.cell_type, deepcopy(_DEFAULT_CONFIG["analysis"].get(self.category, {})))
+        self._panel_cfg = params.setdefault("analysis", {}).setdefault(self.cell_type, deepcopy(_ANALYSIS_PANEL_DEFAULTS.get(self.category, {})))
         self._params = params
         
         groups = deepcopy(behav3d_calculated_features)

@@ -359,37 +359,6 @@ def _compact_experiment_config(config: dict) -> dict:
     if isinstance(death_dynamics, dict):
         summary["death_dynamics"] = _json_value(death_dynamics)
 
-    module_specs = {
-        "behavioral_state_classification": (
-            "hmm_n_states_mode", "hmm_n_states",
-            "hmm_feature_smoothing_window", "hmm_start_offset",
-            "selected_features", "binary_features_to_group",
-        ),
-        "behavioral_track_classification": (
-            "behavioral_trajectory_size", "n_clusters",
-            "trajectory_trim_mode", "linkage",
-        ),
-    }
-    # The Single Cell tab saves per-cell-type blocks. Once one is filled in, the
-    # notebook-widget block it replaced only carries template defaults: the
-    # plugin never reads it, and it would contradict the per-cell-type settings.
-    replacements = {
-        "behavioral_state_classification": "state_classification",
-        "behavioral_track_classification": "track_classification",
-    }
-    for module, keys in module_specs.items():
-        settings = config.get(module)
-        if not isinstance(settings, dict):
-            continue
-        replacement = config.get(replacements[module])
-        if isinstance(replacement, dict) and any(replacement.values()):
-            continue
-        defaults = settings.get("defaults", settings)
-        if isinstance(defaults, dict):
-            summary[module] = {
-                key: _json_value(defaults[key])
-                for key in keys if key in defaults
-            }
     for module in ("state_classification", "track_classification"):
         settings = config.get(module)
         if isinstance(settings, dict):
