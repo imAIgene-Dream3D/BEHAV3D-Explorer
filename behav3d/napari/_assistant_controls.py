@@ -993,7 +993,13 @@ def _analysis_bindings(main_widget) -> list[dict]:
                if state is not None and cell_type else None)
     mode_combo = getattr(state, "combo_hmm_n_states_mode", None)
     sticky_check = getattr(state, "chk_hmm_sticky", None)
-    mode = _safe(mode_combo.currentText, "fixed") if mode_combo is not None else "fixed"
+    # Auto state selection and sticky HMM are dev-mode options: the panel hides
+    # them unless BEHAV3D_DEV_MODE=1, so the assistant must not see them either.
+    dev_mode = bool(getattr(state, "_dev_mode", False))
+    dev_only = {"state_selection_mode", "minimum_states", "maximum_states",
+                "sticky.enabled", "sticky.kappa", "sticky.transition_alpha"}
+    mode = (_safe(mode_combo.currentText, "fixed")
+            if mode_combo is not None and dev_mode else "fixed")
     sticky = bool(_safe(sticky_check.isChecked, False)) if sticky_check is not None else False
     specs = [
         ("window_size", "Window size", "spin_window_size", "timepoints", None),
@@ -1016,6 +1022,8 @@ def _analysis_bindings(main_widget) -> list[dict]:
         ("random_seed", "Random seed", "spin_seed", None, None),
     ]
     for suffix, label, attr, unit, visible in specs:
+        if suffix in dev_only and not dev_mode:
+            continue
         widget = getattr(state, attr, None) if state is not None else None
         if widget is not None:
             relevant = state_visible if visible is None else state_visible and visible

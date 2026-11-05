@@ -5,14 +5,23 @@ Runs under pytest *or* standalone:  python test/test_assistant.py
 Requires the `behav3d` conda env (numpy, the behav3d package). No GPU / Modal /
 Qt needed — only the dependency-free logic is exercised here.
 """
+import dataclasses
+import json
 import os
 import sys
+import tempfile
+import threading
+from pathlib import Path
+from unittest.mock import patch
 
 import anndata as ad
 import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "chatbot"))
+sys.path.insert(0, os.path.dirname(__file__))
+
+from assistant_provider_stub import ProviderStub
 
 from behav3d.napari._assistant_schema import (
     flatten_config_to_cards, cards_for_step, dump_cards_json,
@@ -36,11 +45,19 @@ from behav3d.napari._assistant_recommendations import (
 )
 from behav3d.napari._assistant import (
     AssistantDock, _pending_action_identity, researcher_facing_text,
-    streaming_transcript_block, transcript_block_role,
+    split_transcript_block, streaming_transcript_block,
+)
+from behav3d.napari._assistant_plan import (
+    MAX_OUTCOMES, PlanState, extract_plan, parse_plan_command, record_outcome, step_title,
+)
+from behav3d.napari import _assistant, _assistant_providers, _assistant_settings
+from behav3d.napari._assistant_providers import (
+    ApiKey, ProviderCancelled, ProviderConfig, ProviderError, ServiceTooOld,
+    check_connection, list_models, provider_by_id, run_own_model_turn, stream_reply,
 )
 from behav3d.napari._assistant_client import (
-    ChatWorker, classify_request_failure, diagnose_assistant_service,
-    request_failure_is_retryable,
+    ChatWorker, SERVICE_TOO_OLD_MESSAGE, check_own_provider, classify_request_failure,
+    diagnose_assistant_service, request_failure_is_retryable,
 )
 from behav3d.analysis.track_counts import (
     calculate_track_count_table, format_track_count_summary,
@@ -52,6 +69,12 @@ from behav3d.analysis.behavior.track.visualization.backprojection import (
     _resolve_track_cluster_label,
 )
 from behav3d.napari._results_catalog import scan_outputs
+
+# Every dock queues a startup health check, and any test that spins the event loop
+# would run all of them: real network threads on docks about to be collected.
+AssistantDock._check_service_status = lambda self, **_kwargs: None
+# A developer's own saved provider must not change what these tests do.
+_assistant.load_active_provider = lambda: None
 
 
 # --------------------------------------------------------------------------
@@ -414,6 +437,78 @@ def test_metadata_pixel_size_action_reuses_user_supplied_values():
         "metadata.samples.1.pixel_distance_z": 4.0,
     }
     assert "time unit is unchanged" in result["text"]
+
+
+def _pixel_size_reply(*user_messages):
+    import app
+
+    controls = [
+        {"id": "metadata.samples.0.pixel_distance_xy", "value": 0.5},
+        {"id": "metadata.samples.0.pixel_distance_z", "value": 2.0},
+    ]
+    messages = [{
+        "role": "user",
+        "content": "XY pixel size is 0.5 um and Z spacing is 2 um. Fill the pixel size.",
+    }]
+    for text in user_messages:
+        messages += [
+            {"role": "assistant", "content": "I am proposing those values."},
+            {"role": "user", "content": text},
+        ]
+    return app.metadata_pixel_size_action(
+        {"current_step": "data_preparation", "ui_state": {"controls": controls}}, messages,
+    )
+
+
+def _pixel_size_changes(result):
+    return {
+        call["arguments"]["control_id"].rsplit(".", 1)[-1]: call["arguments"]["value"]
+        for call in result["calls"]
+    }
+
+
+def test_metadata_pixel_size_correction_beats_the_earlier_value():
+    for text, expected in (
+        ("XY pixel size is 0.6 um. Fill the pixel size.", {"pixel_distance_xy": 0.6}),
+        ("Set the XY pixel size to 0.6 um", {"pixel_distance_xy": 0.6}),
+        ("Correct the XY pixel size from 0.5 um to 0.6 um", {"pixel_distance_xy": 0.6}),
+        ("Correct the XY pixel size from 0.5 to 0.6 um", {"pixel_distance_xy": 0.6}),
+        (
+            "Update the pixel size: XY pixel size should be 0.6 um",
+            {"pixel_distance_xy": 0.6},
+        ),
+        ("Set the Z spacing to 3 um", {"pixel_distance_z": 3.0}),
+    ):
+        assert _pixel_size_changes(_pixel_size_reply(text)) == expected, text
+
+    # The newest correction wins, and it is what later requests reuse.
+    assert _pixel_size_changes(_pixel_size_reply(
+        "Set the XY pixel size to 0.6 um", "Set the XY pixel size to 0.7 um",
+    )) == {"pixel_distance_xy": 0.7}
+    assert _pixel_size_changes(_pixel_size_reply(
+        "Set the XY pixel size to 0.7 um", "Can you fill in the correct pixel size?",
+    )) == {"pixel_distance_xy": 0.7}
+
+
+def test_metadata_pixel_size_leaves_unreadable_corrections_to_the_model():
+    # An older value must never answer a new one, so hand these to the model.
+    for text in (
+        "Set the XY pixel size to 500 nm",
+        "Set the XY pixel size to 0.6",
+        "Set the pixel size to 0.6",
+        "Set the XY pixel size to 0.6 um and the Z spacing to 500 nm",
+    ):
+        assert _pixel_size_reply(text) is None, text
+
+
+def test_metadata_pixel_size_reuses_values_when_none_is_stated():
+    for text in (
+        "Can you fill in the correct pixel size?",
+        "Fill the pixel size for all 3 samples",
+    ):
+        result = _pixel_size_reply(text)
+        assert result is not None and result["calls"] == [], text
+        assert "already use" in result["text"], text
 
 
 def test_metadata_pixel_size_action_does_not_intercept_fresh_setup():
@@ -1720,10 +1815,11 @@ def test_chat_worker_offline_fallback_keeps_reason_and_always_finishes():
     assert "Assistant endpoint is not configured" in degraded[0]
     assert "local parameter reference" in degraded[0]
     assert finished == [True]
-    role = transcript_block_role("You")
-    assert role == "user"
-    assert transcript_block_role("My question", role) == "user"
-    assert transcript_block_role("BEHAV3D Assistant", role) == "assistant"
+    assert split_transcript_block("**You**\n\nMy question") == ("user", "My question")
+    assert split_transcript_block("**BEHAV3D Assistant**\n\nAn answer") == (
+        "assistant", "An answer",
+    )
+    assert split_transcript_block("Filled in: Well") == ("assistant", "Filled in: Well")
 
 
 def test_metadata_absence_values_are_csv_safe():
@@ -1937,6 +2033,65 @@ def test_action_tray_is_bounded_deduplicated_and_resettable():
     assert dock.action_tray_panel.isHidden()
     assert dock._request_active is False
     assert qt_app is not None
+
+
+def test_finished_reply_keeps_rendered_markdown():
+    from types import SimpleNamespace
+    from qtpy.QtWidgets import QApplication
+
+    qt_app = QApplication.instance() or QApplication([])
+    dock = AssistantDock(SimpleNamespace())
+    dock._append_user("What are the main steps?")
+    dock._streaming_text = "1. **Data Preparation** - load metadata\n2. **Segmentation**"
+    dock._finalize_streaming()
+    dock._render()
+    text = dock.transcript.toPlainText()
+    assert "Data Preparation" in text and "**" not in text
+    bubble = dock.transcript.bubbles()[-1]
+    assert bubble.document().begin().blockFormat().lineHeight() == 140
+
+
+def test_metadata_wizard_asks_for_the_dead_channel_after_counts():
+    from types import SimpleNamespace
+    from qtpy.QtWidgets import QApplication
+
+    qt_app = QApplication.instance() or QApplication([])
+    dock = AssistantDock(SimpleNamespace())
+    dock.main_widget = SimpleNamespace(
+        data_prep_tab=SimpleNamespace(include_dead_cb=_FakeCheck(True))
+    )
+    applied, sent = [], []
+    dock._md_apply_value = lambda field, value, index=0: applied.append((field, value))
+    dock._md_apply_structural = lambda field: applied.append((field, None)) or True
+    dock._send_message = lambda text, **kwargs: sent.append(text)
+    dock.refresh_context_bar = lambda: None
+
+    def start():
+        dock._md_phase = "counts"
+        dock._md_queue = [dict(step) for step in AssistantDock._MD_COUNT_STEPS]
+        dock._md_ask_next()
+        for answer in ("2", "1", "1", "0"):
+            dock._md_handle_answer(answer)
+
+    start()
+    assert dock._md_current["field"] == "include_dead"
+    assert "dead channel" in dock._md_log[-1]
+    dock._md_handle_answer("What counts as a dead channel?")
+    assert "live/dead dye" in dock._md_log[-1]
+    assert dock._md_current["field"] == "include_dead"
+    dock._md_handle_answer("Yes")
+    assert applied.index(("include_dead", True)) < applied.index(
+        ("configure_cell_types", None)
+    )
+    assert dock._md_current is None and "**Dead ch #**" in dock._md_log[-1]
+
+    applied.clear()
+    start()
+    dock._md_handle_answer("no")
+    assert ("include_dead", False) in applied
+    start()
+    dock._md_handle_answer("maybe later")
+    assert sent == ["maybe later"] and dock._md_current is None
 
 
 def test_metadata_structure_correction_rebuilds_forms_and_preserves_values():
@@ -2893,6 +3048,221 @@ def test_experiment_reference_discovers_calcium_and_compacts_historical_settings
     assert "/private/results" not in str(reference)
 
 
+def test_experiment_reference_keeps_a_complete_dataset_readme(tmp_path=None):
+    import tempfile
+    from pathlib import Path
+
+    root = Path(tmp_path or tempfile.mkdtemp())
+    background = "\n".join(
+        f"- Acquisition and processing detail {index}." for index in range(600)
+    )
+    text = (
+        "# Dataset context\n" + background
+        + "\n## Main analysis definitions\n"
+        "A long contact covers at least a set share of the window.\n"
+    )
+    assert len(text) > 20_000
+    (root / "README_BEHAV3D_Example.md").write_text(text, encoding="utf-8")
+
+    reference = _experiment_reference_context(str(root), {})
+    note = reference["notes"][0]
+    assert note["truncated"] is False
+    assert note["text"] == text
+    assert "truncation_caveat" not in reference
+
+
+def test_experiment_reference_names_what_did_not_fit(tmp_path=None):
+    import tempfile
+    from pathlib import Path
+
+    base = Path(tmp_path or tempfile.mkdtemp())
+    rows = [f"Detail row {index:05d} of the acquisition log." for index in range(1300)]
+    text = (
+        "# Context\n" + "\n".join(rows[:650])
+        + "\n## Main definitions\n" + "\n".join(rows[650:])
+        + "\n```bash\n# a shell comment, not a heading\n```\n## Glossary\nTerms.\n"
+    )
+    long_root = base / "long"
+    long_root.mkdir()
+    (long_root / "README_BEHAV3D_Long.md").write_text(text, encoding="utf-8")
+
+    reference = _experiment_reference_context(str(long_root), {})
+    note = reference["notes"][0]
+    excerpt = note["text"]
+    assert note["truncated"] is True
+    assert text.startswith(excerpt) and text[len(excerpt)] == "\n"
+    assert "## Main definitions" in excerpt
+    assert note["omitted_sections"] == ["Glossary"]
+    assert "Do not infer" in reference["truncation_caveat"]
+
+    # A note that exactly fills the budget leaves no room for the next one.
+    full_root = base / "full"
+    full_root.mkdir()
+    (full_root / "README_BEHAV3D_A.md").write_text(
+        "# A\n" + "x" * 31_996, encoding="utf-8",
+    )
+    (full_root / "README_BEHAV3D_B.md").write_text("# B\n", encoding="utf-8")
+    reference = _experiment_reference_context(str(full_root), {})
+    assert [note["source"] for note in reference["notes"]] == ["README_BEHAV3D_A.md"]
+    assert reference["notes"][0]["truncated"] is False
+    assert reference["omitted_notes"] == ["README_BEHAV3D_B.md"]
+    assert "truncation_caveat" in reference
+
+
+def test_experiment_reference_reports_only_settings_in_effect(tmp_path=None):
+    import tempfile
+    from pathlib import Path
+
+    root = Path(tmp_path or tempfile.mkdtemp())
+    (root / "behav3d_parameters.yml").write_text(
+        "\n".join([
+            "tracking:",
+            "  track_organoids_together: false",
+            "  all_organoids:",
+            "    method: propagation_all_organoids",
+            "  organoid:",
+            "    method: propagation",
+            "    propagation: {}",
+            "    btrack: {max_search_radius: 100, use_optimize: false}",
+            "  myeloid:",
+            "    method: bounded_propagation",
+            "    bounded_propagation: {min_overlap_fraction: 0.0, segment_size_min: 20}",
+            "    reporter_propagation: {min_overlap_fraction: 0.1, segment_size_min: 100}",
+            "    btrack: {max_search_radius: 100, use_optimize: false}",
+            "  tcell:",
+            "    method: btrack",
+            "    btrack:",
+            "      max_search_radius: 150",
+            "      use_optimize: true",
+            "      hypotheses: [P_FP, P_init, P_term, P_link]",
+            "      dist_thresh: 100",
+            "      time_thresh: 5",
+            "    reporter_propagation: {min_overlap_fraction: 0.1, segment_size_min: 100}",
+            "  tcell_control:",
+            "    method: btrack",
+            "    btrack: {max_search_radius: 80, use_optimize: false,"
+            " dist_thresh: 60, time_thresh: 3}",
+            "behavioral_state_classification:",
+            "  defaults: {hmm_n_states: 4}",
+            "state_classification:",
+            "  tcell: {n_states: 6, start_offset: 1}",
+            "track_classification:",
+            "  tcell:",
+            "    behavioral_trajectory_size: 50",
+            "    clustering_family: state_based",
+            "    trajectory_basis: dtw",
+            "    clustering_method: leiden",
+            "    leiden_n_neighbors: 60",
+            "    leiden_resolution: 1.0",
+            "    n_clusters: 15",
+            "    linkage: average",
+            "    bouts_linkage: ward",
+            "  myeloid:",
+            "    clustering_family: state_based",
+            "    trajectory_basis: bouts",
+            "    clustering_method: agglomerative",
+            "    n_clusters: 4",
+            "    linkage: average",
+            "    bouts_linkage: ward",
+            "    bouts_use_fractions: true",
+            "    leiden_resolution: 1.5",
+            "  tcell_control:",
+            "    clustering_family: feature_based",
+            "    clustering_method: leiden",
+            "    leiden_n_neighbors: 30",
+            "    leiden_resolution: 1.0",
+            "    n_clusters: 9",
+            "    trajectory_basis: dtw",
+            "    trajectory_features: {features: [speed],"
+            " binary_features: [organoid_contact]}",
+            "    include_tracklet_net_displacement: true",
+            "    use_exact_original_settings: false",
+            "track_reports:",
+            "  tcell:",
+            "    exemplars: {n_per_cluster: 10}",
+            "    contact:",
+            "      contact_col: myeloid_contact",
+            "      min_bout_length: 1",
+            "      use_target_class: true",
+            "      target_class_source: Track classification",
+            "      target_state_col: full_behavioral_state",
+            "      group_x: (none)",
+            "    contact_duration:",
+            "      long_contact_unit: Percent of time window",
+            "      long_contact_threshold: 30.0",
+            "      comparisons_per_page: 12",
+            "  myeloid:",
+            "    exemplars: {n_per_cluster: 10}",
+        ]),
+        encoding="utf-8",
+    )
+
+    settings = _experiment_reference_context(str(root), {})[
+        "saved_configurations"][0]["settings"]
+    tracking = settings["tracking"]
+    assert "all_organoids" not in tracking
+    assert tracking["organoid"] == {"method": "propagation"}
+    assert tracking["myeloid"] == {
+        "method": "bounded_propagation",
+        "bounded_propagation": {"min_overlap_fraction": 0.0, "segment_size_min": 20},
+    }
+    assert tracking["tcell"] == {
+        "method": "btrack",
+        "btrack": {
+            "max_search_radius": 150, "use_optimize": True,
+            "hypotheses": ["P_FP", "P_init", "P_term", "P_link"],
+            "dist_thresh": 100, "time_thresh": 5,
+        },
+    }
+    assert tracking["tcell_control"] == {
+        "method": "btrack",
+        "btrack": {"max_search_radius": 80, "use_optimize": False},
+    }
+
+    assert "behavioral_state_classification" not in settings
+    trajectories = settings["track_classification"]["by_cell_type"]
+    assert trajectories["tcell"] == {
+        "behavioral_trajectory_size": 50,
+        "clustering_family": "state_based",
+        "trajectory_basis": "dtw",
+        "clustering_method": "leiden",
+        "leiden_n_neighbors": 60,
+        "leiden_resolution": 1.0,
+    }
+    assert trajectories["myeloid"] == {
+        "clustering_family": "state_based",
+        "trajectory_basis": "bouts",
+        "clustering_method": "agglomerative",
+        "n_clusters": 4,
+        "bouts_linkage": "ward",
+        "bouts_use_fractions": True,
+    }
+    assert trajectories["tcell_control"] == {
+        "clustering_family": "feature_based",
+        "clustering_method": "leiden",
+        "leiden_n_neighbors": 30,
+        "leiden_resolution": 1.0,
+        "trajectory_features": {
+            "features": ["speed"], "binary_features": ["organoid_contact"],
+        },
+        "include_tracklet_net_displacement": True,
+    }
+    assert settings["contact_analysis"] == {
+        "tcell": {
+            "contact": {
+                "contact_col": "myeloid_contact",
+                "min_bout_length": 1,
+                "use_target_class": True,
+                "target_class_source": "Track classification",
+            },
+            "contact_duration": {
+                "long_contact_unit": "Percent of time window",
+                "long_contact_threshold": 30.0,
+            },
+        },
+    }
+
+
 def test_prompt_scopes_experiment_reference_and_requires_result_evidence():
     import app
     reference = {
@@ -2987,7 +3357,7 @@ def test_prompt_encodes_pi_feedback_scenarios():
     assert "Seed threshold is the main splitting lever" in sp
     assert "Mask threshold primarily defines the foreground contour" in sp
     assert "With plain Mask + EDT/Watershed, raise EDT" in sp
-    assert "With Peak EDT/Watershed, lower EDT" in sp
+    assert "With Peak EDT/Watershed" not in sp
     assert "do not infer motion from a label" in sp
     assert "use Bounded Propagation" in sp
     assert "use btrack when consecutive detections no longer overlap" in sp
@@ -3707,7 +4077,7 @@ def test_edt_recommendations_use_per_sample_xy_resolution():
     text = format_edt_recommendations(result, "tcell")
     assert "Well_A1" in text and "global starting value" in text
     assert "higher EDT values generally split touching objects more" in text
-    assert "On Peak EDT/Watershed, the direction is reversed" in text
+    assert "Peak EDT" not in text
     assert "Lower EDT values split touching objects more aggressively" not in text
 
     organoid = calculate_edt_recommendations(
@@ -3717,6 +4087,79 @@ def test_edt_recommendations_use_per_sample_xy_resolution():
     )
     assert organoid["object_diameter_um"] == 50
     assert organoid["rows"][0]["object_diameter_px"] == 100
+
+
+def test_developer_options_reach_queenb_only_in_dev_mode():
+    from types import SimpleNamespace
+    import app
+    from guidance import is_developer_only, select_guidance_cards
+
+    def hmm_control_ids(dev_mode):
+        state = SimpleNamespace(
+            spin_hmm_n_states=_FakeSpin(4),
+            combo_hmm_n_states_mode=_FakeCombo(["fixed", "auto"]),
+            spin_hmm_k_min=_FakeSpin(2), spin_hmm_k_max=_FakeSpin(8),
+            chk_hmm_sticky=_FakeCheck(False),
+            _timepoint_checkboxes={}, _logscale_checkboxes={}, _bingrp_checkboxes={},
+            _dev_mode=dev_mode,
+        )
+        main = SimpleNamespace(analysis_tab=SimpleNamespace(single_cell_tab=SimpleNamespace(
+            cell_type_combo=_FakeCombo(["tcell"]), state_tab=state,
+        )))
+        return {item["id"] for item in control_registry(main)}
+
+    prefix = "analysis.state_classification.tcell."
+    hidden = {prefix + "state_selection_mode", prefix + "minimum_states",
+              prefix + "maximum_states", prefix + "sticky.enabled"}
+    assert prefix + "number_of_states" in hmm_control_ids(False)
+    assert not hidden & hmm_control_ids(False)
+    assert hidden <= hmm_control_ids(True)
+
+    edt = calculate_edt_recommendations([
+        {"sample_name": "A1", "pixel_distance_xy": 0.5, "distance_unit": "um"},
+    ])
+    previous = os.environ.pop("BEHAV3D_DEV_MODE", None)
+    try:
+        capabilities = _interface_capabilities([])
+        assert capabilities["developer_options"] is False
+        assert "peak_edt_direction" not in capabilities["segmentation"]["apoc"]
+        os.environ["BEHAV3D_DEV_MODE"] = "1"
+        capabilities = _interface_capabilities([])
+        assert capabilities["developer_options"] is True
+        assert "peak_edt_direction" in capabilities["segmentation"]["apoc"]
+        assert "On Peak EDT/Watershed" in format_edt_recommendations(edt, "tcell")
+    finally:
+        os.environ.pop("BEHAV3D_DEV_MODE", None)
+        if previous is not None:
+            os.environ["BEHAV3D_DEV_MODE"] = previous
+
+    off = {"current_step": "segmentation", "ui_state": {"controls": []}}
+    on = {**off, "interface_capabilities": {"developer_options": True}}
+    assert not app.developer_options_enabled(off)
+    assert app.developer_options_enabled(on)
+
+    def apoc_card(developer_options):
+        cards = select_guidance_cards(off, "APOC splitting",
+                                      developer_options=developer_options)
+        return next(card["text"] for card in cards if card["id"] == "apoc")
+
+    assert "Peak EDT" not in apoc_card(False)
+    assert "In Peak EDT, lower EDT splits more" in apoc_card(True)
+    sticky = {"source": "schema:behavioral_state_classification",
+              "title": "behavioral_state_classification.defaults.hmm_sticky"}
+    smoothing = {"source": "schema:behavioral_state_classification",
+                 "title": "behavioral_state_classification.defaults.hmm_feature_smoothing_window"}
+    assert is_developer_only(sticky) and not is_developer_only(smoothing)
+
+    prompt_off = app.build_system_prompt(off, [], [])
+    prompt_on = app.build_system_prompt(on, [], [])
+    assert "This installation does not offer Peak EDT" in prompt_off
+    assert "This installation does not offer" not in prompt_on
+    assert "With Peak EDT/Watershed" not in prompt_off
+    assert "With Peak EDT/Watershed, lower EDT" in prompt_on
+    question = [{"role": "user", "content": "Which EDT direction splits more?"}]
+    assert "Peak EDT" not in app.edt_direction_guidance(off, question)
+    assert "Peak EDT/Watershed" in app.edt_direction_guidance(on, question)
 
 
 def test_streamed_assistant_text_uses_researcher_facing_labels():
@@ -4055,10 +4498,11 @@ def test_feedback_guidance_fixtures():
 
     fixture = Path(__file__).parent / "fixtures" / "assistant_feedback_transcripts.json"
     cases = json.loads(fixture.read_text(encoding="utf-8"))
-    assert KNOWLEDGE_VERSION == "2026.08.20.1"
+    assert KNOWLEDGE_VERSION == "2026.11.05.1"
     for case in cases:
         cards = select_guidance_cards(
-            {"current_step": case["step"]}, case["user"], case.get("intent"))
+            {"current_step": case["step"]}, case["user"], case.get("intent"),
+            developer_options=case.get("developer_options", False))
         text = " ".join(card["text"] for card in cards).lower()
         for required in case.get("required", []):
             assert required.lower() in text, (case["id"], required)
@@ -4090,6 +4534,1720 @@ def test_assistant_has_no_hidden_model_continuation():
     assert "_dispatch_proactive" not in source
     assert "Checking your setup" not in source
     assert CONTROL_CONTRACT_VERSION == "3.3"
+
+
+PLAN_REPLY = (
+    "You are close.\n\n"
+    "**Plan**\n\n"
+    "1. Run **Tracking** for each population.\n"
+    "   - Check the IDs in Visualization.\n"
+    "2. **Feature Extraction** — run it per cell type.\n"
+    "3. Run **Filtering** to remove short tracks.\n\n"
+    "Start with Tracking."
+)
+PLAN_ITEMS = extract_plan(PLAN_REPLY)[0]
+
+
+def _plan() -> PlanState:
+    plan = PlanState()
+    plan.adopt(PLAN_ITEMS, True)
+    return plan
+
+
+def _plan_statuses(plan: PlanState) -> list[str]:
+    return [plan.status(index) for index in range(len(plan.steps))]
+
+
+def _plan_dock() -> AssistantDock:
+    from types import SimpleNamespace
+    from qtpy.QtWidgets import QApplication
+
+    # Held on the class: a QApplication nothing references is destroyed at once.
+    AssistantDock._test_app = QApplication.instance() or QApplication([])
+    return AssistantDock(SimpleNamespace())
+
+
+def _captured_requests():
+    """Replace the network worker, recording what each request would send."""
+    from contextlib import ExitStack
+    from unittest.mock import MagicMock, patch
+
+    requests = []
+
+    def worker(messages, context, tools, **options):
+        requests.append({"messages": messages, "context": context, **options})
+        return MagicMock()
+
+    stack = ExitStack()
+    stack.enter_context(patch("behav3d.napari._assistant.ChatWorker", side_effect=worker))
+    stack.enter_context(patch("behav3d.napari._assistant.QThread"))
+    stack.enter_context(
+        patch("behav3d.napari._assistant.build_context", return_value={})
+    )
+    return stack, requests
+
+
+def _finish_reply(dock: AssistantDock, text: str, *, canned: bool = False):
+    if canned:
+        dock._on_worker_status({"stage": "local_guidance", "level": "working"})
+    dock._on_token(text)
+    dock._on_finished()
+
+
+def _settle(milliseconds: int = 120):
+    from qtpy.QtTest import QTest
+
+    QTest.qWait(milliseconds)
+
+
+def test_plan_extraction_separates_plans_from_explanations():
+    items, marked = extract_plan(PLAN_REPLY)
+    assert marked and len(items) == 3
+    assert [step_title(item) for item in items] == [
+        "Run Tracking for each population",
+        "Feature Extraction",
+        "Run Filtering to remove short tracks",
+    ]
+    explanation = (
+        "How tracking works:\n\n1. Detection finds objects.\n"
+        "2. Linking joins them.\n3. Gaps are closed."
+    )
+    verbs = "Do this:\n\n1. Open Tracking.\n2. Set the radius.\n3. Run it."
+    assert extract_plan(explanation) is None
+    assert extract_plan(verbs) == (["Open Tracking.", "Set the radius.", "Run it."], False)
+    assert extract_plan(verbs, canned=True) is None
+    modules = (
+        "**What comes after segmentation**\n\n"
+        "1. **Tracking** — link segments across timepoints.\n"
+        "2. **Feature Extraction** — per-track measurements.\n"
+        "3. **Filtering** — apply a minimum track length."
+    )
+    assert extract_plan(modules)[1] is False
+    assert [step_title(item) for item in extract_plan(modules)[0]] == [
+        "Tracking", "Feature Extraction", "Filtering",
+    ]
+    assert extract_plan(modules, canned=True) is None
+    assert step_title("Data Preparation — load the metadata first.") == "Data Preparation"
+    assert step_title("Run **Filtering** — it writes the table.") == "Run Filtering"
+    assert extract_plan("1. Open Tracking.\n2. Set the radius.") is None
+    assert extract_plan("1. **Data Preparation** - load metadata\n2. **Segmentation**") is None
+    assert extract_plan("Plan\n1. Open Tracking.\n2. Move on to Filtering.")[1] is True
+    assert extract_plan("The plan\n1. Open Tracking.\n2. Move on to Filtering.") is None
+    assert extract_plan("**Plan**\n\nThere is nothing left to do.") is None
+    assert extract_plan("**Plan**\n\n1. Only one step.") is None
+
+
+def test_plan_extraction_reads_canned_replies_by_marker_only():
+    import app
+
+    blockers = app.metadata_completion_summary(
+        {"metadata": {}, "metadata_builder": {}},
+        [{"role": "user", "content": "what is still missing"}],
+    )
+    assert "**Next actions**" in blockers
+    assert extract_plan(blockers, canned=True) is None
+
+    setup = app.hmm_setup_guidance(
+        _tcell_hmm_context(),
+        [{"role": "user", "content": (
+            "I want to do behavioral analysis, can you take me through the steps?"
+        )}],
+    )
+    items, marked = extract_plan(setup, canned=True)
+    assert marked and len(items) == 6
+    assert step_title(items[0]) == "Review the continuous HMM inputs"
+
+
+def test_plan_commands_separate_instructions_from_questions():
+    for text, expected in (
+        ("do the second one", ("focus", 1)),
+        ("Ok let's do the first one.", ("focus", 0)),
+        ("step 3", ("focus", 2)),
+        ("next", ("next", None)),
+        ("ok, next step", ("next", None)),
+        ("let's do the next one", ("next", None)),
+        ("done", ("done", None)),
+        ("done, what's next?", ("done", None)),
+        ("ok done with step 1", ("done", 0)),
+        ("what's next?", None),
+        ("What was the second thing you mentioned?", None),
+        ("what does step 2 do?", None),
+        ("is step 2 needed?", None),
+        ("set the number of samples to 3", None),
+        ("Complete the metadata form", None),
+        ("Next, set the radius to 5", None),
+        ("continue tracking with btrack", None),
+        ("Ok, open feature extraction", None),
+    ):
+        assert parse_plan_command(text) == expected, text
+
+
+def test_plan_steps_advance_only_when_the_researcher_moves_on():
+    plan = _plan()
+    assert _plan_statuses(plan) == ["current", "pending", "pending"]
+    assert plan.action_label() == "Start step 1"
+
+    # Starting a step must not complete it.
+    assert plan.advance() == 1
+    assert _plan_statuses(plan) == ["current", "pending", "pending"]
+    assert plan.action_label() == "Continue to step 2"
+
+    # Applying a change never completes a step, because a step can need several.
+    plan.note_applied()
+    assert _plan_statuses(plan) == ["current", "pending", "pending"]
+
+    plan.handle_message("what's next?")
+    assert _plan_statuses(plan) == ["current", "pending", "pending"]
+
+    assert plan.advance() == 2
+    assert _plan_statuses(plan) == ["done", "current", "pending"]
+
+    plan.handle_message("do the third one")
+    assert _plan_statuses(plan) == ["done", "pending", "current"]
+    assert plan.action_label() == "Continue to step 2"
+
+    plan.handle_message("done")
+    assert _plan_statuses(plan) == ["done", "current", "done"]
+    assert plan.action_label() == "Start step 2"
+    assert plan.advance() == 2
+    assert plan.action_label() == "Finish"
+    assert plan.advance() is None
+    assert not plan.active
+
+
+def test_plan_ignores_steps_that_do_not_exist():
+    plan = _plan()
+    plan.handle_message("do step 9")
+    plan.handle_message("done with step 9")
+    assert _plan_statuses(plan) == ["current", "pending", "pending"]
+
+
+def test_plan_rows_toggle_without_losing_focus():
+    plan = _plan()
+    plan.toggle(0)
+    assert _plan_statuses(plan) == ["done", "current", "pending"]
+    plan.toggle(2)
+    assert _plan_statuses(plan) == ["done", "current", "done"]
+    plan.toggle(0)
+    assert _plan_statuses(plan) == ["pending", "current", "done"]
+    plan.toggle(1)
+    assert _plan_statuses(plan) == ["current", "done", "done"]
+
+
+def test_sub_lists_never_replace_an_unfinished_plan():
+    plan = _plan()
+    plan.advance()
+    titles = [step.title for step in plan.steps]
+
+    plan.adopt(["Open Tracking.", "Set the radius.", "Run it."], False)
+    assert [step.title for step in plan.steps] == titles and plan.offer is None
+
+    plan.adopt(PLAN_ITEMS, True)
+    assert plan.offer is None, "a restated plan is not a new plan"
+
+    other = ["Load the metadata.", "Choose a segmentation method."]
+    plan.adopt(other, True)
+    assert [step.title for step in plan.steps] == titles
+    assert plan.offer == other
+    plan.accept_offer()
+    assert [step.title for step in plan.steps] == [
+        "Load the metadata", "Choose a segmentation method",
+    ]
+
+    finished = _plan()
+    for index in range(3):
+        finished.complete(index)
+    finished.adopt(other, False)
+    assert len(finished.steps) == 2 and finished.active
+
+
+def test_plan_follows_applied_navigation():
+    plan = _plan()
+    plan.note_navigation("feature extraction")
+    assert _plan_statuses(plan) == ["pending", "current", "pending"]
+    assert plan.started
+
+    plan.note_navigation("segmentation")
+    assert _plan_statuses(plan) == ["pending", "current", "pending"]
+
+    open_only = PlanState()
+    open_only.adopt(["Open Feature Extraction.", "Run Filtering."], True)
+    open_only.note_navigation("feature extraction")
+    assert _plan_statuses(open_only) == ["done", "current"]
+
+    open_and_edit = PlanState()
+    open_and_edit.adopt(
+        ["Open Feature Extraction and set the contact distance.", "Run Filtering."], True
+    )
+    open_and_edit.note_navigation("feature extraction")
+    assert _plan_statuses(open_and_edit) == ["current", "pending"]
+
+
+def test_recent_outcomes_are_bounded():
+    outcomes = []
+    for index in range(MAX_OUTCOMES + 3):
+        outcomes = record_outcome(outcomes, f"Applied: field {index}")
+    assert len(outcomes) == MAX_OUTCOMES
+    assert outcomes[-1] == f"Applied: field {MAX_OUTCOMES + 2}"
+    assert record_outcome(outcomes, "   ") == outcomes
+
+
+def test_plan_reaches_the_model_outside_the_message_history():
+    import app
+
+    plan = _plan()
+    plan.handle_message("do the second one")
+    session = {
+        "intent": "free_form",
+        "plan": plan.to_context(),
+        "recent_outcomes": ["Declined: Search radius -> 30"],
+    }
+    prompt = app.build_system_prompt({"assistant_session": session}, [], [])
+    assert "ACTIVE PLAN" in prompt and "RECENT INTERFACE OUTCOMES" in prompt
+    assert "2. [current] Feature Extraction — run it per cell type." in prompt
+    assert "Declined: Search radius -> 30" in prompt
+
+    plain = app.build_system_prompt({}, [], [])
+    assert "ACTIVE PLAN\nThe interface" not in plain
+    assert "RECENT INTERFACE OUTCOMES\nWhat" not in plain
+
+    # The format rule pulls replies towards lists, so it only appears when asked.
+    assert "PLAN FORMAT" not in plain
+    assert "PLAN FORMAT" not in app.build_system_prompt(
+        {}, [], [], "The Visualization tab is empty after I converted my files"
+    )
+    for request in (
+        "I've finished segmentation. What are the main steps I should do next?",
+        "Help me get from raw movies to results. What should I do, in order?",
+        "I have tracks now. Recommend what to do next.",
+    ):
+        assert "**Plan** on its own" in app.build_system_prompt({}, [], [], request), request
+
+
+def test_retrieval_uses_the_targeted_step_only():
+    import app
+
+    plan = _plan()
+    plan.handle_message("do the second one")
+    context = {"assistant_session": {"plan": plan.to_context()}}
+    assert app.plan_retrieval_text(context, "do the second one") == (
+        "Feature Extraction do the second one"
+    )
+    plan.finish_request_setup()
+    context = {"assistant_session": {"plan": plan.to_context()}}
+    assert app.plan_retrieval_text(context, "why?") == "why?"
+    assert app.plan_retrieval_text({}, "why?") == "why?"
+
+
+def test_targeted_plan_step_opens_its_module_once():
+    import app
+
+    def context(current_step, title, *, targeted=True, analysis=None):
+        return {
+            "current_step": current_step,
+            "analysis": analysis or {},
+            "assistant_session": {"plan": {
+                "targeted": targeted,
+                "steps": [{"title": title, "status": "current"}],
+            }},
+        }
+
+    feature = {"name": "navigate_to_step", "arguments": {"step": "feature_extraction"}}
+    assert app.plan_navigation_call(context("tracking", "Run Feature Extraction")) == feature
+    assert app.plan_navigation_call(
+        context("feature_extraction", "Run Feature Extraction")
+    ) is None
+    assert app.plan_navigation_call(
+        context("tracking", "Run Feature Extraction", targeted=False)
+    ) is None
+    assert app.plan_navigation_call(context("tracking", "Set the radius")) is None
+    assert app.plan_navigation_call(context("tracking", "Filter tracks by length")) == {
+        "name": "navigate_to_step", "arguments": {"step": "filtering"},
+    }
+    assert app.plan_navigation_call(context("tracking", "Run the Filtering step")) == {
+        "name": "navigate_to_step", "arguments": {"step": "filtering"},
+    }
+    # A module mentioned in passing is not where the step happens.
+    assert app.plan_navigation_call(context(
+        "data_preparation", "Load metadata, then confirm the segmentation outputs",
+    )) is None
+    # The module named first wins when a step mentions several.
+    assert app.plan_navigation_call(
+        context("segmentation", "Run Tracking, then review Feature Extraction")
+    )["arguments"] == {"step": "tracking"}
+
+    trajectory = context("tracking", "Review State Trajectory")
+    assert app.plan_navigation_call(trajectory) == {
+        "name": "open_analysis_view", "arguments": {"view": "state_trajectory"},
+    }
+    assert app.plan_navigation_call(context(
+        "analysis", "Review State Trajectory", analysis={"view": "state_trajectory"},
+    )) is None
+    assert app.plan_navigation_call({}) is None
+
+
+def test_plan_prompt_tells_the_model_when_a_module_is_opening():
+    import app
+
+    plan = _plan()
+    plan.handle_message("do the second one")
+    context = {
+        "current_step": "tracking",
+        "assistant_session": {"intent": "free_form", "plan": plan.to_context()},
+    }
+    assert "opening that step's module now" in app.build_system_prompt(context, [], [])
+    context["current_step"] = "feature_extraction"
+    assert "opening that step's module now" not in app.build_system_prompt(context, [], [])
+
+
+def test_plan_continue_text_matches_no_canned_handler():
+    import app
+
+    tools = [{"name": name} for name in app._TOOL_NAMES]
+    messages = [{"role": "user", "content": "Continue with step 2"}]
+    for step in (
+        "data_preparation", "segmentation", "tracking", "feature_extraction",
+        "filtering", "analysis",
+    ):
+        context = {"current_step": step, "metadata": {"loaded": True}}
+        assert app.deterministic_turn_response(context, messages, tools) is None, step
+
+
+def test_dock_pins_a_plan_and_sends_it_with_each_request():
+    dock = _plan_dock()
+    stack, requests = _captured_requests()
+    with stack:
+        dock._send_message("What should I do next?")
+        assert "plan" not in {
+            key for key, value in requests[0]["context"]["assistant_session"].items()
+            if value
+        }
+        assert not dock.plan_panel.isVisibleTo(dock)
+        _finish_reply(dock, PLAN_REPLY)
+        assert dock.plan_panel.isVisibleTo(dock)
+        assert dock.plan_panel.btn_advance.text() == "Start step 1"
+        assert len(dock.plan_panel.row_labels()) == 3
+
+        dock.input.setPlainText("do the second one")
+        dock._on_send()
+        session = requests[1]["context"]["assistant_session"]
+        assert session["plan"]["targeted"] is True
+        assert session["plan"]["steps"][1]["status"] == "current"
+        assert dock._plan.targeted is False, "targeting applies to one request"
+
+
+def test_plan_survives_a_canned_navigation_turn_and_tab_switch():
+    dock = _plan_dock()
+    stack, requests = _captured_requests()
+    with stack:
+        dock._send_message("What should I do next?")
+        _finish_reply(dock, PLAN_REPLY)
+        dock._send_message("Ok, open feature extraction")
+        action = ProposedAction("navigate_to_step", step="feature_extraction")
+        dock._record_applied(action)
+        _finish_reply(dock, "Opening **Feature Extraction**.", canned=True)
+
+        assert dock._plan.status(1) == "current"
+        assert dock.plan_panel.isVisibleTo(dock)
+        dock._on_tab_changed(4)
+        assert dock.plan_panel.isVisibleTo(dock)
+        assert dock._outcomes == ["Opened feature extraction"]
+
+        dock._reset_conversation()
+        assert not dock._plan.steps and dock._outcomes == []
+        assert not dock.plan_panel.isVisibleTo(dock)
+
+
+def test_tab_switch_needs_no_note_when_the_reply_speaks_for_it():
+    from unittest.mock import patch
+
+    def navigate(dock):
+        with patch("behav3d.napari._assistant.apply_action", return_value=True), patch(
+            "behav3d.napari._assistant.build_context", return_value={}
+        ), patch(
+            "behav3d.napari._assistant_schema.flatten_config_to_cards", return_value=[]
+        ):
+            dock.main_widget.data_prep_tab = None
+            dock._on_tool_calls([{
+                "name": "navigate_to_step", "arguments": {"step": "tracking"},
+            }])
+
+    explained = _plan_dock()
+    explained._streaming_text = "Tracking needs one measurement."
+    navigate(explained)
+    assert "Filled in" not in explained._md_log[-1]
+    assert explained._outcomes == ["Opened tracking"]
+
+    silent = _plan_dock()
+    silent._streaming_text = ""
+    navigate(silent)
+    assert "Go to the tracking tab" in silent._md_log[-1]
+
+
+def test_tool_only_reply_still_leaves_an_assistant_turn():
+    from unittest.mock import patch
+
+    dock = _plan_dock()
+    dock.main_widget.data_prep_tab = None
+    dock._history = [{"role": "user", "content": "Set the radius to 30"}]
+    dock._streaming_text = ""
+    with patch("behav3d.napari._assistant.build_context", return_value={}), patch(
+        "behav3d.napari._assistant.apply_action", return_value=True,
+    ):
+        dock._on_tool_calls([{"name": "navigate_to_step", "arguments": {"step": "tracking"}}])
+
+    # Otherwise the model reads the request as unanswered and acts on it again.
+    assert dock._history[-1] == {
+        "role": "assistant", "content": "Sent to the interface: Go to the tracking tab",
+    }
+    assert not any("Sent to the interface" in block for block in dock._md_log)
+
+    answered = _plan_dock()
+    answered.main_widget.data_prep_tab = None
+    answered._history = [{"role": "user", "content": "Open tracking"}]
+    answered._streaming_text = "Opening **Tracking**."
+    with patch("behav3d.napari._assistant.build_context", return_value={}), patch(
+        "behav3d.napari._assistant.apply_action", return_value=True,
+    ):
+        answered._on_tool_calls([{
+            "name": "navigate_to_step", "arguments": {"step": "tracking"},
+        }])
+    assert answered._history[-1]["content"] == "Opening **Tracking**."
+
+
+def _radius_action(value=30.0):
+    action = ProposedAction(
+        "set_ui_value", control_id="tracking.tcell.radius", value=value
+    )
+    action.preview = f"Search radius: 12.0 -> {value}"
+    return action
+
+
+def test_declined_change_is_not_proposed_again():
+    dock = _plan_dock()
+    declined = _radius_action()
+    dock._add_action_card(declined)
+    dock.action_tray_layout.itemAt(0).widget().dismissed.emit(declined)
+
+    dock._history = [{"role": "user", "content": "Continue with step 1"}]
+    assert dock._repeats_declined(_radius_action())
+    assert not dock._repeats_declined(_radius_action(25.0)), "a new value is a new change"
+
+    dock._history = [{"role": "user", "content": "Actually set the radius to 30"}]
+    assert not dock._repeats_declined(_radius_action()), "asking again is allowed"
+
+    other = ProposedAction("bulk_fill_metadata", samples=[])
+    assert not dock._repeats_declined(other)
+
+    dock._reset_conversation()
+    dock._history = [{"role": "user", "content": "Continue with step 1"}]
+    assert not dock._repeats_declined(_radius_action())
+
+
+def test_dropped_repeat_with_no_text_still_answers():
+    from unittest.mock import patch
+
+    dock = _plan_dock()
+    dock.main_widget.data_prep_tab = None
+    declined = _radius_action()
+    dock._add_action_card(declined)
+    dock.action_tray_layout.itemAt(0).widget().dismissed.emit(declined)
+    dock._history = [{"role": "user", "content": "Continue with step 1"}]
+    dock._streaming_text = ""
+    with patch("behav3d.napari._assistant.build_context", return_value={}), patch(
+        "behav3d.napari._assistant.build_actions", return_value=[_radius_action()],
+    ):
+        dock._on_tool_calls([{"name": "set_ui_value", "arguments": {}}])
+    assert dock.action_tray_layout.count() == 0
+    assert "kept the current value" in dock._md_log[-1]
+
+
+def test_card_decisions_settle_a_tool_only_history_entry():
+    dock = _plan_dock()
+    declined, applied = _radius_action(), _radius_action(25.0)
+    dock._history = [
+        {"role": "user", "content": "Set the radius to 30"},
+        {"role": "assistant", "content": f"Sent to the interface: {declined.preview}"},
+        {"role": "user", "content": "Try 25 instead"},
+        {"role": "assistant", "content": f"Sent to the interface: {applied.preview}"},
+    ]
+    dock._record_declined(declined)
+    dock._record_applied(applied)
+    assert "declined, so the value did not change" in dock._history[1]["content"]
+    assert dock._history[3]["content"].endswith("(applied)")
+
+
+def test_failed_reply_does_not_create_a_plan():
+    dock = _plan_dock()
+    stack, _requests = _captured_requests()
+    with stack:
+        dock._send_message("What should I do next?")
+        dock._on_token(PLAN_REPLY)
+        dock._on_error("The stream was cut off.")
+        dock._on_finished()
+    assert not dock._plan.steps
+
+
+def test_plan_continue_sends_one_fixed_message_and_waits():
+    dock = _plan_dock()
+    stack, requests = _captured_requests()
+    with stack:
+        dock._send_message("What should I do next?")
+        _finish_reply(dock, PLAN_REPLY)
+        assert dock.plan_panel.btn_advance.isEnabled()
+        dock.plan_panel.btn_advance.click()
+        assert requests[-1]["messages"][-1]["content"] == "Continue with step 1"
+        assert len(requests) == 2
+        assert not dock.plan_panel.btn_advance.isEnabled(), "a request is in flight"
+        _finish_reply(dock, "Tracking needs one measurement.")
+        assert len(requests) == 2, "no hidden continuation"
+
+        dock.plan_panel.btn_advance.click()
+        assert requests[-1]["messages"][-1]["content"] == "Continue with step 2"
+        assert dock._plan.status(0) == "done"
+
+
+def test_plan_rows_are_visible_at_any_dock_width():
+    dock = _plan_dock()
+    dock._plan.adopt([f"Run a step with quite a long description {n}." for n in range(3)], True)
+    for width in (300, 520):
+        dock.resize(width, 700)
+        dock.show()
+        dock._refresh_plan_panel()
+        _settle()
+        # Rows rebuilt on a visible panel are what collapsed to nothing. Check before
+        # the event loop runs, because a later resize can mask it.
+        dock._refresh_plan_panel()
+        assert dock.plan_panel._steps.height() > 0, width
+        _settle()
+        rows = dock.plan_panel.row_labels()
+        assert len(rows) == 3
+        for row in rows:
+            assert row.isVisible() and row.height() >= row.fontMetrics().height(), width
+        visible_area = dock.plan_panel._steps.viewport().height()
+        assert visible_area >= sum(row.height() for row in rows), width
+    dock.close()
+
+
+def test_long_plans_scroll_instead_of_squeezing_the_chat():
+    dock = _plan_dock()
+    dock._plan.adopt([f"Run a step with a long description {n}." for n in range(10)], True)
+    dock.resize(300, 700)
+    dock.show()
+    dock._refresh_plan_panel()
+    _settle()
+    assert dock.plan_panel._steps.height() <= 132
+    assert dock.transcript.height() > 200
+    dock.close()
+
+
+def test_plan_continue_is_disabled_during_the_metadata_wizard():
+    dock = _plan_dock()
+    dock._plan.adopt(PLAN_ITEMS, True)
+    dock._md_queue = [dict(step) for step in AssistantDock._MD_COUNT_STEPS]
+    dock._md_ask_next()
+    assert not dock.plan_panel.btn_advance.isEnabled()
+
+
+def test_plan_finish_needs_no_request():
+    dock = _plan_dock()
+    stack, requests = _captured_requests()
+    with stack:
+        dock._plan.adopt(["Open Tracking.", "Run Filtering."], True)
+        dock._plan.complete(0)
+        dock._plan.advance()
+        dock._refresh_plan_panel()
+        assert dock.plan_panel.btn_advance.text() == "Finish"
+        dock.plan_panel.btn_advance.click()
+    assert requests == []
+    assert not dock.plan_panel.isVisibleTo(dock)
+    assert "All plan steps are done." in dock._md_log[-1]
+
+
+def test_action_outcomes_stay_out_of_the_message_history():
+    from unittest.mock import patch
+
+    dock = _plan_dock()
+    dock.refresh_context_bar = lambda: None
+    dock._plan.adopt(PLAN_ITEMS, True)
+    applied = ProposedAction("set_ui_value", control_id="tracking.radius", value=12)
+    applied.preview = "Search radius -> 12"
+    declined = ProposedAction("set_ui_value", control_id="tracking.gap", value=3)
+    declined.preview = "Maximum gap -> 3"
+    swept = ProposedAction("set_ui_value", control_id="tracking.size", value=4)
+    swept.preview = "Minimum size -> 4"
+    failed = ProposedAction("set_ui_value", control_id="tracking.mode", value="a")
+    failed.preview = "Mode -> a"
+
+    with patch("behav3d.napari._assistant.apply_action", return_value=True):
+        dock._add_action_card(applied)
+        dock._apply_action(applied)
+    with patch("behav3d.napari._assistant.apply_action", return_value=False):
+        dock._apply_action(failed)
+    dock._add_action_card(declined)
+    card = dock.action_tray_layout.itemAt(0).widget()
+    card.dismissed.emit(declined)
+    dock._add_action_card(swept)
+    dock.btn_clear_actions.click()
+
+    assert dock._outcomes == [
+        "Applied: Search radius -> 12",
+        "Could not apply: Mode -> a",
+        "Declined: Maximum gap -> 3",
+        "Declined: Minimum size -> 4",
+    ]
+    assert dock._history == []
+    assert dock._plan.status(0) == "current", "Apply must not complete a step"
+
+    # An emptied tray points at Continue, and New chat is not a dismissal.
+    assert dock.plan_panel.btn_advance.property("emphasis") == "true"
+    dock._add_action_card(declined)
+    assert dock.plan_panel.btn_advance.property("emphasis") == "false"
+    outcomes = list(dock._outcomes)
+    dock._clear_action_cards()
+    assert dock._outcomes == outcomes
+
+
+def test_each_message_gets_its_own_bubble():
+    dock = _plan_dock()
+    dock._append_user("First question")
+    dock._append_md("First answer")
+    dock._append_md("Filled in: Well")
+    bubbles = dock.transcript.bubbles()
+    assert [bubble.role for bubble in bubbles] == [
+        "assistant", "user", "assistant", "assistant",
+    ]
+    assert bubbles[1].toPlainText() == "First question"
+    assert "**You**" not in dock.transcript.toPlainText()
+
+    captions = [caption for _bubble, caption in dock.transcript._rows]
+    assert captions[2] is not None and captions[3] is None, "one caption per speaker run"
+
+    dock._reset_conversation()
+    assert len(dock.transcript.bubbles()) == 1
+    assert "Filled in" not in dock.transcript.toPlainText()
+
+
+def test_styling_failure_keeps_rendered_markdown():
+    from unittest.mock import patch
+
+    dock = _plan_dock()
+    with patch(
+        "behav3d.napari._assistant_widgets.style_transcript_document",
+        side_effect=TypeError("enum"),
+    ):
+        dock._append_md("**Bold** text")
+    assert dock.transcript.bubbles()[-1].toPlainText() == "Bold text"
+
+
+def test_streaming_rerenders_only_the_latest_bubble():
+    dock = _plan_dock()
+    dock._append_user("A question")
+    older = dock.transcript.bubbles()[1]
+    older_document = older.document()
+    rendered = []
+    older.setMarkdown = lambda text: rendered.append(text)
+
+    dock._streaming_text = "Partial"
+    dock._render()
+    latest = dock.transcript.bubbles()[-1]
+    dock._streaming_text = "Partial answer"
+    dock._render()
+
+    assert rendered == []
+    assert older.document() is older_document
+    assert dock.transcript.bubbles()[-1] is latest
+    assert latest.toPlainText() == "Partial answer"
+
+
+def test_bubbles_fit_a_narrow_dock_and_refit_on_resize():
+    dock = _plan_dock()
+    dock.resize(300, 700)
+    dock.show()
+    _settle()
+    dock._append_user("Short question")
+    dock._append_md("A long reply. " * 40)
+    dock._append_md(
+        "| Analysis | What it answers |\n|---|---|\n"
+        "| **Death Dynamics** | How the signal-positive fraction changes over time. |"
+    )
+    _settle()
+
+    transcript = dock.transcript
+    _greeting, short, long, table = transcript.bubbles()
+    available = transcript._available_width()
+    for bubble in transcript.bubbles():
+        assert bubble.width() <= available
+        assert bubble.height() >= bubble.document().size().height()
+    assert short.width() < long.width(), "a short message shrinks to its text"
+    assert table.width() >= long.width() * 0.9, "tables take the full width"
+    assert short.x() + short.width() > long.x() + long.width() - 1, "you sit on the right"
+
+    narrow_height = long.height()
+    dock.resize(520, 700)
+    _settle()
+    assert transcript._available_width() > available
+    assert long.height() < narrow_height, "a wider dock reflows the text"
+    dock.close()
+
+
+def test_transcript_follows_the_end_only_while_reading_there():
+    dock = _plan_dock()
+    dock.resize(320, 420)
+    dock.show()
+    _settle()
+    for index in range(8):
+        dock._append_md(f"Message {index}. " * 30)
+    _settle()
+    bar = dock.transcript.verticalScrollBar()
+    assert bar.value() == bar.maximum() > 0
+
+    bar.setValue(0)
+    _settle()
+    dock._append_md("A later reply. " * 30)
+    _settle()
+    assert bar.value() == 0, "reading older messages is not interrupted"
+
+    dock._append_user("A new question")
+    _settle()
+    assert bar.value() == bar.maximum()
+    dock.close()
+
+
+def test_bubble_links_only_open_web_addresses():
+    from unittest.mock import patch
+    from qtpy.QtCore import QUrl
+    from behav3d.napari._assistant_widgets import _MessageBubble
+
+    with patch("behav3d.napari._assistant_widgets.QDesktopServices.openUrl") as open_url:
+        _MessageBubble._open_link(QUrl("file:///etc/passwd"))
+        open_url.assert_not_called()
+        _MessageBubble._open_link(QUrl("https://behav3d.readthedocs.io"))
+        open_url.assert_called_once()
+
+
+SENTINEL_KEY = "sk-SENTINEL-do-not-leak"
+_PROVIDER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "set_ui_value",
+        "description": "Set a value.",
+        "parameters": {"type": "object", "properties": {"value": {}}},
+    },
+}
+_PROVIDER_REQUEST = {
+    "system": "SYSTEM RULES",
+    "messages": [
+        {"role": "assistant", "content": "An older reply"},
+        {"role": "user", "content": "Set the radius"},
+        {"role": "assistant", "content": ""},
+    ],
+    "tools": [_PROVIDER_TOOL],
+    "must_call_tool": False,
+}
+_API_PATHS = {"openai": "/v1", "mistral": "/v1", "deepseek": "/v1", "gemini": "/v1"}
+
+
+def _stub_config(stub, provider_id, model="model-a"):
+    spec = dataclasses.replace(
+        provider_by_id(provider_id),
+        base_url=stub.url + _API_PATHS.get(provider_id, ""),
+    )
+    return ProviderConfig(spec, model, ApiKey(SENTINEL_KEY))
+
+
+def _stream(stub, provider_id, model="model-a", **request):
+    shown = []
+    reply = stream_reply(
+        _stub_config(stub, provider_id, model),
+        {**_PROVIDER_REQUEST, **request},
+        shown.append,
+    )
+    assert "".join(shown) == reply.text
+    return reply, stub.requests[-1]
+
+
+class _ServiceResponse:
+    def __init__(self, payload, status=200):
+        self.payload = payload
+        self.status_code = status
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise ConnectionError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return self.payload
+
+
+def _fake_service(prepared, finished=None, *, finish_fails=False):
+    calls = []
+
+    def post(url, json=None, timeout=None):
+        calls.append((url.rsplit("/", 1)[-1], json))
+        if url.endswith("/prepare"):
+            return _ServiceResponse(prepared)
+        if finish_fails:
+            raise ConnectionError("service went away")
+        return _ServiceResponse(finished or {"calls": []})
+
+    post.calls = calls
+    return post
+
+
+def _model_request(**extra):
+    return {"kind": "model_request", **_PROVIDER_REQUEST, **extra}
+
+
+def _own_turn(stub, post, provider_id="mistral", **options):
+    shown, statuses = [], []
+    with patch.object(_assistant_providers.time, "sleep"):
+        result = run_own_model_turn(
+            "https://service",
+            {"messages": [], "context": {}, "tools": []},
+            _stub_config(stub, provider_id),
+            on_text=shown.append,
+            on_status=statuses.append,
+            post=post,
+            **options,
+        )
+    return result, "".join(shown), statuses
+
+
+def test_turn_policy_narrows_tools_in_order():
+    import app
+
+    tools = [{"name": name} for name in app._TOOL_NAMES]
+    plan = PlanState()
+    plan.adopt(["Run Feature Extraction.", "Run Filtering."], True)
+    plan.handle_message("do the first one")
+    context = {
+        "current_step": "tracking",
+        "assistant_session": {"plan": plan.to_context()},
+    }
+    policy = app.turn_policy(
+        context, [{"role": "user", "content": "Continue with step 1"}], tools
+    )
+    assert policy["plan_call"]["arguments"] == {"step": "feature_extraction"}
+    names = {tool["name"] for tool in policy["tools"]}
+    assert "navigate_to_step" not in names and "open_analysis_view" not in names
+    assert "set_ui_value" in names
+
+    request = app.build_model_request(
+        context, [{"role": "system", "content": "x"}, {"role": "user", "content": "y"}],
+        policy, [],
+    )
+    assert request["messages"] == [{"role": "user", "content": "y"}]
+    assert request["tool_choice"] == "auto" and request["thinking_override"] is None
+
+
+def test_finalize_calls_prepends_navigation_after_checking_for_a_missing_edit():
+    import app
+
+    navigate = {"name": "navigate_to_step", "arguments": {"step": "tracking"}}
+    policy = {
+        "user_msg": "Set the radius to 5", "tools": [{"name": "set_ui_value"}],
+        "force_bulk": False, "force_edit": True, "plan_call": navigate,
+    }
+    calls, missing = app.finalize_calls([], "I have set it.", {}, policy)
+    assert calls == [navigate] and missing is True, "navigation must not hide this"
+
+    fragments = [{
+        "index": 0, "name": "set_ui_value",
+        "arguments": '{"control_id": "a", "value": 5}',
+    }]
+    calls, missing = app.finalize_calls(fragments, "", {}, policy)
+    assert [call["name"] for call in calls] == ["navigate_to_step", "set_ui_value"]
+    assert missing is False
+
+
+def test_chat_completions_maps_a_required_tool_per_provider():
+    stub = ProviderStub()
+    try:
+        stub.queue({"text": "Hi"}, {"text": "Hi"}, {"text": "Hi"}, {"text": "Hi"})
+        _reply, mistral = _stream(stub, "mistral", must_call_tool=True)
+        _reply, deepseek = _stream(stub, "deepseek", must_call_tool=True)
+        _reply, gemini = _stream(stub, "gemini", must_call_tool=True)
+        _reply, relaxed = _stream(stub, "deepseek", must_call_tool=False)
+    finally:
+        stub.close()
+    assert mistral["path"].endswith("/chat/completions")
+    assert mistral["body"]["tool_choice"] == "required"
+    assert "thinking" not in mistral["body"]
+    assert mistral["body"]["temperature"] == 0.3
+    assert deepseek["body"]["thinking"] == {"type": "disabled"}
+    assert "thinking" not in relaxed["body"], "only a forced call turns thinking off"
+    assert gemini["body"]["tool_choice"] == "auto"
+    assert "requires a change" in gemini["body"]["messages"][0]["content"]
+    assert "requires a change" not in mistral["body"]["messages"][0]["content"]
+    assert [m["content"] for m in mistral["body"]["messages"][1:]] == [
+        "An older reply", "Set the radius",
+    ], "empty messages are rejected by some providers"
+
+
+def test_a_rejected_request_is_retried_once_without_optional_parameters():
+    stub = ProviderStub()
+    try:
+        stub.queue({"status": 400}, {"text": "Hi"})
+        reply, _request = _stream(stub, "mistral")
+        assert reply.text == "Hi" and len(stub.requests) == 2
+        assert stub.requests[0]["body"]["temperature"] == 0.3
+        assert "temperature" not in stub.requests[1]["body"]
+
+        stub.queue({"status": 400}, {"status": 400})
+        try:
+            _stream(stub, "mistral")
+            raise AssertionError("expected a failure")
+        except ProviderError as failure:
+            assert failure.kind == "bad_request"
+    finally:
+        stub.close()
+
+
+def test_parallel_tool_calls_sharing_an_index_stay_separate():
+    import app
+
+    stub = ProviderStub()
+    try:
+        stub.queue({"text": "", "tools": [
+            {"index": 0, "id": "a", "name": "set_ui_value", "arguments": {"value": 1}},
+            {"index": 0, "id": "b", "name": "set_ui_value", "arguments": {"value": 2}},
+        ]})
+        reply, _request = _stream(stub, "gemini")
+    finally:
+        stub.close()
+    calls = app.assemble_tool_calls(list(reply.fragments))
+    assert [call["arguments"]["value"] for call in calls] == [1, 2]
+
+
+def test_openai_uses_the_responses_api_without_storing_the_conversation():
+    stub = ProviderStub()
+    try:
+        stub.queue({
+            "pieces": ["Hel", "lo"],
+            "tools": [{"name": "set_ui_value", "arguments": {"value": 1}}],
+        })
+        reply, request = _stream(stub, "openai", must_call_tool=True)
+    finally:
+        stub.close()
+    body = request["body"]
+    assert request["path"].endswith("/responses")
+    assert body["store"] is False
+    assert "temperature" not in body
+    assert body["tool_choice"] == "auto"
+    assert body["instructions"].startswith("SYSTEM RULES")
+    assert "requires a change" in body["instructions"]
+    assert body["tools"][0]["name"] == "set_ui_value"
+    assert body["tools"][0]["strict"] is False and "function" not in body["tools"][0]
+    assert reply.text == "Hello"
+    assert reply.fragments[0]["name"] == "set_ui_value"
+
+
+def test_claude_requests_avoid_every_parameter_current_models_reject():
+    stub = ProviderStub()
+    try:
+        stub.queue({"text": "Hi", "tools": [
+            {"name": "set_ui_value", "arguments": {"value": 1}},
+        ]})
+        reply, request = _stream(
+            stub, "anthropic", "claude-haiku-5-5", must_call_tool=True
+        )
+    finally:
+        stub.close()
+    body = request["body"]
+    assert request["path"] == "/v1/messages"
+    for rejected in ("temperature", "thinking", "tool_choice"):
+        assert rejected not in body, rejected
+    assert body["system"].startswith("SYSTEM RULES")
+    assert "requires a change" in body["system"]
+    assert body["max_tokens"] > 0
+    assert body["tools"][0]["input_schema"]["type"] == "object"
+    assert body["messages"] == [{"role": "user", "content": "Set the radius"}], (
+        "the history window can open on an assistant turn, which Claude rejects"
+    )
+    assert json.loads(reply.fragments[0]["arguments"]) == {"value": 1}
+
+
+def test_claude_fallback_is_only_requested_on_eligible_models():
+    stub = ProviderStub()
+    try:
+        for model in ("claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"):
+            stub.queue({"text": "Hi"})
+            _reply, request = _stream(stub, "anthropic", model)
+            eligible = model != "claude-haiku-5-5"
+            assert (request["body"].get("fallbacks") == "default") is eligible, model
+            assert ("server-side-fallback" in str(
+                request["headers"].get("anthropic-beta")
+            )) is eligible, model
+    finally:
+        stub.close()
+
+
+def test_claude_refusal_reports_its_category_and_no_tool_calls():
+    stub = ProviderStub()
+    try:
+        stub.queue({
+            "blocks": [
+                {"type": "text", "text": "Partial"},
+                {"type": "tool_use", "name": "set_ui_value", "arguments": {"value": 1}},
+            ],
+            "stop": "refusal", "category": "bio",
+        })
+        reply, _request = _stream(stub, "anthropic", "claude-opus-5-5")
+    finally:
+        stub.close()
+    assert reply.stop == "refused" and reply.refusal_category == "bio"
+    assert reply.fragments == ()
+
+
+def test_claude_tool_use_before_a_fallback_is_discarded():
+    stub = ProviderStub()
+    try:
+        stub.queue({"blocks": [
+            {"type": "tool_use", "name": "set_ui_value", "arguments": {"value": 9}},
+            {"type": "fallback", "from": {"model": "a"}, "to": {"model": "b"}},
+            {"type": "tool_use", "name": "set_ui_value", "arguments": {"value": 4}},
+        ]})
+        reply, _request = _stream(stub, "anthropic", "claude-opus-5-5")
+    finally:
+        stub.close()
+    assert [json.loads(item["arguments"]) for item in reply.fragments] == [{"value": 4}]
+
+
+def test_replies_cut_off_at_the_length_limit_are_flagged():
+    stub = ProviderStub()
+    try:
+        stub.queue(
+            {"text": "Hi", "finish": "length"},
+            {"text": "Hi", "incomplete": True},
+            {"text": "Hi", "stop": "max_tokens"},
+        )
+        assert _stream(stub, "mistral")[0].stop == "truncated"
+        assert _stream(stub, "openai")[0].stop == "truncated"
+        assert _stream(stub, "anthropic", "claude-haiku-5-5")[0].stop == "truncated"
+    finally:
+        stub.close()
+
+
+def test_provider_failures_become_fixed_messages():
+    stub = ProviderStub()
+    try:
+        for provider_id, status, kind, retryable in (
+            ("anthropic", 401, "bad_key", False),
+            ("anthropic", 403, "forbidden", False),
+            ("openai", 404, "no_model", False),
+            ("mistral", 429, "rate_limit", True),
+            ("gemini", 500, "server", True),
+        ):
+            stub.queue({"status": status})
+            try:
+                _stream(stub, provider_id, "claude-haiku-5-5")
+                raise AssertionError("expected a failure")
+            except ProviderError as failure:
+                assert failure.kind == kind and failure.retryable is retryable
+                assert failure.__cause__ is None and failure.__suppress_context__
+                assert "stub failure" not in failure.message
+                assert SENTINEL_KEY not in failure.message
+                status_info = failure.status()
+                assert status_info["code"] == f"byok_{kind}"
+                assert not status_info["code"].startswith(("deepseek", "provider"))
+    finally:
+        stub.close()
+
+
+def test_provider_clients_ignore_ambient_credentials_and_urls():
+    stub = ProviderStub()
+    ambient = {
+        "OPENAI_API_KEY": "ambient", "OPENAI_BASE_URL": "http://127.0.0.1:9/v1",
+        "ANTHROPIC_API_KEY": "ambient", "ANTHROPIC_BASE_URL": "http://127.0.0.1:9",
+    }
+    try:
+        with patch.dict(os.environ, ambient):
+            stub.queue({"text": "Hi"}, {"text": "Hi"})
+            _reply, openai_request = _stream(stub, "openai")
+            _reply, claude_request = _stream(stub, "anthropic", "claude-haiku-5-5")
+    finally:
+        stub.close()
+    for request in (openai_request, claude_request):
+        assert SENTINEL_KEY in str(request["headers"]), "the chosen key must be used"
+        assert "ambient" not in str(request["headers"])
+
+
+def test_listing_models_hides_non_chat_models_and_checks_the_key():
+    stub = ProviderStub()
+    try:
+        assert list_models(_stub_config(stub, "mistral")) == ["model-a", "model-b"]
+        assert list_models(_stub_config(stub, "anthropic")) == ["model-a", "model-b"]
+        stub.models = ["models/gemini-x"]
+        assert list_models(_stub_config(stub, "gemini")) == ["gemini-x"]
+
+        stub.queue({"status": 401})
+        try:
+            list_models(_stub_config(stub, "openai"))
+            raise AssertionError("expected a failure")
+        except ProviderError as failure:
+            assert failure.kind == "bad_key"
+
+        stub.queue({"text": "OK"})
+        check_connection(_stub_config(stub, "anthropic", "claude-haiku-5-5"))
+        assert stub.requests[-1]["body"]["tools"][0]["name"] == "ping"
+    finally:
+        stub.close()
+
+
+def test_a_canned_reply_needs_no_provider_and_is_marked_as_canned():
+    stub = ProviderStub()
+    try:
+        post = _fake_service({
+            "kind": "final", "text": "Opening **Tracking**.",
+            "calls": [{"name": "navigate_to_step", "arguments": {"step": "tracking"}}],
+        })
+        result, text, statuses = _own_turn(stub, post)
+    finally:
+        stub.close()
+    assert stub.requests == []
+    assert text == "Opening **Tracking**." and len(result["calls"]) == 1
+    assert "local_guidance" in {status.get("stage") for status in statuses}
+
+
+def test_finish_receives_the_raw_reply_and_returns_checked_calls():
+    stub = ProviderStub()
+    try:
+        stub.queue({"text": "Hi", "tools": [
+            {"name": "set_ui_value", "arguments": {"value": 1}},
+        ]})
+        checked = [{"name": "set_ui_value", "arguments": {"value": 1}}]
+        post = _fake_service(
+            _model_request(),
+            {"calls": checked, "missing_required_tool": False},
+        )
+        result, _text, _statuses = _own_turn(stub, post)
+    finally:
+        stub.close()
+    assert result["calls"] == checked
+    route, body = post.calls[-1]
+    assert route == "finish" and body["content"] == "Hi"
+    assert body["tool_fragments"][0]["name"] == "set_ui_value"
+
+
+def test_a_failed_finish_never_calls_the_provider_again_or_applies_unchecked_calls():
+    stub = ProviderStub()
+    plan_call = {"name": "navigate_to_step", "arguments": {"step": "tracking"}}
+    try:
+        stub.queue({"text": "", "tools": [
+            {"name": "set_ui_value", "arguments": {"value": 1}},
+        ]})
+        post = _fake_service(_model_request(plan_call=plan_call), finish_fails=True)
+        result, _text, _statuses = _own_turn(stub, post)
+    finally:
+        stub.close()
+    assert len(stub.requests) == 1, "a tool-only reply must not buy a second model call"
+    assert [route for route, _body in post.calls].count("finish") == 2
+    assert result["calls"] == [plan_call]
+    assert result["unchecked"] is True
+
+
+def test_a_refusal_skips_finish():
+    stub = ProviderStub()
+    try:
+        stub.queue({"text": "Partial", "stop": "refusal", "category": "bio"})
+        post = _fake_service(_model_request())
+        result, _text, _statuses = _own_turn(stub, post, "anthropic")
+    finally:
+        stub.close()
+    assert result["refused"] is True and result["refusal_category"] == "bio"
+    assert [route for route, _body in post.calls] == ["prepare"]
+
+
+def test_transient_provider_failures_retry_once_before_any_output():
+    stub = ProviderStub()
+    try:
+        stub.queue({"status": 429}, {"text": "Hi"})
+        result, text, statuses = _own_turn(stub, _fake_service(_model_request()))
+        assert text == "Hi" and len(stub.requests) == 2
+        assert "retrying" in {status.get("stage") for status in statuses}
+
+        stub.requests.clear()
+        stub.queue({"status": 401})
+        try:
+            _own_turn(stub, _fake_service(_model_request()))
+            raise AssertionError("expected a failure")
+        except ProviderError as failure:
+            assert failure.kind == "bad_key"
+        assert len(stub.requests) == 1, "a bad key is not worth a second attempt"
+
+        stub.requests.clear()
+        stub.queue({"status": 429}, {"status": 429})
+        try:
+            _own_turn(stub, _fake_service(_model_request()))
+            raise AssertionError("expected a failure")
+        except ProviderError as failure:
+            assert failure.kind == "rate_limit"
+        assert len(stub.requests) == 2
+    finally:
+        stub.close()
+
+
+def test_a_failure_after_text_is_shown_is_never_retried():
+    calls = []
+
+    def fails_after_text(client, config, request, on_text, cancelled, relaxed):
+        calls.append(relaxed)
+        on_text("Half a reply")
+        raise ProviderError("server", config)
+
+    stub = ProviderStub()
+    try:
+        with patch.dict(
+            _assistant_providers._ADAPTERS, {"chat_completions": fails_after_text},
+        ):
+            try:
+                _own_turn(stub, _fake_service(_model_request()))
+                raise AssertionError("expected a failure")
+            except ProviderError as failure:
+                assert failure.kind == "server"
+    finally:
+        stub.close()
+    assert calls == [False], "a retry would repeat text already on screen"
+
+
+def test_cancelling_stops_reading_the_stream():
+    stub = ProviderStub()
+    try:
+        stub.queue({"pieces": ["one ", "two ", "three"]})
+        shown = []
+        try:
+            stream_reply(
+                _stub_config(stub, "mistral"), _PROVIDER_REQUEST, shown.append,
+                cancelled=lambda: bool(shown),
+            )
+            raise AssertionError("expected cancellation")
+        except ProviderCancelled:
+            pass
+    finally:
+        stub.close()
+    assert shown == ["one "]
+
+
+def test_an_old_service_is_reported_and_never_retried_through_chat():
+    def post(url, json=None, timeout=None):
+        assert url.endswith("/prepare"), "must not fall back to /chat"
+        return _ServiceResponse({}, status=404)
+
+    stub = ProviderStub()
+    try:
+        try:
+            _own_turn(stub, post)
+            raise AssertionError("expected a failure")
+        except ServiceTooOld:
+            pass
+    finally:
+        stub.close()
+
+
+def _run_worker(config, post):
+    events = {"token": [], "status": [], "error": [], "degraded": [], "notice": []}
+    worker = ChatWorker(
+        [{"role": "user", "content": "Set the radius"}], {"current_step": "tracking"},
+        [], provider=config,
+    )
+    worker.token.connect(events["token"].append)
+    worker.status.connect(events["status"].append)
+    worker.error.connect(events["error"].append)
+    worker.degraded.connect(events["degraded"].append)
+    worker.notice.connect(events["notice"].append)
+    with patch(
+        "behav3d.napari._assistant_client.load_client_config",
+        return_value={"endpoint": "https://service", "timeout": 60},
+    ), patch("requests.post", post), patch.object(_assistant_providers.time, "sleep"):
+        worker.run()
+    return events
+
+
+def test_a_provider_failure_is_shown_and_never_falls_back():
+    stub = ProviderStub()
+    try:
+        stub.queue({"status": 401})
+        post = _fake_service(_model_request())
+        events = _run_worker(_stub_config(stub, "mistral"), post)
+    finally:
+        stub.close()
+    assert "rejected the API key" in events["error"][0]
+    assert events["degraded"] == [], "the offline answer would hide a bad key"
+    assert [route for route, _body in post.calls] == ["prepare"]
+    assert events["status"][-1]["code"] == "byok_bad_key"
+
+
+def test_the_offline_answer_only_appears_when_the_service_is_unreachable():
+    def post(url, json=None, timeout=None):
+        raise ConnectionError("no route")
+
+    stub = ProviderStub()
+    try:
+        events = _run_worker(_stub_config(stub, "mistral"), post)
+    finally:
+        stub.close()
+    assert "Assistant offline" in events["degraded"][0]
+    assert stub.requests == [], "nothing goes to the provider without the service"
+
+
+def test_an_old_service_error_is_shown_by_the_worker():
+    def post(url, json=None, timeout=None):
+        return _ServiceResponse({}, status=404)
+
+    stub = ProviderStub()
+    try:
+        events = _run_worker(_stub_config(stub, "mistral"), post)
+    finally:
+        stub.close()
+    assert events["error"] == [SERVICE_TOO_OLD_MESSAGE] and events["degraded"] == []
+
+
+def test_the_key_only_ever_reaches_the_provider():
+    stub = ProviderStub()
+    try:
+        replies = (
+            {"text": "Done", "tools": [{"name": "set_ui_value", "arguments": {"value": 1}}]},
+            {"status": 401},
+            {"status": 500},
+            {"status": 500},
+        )
+        seen = []
+        for provider_id in ("mistral", "openai", "anthropic"):
+            stub.queue(*replies)
+            for _turn in range(3):
+                post = _fake_service(_model_request())
+                seen.append(_run_worker(_stub_config(stub, provider_id, "claude-haiku-5-5"), post))
+                seen.append([body for _route, body in post.calls])
+    finally:
+        stub.close()
+    assert SENTINEL_KEY not in repr(seen)
+    assert stub.requests, "the turns must have reached the provider"
+    for request in stub.requests:
+        assert SENTINEL_KEY not in json.dumps(request["body"])
+        assert SENTINEL_KEY in str(request["headers"])
+
+
+def test_the_key_cannot_be_printed_by_accident():
+    key = ApiKey(SENTINEL_KEY)
+    config = ProviderConfig(provider_by_id("openai"), "m", key)
+    for text in (repr(key), str(key), f"{key}", repr(config)):
+        assert SENTINEL_KEY not in text
+    assert key.reveal() == SENTINEL_KEY and bool(key) and not ApiKey("  ")
+
+
+def test_the_tracked_client_config_has_nowhere_for_a_key():
+    tracked = Path(__file__).parents[1] / "napari" / "assistant_config.json"
+    assert set(json.loads(tracked.read_text())) <= {"endpoint", "timeout"}
+    source = (
+        Path(__file__).parents[1] / "behav3d" / "napari" / "_assistant_settings.py"
+    ).read_text()
+    assert "assistant_config.json`" in source and "write_text" not in source
+
+
+def _own_key_dock(key=SENTINEL_KEY, model="model-a"):
+    dock = _plan_dock()
+    dock._provider_config = ProviderConfig(provider_by_id("mistral"), model, ApiKey(key))
+    return dock
+
+
+def test_a_message_containing_the_key_is_not_sent():
+    dock = _own_key_dock()
+    stack, requests = _captured_requests()
+    with stack:
+        dock.input.setPlainText(f"my key is {SENTINEL_KEY} please use it")
+        dock._on_send()
+    assert requests == [] and dock._history == []
+    assert SENTINEL_KEY not in " ".join(dock._md_log)
+    assert "not sent" in dock._md_log[-1]
+
+
+def test_a_missing_key_stops_the_turn_instead_of_using_the_shared_service():
+    for key, model in (("", "model-a"), (SENTINEL_KEY, "")):
+        dock = _own_key_dock(key, model)
+        stack, requests = _captured_requests()
+        with stack:
+            dock._send_message("Set the radius")
+        assert requests == [] and dock._history == []
+        assert "nothing was sent" in dock._md_log[-1]
+
+
+def test_the_dock_passes_its_provider_and_a_fresh_cancel_flag_to_the_worker():
+    dock = _own_key_dock()
+    stack, requests = _captured_requests()
+    with stack:
+        dock._send_message("First")
+        first = requests[-1]["cancel"]
+        _finish_reply(dock, "Done")
+        dock._send_message("Second")
+    assert requests[-1]["provider"] is dock._provider_config
+    assert requests[-1]["cancel"] is not first
+    assert isinstance(first, threading.Event)
+
+
+def test_new_chat_cancels_the_request_in_flight():
+    dock = _own_key_dock()
+    stack, requests = _captured_requests()
+    with stack:
+        dock._send_message("Set the radius")
+        cancel = requests[-1]["cancel"]
+        assert not cancel.is_set()
+        dock._reset_conversation()
+    assert cancel.is_set()
+
+
+def test_a_refused_turn_leaves_nothing_for_the_next_request():
+    dock = _own_key_dock()
+    stack, _requests = _captured_requests()
+    with stack:
+        dock._send_message("How do T cells kill targets?")
+        dock._on_token("**Plan**\n\n1. Run Tracking.\n2. Run Filtering.")
+        dock._on_refused({"label": "Anthropic Claude", "category": "bio"})
+        dock._on_finished()
+    assert dock._history == [], "the declined turn would otherwise repeat in every prompt"
+    assert not dock._plan.steps, "a partial reply must not create a plan"
+    assert "(stopped)" in dock._md_log[-2]
+    assert "declined this request (bio)" in dock._md_log[-1]
+    assert dock._request_outcome == "refused"
+
+
+def test_an_own_provider_failure_promises_no_automatic_recovery():
+    dock = _own_key_dock()
+    dock._on_error("Mistral rejected the API key.")
+    assert "rejected the API key" in dock._md_log[-1]
+    assert "recovery" not in dock._md_log[-1], "no recheck can fix a wrong key"
+
+    shared = _plan_dock()
+    shared._on_error("Modal is down.")
+    assert "recovery" in shared._md_log[-1]
+
+
+def test_a_refusal_leaves_a_settled_status():
+    dock = _own_key_dock()
+    dock._set_service_status({
+        "level": "working", "stage": "streaming", "message": "Receiving...",
+    })
+    dock._on_refused({"label": "Mistral", "category": ""})
+    assert dock.status_label.text() == "Online · Mistral"
+
+
+def test_the_settings_dialog_never_cuts_off_its_text():
+    _plan_dock()
+    fake = _FakeKeyring()
+    with _isolated_settings(), patch.dict(sys.modules, {"keyring": fake}):
+        dialog = _assistant_settings.ProviderSettingsDialog()
+        dialog.show()
+        for index in range(dialog.provider.count()):
+            dialog.provider.setCurrentIndex(index)
+            _settle(60)
+            notice = dialog.notice
+            assert notice.height() >= notice.heightForWidth(notice.width()), index
+        dialog.provider.setCurrentIndex(dialog.provider.findData("anthropic"))
+        _settle(60)
+        name_width = dialog.model.fontMetrics().horizontalAdvance("claude-sonnet-5-5")
+        assert dialog.model.lineEdit().width() >= name_width
+        for button in (dialog.btn_remove_key, dialog.btn_load_models):
+            assert button.height() >= button.minimumSizeHint().height(), button.text()
+        dialog.close()
+
+
+def test_a_required_edit_with_no_tool_call_is_called_out():
+    dock = _own_key_dock()
+    stack, _requests = _captured_requests()
+    with stack:
+        dock._send_message("Set the radius to 5")
+        dock._on_token("I have set the radius to 5.")
+        dock._on_missing_tool()
+        dock._on_finished()
+    assert "I have set the radius" in dock._md_log[-2], "order follows the conversation"
+    assert "No change was proposed" in dock._md_log[-1]
+    assert any("No change was proposed" in outcome for outcome in dock._outcomes)
+
+
+def test_notices_follow_the_text_they_are_about():
+    dock = _own_key_dock()
+    dock._streaming_text = "A reply that was cut"
+    dock._on_notice("It stopped early.")
+    assert "A reply that was cut" in dock._md_log[-2]
+    assert "It stopped early." in dock._md_log[-1]
+
+
+def test_a_bad_key_is_not_treated_as_an_outage():
+    dock = _own_key_dock()
+    dock._set_service_status({
+        "level": "error", "code": "byok_bad_key", "component": "byok",
+        "stage": "provider", "message": "Rejected.",
+    })
+    assert not dock._recovery_timer.isActive(), "a recovery check would report Online"
+    assert not dock._recovery_probe_provider
+    assert "Rejected." in dock.status_label.text()
+
+    dock._set_service_status({"level": "online", "stage": "complete", "message": "ok"})
+    assert dock.status_label.text() == "Online · Mistral"
+
+
+def test_status_text_names_the_active_model():
+    dock = _plan_dock()
+    assert "DeepSeek" in dock.btn_check_status.toolTip()
+    assert dock._model_label() == "DeepSeek"
+    assert _own_key_dock()._model_label() == "Mistral"
+
+
+def test_health_checks_never_use_the_shared_account_for_an_own_key():
+    stub = ProviderStub()
+    config = _stub_config(stub, "mistral")
+    healthy = {"modal": "online", "level": "online", "byok_contract": "1", "message": "ok"}
+    try:
+        assert check_own_provider(healthy, config, probe=False) == healthy
+        assert stub.requests == [], "a background check should not contact the provider"
+
+        result = check_own_provider(healthy, config, probe=True)
+        assert result["own_provider"] == "online" and "Mistral" in result["message"]
+        assert stub.requests[-1]["path"].endswith("/models")
+
+        stub.queue({"status": 401})
+        failed = check_own_provider(healthy, config, probe=True)
+        assert failed["code"] == "byok_bad_key" and failed["level"] == "error"
+    finally:
+        stub.close()
+    offline = {"modal": "offline", "level": "offline"}
+    assert check_own_provider(offline, config, probe=True) == offline
+    old = check_own_provider({"modal": "online"}, config, probe=False)
+    assert old["code"] == "byok_service_too_old"
+
+
+class _FakeKeyring:
+    def __init__(self):
+        self.saved = {}
+
+    def get_keyring(self):
+        return self
+
+    def get_password(self, service, name):
+        return self.saved.get((service, name))
+
+    def set_password(self, service, name, value):
+        self.saved[(service, name)] = value
+
+    def delete_password(self, service, name):
+        self.saved.pop((service, name), None)
+
+
+def test_an_environment_without_the_sdks_says_so_instead_of_crashing():
+    config = ProviderConfig(provider_by_id("anthropic"), "m", ApiKey(SENTINEL_KEY))
+    with patch.dict(sys.modules, {"anthropic": None}):
+        try:
+            stream_reply(config, _PROVIDER_REQUEST, lambda _text: None)
+            raise AssertionError("expected a failure")
+        except ProviderError as failure:
+            assert failure.kind == "missing_package"
+            assert "anthropic" in failure.message and "Reinstall" in failure.message
+    openai_config = ProviderConfig(provider_by_id("openai"), "m", ApiKey(SENTINEL_KEY))
+    with patch.dict(sys.modules, {"openai": None}):
+        try:
+            list_models(openai_config)
+            raise AssertionError("expected a failure")
+        except ProviderError as failure:
+            assert failure.kind == "missing_package" and "openai" in failure.message
+
+
+def test_an_environment_without_keyring_keeps_the_key_for_the_session():
+    with patch.dict(sys.modules, {"keyring": None}):
+        assert not _assistant_providers.keychain_available()
+        assert _assistant_providers.save_api_key("mistral", ApiKey(SENTINEL_KEY)) is False
+        assert _assistant_providers.load_api_key("mistral").reveal() == SENTINEL_KEY
+        _assistant_providers.delete_api_key("mistral")
+        assert not _assistant_providers.load_api_key("mistral")
+
+
+def test_keys_are_kept_in_the_keychain():
+    fake = _FakeKeyring()
+    with patch.dict(sys.modules, {"keyring": fake}):
+        assert _assistant_providers.keychain_available()
+        assert _assistant_providers.save_api_key("openai", ApiKey(SENTINEL_KEY)) is True
+        assert _assistant_providers.load_api_key("openai").reveal() == SENTINEL_KEY
+        _assistant_providers.delete_api_key("openai")
+        assert not _assistant_providers.load_api_key("openai")
+
+
+def test_keys_are_session_only_without_a_secure_keychain():
+    class PlaintextKeyring(_FakeKeyring):
+        pass
+
+    fake = PlaintextKeyring()
+    with patch.dict(sys.modules, {"keyring": fake}):
+        assert not _assistant_providers.keychain_available(), "plain text is not secure"
+        assert _assistant_providers.save_api_key("openai", ApiKey(SENTINEL_KEY)) is False
+        assert fake.saved == {}
+        assert _assistant_providers.load_api_key("openai").reveal() == SENTINEL_KEY
+        _assistant_providers.delete_api_key("openai")
+        assert not _assistant_providers.load_api_key("openai")
+
+
+def _isolated_settings():
+    from qtpy.QtCore import QSettings
+
+    folder = tempfile.mkdtemp()
+    return patch.object(
+        _assistant_settings, "_settings",
+        lambda: QSettings(os.path.join(folder, "assistant.ini"), QSettings.IniFormat),
+    )
+
+
+def test_a_chosen_provider_without_a_key_is_still_the_chosen_provider():
+    with _isolated_settings(), patch.object(
+        _assistant_settings, "load_api_key", return_value=ApiKey(""),
+    ):
+        assert _assistant_settings.load_active_provider() is None
+        _assistant_settings.save_active_provider("anthropic", "")
+        config = _assistant_settings.load_active_provider()
+        assert config.spec.id == "anthropic", "falling back would be a silent data change"
+        assert config.model == "claude-opus-5-5" and not config.key
+        _assistant_settings.save_active_provider("")
+        assert _assistant_settings.load_active_provider() is None
+
+
+def test_the_settings_dialog_says_where_data_goes():
+    shared = _assistant_settings.data_notice()
+    assert "DeepSeek" in shared and "never the images" in shared
+    own = _assistant_settings.data_notice(provider_by_id("mistral"))
+    assert "stays on this computer" in own and "Mistral" in own
+    assert "DeepSeek" not in own and "20,000 tokens" in own
+    assert "Mistral" in own and "another Claude model" not in own
+    assert "another Claude model" in _assistant_settings.data_notice(
+        provider_by_id("anthropic")
+    )
+
+
+def test_the_settings_dialog_saves_a_provider_and_its_key():
+    _plan_dock()
+    fake = _FakeKeyring()
+    with _isolated_settings(), patch.dict(sys.modules, {"keyring": fake}):
+        dialog = _assistant_settings.ProviderSettingsDialog()
+        assert not dialog.key.isEnabled(), "the shared service needs no key"
+
+        dialog.provider.setCurrentIndex(dialog.provider.findData("anthropic"))
+        assert dialog.key.isEnabled()
+        assert dialog.model.currentText() == "claude-opus-5-5"
+        assert dialog.key.echoMode() == dialog.key.EchoMode.Password
+
+        dialog._save()
+        assert "Enter your Anthropic Claude API key" in dialog.message.text()
+        assert fake.saved == {}
+
+        dialog.key.setText(SENTINEL_KEY)
+        dialog._save()
+        config = _assistant_settings.load_active_provider()
+        assert config.spec.id == "anthropic" and config.key.reveal() == SENTINEL_KEY
+
+        reopened = _assistant_settings.ProviderSettingsDialog()
+        assert reopened.provider.currentData() == "anthropic"
+        assert reopened.key.text() == "", "a saved key is never shown again"
+        assert reopened.key.placeholderText() == "Saved on this computer"
+
+        reopened.provider.setCurrentIndex(0)
+        reopened._save()
+        assert _assistant_settings.load_active_provider() is None
 
 
 # --------------------------------------------------------------------------

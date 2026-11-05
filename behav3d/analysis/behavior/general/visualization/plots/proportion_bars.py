@@ -9,7 +9,6 @@ from matplotlib import pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.gridspec import GridSpec
 from matplotlib.patches import Patch
-from scipy import stats
 
 A4_PORTRAIT = (8.27, 11.69)
 
@@ -179,8 +178,7 @@ def compute_class_by_stack_proportions(df, *, class_col, stack_col, class_order,
 
 
 def compute_class_by_group_mean_sem(df, *, class_col, group_col, value_col, class_order, group_order):
-    """Pivot per-(class, group) mean/SEM/n of `value_col` — purely descriptive aggregation (no
-    significance test), feeding `draw_grouped_value_barh`. Returns `(mean_df, sem_df, n_df)`,
+    """Pivot per-(class, group) mean/SEM/n of `value_col`, feeding `draw_grouped_value_barh`. Returns `(mean_df, sem_df, n_df)`,
     each indexed by `class_order` with `group_order` columns."""
     grouped = df.groupby([class_col, group_col], observed=True)[value_col]
     mean_df = grouped.mean().unstack(group_col).reindex(index=list(class_order), columns=list(group_order))
@@ -265,41 +263,18 @@ def plot_page_stacked_proportion_barh_grid(
     return fig
 
 
-SIGNIFICANCE_LEGEND_TEXT = "n.s. p≥0.05    * p<0.05    ** p<0.01    *** p<0.001    **** p<0.0001"
-
-
-def welch_ttest_stars(p_value):
-    """'' if p is NaN (test not run, e.g. too few samples), 'n.s.' if p>=0.05, else '*' p<0.05,
-    '**' p<0.01, '***' p<0.001, '****' p<0.0001."""
-    if p_value is None or not np.isfinite(p_value):
-        return ""
-    if p_value < 1e-4:
-        return "****"
-    if p_value < 1e-3:
-        return "***"
-    if p_value < 1e-2:
-        return "**"
-    if p_value < 5e-2:
-        return "*"
-    return "n.s."
-
-
 DIFF_BAR_LEGEND_TEXT = (
     "Bar = difference in mean cluster share (right level − left level)\n"
-    "whisker = 95% CI of the difference; Welch's t-test"
+    "whisker = SEM of the difference"
 )
 # Inches reserved below a diff-bar grid for the last row's tick labels + x-axis label plus the
-# three footnote lines.
-_DIFF_GRID_BOTTOM_IN = 1.05
+# two footnote lines.
+_DIFF_GRID_BOTTOM_IN = 0.92
 
 
-def add_significance_legend(fig, *, y=0.005, fontsize=7, extra_text=None):
-    """Draw the shared star-notation legend ('n.s.'/'*'/'**'/'***'/'****' thresholds) centered
-    near the bottom of `fig`, so every panel using `welch_ttest_stars` stays self-explanatory
-    even when nothing is significant. ``extra_text`` is added as a second line (e.g. what the
-    bars/whiskers mean)."""
-    text = SIGNIFICANCE_LEGEND_TEXT if not extra_text else f"{SIGNIFICANCE_LEGEND_TEXT}\n{extra_text}"
-    fig.text(0.5, y, text, ha="center", va="bottom", fontsize=fontsize, linespacing=1.4)
+def _add_diff_bar_legend(fig, *, y, fontsize=7):
+    """Draw the note explaining the bars and whiskers, centered near the bottom of `fig`."""
+    fig.text(0.5, y, DIFF_BAR_LEGEND_TEXT, ha="center", va="bottom", fontsize=fontsize, linespacing=1.4)
 
 
 def _diff_grid_title_margin_in(title, fig_w_in):
@@ -336,8 +311,9 @@ def _diff_grid_figure(fig_w, heights_in, top_in, *, ncols, width_ratios=None):
     return fig, outer, fig_h
 
 
-def _welch_diff_rows(class_order, vals_a_panel, vals_b_panel):
-    """Per-class Welch's two-sided unpaired t-test rows comparing two panels of samples."""
+def _class_diff_rows(class_order, vals_a_panel, vals_b_panel):
+    """Per-class mean difference (b - a) and its standard error between two panels of samples.
+    ``se_diff`` needs at least two samples on each side, and is NaN otherwise."""
     rows = []
     for class_name in class_order:
         vals_a = pd.to_numeric(vals_a_panel[class_name], errors="coerce").dropna().to_numpy()
@@ -345,38 +321,17 @@ def _welch_diff_rows(class_order, vals_a_panel, vals_b_panel):
         mean_a = float(np.mean(vals_a)) if len(vals_a) > 0 else float("nan")
         mean_b = float(np.mean(vals_b)) if len(vals_b) > 0 else float("nan")
         if len(vals_a) >= 2 and len(vals_b) >= 2:
-            t_stat, p_value = stats.ttest_ind(vals_b, vals_a, equal_var=False, nan_policy="omit")
-            t_stat = float(t_stat)
-            p_value = float(p_value)
-            # Same quantity Welch's t-test divides by (t = diff / se_diff).
             var_a = float(np.var(vals_a, ddof=1))
             var_b = float(np.var(vals_b, ddof=1))
             se_diff = float(np.sqrt(var_a / len(vals_a) + var_b / len(vals_b)))
-            if var_a > 0.0 or var_b > 0.0:
-                # Welch-Satterthwaite df (same df scipy uses internally for p_value), used to turn
-                # se_diff into a 95% CI margin - unlike a flat 1*se_diff, this has a fixed
-                # relationship to the significance stars: if it reaches past zero when mirrored
-                # inward around diff, the result is exactly "n.s." at alpha=0.05.
-                df = (var_a / len(vals_a) + var_b / len(vals_b)) ** 2 / (
-                    (var_a / len(vals_a)) ** 2 / (len(vals_a) - 1) + (var_b / len(vals_b)) ** 2 / (len(vals_b) - 1)
-                )
-                ci95_diff = float(stats.t.ppf(0.975, df) * se_diff)
-            else:
-                # Both groups have zero variance (e.g. a class that never occurs on either side) -
-                # se_diff is exactly 0.0 too, so the CI margin is legitimately 0.0, not undefined.
-                ci95_diff = 0.0
         else:
-            t_stat, p_value, se_diff, ci95_diff = float("nan"), float("nan"), float("nan"), float("nan")
+            se_diff = float("nan")
         rows.append({
             "class": class_name,
             "mean_a": mean_a,
             "mean_b": mean_b,
             "diff": (mean_b - mean_a) if np.isfinite(mean_a) and np.isfinite(mean_b) else float("nan"),
-            "t_stat": t_stat,
-            "p_value": p_value,
             "se_diff": se_diff,
-            "ci95_diff": ci95_diff,
-            "stars": welch_ttest_stars(p_value),
             "n_a": int(len(vals_a)),
             "n_b": int(len(vals_b)),
         })
@@ -395,9 +350,9 @@ def compute_condition_diff_stats_pairwise(
     """Per group (or a single '(all)' bucket if group_cols is empty), per pair of
     condition_col levels present anywhere in the dataset — every combination, ordered by
     first appearance in the data, e.g. levels [None, M21, M23] -> (None, M21), (None,
-    M23), (M21, M23) — per class: Welch's two-sided unpaired t-test. The same set of
+    M23), (M21, M23) — per class: mean difference and its standard error. The same set of
     pairs is used for every group so rows stay aligned in the resulting grid; a pair
-    with too few samples on one side within a given group simply gets NaN stats for it.
+    with too few samples on one side within a given group simply gets NaN values for it.
 
     diff = mean of the second level minus mean of the first level in each pair.
 
@@ -420,7 +375,7 @@ def compute_condition_diff_stats_pairwise(
     -------
     dict[str, dict[tuple[str, str], pd.DataFrame]]
         Keyed by group label (or "(all)"), then by (level_a, level_b); each DataFrame
-        has columns: class, mean_a, mean_b, diff, t_stat, p_value, stars, n_a, n_b.
+        has columns: class, mean_a, mean_b, diff, se_diff, n_a, n_b, n_samples_a, n_samples_b.
     """
     class_order = [str(c) for c in list(class_order)]
     joined = per_sample_class_props.join(sample_metadata, how="inner")
@@ -455,7 +410,7 @@ def compute_condition_diff_stats_pairwise(
         for level_a, level_b in combinations(all_levels, 2):
             vals_a_panel = panel[cond == level_a]
             vals_b_panel = panel[cond == level_b]
-            rows = _welch_diff_rows(class_order, vals_a_panel, vals_b_panel)
+            rows = _class_diff_rows(class_order, vals_a_panel, vals_b_panel)
             df_rows = pd.DataFrame(rows)
             # Raw unit counts on each side (before per-class NaN dropping) - i.e. how many
             # samples were merged into level_a/level_b for this group, for display in plot
@@ -475,14 +430,13 @@ def draw_diff_barh(
     *,
     xlim=None,
     bar_height_frac=0.6,
-    star_fontsize=8,
     label_fontsize=8,
 ):
     """One horizontal bar per class showing signed proportion difference (diff_df['diff'] in
-    fractional units, plotted as percent), with a one-sided whisker (95% CI margin of the
-    difference, extending only outward from zero, cap drawn only at the outer end - not at
-    the bar tip) and a significance star past the whisker cap. class_order[0] is drawn at the
-    top (matches typical reference-figure convention: first cluster on top)."""
+    fractional units, plotted as percent), with a one-sided whisker (SEM of the difference,
+    extending only outward from zero, cap drawn only at the outer end - not at the bar tip).
+    class_order[0] is drawn at the top (matches typical reference-figure convention: first
+    cluster on top)."""
     class_order = [str(c) for c in list(class_order)]
     by_class = diff_df.set_index("class")
     rows = list(reversed(class_order))
@@ -493,8 +447,8 @@ def draw_diff_barh(
         if class_name not in by_class.index:
             continue
         diff_pct = float(by_class.loc[class_name, "diff"]) * 100.0
-        ci_pct = float(by_class.loc[class_name, "ci95_diff"]) * 100.0 if np.isfinite(by_class.loc[class_name, "ci95_diff"]) else 0.0
-        max_abs = max(max_abs, abs(diff_pct) + ci_pct)
+        se_pct = float(by_class.loc[class_name, "se_diff"]) * 100.0 if np.isfinite(by_class.loc[class_name, "se_diff"]) else 0.0
+        max_abs = max(max_abs, abs(diff_pct) + se_pct)
     xmax = xlim if xlim is not None else max(max_abs * 1.35, 5.0)
 
     for y, class_name in zip(y_positions, rows):
@@ -502,16 +456,16 @@ def draw_diff_barh(
             continue
         row = by_class.loc[class_name]
         diff_pct = float(row["diff"]) * 100.0 if np.isfinite(row["diff"]) else 0.0
-        ci_pct = float(row["ci95_diff"]) * 100.0 if np.isfinite(row.get("ci95_diff", float("nan"))) else 0.0
+        se_pct = float(row["se_diff"]) * 100.0 if np.isfinite(row.get("se_diff", float("nan"))) else 0.0
         color = colors.get(class_name, "#808080")
         ax.barh([y], [diff_pct], height=bar_height_frac, color=color, edgecolor="none", linewidth=0.0)
-        if ci_pct > 0:
+        if se_pct > 0:
             # One-sided: only extend further away from zero, not back toward it, so the
             # whisker doesn't double up on top of the bar / neighboring rows. Cap is drawn
             # only at the outer endpoint (not at the bar tip) via a separate marker, since
             # ax.errorbar's capsize would otherwise draw a redundant cap at both ends.
-            outer_x = diff_pct + ci_pct if diff_pct >= 0 else diff_pct - ci_pct
-            xerr = [[0.0], [ci_pct]] if diff_pct >= 0 else [[ci_pct], [0.0]]
+            outer_x = diff_pct + se_pct if diff_pct >= 0 else diff_pct - se_pct
+            xerr = [[0.0], [se_pct]] if diff_pct >= 0 else [[se_pct], [0.0]]
             ax.errorbar(
                 [diff_pct], [y], xerr=xerr, fmt="none", ecolor="black",
                 elinewidth=1.0, capsize=0, zorder=3,
@@ -520,12 +474,6 @@ def draw_diff_barh(
                 [outer_x], [y], marker="|", markersize=6, markeredgewidth=1.0,
                 color="black", zorder=3,
             )
-        stars = str(row.get("stars", ""))
-        if stars:
-            edge = diff_pct + ci_pct if diff_pct >= 0 else diff_pct - ci_pct
-            tip = edge + (xmax * 0.03 if diff_pct >= 0 else -xmax * 0.03)
-            ha = "left" if diff_pct >= 0 else "right"
-            ax.text(tip, y, stars, ha=ha, va="center", fontsize=star_fontsize)
 
     ax.axvline(0.0, color="black", linewidth=0.8)
     ax.set_xlim(-xmax, xmax)
@@ -553,8 +501,7 @@ def draw_grouped_value_barh(
 ):
     """Horizontal grouped bar chart: one row per class (cluster/state), one bar per
     `group_order` entry (e.g. a selected contact column) within that row, bar length = mean,
-    error whisker = SEM. Purely descriptive — no significance test, no stars, no p-values
-    (same "descriptive only" convention as `plot_condition_time_series_grid`).
+    error whisker = SEM.
 
     `mean_df`/`sem_df` : DataFrames indexed by `class_order`, columns `group_order` (as
     returned by `compute_class_by_group_mean_sem`). class_order[0] is drawn at the top.
@@ -606,15 +553,15 @@ def _diff_df_has_data(diff_df):
 
 
 def _diff_plus_se_max(diff_df):
-    """Max of |diff| + ci95_diff (percent) across a diff_df's rows, treating a non-finite
-    ci95_diff as 0 - matches the one-sided whisker drawn by `draw_diff_barh` so it's never
+    """Max of |diff| + se_diff (percent) across a diff_df's rows, treating a non-finite
+    se_diff as 0 - matches the one-sided whisker drawn by `draw_diff_barh` so it's never
     clipped."""
     diff_pct = diff_df["diff"].to_numpy(dtype=float) * 100.0
-    ci_pct = np.nan_to_num(diff_df["ci95_diff"].to_numpy(dtype=float), nan=0.0) * 100.0
+    se_pct = np.nan_to_num(diff_df["se_diff"].to_numpy(dtype=float), nan=0.0) * 100.0
     finite = np.isfinite(diff_pct)
     if not finite.any():
         return 0.0
-    return float(np.nanmax(np.abs(diff_pct[finite]) + ci_pct[finite]))
+    return float(np.nanmax(np.abs(diff_pct[finite]) + se_pct[finite]))
 
 
 def _panel_n_label(diff_df):
@@ -716,7 +663,7 @@ def plot_condition_diff_grid(
                     long_rows.append(df_long)
 
             fig.suptitle(page_title, fontsize=11, fontweight="bold", y=1.0 - 0.12 / fig_h, va="top")
-            add_significance_legend(fig, y=0.06 / fig_h, extra_text=DIFF_BAR_LEGEND_TEXT)
+            _add_diff_bar_legend(fig, y=0.06 / fig_h)
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
@@ -873,7 +820,7 @@ def plot_condition_diff_grid_2d(
                     long_rows.append(df_long)
 
             fig.suptitle(page_title, fontsize=11, fontweight="bold", y=1.0 - 0.12 / fig_h, va="top")
-            add_significance_legend(fig, y=0.06 / fig_h, extra_text=DIFF_BAR_LEGEND_TEXT)
+            _add_diff_bar_legend(fig, y=0.06 / fig_h)
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
@@ -910,8 +857,7 @@ def build_condition_time_series_raw_table(
     label_col_name=unit_col_name)`` — columns ``[unit_col_name, time_col, "state_id",
     "relative_proportion"]``) with per-unit metadata (indexed by the same unit key,
     columns including ``condition_col`` + ``group_cols``) into the raw, per-unit,
-    per-timepoint, per-class table exported for the user's own external statistics —
-    no significance test is computed for this view by design.
+    per-timepoint, per-class table exported alongside the plot.
 
     If ``condition_groups`` is given, raw ``condition_col`` levels are relabeled to
     their merged group first (same semantics as ``compute_condition_diff_stats_pairwise``),
@@ -944,9 +890,7 @@ def compute_condition_time_series_stats(
     value_col="relative_proportion",
 ):
     """Aggregate raw per-unit rows (from ``build_condition_time_series_raw_table``) to
-    mean/SEM/n per (group label, condition_col level, time_col value, class_col level) —
-    purely descriptive, no significance test (see module design note on
-    ``plot_condition_time_series_grid``).
+    mean/SEM/n per (group label, condition_col level, time_col value, class_col level).
 
     Returns columns: group, condition, class, time, time_unit, mean, sem, n. ``mean``/
     ``sem`` stay in [0, 1] fraction units (same scale as ``relative_proportion``) — a
@@ -993,9 +937,8 @@ def plot_condition_time_series_grid(
     facet grid — one panel per ``class_order`` entry, ``ncols`` columns x up to
     ``max_rows_per_page`` rows per page (paginated via ``_chunk_list`` when
     ``class_order`` doesn't fit) — with one mean-%-of-cells line + shaded SE ribbon per
-    ``condition_levels`` entry (any count >= 1, not just 2). Purely descriptive: no
-    significance test is computed here — the caller is expected to have written the
-    underlying per-unit values to a CSV so a significance test can be run externally.
+    ``condition_levels`` entry (any count >= 1, not just 2). The caller is expected to have
+    written the underlying per-unit values to a CSV.
 
     ``colors`` maps ``condition_levels`` -> color (a distinct palette from cluster/class
     colors, since those are used elsewhere for bars/stacks).

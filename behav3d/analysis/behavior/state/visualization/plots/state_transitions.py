@@ -1,3 +1,4 @@
+import anndata as ad
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -11,6 +12,7 @@ from pathlib import Path
 from matplotlib.backends.backend_pdf import PdfPages
 from behav3d.analysis.behavior.utils import _natural_sort_key, _sanitize_filename_token
 from behav3d.core.utils import rmtree_ignore_missing
+from behav3d.analysis.behavior.state.filtering import filter_short_state_runs
 from behav3d.analysis.behavior.state.utils import (
     _apply_state_order,
     _get_classification_state_colors,
@@ -18,6 +20,8 @@ from behav3d.analysis.behavior.state.utils import (
     _normalize_label_color_map,
 )
 from behav3d.analysis.behavior.general.visualization.plots.circular_transition_diagram import (
+    clutter_change_summary,
+    least_cluttered_order,
     plot_circular_transition_diagram,
     plot_circular_transition_diagram_grid,
     plot_circular_transition_diagram_pair,
@@ -967,6 +971,8 @@ def save_state_transition_report(
     circular_curvature=0.28,
     circular_label_style="legend",
     circular_include_self_transitions=False,
+    circular_auto_node_order=True,
+    circular_custom_node_order=None,
     include_circular_absolute_scale=False,
     include_circular_diagram_per_cluster=True,
     include_ngram_rankings=True,
@@ -979,13 +985,39 @@ def save_state_transition_report(
     include_sankey_pairs=False,
     state_colors=None,
     state_order=None,
+    min_bout_length=1,
     verbose=True,
 ):
-    """Save transition matrix + all-pairs Sankey report for one state column."""
+    """Save transition matrix + all-pairs Sankey report for one state column.
+
+    `min_bout_length` (timepoints): bouts shorter than this are merged into their
+    neighbouring state (see `filter_short_state_runs`) before any transitions, n-grams or
+    Sankey paths are counted. 1 disables the filter.
+
+    `circular_auto_node_order=True` arranges the nodes of every circular page, all in one shared
+    order, so arrows cross and overlap as little as possible at `circular_min_prob_to_draw` (see
+    `least_cluttered_order`). False keeps them in `circular_custom_node_order` if given, otherwise
+    in `state_order`. Other pages and the CSVs always use `state_order`.
+    """
     if state_order is None:
         state_order = _get_classification_state_order(adata, state_col)
     if state_colors is None:
         state_colors = _get_classification_state_colors(adata, state_col)
+
+    min_bout_length = max(1, int(min_bout_length))
+    state_label = str(state_col)
+    bout_note = f" (bouts ≥ {min_bout_length} timepoints)" if min_bout_length > 1 else ""
+    if min_bout_length > 1:
+        # Filter an obs-only copy so the caller's (possibly shared/cached) AnnData is untouched.
+        adata = filter_short_state_runs(
+            ad.AnnData(obs=adata.obs.copy()),
+            cluster_key=str(state_col),
+            id_cols=tuple(id_cols),
+            time_key=str(time_col),
+            length_removed=min_bout_length - 1,
+            inplace=True,
+        )
+        state_label = f"{state_col}, bouts ≥ {min_bout_length} timepoints"
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1084,12 +1116,13 @@ def save_state_transition_report(
         df_ngrams_per_end.to_csv(ngrams_per_end_csv, index=False)
         df_ngrams_per_start.to_csv(ngrams_per_start_csv, index=False)
 
+    circular_node_order = None
     with PdfPages(matrix_heatmap_pdf) as pdf:
         # Page 1 — all four heatmaps in a 2×2 square grid (when no-self matrices available)
         if include_transition_matrix:
             if include_no_self_matrices and probs_no_self is not None and counts_no_self is not None:
                 fig_quad = _plot_transition_heatmap_quad_page(
-                    probs, probs_no_self, counts, counts_no_self, state_col=str(state_col),
+                    probs, probs_no_self, counts, counts_no_self, state_col=state_label,
                 )
                 pdf.savefig(fig_quad, bbox_inches="tight")
                 plt.close(fig_quad)
@@ -1097,7 +1130,7 @@ def save_state_transition_report(
                 # Fallback: one A4 page per metric when no-self matrices are not computed
                 fig_probs = _plot_transition_heatmap_page(
                     probs,
-                    title=f"Transition Probabilities — all transitions  ({state_col})",
+                    title=f"Transition Probabilities — all transitions  ({state_label})",
                     colorbar_label="P(next | current)",
                     normalized=True,
                 )
@@ -1106,7 +1139,7 @@ def save_state_transition_report(
 
                 fig_counts = _plot_transition_heatmap_page(
                     counts,
-                    title=f"Transition Counts — all transitions  ({state_col})",
+                    title=f"Transition Counts — all transitions  ({state_label})",
                     colorbar_label="Count",
                     normalized=False,
                 )
@@ -1138,11 +1171,40 @@ def save_state_transition_report(
                         only_transitions=True,
                         state_order=state_order,
                     )
+
+            # Column-normalized counterpart of `circular_probs`: for each destination
+            # cluster, what share of its arrivals came from each source. Must be derived from
+            # the counts (not from the already row-normalized `circular_probs`), since
+            # normalizing an already-normalized matrix's columns would not equal each source's
+            # true share.
+            col_sums = circular_counts.sum(axis=0)
+            circular_probs_incoming = circular_counts.div(col_sums.replace(0, np.nan), axis=1)
+            circular_probs_incoming.to_csv(matrix_probs_incoming_csv)
+
+            # One node order for every circular page below, so they can be compared directly.
+            circular_matrices = [circular_probs, circular_probs_incoming]
+            saved_node_order = [str(c) for c in circular_probs.index]
+            circular_node_order = saved_node_order
+            if circular_auto_node_order:
+                circular_node_order = least_cluttered_order(
+                    circular_matrices,
+                    min_prob=circular_min_prob_to_draw,
+                    curvature=circular_curvature,
+                )
+                if verbose:
+                    summary = clutter_change_summary(
+                        circular_matrices, saved_node_order, circular_node_order,
+                        circular_min_prob_to_draw, circular_curvature,
+                    )
+                    print(f"Circular node order {circular_node_order}: {summary}")
+            elif circular_custom_node_order:
+                circular_node_order = _apply_state_order(saved_node_order, circular_custom_node_order)
+
             fig_circular = plot_circular_transition_diagram_pair(
                 circular_probs,
                 state_colors=state_colors,
-                state_order=state_order,
-                title=f"Inter-cluster transition probability ({state_col})",
+                state_order=circular_node_order,
+                title=f"Outgoing transitions: where cells in each state go next{bout_note}",
                 min_prob_to_draw=circular_min_prob_to_draw,
                 emphasis_gamma=circular_emphasis_gamma,
                 curvature=circular_curvature,
@@ -1161,8 +1223,8 @@ def save_state_transition_report(
                 fig_circular_absolute = plot_circular_transition_diagram(
                     circular_probs,
                     state_colors=state_colors,
-                    state_order=state_order,
-                    title=f"Inter-cluster transition probability, absolute scale ({state_col})",
+                    state_order=circular_node_order,
+                    title=f"Outgoing transitions: where cells in each state go next, absolute scale{bout_note}",
                     min_prob_to_draw=circular_min_prob_to_draw,
                     emphasis_gamma=circular_emphasis_gamma,
                     curvature=circular_curvature,
@@ -1172,19 +1234,12 @@ def save_state_transition_report(
                 pdf.savefig(fig_circular_absolute, bbox_inches="tight")
                 plt.close(fig_circular_absolute)
 
-            # Page 2b — column-normalized counterpart of `circular_probs`: for each destination
-            # cluster, what share of its arrivals came from each source. Must be derived from
-            # the counts (not from the already row-normalized `circular_probs`), since
-            # normalizing an already-normalized matrix's columns would not equal each source's
-            # true share.
-            col_sums = circular_counts.sum(axis=0)
-            circular_probs_incoming = circular_counts.div(col_sums.replace(0, np.nan), axis=1)
-            circular_probs_incoming.to_csv(matrix_probs_incoming_csv)
+            # Page 2b — incoming counterpart of the outgoing page above.
             fig_circular_incoming = plot_circular_transition_diagram_pair(
                 circular_probs_incoming,
                 state_colors=state_colors,
-                state_order=state_order,
-                title=f"Inter-cluster transition probability, incoming ({state_col})",
+                state_order=circular_node_order,
+                title=f"Incoming transitions: where cells in each state came from{bout_note}",
                 min_prob_to_draw=circular_min_prob_to_draw,
                 emphasis_gamma=circular_emphasis_gamma,
                 curvature=circular_curvature,
@@ -1197,11 +1252,8 @@ def save_state_transition_report(
                 fig_circular_incoming_absolute = plot_circular_transition_diagram(
                     circular_probs_incoming,
                     state_colors=state_colors,
-                    state_order=state_order,
-                    title=(
-                        f"Inter-cluster transition probability, incoming, absolute scale "
-                        f"({state_col})"
-                    ),
+                    state_order=circular_node_order,
+                    title=f"Incoming transitions: where cells in each state came from, absolute scale{bout_note}",
                     min_prob_to_draw=circular_min_prob_to_draw,
                     emphasis_gamma=circular_emphasis_gamma,
                     curvature=circular_curvature,
@@ -1218,8 +1270,8 @@ def save_state_transition_report(
                 fig_circular_grid_out = plot_circular_transition_diagram_grid(
                     circular_probs,
                     state_colors=state_colors,
-                    state_order=state_order,
-                    title=f"Per-cluster outgoing transitions ({state_col})",
+                    state_order=circular_node_order,
+                    title=f"Outgoing transitions per state{bout_note}",
                     min_prob_to_draw=circular_min_prob_to_draw,
                     emphasis_gamma=circular_emphasis_gamma,
                     curvature=circular_curvature,
@@ -1232,8 +1284,8 @@ def save_state_transition_report(
                 fig_circular_grid_in = plot_circular_transition_diagram_grid(
                     circular_probs_incoming,
                     state_colors=state_colors,
-                    state_order=state_order,
-                    title=f"Per-cluster incoming transitions ({state_col})",
+                    state_order=circular_node_order,
+                    title=f"Incoming transitions per state{bout_note}",
                     min_prob_to_draw=circular_min_prob_to_draw,
                     emphasis_gamma=circular_emphasis_gamma,
                     curvature=circular_curvature,
@@ -1559,6 +1611,8 @@ def save_state_transition_report(
         "output_dir": str(output_dir),
         "state_col": str(state_col),
         "states": list(states),
+        "min_bout_length": int(min_bout_length),
+        "circular_node_order": circular_node_order,
         "sankey_min_count": int(sankey_min_count),
         "sankey_relative_count": float(sankey_relative_count),
         "transition_matrix_counts_csv": str(matrix_counts_csv),

@@ -1239,8 +1239,7 @@ def save_track_condition_comparison_report(
     csv_dir=None,
 ):
     """Per-cluster overall (pooled) track-class proportion difference between every pairwise
-    combination of `condition_col`'s levels, with Welch's two-sided unpaired t-test significance
-    stars — one row per pairwise comparison, one column per group, optionally split into
+    combination of `condition_col`'s levels — one row per pairwise comparison, one column per group, optionally split into
     multiple groups (columns) via `group_x`/`group_cols`.
 
     diff = mean of the second level minus mean of the first level in each pair.
@@ -1265,9 +1264,8 @@ def save_track_condition_comparison_report(
         When True, appends an extra page (per group_cols section) showing each cluster's
         prevalence over time, one line + shaded SE ribbon per condition_col level (or merged
         condition_groups label), expanding each track across its `[tmin_col, tmax_col]` window
-        at raw per-frame resolution. Purely descriptive - no significance test is computed; the
-        underlying per-unit, per-timepoint values are written to a companion CSV so a
-        significance test can be run externally. Silently skipped (with a verbose note) if
+        at raw per-frame resolution. The underlying per-unit, per-timepoint values are written to
+        a companion CSV. Silently skipped (with a verbose note) if
         `tmin_col`/`tmax_col` aren't available.
 
     minutes_per_frame : float, optional
@@ -1487,7 +1485,7 @@ def save_track_contact_group_analysis(
     2. A `class_col`-on-x-axis grid of contact/no_contact composition, faceted by `group_x`/
        `group_y` (true 2D grid) with `extra_group_cols` paginating into separate grid pages;
        skipped if none of `group_x`/`group_y`/`extra_group_cols` are set.
-    3. A condition-comparison report (Welch's t-test) between the two contact groups — a true
+    3. A condition-comparison report between the two contact groups — a true
        `group_x` × `group_y` 2D grid (since the comparison is always binary, both axes are free
        to be real grid axes); `extra_group_cols` paginate into separate grid pages.
     4. Violin plots of mean contact fraction and max contact-bout length per cluster.
@@ -1507,7 +1505,7 @@ def save_track_contact_group_analysis(
     6. A `class_col`-on-x-axis composition grid, stacked by target-class group (``no_contact`` /
        each touched target class / ``"Multiple classes"`` for tracks that touched >= 2 distinct
        target classes).
-    7. A condition-comparison report (Welch's t-test, pairwise across all target-class-group
+    7. A condition-comparison report (pairwise across all target-class-group
        levels) analogous to section 3, but keyed on the target-class-group instead of plain
        contact/no_contact.
 

@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 
 
 def filter_short_state_runs(
@@ -66,12 +67,19 @@ def filter_short_state_runs(
 
         return states
 
-    for _, sub in df.groupby(list(id_cols), sort=False):
+    for _, sub in df.groupby(list(id_cols), sort=False, observed=True):
         idx = sub.index.to_numpy()
         states = sub[cluster_key].to_numpy().copy()
+        # Missing states split the track into segments smoothed independently, so they are
+        # never filled in or used as a replacement (NaN != NaN would make each a run of 1).
+        missing = pd.isna(states)
+        bounds = np.flatnonzero(np.diff(np.r_[0, (~missing).astype(np.int8), 0]))
 
-        for k in range(1, int(length_removed) + 1):
-            states = _smooth_exact_k_in_order(states, k)
+        for start, stop in zip(bounds[::2], bounds[1::2]):
+            seg = states[start:stop]
+            for k in range(1, int(length_removed) + 1):
+                seg = _smooth_exact_k_in_order(seg, k)
+            states[start:stop] = seg
 
         out.loc[idx] = states
 

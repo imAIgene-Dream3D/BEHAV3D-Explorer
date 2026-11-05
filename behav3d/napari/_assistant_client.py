@@ -22,15 +22,27 @@ If no endpoint is configured or the server is unreachable, the client falls back
 to :class:`LocalResponder` (degraded mode): schema-grounded answers to
 "what is X" / "explain X" with no LLM. This honours the "requires internet"
 design while never hard-failing.
+
+With a researcher's own provider the turn runs through
+:func:`_assistant_providers.run_own_model_turn` instead. A provider failure is shown
+as it is and never falls back: not to this offline responder, and not to the shared
+service, which would send their data somewhere they did not choose.
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
 from qtpy.QtCore import QObject, Signal
+
+from behav3d.napari._assistant_providers import (
+    ProviderCancelled, ProviderConfig, ProviderError, ServiceTooOld, list_models,
+    run_own_model_turn,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -247,10 +259,46 @@ def diagnose_assistant_service(
         "chunks": retrieval.get("chunks", payload.get("chunks")),
         "model": payload.get("model"),
         "knowledge_version": payload.get("knowledge_version"),
+        "byok_contract": payload.get("byok_contract"),
         "provider_latency_ms": provider.get("latency_ms"),
         "provider_error": provider.get("error_type"),
         "latency_ms": round((time.monotonic() - started) * 1000),
         "endpoint": endpoint,
+    }
+
+
+SERVICE_TOO_OLD_MESSAGE = (
+    "The BEHAV3D service needs updating before it can use your own provider. "
+    "Choose the BEHAV3D service in the assistant settings for now."
+)
+
+
+def check_own_provider(info: dict, config: ProviderConfig, *, probe: bool) -> dict:
+    """Add a researcher's provider to a health result.
+
+    Listing models costs nothing and proves the key. The shared DeepSeek account is
+    never probed here, or a bad key would spend its quota and still report Online.
+    """
+    if info.get("modal") != "online":
+        return info
+    if not info.get("byok_contract"):
+        return {
+            **info,
+            "level": "error",
+            "component": "byok",
+            "code": "byok_service_too_old",
+            "message": SERVICE_TOO_OLD_MESSAGE,
+        }
+    if not probe:
+        return info
+    try:
+        list_models(config)
+    except ProviderError as failure:
+        return {**info, **failure.status()}
+    return {
+        **info,
+        "own_provider": "online",
+        "message": f"Modal, BEHAV3D guidance, and {config.spec.label} are online.",
     }
 
 
@@ -307,13 +355,27 @@ class ChatWorker(QObject):
     status = Signal(object)        # stage/component/message diagnostics
     error = Signal(str)
     degraded = Signal(str)         # emitted (full text) when answered offline
+    notice = Signal(str)           # a note for the transcript, not a failure
+    refused = Signal(object)       # the provider declined the request
+    missing_tool = Signal()        # a turn that had to change something did not
     finished = Signal()            # always last; quits the thread
 
-    def __init__(self, messages: list[dict], context: dict, tools: list[dict]):
+    def __init__(
+        self,
+        messages: list[dict],
+        context: dict,
+        tools: list[dict],
+        provider: ProviderConfig | None = None,
+        cancel: threading.Event | None = None,
+    ):
         super().__init__()
-        self._messages = messages
+        # /finish resends these after the provider replies, by which time the dock
+        # may have edited its history entries in place.
+        self._messages = copy.deepcopy(messages) if provider else messages
         self._context = context
         self._tools = tools
+        self._provider = provider
+        self._cancel = cancel or threading.Event()
         self._last_stage = "connecting"
         self._stream_started = False
         self._received_output = False
@@ -330,6 +392,9 @@ class ChatWorker(QObject):
                     "code": "endpoint_missing",
                     "message": "Assistant endpoint is not configured.",
                 })
+                return
+            if self._provider is not None:
+                self._run_own_model(cfg)
                 return
             for attempt in range(2):
                 self._last_stage = "connecting"
@@ -380,6 +445,74 @@ class ChatWorker(QObject):
         if info.get("stage"):
             self._last_stage = str(info["stage"])
         self.status.emit(info)
+
+    def _run_own_model(self, cfg: dict):
+        read_timeout = _configured_read_timeout(cfg)
+        label = self._provider.spec.label
+
+        def on_text(text: str):
+            if not self._stream_started:
+                self._stream_started = True
+                self._emit_status({
+                    "level": "working",
+                    "stage": "streaming",
+                    "component": "byok",
+                    "message": "Receiving the assistant response...",
+                })
+            self.token.emit(text)
+
+        try:
+            result = run_own_model_turn(
+                cfg["endpoint"],
+                {"messages": self._messages, "context": self._context, "tools": self._tools},
+                self._provider,
+                on_text=on_text,
+                on_status=self._emit_status,
+                cancelled=self._cancel.is_set,
+                timeout=(10, read_timeout),
+            )
+        except ProviderCancelled:
+            return
+        except ProviderError as failure:
+            self._emit_status(failure.status())
+            self.error.emit(failure.message)
+            return
+        except ServiceTooOld:
+            self._emit_status({
+                "level": "error",
+                "stage": "modal",
+                "component": "byok",
+                "code": "byok_service_too_old",
+                "message": SERVICE_TOO_OLD_MESSAGE,
+            })
+            self.error.emit(SERVICE_TOO_OLD_MESSAGE)
+            return
+        except Exception as error:
+            # Only /prepare gets here, so the service itself is unreachable.
+            self._fallback(classify_request_failure(
+                error, stage=self._last_stage, read_timeout=read_timeout
+            ))
+            return
+
+        if result.get("refused"):
+            self.refused.emit({
+                "label": label, "category": result.get("refusal_category", ""),
+            })
+            return
+        if result.get("calls"):
+            self.tool_calls.emit(result["calls"])
+        if result.get("truncated"):
+            self.notice.emit(
+                f"{label} stopped because this reply reached its length limit, so it "
+                "may be incomplete."
+            )
+        if result.get("unchecked"):
+            self.notice.emit(
+                "The proposed changes could not be checked by the BEHAV3D service, so "
+                "none were shown. Please ask again."
+            )
+        if result.get("missing_required_tool"):
+            self.missing_tool.emit()
 
     # -- networking ---------------------------------------------------------
     def _stream(self, cfg: dict):
@@ -495,14 +628,24 @@ class HealthWorker(QObject):
     result = Signal(object)
     finished = Signal()
 
-    def __init__(self, *, probe_provider: bool = False):
+    def __init__(
+        self, *, probe_provider: bool = False, provider: ProviderConfig | None = None,
+    ):
         super().__init__()
         self._probe_provider = bool(probe_provider)
+        self._provider = provider
 
     def run(self):
         try:
-            self.result.emit(diagnose_assistant_service(
-                probe_provider=self._probe_provider
-            ))
+            if self._provider is None:
+                self.result.emit(diagnose_assistant_service(
+                    probe_provider=self._probe_provider
+                ))
+            else:
+                self.result.emit(check_own_provider(
+                    diagnose_assistant_service(),
+                    self._provider,
+                    probe=self._probe_provider,
+                ))
         finally:
             self.finished.emit()

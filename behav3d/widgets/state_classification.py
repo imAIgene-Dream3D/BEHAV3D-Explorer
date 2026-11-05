@@ -1495,7 +1495,7 @@ class StateClassificationHMMPanel(BaseStateClassificationPanel):
             title="Condition comparison plot",
             description=(
                 "Per-cluster overall proportion difference between every pairwise combination of a "
-                "condition's levels (Welch's t-test), shown as one row per pairwise comparison."
+                "condition's levels, shown as one row per pairwise comparison."
             ),
             run_row=widgets.HBox(
                 [self.btn_create_condition_comparison, self.condition_comparison_spinner],

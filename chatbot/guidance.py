@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 
-KNOWLEDGE_VERSION = "2026.08.20.1"
+KNOWLEDGE_VERSION = "2026.11.05.1"
 
 
 GUIDANCE_CARDS = {
@@ -108,7 +108,11 @@ GUIDANCE_CARDS = {
         "channels when they contain useful target signal or context. Do not add a dead channel merely "
         "as a negative class, to exclude dead cells, or to identify background: a dead target is still "
         "the same target population. Include it only when the researcher confirms that its signal is "
-        "genuinely informative for that target model. If channel checkboxes are not ready, that means "
+        "genuinely informative for that target model. One valid case is a large target whose own marker "
+        "fades as it dies while the dead dye still marks its remnants; the dead channel then keeps those "
+        "remnants segmented. When Multicolor colors are dye combinations, give every color model every "
+        "dye channel: a double-labeled cell is recognized only when both channels are bright together. "
+        "If channel checkboxes are not ready, that means "
         "training data is not "
         "loaded; it does not mean APOC always uses every channel. Configure channels and classifier "
         "features before training, even when saved annotations already exist. Small structures is the "
@@ -137,8 +141,8 @@ GUIDANCE_CARDS = {
         "objects, but watch for cells disappearing if it becomes too strict. Raising Mask threshold "
         "can tighten borders and can add splitting when combined with Seed threshold. If tuning is "
         "not enough, annotate more background at touching-cell boundaries and retrain. In Mask + "
-        "EDT, higher EDT generally splits more; in Peak EDT, lower EDT splits more because it is a "
-        "peak-height filter. Use small opening values only and preview them; Fill holes is useful "
+        "EDT, higher EDT generally splits more. Use small opening values only and preview them; "
+        "Fill holes is useful "
         "for hollow or cytoplasmic objects. Minimum size is post-processing: it excludes objects "
         "below the threshold and never merges a small object into a larger one. For multicellular structures, prefer the initial-size "
         "filter in Filtering so segmentation and propagation retain small fragments."
@@ -328,10 +332,30 @@ GUIDANCE_CARDS = {
 }
 
 
+# Settings the plugin hides unless it runs in dev mode (a .behav3d_dev file in
+# the repository root). Their parameter cards are left out of retrieval for
+# everyone else, and dev-only guidance is appended to a card only in dev mode.
+DEVELOPER_ONLY_PARAMETERS = frozenset({
+    "hmm_n_states_mode", "hmm_k_min", "hmm_k_max", "hmm_sticky",
+    "hmm_stickiness_kappa", "hmm_transmat_alpha",
+    "make_backprojection_pdf", "make_backprojection_mp4",
+})
+DEVELOPER_GUIDANCE = {
+    "apoc": "In Peak EDT, lower EDT splits more because it is a peak-height filter.",
+}
+
+
+def is_developer_only(chunk: dict) -> bool:
+    """True for a retrieved parameter card that documents a dev-mode setting."""
+    return (str(chunk.get("source", "")).startswith("schema:")
+            and str(chunk.get("title", "")).rsplit(".", 1)[-1] in DEVELOPER_ONLY_PARAMETERS)
+
+
 def select_guidance_cards(
     context: dict,
     user_message: str = "",
     intent: str | None = None,
+    developer_options: bool = False,
 ) -> list[dict]:
     """Select deterministic cards before generic vector retrieval."""
     step = str(context.get("current_step") or "")
@@ -420,4 +444,10 @@ def select_guidance_cards(
     for key, words in keyword_map.items():
         if key not in selected and any(word in query for word in words):
             selected.append(key)
-    return [{"id": key, "text": GUIDANCE_CARDS[key]} for key in selected]
+    cards = []
+    for key in selected:
+        text = GUIDANCE_CARDS[key]
+        if developer_options and key in DEVELOPER_GUIDANCE:
+            text = f"{text} {DEVELOPER_GUIDANCE[key]}"
+        cards.append({"id": key, "text": text})
+    return cards

@@ -808,8 +808,7 @@ def save_state_condition_comparison_report(
     verbose=True,
 ):
     """Per-cluster overall (pooled, non-per-timepoint) proportion difference between every
-    pairwise combination of `condition_col`'s levels, with Welch's two-sided unpaired t-test
-    significance stars — one row per pairwise comparison, one column per group, optionally
+    pairwise combination of `condition_col`'s levels — one row per pairwise comparison, one column per group, optionally
     split into multiple groups (columns) via `group_x`/`group_cols`.
 
     diff = mean of the second level minus mean of the first level in each pair.
@@ -826,9 +825,8 @@ def save_state_condition_comparison_report(
     include_over_time : bool, optional
         When True, appends an extra page (per group_cols section) showing each cluster's
         prevalence over time, one line + shaded SE ribbon per condition_col level (or
-        merged condition_groups label), at raw per-frame resolution. Purely descriptive -
-        no significance test is computed; the underlying per-unit, per-timepoint values
-        are written to a companion CSV so a significance test can be run externally.
+        merged condition_groups label), at raw per-frame resolution. The underlying
+        per-unit, per-timepoint values are written to a companion CSV.
         Silently skipped (with a verbose note) if `time_col` isn't available.
 
     minutes_per_frame : float, optional

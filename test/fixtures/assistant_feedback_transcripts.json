@@ -331,6 +331,18 @@
     "step": "segmentation",
     "user": "Explain the APOC EDT direction correctly.",
     "required": [
+      "in mask + edt, higher edt generally splits more"
+    ],
+    "forbidden": [
+      "peak edt"
+    ]
+  },
+  {
+    "id": "apoc_peak_edt_direction_needs_dev_mode",
+    "step": "segmentation",
+    "user": "Explain the APOC EDT direction correctly.",
+    "developer_options": true,
+    "required": [
       "in mask + edt, higher edt generally splits more",
       "in peak edt, lower edt splits more"
     ]

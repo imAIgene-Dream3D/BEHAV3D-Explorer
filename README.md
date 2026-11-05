@@ -409,6 +409,10 @@ DEEPSEEK_MODEL=deepseek-v4-pro python -m modal deploy chatbot/app.py
 
 Available options: `deepseek-v4-flash` (fast, cheap), `deepseek-v4-pro` (stronger, pricier).
 
+### Researchers' own providers
+
+Researchers can choose OpenAI, Anthropic, Gemini, Mistral or DeepSeek with their own key in the assistant's **⚙** settings. The plugin calls the provider directly, so their key never reaches this service and their usage is not billed to your DeepSeek account. See `chatbot/README.md`.
+
 ### Monitoring costs
 
 - DeepSeek usage: [platform.deepseek.com](https://platform.deepseek.com) → Usage
@@ -445,6 +449,7 @@ New-Item -ItemType File .behav3d_dev
 | Window title | Adds `[DEV MODE]` to the napari window title bar |
 | Environment variable | Sets `BEHAV3D_DEV_MODE=1` for the duration of the session |
 | Console output | Enables extra verbose logging in some pipeline stages |
+| BEHAV3D Assistant | Can discuss and set developer options; without dev mode it leaves them out of its answers |
 
 **How to disable:**
 

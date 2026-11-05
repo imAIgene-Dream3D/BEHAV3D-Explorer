@@ -5,7 +5,7 @@ State-native counterpart of
 multiple per-organoid-type contact columns (e.g. `healthy_organoid_contact` vs.
 `tumor_organoid_contact`) and, restricted to timepoints where the T cell **is** in organoid
 contact, compare how the mix of organoid-contacting behavioral states differs between contact
-types: a Welch's-t-test cluster-size-difference grid (same style as the state-composition
+types: a cluster-size-difference grid (same style as the state-composition
 `condition_comparison` report) plus a stacked bar of state-composition proportions per
 contact column.
 """
@@ -57,8 +57,8 @@ def save_state_contact_type_comparison(
 
     Reuses `contact_grouping.compute_state_contact_type_cluster_proportions` for the
     per-(track, contact column) state proportions, then the shared condition-comparison engine
-    (`compute_condition_diff_stats_pairwise` / `plot_condition_diff_grid`) for a Welch's
-    two-sided unpaired t-test cluster-size-difference grid — one row per pairwise contact-column
+    (`compute_condition_diff_stats_pairwise` / `plot_condition_diff_grid`) for a
+    cluster-size-difference grid — one row per pairwise contact-column
     comparison, generalizing to any number of selected contact columns — plus a stacked bar of
     mean state-composition proportions per contact column.
 

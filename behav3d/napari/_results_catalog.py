@@ -225,6 +225,10 @@ FILE_CATALOG: list[tuple[str, str]] = [
         "Sankey diagrams of state transitions for all pairs.",
     ),
     (
+        "killing_by_state.pdf",
+        "Killing efficiency per behavioral state: bar plots per cell and per timepoint.",
+    ),
+    (
         "*_confusion_matrices.pdf",
         "Confusion matrices for a classifier.",
     ),

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import os
 from statistics import median
 from typing import Any
 
@@ -117,13 +118,17 @@ def format_edt_recommendations(result: dict, cell_type: str) -> str:
             f"| {row['sample_name']} | {row['pixel_size_xy_um']:.4g} | "
             f"{row['object_diameter_px']:.2f} | {trials} |"
         )
+    # Peak EDT/Watershed is only offered in dev mode (BEHAV3D_DEV_MODE=1).
+    peak_edt = (
+        "On Peak EDT/Watershed, the direction is reversed because EDT is used as a "
+        "minimum peak-height filter. " if os.environ.get("BEHAV3D_DEV_MODE") == "1" else ""
+    )
     lines.extend([
         "",
         f"A practical global starting value is **{result['global_start_px']:g} pixels** "
         "(the median middle candidate across samples). On the plain Mask + EDT/Watershed "
         "strategy, higher EDT values generally split touching objects more and lower values "
-        "keep neighbouring cores connected. On Peak EDT/Watershed, the direction is reversed "
-        "because EDT is used as a minimum peak-height filter. Probability Map + Watershed uses "
+        f"keep neighbouring cores connected. {peak_edt}Probability Map + Watershed uses "
         "Mask and Seed thresholds instead of EDT.",
         "",
         "These candidates are 20%, 25%, and 30% of the expected XY diameter. "

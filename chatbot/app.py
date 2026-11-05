@@ -16,6 +16,9 @@ Endpoints (FastAPI, public):
         {"type":"token","text":...}        streamed assistant text
         {"type":"tool_calls","calls":[...]}  proposed actions (client confirms)
         {"type":"done"} | {"type":"error","message":...}
+  POST /prepare, POST /finish   -> a researcher's own model: the service builds the
+        request and checks the reply, and the plugin calls the provider between them,
+        so their key never reaches this service.
 
 Tool calls use DeepSeek's native function-calling; `set_ui_value.control_id` is
 constrained to the live control registry so the model can't invent fields.
@@ -47,6 +50,7 @@ _TOOL_NAMES = (
 )
 _TOOL_NAME_PATTERN = "|".join(re.escape(name) for name in _TOOL_NAMES)
 CONTROL_CONTRACT_VERSION = "3.3"
+BYOK_CONTRACT_VERSION = "1"
 _RESEARCHER_LABELS = {
     "pixel_distance_xy": "XY pixel size",
     "pixel_distance_z": "Z pixel size",
@@ -1053,6 +1057,20 @@ def metadata_time_conversion_action(
     }
 
 
+_RESOLUTION_VALUE = (
+    r"\s*(?:from\s+\d+(?:\.\d+)?\s*(?:µm|um)?\s+)?"
+    r"(?:(?:is|was|=|:|of|to|at|now|should be|must be)\s*)*"
+    r"(\d+(?:\.\d+)?)\s*(?:µm|um)\b"
+)
+_XY_RESOLUTION = r"\bxy(?:\s+pixel)?\s+size" + _RESOLUTION_VALUE
+_Z_RESOLUTION = (
+    r"\bz(?:[- ]?spacing|[- ]?step|(?:\s+pixel)?\s+size)" + _RESOLUTION_VALUE
+)
+_RESOLUTION_STATEMENT = (
+    r"\b(?:size|spacing|step|resolution)\b[^.\d]{0,20}(?:\bto\b|\bis\b|=|:|\bbe\b)\s*\d"
+)
+
+
 def metadata_pixel_size_action(
     context: dict, messages: list[dict],
 ) -> dict | None:
@@ -1079,26 +1097,26 @@ def metadata_pixel_size_action(
     ):
         return None
 
+    # A new value these patterns cannot read, such as 500 nm, is for the model:
+    # answering from history would reject the correction with an older value.
+    readable = sum(
+        len(re.findall(pattern, latest)) for pattern in (_XY_RESOLUTION, _Z_RESOLUTION)
+    )
+    if len(re.findall(_RESOLUTION_STATEMENT, latest)) > readable:
+        return None
+
     user_history = " ".join(
         str(message.get("content") or "").lower()
         for message in messages
         if message.get("role") == "user"
     )
-    xy_match = re.search(
-        r"\bxy(?:\s+pixel)?\s+size\s+(?:is|=|of)?\s*"
-        r"(\d+(?:\.\d+)?)\s*(?:µm|um)\b",
-        user_history,
-    )
-    z_match = re.search(
-        r"\bz(?:[- ]?spacing|[- ]?step|(?:\s+pixel)?\s+size)\s+"
-        r"(?:is|=|of)?\s*(\d+(?:\.\d+)?)\s*(?:µm|um)\b",
-        user_history,
-    )
     supplied = {}
-    if xy_match:
-        supplied["pixel_distance_xy"] = float(xy_match.group(1))
-    if z_match:
-        supplied["pixel_distance_z"] = float(z_match.group(1))
+    for field, pattern in (
+        ("pixel_distance_xy", _XY_RESOLUTION), ("pixel_distance_z", _Z_RESOLUTION),
+    ):
+        values = re.findall(pattern, user_history)
+        if values:
+            supplied[field] = float(values[-1])  # corrections come after the original
     if not supplied:
         return None
 
@@ -1531,7 +1549,9 @@ def apoc_channel_selection_guidance(
         + "A dead cell is still a member of its target population, so the dead "
         "channel should not be treated as a separate negative/background class. "
         "Include it only if you confirm that its signal is genuinely informative for "
-        "that specific target model."
+        "that specific target model, for example when a dying target loses its own "
+        "marker while the dead dye still marks its remnants, so including the dead "
+        "channel keeps those remnants segmented."
     )
 
 
@@ -1759,6 +1779,11 @@ def apoc_feature_grid_guidance(
     )
 
 
+def developer_options_enabled(context: dict) -> bool:
+    """True when the plugin runs in dev mode; clients that predate the flag do not."""
+    return bool((context.get("interface_capabilities") or {}).get("developer_options"))
+
+
 def _active_instance_strategy(context: dict) -> str:
     segmentation = context.get("segmentation", {}) or {}
     active = str(context.get("active_cell_type") or "")
@@ -1829,10 +1854,16 @@ def edt_direction_guidance(context: dict, messages: list[dict]) -> str | None:
             "response can turn back to 'merged' at that extreme, but the normal tuning "
             "direction is: raise for more splitting, lower for less."
         )
+    if developer_options_enabled(context):
+        return (
+            "I cannot give a reliable EDT direction without the exact active instance "
+            "strategy. **Mask + EDT/Watershed** and **Peak EDT/Watershed** use the field "
+            "in opposite directions. Which strategy is shown for this cell type?"
+        )
     return (
-        "I cannot give a reliable EDT direction without the exact active instance "
-        "strategy. **Mask + EDT/Watershed** and **Peak EDT/Watershed** use the field "
-        "in opposite directions. Which strategy is shown for this cell type?"
+        "EDT threshold is the splitting control of **Mask + EDT/Watershed**, where higher "
+        "EDT generally means more splitting. **Probability Map + Watershed** splits with "
+        "the Seed threshold instead. Which strategy is shown for this cell type?"
     )
 
 
@@ -2457,6 +2488,7 @@ def hmm_setup_guidance(context: dict, messages: list[dict]) -> str | None:
     return (
         f"You currently have **{cell_type}** selected, so this setup and every "
         "recommendation below apply to that population.\n\n"
+        "**Plan**\n\n"
         "1. Review the continuous HMM inputs. Current per-timepoint features: "
         f"**{timepoint}**; current window features: **{window}**.\n"
         "2. Keep binary groups separate from HMM training. Current binary groups: "
@@ -3646,7 +3678,143 @@ def recover_single_control_action(
     }]
 
 
-def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict]) -> str:
+_PLAN_MODULES = (
+    (("data preparation",), "navigate_to_step", {"step": "data_preparation"}),
+    (("segmentation",), "navigate_to_step", {"step": "segmentation"}),
+    (("tracking",), "navigate_to_step", {"step": "tracking"}),
+    (("feature extraction",), "navigate_to_step", {"step": "feature_extraction"}),
+    (("filtering", "filter tracks"), "navigate_to_step", {"step": "filtering"}),
+    (("population dynamics",), "open_analysis_view", {"view": "population_dynamics"}),
+    (("death dynamics",), "open_analysis_view", {"view": "death_dynamics"}),
+    (("interaction analysis",), "open_analysis_view", {"view": "interaction"}),
+    (("invasiveness analysis",), "open_analysis_view", {"view": "invasiveness"}),
+    (("active killing",), "open_analysis_view", {"view": "active_killing"}),
+    (("behavioral state", "behavioural state"), "open_analysis_view",
+     {"view": "behavioral_state"}),
+    (("state trajectory",), "open_analysis_view", {"view": "state_trajectory"}),
+)
+_NAVIGATION_TOOLS = {"navigate_to_step", "open_analysis_view"}
+_MAX_WORDS_BEFORE_PLAN_MODULE = 2
+
+
+def _targeted_plan_step(context: dict) -> dict | None:
+    plan = (context.get("assistant_session") or {}).get("plan") or {}
+    if not plan.get("targeted"):
+        return None
+    return next(
+        (step for step in plan.get("steps") or [] if step.get("status") == "current"),
+        None,
+    )
+
+
+def plan_navigation_call(context: dict) -> dict | None:
+    """Open the module of a step the researcher just targeted, if it is elsewhere.
+
+    Given a navigation tool on these turns the model replies with the tab switch
+    alone, which leaves the researcher with no guidance for the step.
+    """
+    step = _targeted_plan_step(context)
+    title = str((step or {}).get("title") or "").lower()
+    # Only a step that leads with a module happens there: "Run Tracking" does, but
+    # "Load metadata, then confirm the segmentation outputs" does not.
+    matches = [
+        (title.index(phrase), name, arguments)
+        for phrases, name, arguments in _PLAN_MODULES
+        for phrase in phrases
+        if phrase in title
+        and len(title[:title.index(phrase)].split()) <= _MAX_WORDS_BEFORE_PLAN_MODULE
+    ]
+    if not matches:
+        return None
+    _position, name, arguments = min(matches, key=lambda match: match[0])
+    view = (context.get("analysis") or {}).get("view")
+    already_open = (
+        context.get("current_step") == arguments.get("step")
+        or (
+            context.get("current_step") == "analysis"
+            and view in {arguments.get("view"), f"{arguments.get('view')}_overview"}
+        )
+    )
+    return None if already_open else {"name": name, "arguments": dict(arguments)}
+
+
+def _asks_for_steps(user_message: str) -> bool:
+    """Recognize a request for a sequence of steps."""
+    return bool(re.search(
+        r"\b(?:steps?|next|in order|sequence|workflow|plan|roadmap|where do i start|"
+        r"walk me through|guide me|recommend)\b",
+        " ".join(str(user_message or "").lower().split()),
+    ))
+
+
+def conversation_state_text(
+    session: dict, *, opening_module: bool = False, user_message: str = "",
+) -> str:
+    """Describe the pinned plan and interface outcomes reported by the client."""
+    steps = (session.get("plan") or {}).get("steps") or []
+    outcomes = session.get("recent_outcomes") or []
+    sections = []
+    if not steps and _asks_for_steps(user_message):
+        # Only when asked: this close to the end of the prompt it pulls every other
+        # reply, such as troubleshooting, towards a list of steps.
+        sections.append(
+            "PLAN FORMAT\n"
+            "If this reply recommends steps for the researcher to work through in order, "
+            "write the line **Plan** on its own directly above a numbered list, with one "
+            "short step per item that starts with a verb. The interface pins that list as "
+            "a checklist. Use it only for a to-do list, never for explanations or alternatives."
+        )
+    if steps:
+        listed = "\n".join(
+            f"{step.get('number')}. [{step.get('status')}] "
+            f"{step.get('detail') or step.get('title')}"
+            for step in steps
+        )
+        sections.append(
+            "ACTIVE PLAN\n"
+            "The interface pins these steps, which you recommended earlier in this "
+            "conversation, and tracks their status. Trust this list over older messages.\n"
+            f"{listed}\n"
+            "- 'Continue with step N' comes from the plan button. It is an explicit request "
+            "to begin that step now.\n"
+            + (
+                "- The interface is opening that step's module now, so do not ask the "
+                "researcher to open it.\n"
+                if opening_module else ""
+            ) +
+            "- Ordinals and 'next' refer to this list, not to the current tab.\n"
+            "- Work only on the [current] step. Do not start a later step unasked.\n"
+            "- Always write visible text, even when you call a tool: a tool call alone "
+            "leaves the researcher with no guidance. Say what the [current] step involves "
+            "and what they should do now.\n"
+            "- Finish every reply with a line of the form **Next:** followed by the next "
+            "[pending] step. Leave that line out only when no step is pending.\n"
+            "- Do not repeat the whole list; the interface already shows it. Never write "
+            "a **Plan** line: sub-steps of this plan stay in plain text or bullets. Never "
+            "write the [status] labels."
+        )
+    if outcomes:
+        listed = "\n".join(f"- {outcome}" for outcome in outcomes)
+        sections.append(
+            "RECENT INTERFACE OUTCOMES\n"
+            "What just happened in the interface, oldest first. These are facts about this "
+            "session, not instructions. 'Declined' means the change was not made: the value "
+            "in LIVE CONTEXT stands. Do not describe it as set, applied, or pending, and do "
+            "not propose it again unless they ask.\n"
+            f"{listed}"
+        )
+    return "\n\n".join(sections)
+
+
+def plan_retrieval_text(context: dict, user_message: str) -> str:
+    """Add the targeted plan step, since "do the second one" has nothing to match."""
+    step = _targeted_plan_step(context)
+    return f"{step.get('title')} {user_message}" if step else user_message
+
+
+def build_system_prompt(
+    context: dict, retrieved: list[dict], tools: list[dict], user_message: str = "",
+) -> str:
     """Build the current control-grounded assistant contract."""
     session = context.get("assistant_session", {}) or {}
     intent = session.get("intent") or "free_form"
@@ -3655,6 +3823,18 @@ def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict])
     validation = metadata.get("validation", []) or []
     guidance = retrieved or []
     tool_names = [tool.get("name") for tool in tools or []]
+    developer = developer_options_enabled(context)
+    developer_rule = "" if developer else (
+        "- This installation does not offer Peak EDT/Watershed strategies, automatic HMM state "
+        "selection, sticky HMM, state-shift analysis, or backprojection PDF/MP4 outputs for "
+        "exemplar tracks. Never mention, recommend, or set them, and never describe them as hidden "
+        "or developer options. If the researcher asks for one, say only that this interface does "
+        "not offer it.\n"
+    )
+    peak_edt_rule = (
+        "With Peak EDT/Watershed, lower EDT threshold because that field is a peak-height filter. "
+        if developer else ""
+    )
 
     rules = (
         "You are the BEHAV3D Assistant for researchers analysing 3D fluorescence imaging. "
@@ -3671,6 +3851,7 @@ def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict])
         "where a setting lives or how to change it, require either a matching LIVE CONTROL for that "
         "module/method or an explicit matching entry in INTERFACE CAPABILITIES or FEEDBACK-GROUNDED "
         "KNOWLEDGE. Never invent a dropdown, mode, button, field, or per-sample mapping.\n"
+        f"{developer_rule}"
         "- If the exact capability, active method, strategy, unit, or biological input needed for a "
         "factual answer is not established by those sources, say specifically what cannot be confirmed "
         "and ask one focused question. Do not fill the gap with a plausible feature from a related "
@@ -3870,8 +4051,8 @@ def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict])
         "Probability Map + Watershed, Seed threshold is the main splitting lever: raise it in small "
         "increments, keep it at least as high as Mask threshold, and watch for missing cells. Mask threshold "
         "primarily defines the foreground contour; raise it only when borders also need tightening or combined "
-        "tuning is warranted. With plain Mask + EDT/Watershed, raise EDT threshold. With Peak EDT/Watershed, "
-        "lower EDT threshold because that field is a peak-height filter. Reverse the relevant direction for "
+        "tuning is warranted. With plain Mask + EDT/Watershed, raise EDT threshold. "
+        f"{peak_edt_rule}Reverse the relevant direction for "
         "over-splitting, change only controls present in LIVE CONTROLS, and ask the user to inspect a preview. "
         "If threshold tuning is insufficient, recommend more boundary/background annotations and retraining. "
         "A Minimum size or size-preview filter excludes objects after segmentation; it never merges them. "
@@ -4011,9 +4192,19 @@ def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict])
         if not validation else
         "Discuss validation items only when relevant; 'review' notes are not errors."
     )
+    # Last, because the model follows these turn-specific rules far less reliably
+    # when they sit ahead of the long context.
+    conversation_state = conversation_state_text(
+        session,
+        opening_module=plan_navigation_call(context) is not None,
+        user_message=user_message,
+    )
+    if conversation_state:
+        conversation_state = f"\n\n{conversation_state}"
     return (f"{rules}\n\nSESSION INTENT: {intent}\n{validation_note}\n\n"
             f"LIVE CONTEXT\n{context_text}\n\n"
-            f"FEEDBACK-GROUNDED KNOWLEDGE\n{knowledge or 'No additional card selected.'}")
+            f"FEEDBACK-GROUNDED KNOWLEDGE\n{knowledge or 'No additional card selected.'}"
+            f"{conversation_state}")
 
 
 
@@ -4146,6 +4337,92 @@ def assemble_tool_calls(fragments: list[dict]) -> list[dict]:
             continue
         calls.append({"name": entry["name"], "arguments": args})
     return calls
+
+
+def turn_policy(context: dict, messages: list[dict], tools: list[dict]) -> dict:
+    """Decide what the model may do this turn. Order matters: each step narrows
+    the tools the next one sees."""
+    user_msg = next((m["content"] for m in reversed(messages)
+                     if m.get("role") == "user"), "")
+    force_bulk = should_force_bulk_metadata(context, user_msg, tools)
+    if force_bulk:
+        tools = [tool for tool in tools if tool.get("name") == "bulk_fill_metadata"]
+    force_edit = should_require_edit_action(context, user_msg, tools)
+    plan_call = plan_navigation_call(context)
+    if plan_call:
+        tools = [
+            tool for tool in tools if tool.get("name") not in _NAVIGATION_TOOLS
+        ]
+    return {
+        "user_msg": user_msg,
+        "tools": tools,
+        "force_bulk": force_bulk,
+        "force_edit": force_edit,
+        "plan_call": plan_call,
+    }
+
+
+def retrieval_target(context: dict, policy: dict) -> tuple[dict, str]:
+    """Return the context and text to search guidance with."""
+    retrieval_context = context
+    plan_call = policy["plan_call"]
+    if plan_call:
+        # Ground the reply in the module being opened, not the one left.
+        retrieval_context = {
+            **context,
+            "current_step": plan_call["arguments"].get("step", "analysis"),
+        }
+    return retrieval_context, plan_retrieval_text(context, policy["user_msg"])
+
+
+def build_model_request(
+    context: dict, messages: list[dict], policy: dict, retrieved: list[dict],
+) -> dict:
+    """Build the provider-neutral request for this turn."""
+    system = build_system_prompt(context, retrieved, policy["tools"], policy["user_msg"])
+    control_ids = [
+        item.get("id")
+        for item in (context.get("ui_state", {}) or {}).get("controls", [])
+        if item.get("id") and item.get("enabled") and item.get("visible")
+    ]
+    oai_tools = to_openai_tools(policy["tools"], key_enum=control_ids)
+    tool_choice, thinking_override = model_tool_policy(
+        policy["force_bulk"], bool(oai_tools), policy["force_edit"]
+    )
+    return {
+        "system": system,
+        "messages": [m for m in messages if m.get("role") != "system"],
+        "tools": oai_tools,
+        "tool_choice": tool_choice,
+        "thinking_override": thinking_override,
+    }
+
+
+def finalize_calls(
+    fragments: list[dict], content: str, context: dict, policy: dict,
+) -> tuple[list[dict], bool]:
+    """Turn a model reply into validated calls. Also reports whether a turn that
+    had to change something produced nothing, which plan navigation must not hide."""
+    calls = assemble_tool_calls(fragments)
+    if not calls:                       # fallback: call embedded in text
+        _, calls = parse_tool_calls(content)
+    calls = recover_single_control_action(
+        calls, context, policy["user_msg"], content
+    )
+    if policy["force_bulk"]:
+        for call in calls:
+            if call.get("name") == "bulk_fill_metadata":
+                call["arguments"] = sanitize_bulk_metadata_arguments(
+                    call.get("arguments", {}), policy["user_msg"]
+                )
+    calls = normalize_metadata_line_calls(calls)
+    must_call_tool = policy["force_bulk"] or (
+        policy["force_edit"] and bool(policy["tools"])
+    )
+    missing_required_tool = must_call_tool and not calls
+    if policy["plan_call"]:
+        calls = [policy["plan_call"], *calls]
+    return calls, missing_required_tool
 
 
 def deterministic_turn_response(
@@ -4297,6 +4574,7 @@ if modal is not None:
         import time
         import uuid
         from fastapi import FastAPI, Request
+        from fastapi.concurrency import run_in_threadpool
         from fastapi.responses import StreamingResponse
         from openai import OpenAI
         from embeddings import Embedder, VectorIndex
@@ -4308,7 +4586,10 @@ if modal is not None:
             index = VectorIndex.load(INDEX_DIR)
         except Exception:
             index = VectorIndex()
-        from guidance import KNOWLEDGE_VERSION, select_guidance_cards
+        from guidance import (
+            DEVELOPER_ONLY_PARAMETERS, KNOWLEDGE_VERSION, is_developer_only,
+            select_guidance_cards,
+        )
 
         # deepseek-v4-flash is the explicit V4 Flash id (tool-calls + streaming).
         # The older `deepseek-chat` alias also maps to it but is being deprecated.
@@ -4320,6 +4601,32 @@ if modal is not None:
             timeout=60.0,
             max_retries=1,
         )
+
+        def search_guidance(context, policy, request_id):
+            """Return guidance for a turn, and whether the document search failed."""
+            retrieval_context, retrieval_msg = retrieval_target(context, policy)
+            query = f"{retrieval_context.get('current_step','')} {retrieval_msg}"
+            developer = developer_options_enabled(context)
+            degraded = False
+            try:
+                # Fetch extra results so dropping dev-only cards still leaves six.
+                retrieved = index.search(
+                    embedder.encode([query])[0], k=6 + len(DEVELOPER_ONLY_PARAMETERS)
+                )
+            except Exception as error:
+                print(f"RAG retrieval failed for {request_id} ({type(error).__name__}): {error}")
+                retrieved = []
+                degraded = True
+
+            if not developer:
+                retrieved = [chunk for chunk in retrieved if not is_developer_only(chunk)]
+            retrieved = retrieved[:6]
+
+            intent = (context.get("assistant_session", {}) or {}).get("intent")
+            guidance_cards = select_guidance_cards(
+                retrieval_context, retrieval_msg, intent, developer_options=developer
+            )
+            return guidance_cards + retrieved, degraded
 
         @api.get("/health")
         def health(probe_provider: bool = False):
@@ -4364,6 +4671,7 @@ if modal is not None:
                 "model": deepseek_model,
                 "control_contract_version": CONTROL_CONTRACT_VERSION,
                 "knowledge_version": KNOWLEDGE_VERSION,
+                "byok_contract": BYOK_CONTRACT_VERSION,
             }
 
         @api.post("/chat")
@@ -4407,12 +4715,7 @@ if modal is not None:
                     deterministic_action_stream(), media_type="text/event-stream"
                 )
 
-            user_msg = next((m["content"] for m in reversed(messages)
-                             if m.get("role") == "user"), "")
-            force_bulk = should_force_bulk_metadata(context, user_msg, tools)
-            if force_bulk:
-                tools = [tool for tool in tools if tool.get("name") == "bulk_fill_metadata"]
-            force_edit = should_require_edit_action(context, user_msg, tools)
+            policy = turn_policy(context, messages, tools)
 
             def event_stream():
                 content = ""
@@ -4426,12 +4729,8 @@ if modal is not None:
                     "message": "Checking BEHAV3D guidance for this question...",
                 })
 
-                query = f"{context.get('current_step','')} {user_msg}"
-                try:
-                    retrieved = index.search(embedder.encode([query])[0], k=6)
-                except Exception as error:
-                    print(f"RAG retrieval failed for {request_id} ({type(error).__name__}): {error}")
-                    retrieved = []
+                retrieved, retrieval_degraded = search_guidance(context, policy, request_id)
+                if retrieval_degraded:
                     yield sse({
                         "type": "status",
                         "level": "degraded",
@@ -4443,22 +4742,12 @@ if modal is not None:
                             "built-in guidance."
                         ),
                     })
-
-                intent = (context.get("assistant_session", {}) or {}).get("intent")
-                guidance_cards = select_guidance_cards(context, user_msg, intent)
-                retrieved = guidance_cards + retrieved
-                system = build_system_prompt(context, retrieved, tools)
-                convo = [{"role": "system", "content": system}]
-                convo += [m for m in messages if m.get("role") != "system"]
-                control_ids = [
-                    item.get("id")
-                    for item in (context.get("ui_state", {}) or {}).get("controls", [])
-                    if item.get("id") and item.get("enabled") and item.get("visible")
-                ]
-                oai_tools = to_openai_tools(tools, key_enum=control_ids)
-                tool_choice, thinking_override = model_tool_policy(
-                    force_bulk, bool(oai_tools), force_edit
-                )
+                model_request = build_model_request(context, messages, policy, retrieved)
+                convo = [{"role": "system", "content": model_request["system"]}]
+                convo += model_request["messages"]
+                oai_tools = model_request["tools"]
+                tool_choice = model_request["tool_choice"]
+                thinking_override = model_request["thinking_override"]
 
                 yield sse({
                     "type": "status",
@@ -4538,23 +4827,60 @@ if modal is not None:
                 )
                 if visible:
                     yield sse({"type": "token", "text": visible})
-                calls = assemble_tool_calls(tool_frags)
-                if not calls:                       # fallback: call embedded in text
-                    _, calls = parse_tool_calls(content)
-                calls = recover_single_control_action(
-                    calls, context, user_msg, content
+                calls, _missing_required_tool = finalize_calls(
+                    tool_frags, content, context, policy
                 )
-                if force_bulk:
-                    for call in calls:
-                        if call.get("name") == "bulk_fill_metadata":
-                            call["arguments"] = sanitize_bulk_metadata_arguments(
-                                call.get("arguments", {}), user_msg
-                            )
-                calls = normalize_metadata_line_calls(calls)
                 if calls:
                     yield sse({"type": "tool_calls", "calls": calls})
                 yield sse({"type": "done"})
 
             return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+        @api.post("/prepare")
+        async def prepare(request: Request):
+            body = await request.json()
+            messages = body.get("messages", [])
+            context = body.get("context", {})
+            tools = tools_for_context(body.get("tools", []), context)
+            request_id = uuid.uuid4().hex[:12]
+
+            deterministic = deterministic_turn_response(context, messages, tools)
+            if deterministic:
+                return {
+                    "kind": "final",
+                    "stage": "local_guidance",
+                    "text": deterministic["text"],
+                    "calls": deterministic.get("calls", []),
+                    "request_id": request_id,
+                }
+            policy = turn_policy(context, messages, tools)
+            # Embedding is CPU work and would stall every other request in this route.
+            retrieved, degraded = await run_in_threadpool(
+                search_guidance, context, policy, request_id
+            )
+            model_request = build_model_request(context, messages, policy, retrieved)
+            return {
+                "kind": "model_request",
+                "system": model_request["system"],
+                "messages": model_request["messages"],
+                "tools": model_request["tools"],
+                "must_call_tool": model_request["tool_choice"] == "required",
+                "plan_call": policy["plan_call"],
+                "retrieval_degraded": degraded,
+                "request_id": request_id,
+            }
+
+        @api.post("/finish")
+        async def finish(request: Request):
+            body = await request.json()
+            messages = body.get("messages", [])
+            context = body.get("context", {})
+            tools = tools_for_context(body.get("tools", []), context)
+            policy = turn_policy(context, messages, tools)
+            calls, missing_required_tool = finalize_calls(
+                body.get("tool_fragments", []), str(body.get("content") or ""),
+                context, policy,
+            )
+            return {"calls": calls, "missing_required_tool": missing_required_tool}
 
         return api
