@@ -5,14 +5,23 @@ Runs under pytest *or* standalone:  python test/test_assistant.py
 Requires the `behav3d` conda env (numpy, the behav3d package). No GPU / Modal /
 Qt needed — only the dependency-free logic is exercised here.
 """
+import dataclasses
+import json
 import os
 import sys
+import tempfile
+import threading
+from pathlib import Path
+from unittest.mock import patch
 
 import anndata as ad
 import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "chatbot"))
+sys.path.insert(0, os.path.dirname(__file__))
+
+from assistant_provider_stub import ProviderStub
 
 from behav3d.napari._assistant_schema import (
     flatten_config_to_cards, cards_for_step, dump_cards_json,
@@ -41,9 +50,14 @@ from behav3d.napari._assistant import (
 from behav3d.napari._assistant_plan import (
     MAX_OUTCOMES, PlanState, extract_plan, parse_plan_command, record_outcome, step_title,
 )
+from behav3d.napari import _assistant, _assistant_providers, _assistant_settings
+from behav3d.napari._assistant_providers import (
+    ApiKey, ProviderCancelled, ProviderConfig, ProviderError, ServiceTooOld,
+    check_connection, list_models, provider_by_id, run_own_model_turn, stream_reply,
+)
 from behav3d.napari._assistant_client import (
-    ChatWorker, classify_request_failure, diagnose_assistant_service,
-    request_failure_is_retryable,
+    ChatWorker, SERVICE_TOO_OLD_MESSAGE, check_own_provider, classify_request_failure,
+    diagnose_assistant_service, request_failure_is_retryable,
 )
 from behav3d.analysis.track_counts import (
     calculate_track_count_table, format_track_count_summary,
@@ -59,6 +73,8 @@ from behav3d.napari._results_catalog import scan_outputs
 # Every dock queues a startup health check, and any test that spins the event loop
 # would run all of them: real network threads on docks about to be collected.
 AssistantDock._check_service_status = lambda self, **_kwargs: None
+# A developer's own saved provider must not change what these tests do.
+_assistant.load_active_provider = lambda: None
 
 
 # --------------------------------------------------------------------------
@@ -4561,8 +4577,8 @@ def _captured_requests():
 
     requests = []
 
-    def worker(messages, context, tools):
-        requests.append({"messages": messages, "context": context})
+    def worker(messages, context, tools, **options):
+        requests.append({"messages": messages, "context": context, **options})
         return MagicMock()
 
     stack = ExitStack()
@@ -5311,6 +5327,930 @@ def test_bubble_links_only_open_web_addresses():
         open_url.assert_not_called()
         _MessageBubble._open_link(QUrl("https://behav3d.readthedocs.io"))
         open_url.assert_called_once()
+
+
+SENTINEL_KEY = "sk-SENTINEL-do-not-leak"
+_PROVIDER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "set_ui_value",
+        "description": "Set a value.",
+        "parameters": {"type": "object", "properties": {"value": {}}},
+    },
+}
+_PROVIDER_REQUEST = {
+    "system": "SYSTEM RULES",
+    "messages": [
+        {"role": "assistant", "content": "An older reply"},
+        {"role": "user", "content": "Set the radius"},
+        {"role": "assistant", "content": ""},
+    ],
+    "tools": [_PROVIDER_TOOL],
+    "must_call_tool": False,
+}
+_API_PATHS = {"openai": "/v1", "mistral": "/v1", "deepseek": "/v1", "gemini": "/v1"}
+
+
+def _stub_config(stub, provider_id, model="model-a"):
+    spec = dataclasses.replace(
+        provider_by_id(provider_id),
+        base_url=stub.url + _API_PATHS.get(provider_id, ""),
+    )
+    return ProviderConfig(spec, model, ApiKey(SENTINEL_KEY))
+
+
+def _stream(stub, provider_id, model="model-a", **request):
+    shown = []
+    reply = stream_reply(
+        _stub_config(stub, provider_id, model),
+        {**_PROVIDER_REQUEST, **request},
+        shown.append,
+    )
+    assert "".join(shown) == reply.text
+    return reply, stub.requests[-1]
+
+
+class _ServiceResponse:
+    def __init__(self, payload, status=200):
+        self.payload = payload
+        self.status_code = status
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise ConnectionError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return self.payload
+
+
+def _fake_service(prepared, finished=None, *, finish_fails=False):
+    calls = []
+
+    def post(url, json=None, timeout=None):
+        calls.append((url.rsplit("/", 1)[-1], json))
+        if url.endswith("/prepare"):
+            return _ServiceResponse(prepared)
+        if finish_fails:
+            raise ConnectionError("service went away")
+        return _ServiceResponse(finished or {"calls": []})
+
+    post.calls = calls
+    return post
+
+
+def _model_request(**extra):
+    return {"kind": "model_request", **_PROVIDER_REQUEST, **extra}
+
+
+def _own_turn(stub, post, provider_id="mistral", **options):
+    shown, statuses = [], []
+    with patch.object(_assistant_providers.time, "sleep"):
+        result = run_own_model_turn(
+            "https://service",
+            {"messages": [], "context": {}, "tools": []},
+            _stub_config(stub, provider_id),
+            on_text=shown.append,
+            on_status=statuses.append,
+            post=post,
+            **options,
+        )
+    return result, "".join(shown), statuses
+
+
+def test_turn_policy_narrows_tools_in_order():
+    import app
+
+    tools = [{"name": name} for name in app._TOOL_NAMES]
+    plan = PlanState()
+    plan.adopt(["Run Feature Extraction.", "Run Filtering."], True)
+    plan.handle_message("do the first one")
+    context = {
+        "current_step": "tracking",
+        "assistant_session": {"plan": plan.to_context()},
+    }
+    policy = app.turn_policy(
+        context, [{"role": "user", "content": "Continue with step 1"}], tools
+    )
+    assert policy["plan_call"]["arguments"] == {"step": "feature_extraction"}
+    names = {tool["name"] for tool in policy["tools"]}
+    assert "navigate_to_step" not in names and "open_analysis_view" not in names
+    assert "set_ui_value" in names
+
+    request = app.build_model_request(
+        context, [{"role": "system", "content": "x"}, {"role": "user", "content": "y"}],
+        policy, [],
+    )
+    assert request["messages"] == [{"role": "user", "content": "y"}]
+    assert request["tool_choice"] == "auto" and request["thinking_override"] is None
+
+
+def test_finalize_calls_prepends_navigation_after_checking_for_a_missing_edit():
+    import app
+
+    navigate = {"name": "navigate_to_step", "arguments": {"step": "tracking"}}
+    policy = {
+        "user_msg": "Set the radius to 5", "tools": [{"name": "set_ui_value"}],
+        "force_bulk": False, "force_edit": True, "plan_call": navigate,
+    }
+    calls, missing = app.finalize_calls([], "I have set it.", {}, policy)
+    assert calls == [navigate] and missing is True, "navigation must not hide this"
+
+    fragments = [{
+        "index": 0, "name": "set_ui_value",
+        "arguments": '{"control_id": "a", "value": 5}',
+    }]
+    calls, missing = app.finalize_calls(fragments, "", {}, policy)
+    assert [call["name"] for call in calls] == ["navigate_to_step", "set_ui_value"]
+    assert missing is False
+
+
+def test_chat_completions_maps_a_required_tool_per_provider():
+    stub = ProviderStub()
+    try:
+        stub.queue({"text": "Hi"}, {"text": "Hi"}, {"text": "Hi"}, {"text": "Hi"})
+        _reply, mistral = _stream(stub, "mistral", must_call_tool=True)
+        _reply, deepseek = _stream(stub, "deepseek", must_call_tool=True)
+        _reply, gemini = _stream(stub, "gemini", must_call_tool=True)
+        _reply, relaxed = _stream(stub, "deepseek", must_call_tool=False)
+    finally:
+        stub.close()
+    assert mistral["path"].endswith("/chat/completions")
+    assert mistral["body"]["tool_choice"] == "required"
+    assert "thinking" not in mistral["body"]
+    assert mistral["body"]["temperature"] == 0.3
+    assert deepseek["body"]["thinking"] == {"type": "disabled"}
+    assert "thinking" not in relaxed["body"], "only a forced call turns thinking off"
+    assert gemini["body"]["tool_choice"] == "auto"
+    assert "requires a change" in gemini["body"]["messages"][0]["content"]
+    assert "requires a change" not in mistral["body"]["messages"][0]["content"]
+    assert [m["content"] for m in mistral["body"]["messages"][1:]] == [
+        "An older reply", "Set the radius",
+    ], "empty messages are rejected by some providers"
+
+
+def test_a_rejected_request_is_retried_once_without_optional_parameters():
+    stub = ProviderStub()
+    try:
+        stub.queue({"status": 400}, {"text": "Hi"})
+        reply, _request = _stream(stub, "mistral")
+        assert reply.text == "Hi" and len(stub.requests) == 2
+        assert stub.requests[0]["body"]["temperature"] == 0.3
+        assert "temperature" not in stub.requests[1]["body"]
+
+        stub.queue({"status": 400}, {"status": 400})
+        try:
+            _stream(stub, "mistral")
+            raise AssertionError("expected a failure")
+        except ProviderError as failure:
+            assert failure.kind == "bad_request"
+    finally:
+        stub.close()
+
+
+def test_parallel_tool_calls_sharing_an_index_stay_separate():
+    import app
+
+    stub = ProviderStub()
+    try:
+        stub.queue({"text": "", "tools": [
+            {"index": 0, "id": "a", "name": "set_ui_value", "arguments": {"value": 1}},
+            {"index": 0, "id": "b", "name": "set_ui_value", "arguments": {"value": 2}},
+        ]})
+        reply, _request = _stream(stub, "gemini")
+    finally:
+        stub.close()
+    calls = app.assemble_tool_calls(list(reply.fragments))
+    assert [call["arguments"]["value"] for call in calls] == [1, 2]
+
+
+def test_openai_uses_the_responses_api_without_storing_the_conversation():
+    stub = ProviderStub()
+    try:
+        stub.queue({
+            "pieces": ["Hel", "lo"],
+            "tools": [{"name": "set_ui_value", "arguments": {"value": 1}}],
+        })
+        reply, request = _stream(stub, "openai", must_call_tool=True)
+    finally:
+        stub.close()
+    body = request["body"]
+    assert request["path"].endswith("/responses")
+    assert body["store"] is False
+    assert "temperature" not in body
+    assert body["tool_choice"] == "auto"
+    assert body["instructions"].startswith("SYSTEM RULES")
+    assert "requires a change" in body["instructions"]
+    assert body["tools"][0]["name"] == "set_ui_value"
+    assert body["tools"][0]["strict"] is False and "function" not in body["tools"][0]
+    assert reply.text == "Hello"
+    assert reply.fragments[0]["name"] == "set_ui_value"
+
+
+def test_claude_requests_avoid_every_parameter_current_models_reject():
+    stub = ProviderStub()
+    try:
+        stub.queue({"text": "Hi", "tools": [
+            {"name": "set_ui_value", "arguments": {"value": 1}},
+        ]})
+        reply, request = _stream(
+            stub, "anthropic", "claude-haiku-5-5", must_call_tool=True
+        )
+    finally:
+        stub.close()
+    body = request["body"]
+    assert request["path"] == "/v1/messages"
+    for rejected in ("temperature", "thinking", "tool_choice"):
+        assert rejected not in body, rejected
+    assert body["system"].startswith("SYSTEM RULES")
+    assert "requires a change" in body["system"]
+    assert body["max_tokens"] > 0
+    assert body["tools"][0]["input_schema"]["type"] == "object"
+    assert body["messages"] == [{"role": "user", "content": "Set the radius"}], (
+        "the history window can open on an assistant turn, which Claude rejects"
+    )
+    assert json.loads(reply.fragments[0]["arguments"]) == {"value": 1}
+
+
+def test_claude_fallback_is_only_requested_on_eligible_models():
+    stub = ProviderStub()
+    try:
+        for model in ("claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"):
+            stub.queue({"text": "Hi"})
+            _reply, request = _stream(stub, "anthropic", model)
+            eligible = model != "claude-haiku-5-5"
+            assert (request["body"].get("fallbacks") == "default") is eligible, model
+            assert ("server-side-fallback" in str(
+                request["headers"].get("anthropic-beta")
+            )) is eligible, model
+    finally:
+        stub.close()
+
+
+def test_claude_refusal_reports_its_category_and_no_tool_calls():
+    stub = ProviderStub()
+    try:
+        stub.queue({
+            "blocks": [
+                {"type": "text", "text": "Partial"},
+                {"type": "tool_use", "name": "set_ui_value", "arguments": {"value": 1}},
+            ],
+            "stop": "refusal", "category": "bio",
+        })
+        reply, _request = _stream(stub, "anthropic", "claude-opus-5-5")
+    finally:
+        stub.close()
+    assert reply.stop == "refused" and reply.refusal_category == "bio"
+    assert reply.fragments == ()
+
+
+def test_claude_tool_use_before_a_fallback_is_discarded():
+    stub = ProviderStub()
+    try:
+        stub.queue({"blocks": [
+            {"type": "tool_use", "name": "set_ui_value", "arguments": {"value": 9}},
+            {"type": "fallback", "from": {"model": "a"}, "to": {"model": "b"}},
+            {"type": "tool_use", "name": "set_ui_value", "arguments": {"value": 4}},
+        ]})
+        reply, _request = _stream(stub, "anthropic", "claude-opus-5-5")
+    finally:
+        stub.close()
+    assert [json.loads(item["arguments"]) for item in reply.fragments] == [{"value": 4}]
+
+
+def test_replies_cut_off_at_the_length_limit_are_flagged():
+    stub = ProviderStub()
+    try:
+        stub.queue(
+            {"text": "Hi", "finish": "length"},
+            {"text": "Hi", "incomplete": True},
+            {"text": "Hi", "stop": "max_tokens"},
+        )
+        assert _stream(stub, "mistral")[0].stop == "truncated"
+        assert _stream(stub, "openai")[0].stop == "truncated"
+        assert _stream(stub, "anthropic", "claude-haiku-5-5")[0].stop == "truncated"
+    finally:
+        stub.close()
+
+
+def test_provider_failures_become_fixed_messages():
+    stub = ProviderStub()
+    try:
+        for provider_id, status, kind, retryable in (
+            ("anthropic", 401, "bad_key", False),
+            ("anthropic", 403, "forbidden", False),
+            ("openai", 404, "no_model", False),
+            ("mistral", 429, "rate_limit", True),
+            ("gemini", 500, "server", True),
+        ):
+            stub.queue({"status": status})
+            try:
+                _stream(stub, provider_id, "claude-haiku-5-5")
+                raise AssertionError("expected a failure")
+            except ProviderError as failure:
+                assert failure.kind == kind and failure.retryable is retryable
+                assert failure.__cause__ is None and failure.__suppress_context__
+                assert "stub failure" not in failure.message
+                assert SENTINEL_KEY not in failure.message
+                status_info = failure.status()
+                assert status_info["code"] == f"byok_{kind}"
+                assert not status_info["code"].startswith(("deepseek", "provider"))
+    finally:
+        stub.close()
+
+
+def test_provider_clients_ignore_ambient_credentials_and_urls():
+    stub = ProviderStub()
+    ambient = {
+        "OPENAI_API_KEY": "ambient", "OPENAI_BASE_URL": "http://127.0.0.1:9/v1",
+        "ANTHROPIC_API_KEY": "ambient", "ANTHROPIC_BASE_URL": "http://127.0.0.1:9",
+    }
+    try:
+        with patch.dict(os.environ, ambient):
+            stub.queue({"text": "Hi"}, {"text": "Hi"})
+            _reply, openai_request = _stream(stub, "openai")
+            _reply, claude_request = _stream(stub, "anthropic", "claude-haiku-5-5")
+    finally:
+        stub.close()
+    for request in (openai_request, claude_request):
+        assert SENTINEL_KEY in str(request["headers"]), "the chosen key must be used"
+        assert "ambient" not in str(request["headers"])
+
+
+def test_listing_models_hides_non_chat_models_and_checks_the_key():
+    stub = ProviderStub()
+    try:
+        assert list_models(_stub_config(stub, "mistral")) == ["model-a", "model-b"]
+        assert list_models(_stub_config(stub, "anthropic")) == ["model-a", "model-b"]
+        stub.models = ["models/gemini-x"]
+        assert list_models(_stub_config(stub, "gemini")) == ["gemini-x"]
+
+        stub.queue({"status": 401})
+        try:
+            list_models(_stub_config(stub, "openai"))
+            raise AssertionError("expected a failure")
+        except ProviderError as failure:
+            assert failure.kind == "bad_key"
+
+        stub.queue({"text": "OK"})
+        check_connection(_stub_config(stub, "anthropic", "claude-haiku-5-5"))
+        assert stub.requests[-1]["body"]["tools"][0]["name"] == "ping"
+    finally:
+        stub.close()
+
+
+def test_a_canned_reply_needs_no_provider_and_is_marked_as_canned():
+    stub = ProviderStub()
+    try:
+        post = _fake_service({
+            "kind": "final", "text": "Opening **Tracking**.",
+            "calls": [{"name": "navigate_to_step", "arguments": {"step": "tracking"}}],
+        })
+        result, text, statuses = _own_turn(stub, post)
+    finally:
+        stub.close()
+    assert stub.requests == []
+    assert text == "Opening **Tracking**." and len(result["calls"]) == 1
+    assert "local_guidance" in {status.get("stage") for status in statuses}
+
+
+def test_finish_receives_the_raw_reply_and_returns_checked_calls():
+    stub = ProviderStub()
+    try:
+        stub.queue({"text": "Hi", "tools": [
+            {"name": "set_ui_value", "arguments": {"value": 1}},
+        ]})
+        checked = [{"name": "set_ui_value", "arguments": {"value": 1}}]
+        post = _fake_service(
+            _model_request(),
+            {"calls": checked, "missing_required_tool": False},
+        )
+        result, _text, _statuses = _own_turn(stub, post)
+    finally:
+        stub.close()
+    assert result["calls"] == checked
+    route, body = post.calls[-1]
+    assert route == "finish" and body["content"] == "Hi"
+    assert body["tool_fragments"][0]["name"] == "set_ui_value"
+
+
+def test_a_failed_finish_never_calls_the_provider_again_or_applies_unchecked_calls():
+    stub = ProviderStub()
+    plan_call = {"name": "navigate_to_step", "arguments": {"step": "tracking"}}
+    try:
+        stub.queue({"text": "", "tools": [
+            {"name": "set_ui_value", "arguments": {"value": 1}},
+        ]})
+        post = _fake_service(_model_request(plan_call=plan_call), finish_fails=True)
+        result, _text, _statuses = _own_turn(stub, post)
+    finally:
+        stub.close()
+    assert len(stub.requests) == 1, "a tool-only reply must not buy a second model call"
+    assert [route for route, _body in post.calls].count("finish") == 2
+    assert result["calls"] == [plan_call]
+    assert result["unchecked"] is True
+
+
+def test_a_refusal_skips_finish():
+    stub = ProviderStub()
+    try:
+        stub.queue({"text": "Partial", "stop": "refusal", "category": "bio"})
+        post = _fake_service(_model_request())
+        result, _text, _statuses = _own_turn(stub, post, "anthropic")
+    finally:
+        stub.close()
+    assert result["refused"] is True and result["refusal_category"] == "bio"
+    assert [route for route, _body in post.calls] == ["prepare"]
+
+
+def test_transient_provider_failures_retry_once_before_any_output():
+    stub = ProviderStub()
+    try:
+        stub.queue({"status": 429}, {"text": "Hi"})
+        result, text, statuses = _own_turn(stub, _fake_service(_model_request()))
+        assert text == "Hi" and len(stub.requests) == 2
+        assert "retrying" in {status.get("stage") for status in statuses}
+
+        stub.requests.clear()
+        stub.queue({"status": 401})
+        try:
+            _own_turn(stub, _fake_service(_model_request()))
+            raise AssertionError("expected a failure")
+        except ProviderError as failure:
+            assert failure.kind == "bad_key"
+        assert len(stub.requests) == 1, "a bad key is not worth a second attempt"
+
+        stub.requests.clear()
+        stub.queue({"status": 429}, {"status": 429})
+        try:
+            _own_turn(stub, _fake_service(_model_request()))
+            raise AssertionError("expected a failure")
+        except ProviderError as failure:
+            assert failure.kind == "rate_limit"
+        assert len(stub.requests) == 2
+    finally:
+        stub.close()
+
+
+def test_a_failure_after_text_is_shown_is_never_retried():
+    calls = []
+
+    def fails_after_text(client, config, request, on_text, cancelled, relaxed):
+        calls.append(relaxed)
+        on_text("Half a reply")
+        raise ProviderError("server", config)
+
+    stub = ProviderStub()
+    try:
+        with patch.dict(
+            _assistant_providers._ADAPTERS, {"chat_completions": fails_after_text},
+        ):
+            try:
+                _own_turn(stub, _fake_service(_model_request()))
+                raise AssertionError("expected a failure")
+            except ProviderError as failure:
+                assert failure.kind == "server"
+    finally:
+        stub.close()
+    assert calls == [False], "a retry would repeat text already on screen"
+
+
+def test_cancelling_stops_reading_the_stream():
+    stub = ProviderStub()
+    try:
+        stub.queue({"pieces": ["one ", "two ", "three"]})
+        shown = []
+        try:
+            stream_reply(
+                _stub_config(stub, "mistral"), _PROVIDER_REQUEST, shown.append,
+                cancelled=lambda: bool(shown),
+            )
+            raise AssertionError("expected cancellation")
+        except ProviderCancelled:
+            pass
+    finally:
+        stub.close()
+    assert shown == ["one "]
+
+
+def test_an_old_service_is_reported_and_never_retried_through_chat():
+    def post(url, json=None, timeout=None):
+        assert url.endswith("/prepare"), "must not fall back to /chat"
+        return _ServiceResponse({}, status=404)
+
+    stub = ProviderStub()
+    try:
+        try:
+            _own_turn(stub, post)
+            raise AssertionError("expected a failure")
+        except ServiceTooOld:
+            pass
+    finally:
+        stub.close()
+
+
+def _run_worker(config, post):
+    events = {"token": [], "status": [], "error": [], "degraded": [], "notice": []}
+    worker = ChatWorker(
+        [{"role": "user", "content": "Set the radius"}], {"current_step": "tracking"},
+        [], provider=config,
+    )
+    worker.token.connect(events["token"].append)
+    worker.status.connect(events["status"].append)
+    worker.error.connect(events["error"].append)
+    worker.degraded.connect(events["degraded"].append)
+    worker.notice.connect(events["notice"].append)
+    with patch(
+        "behav3d.napari._assistant_client.load_client_config",
+        return_value={"endpoint": "https://service", "timeout": 60},
+    ), patch("requests.post", post), patch.object(_assistant_providers.time, "sleep"):
+        worker.run()
+    return events
+
+
+def test_a_provider_failure_is_shown_and_never_falls_back():
+    stub = ProviderStub()
+    try:
+        stub.queue({"status": 401})
+        post = _fake_service(_model_request())
+        events = _run_worker(_stub_config(stub, "mistral"), post)
+    finally:
+        stub.close()
+    assert "rejected the API key" in events["error"][0]
+    assert events["degraded"] == [], "the offline answer would hide a bad key"
+    assert [route for route, _body in post.calls] == ["prepare"]
+    assert events["status"][-1]["code"] == "byok_bad_key"
+
+
+def test_the_offline_answer_only_appears_when_the_service_is_unreachable():
+    def post(url, json=None, timeout=None):
+        raise ConnectionError("no route")
+
+    stub = ProviderStub()
+    try:
+        events = _run_worker(_stub_config(stub, "mistral"), post)
+    finally:
+        stub.close()
+    assert "Assistant offline" in events["degraded"][0]
+    assert stub.requests == [], "nothing goes to the provider without the service"
+
+
+def test_an_old_service_error_is_shown_by_the_worker():
+    def post(url, json=None, timeout=None):
+        return _ServiceResponse({}, status=404)
+
+    stub = ProviderStub()
+    try:
+        events = _run_worker(_stub_config(stub, "mistral"), post)
+    finally:
+        stub.close()
+    assert events["error"] == [SERVICE_TOO_OLD_MESSAGE] and events["degraded"] == []
+
+
+def test_the_key_only_ever_reaches_the_provider():
+    stub = ProviderStub()
+    try:
+        replies = (
+            {"text": "Done", "tools": [{"name": "set_ui_value", "arguments": {"value": 1}}]},
+            {"status": 401},
+            {"status": 500},
+            {"status": 500},
+        )
+        seen = []
+        for provider_id in ("mistral", "openai", "anthropic"):
+            stub.queue(*replies)
+            for _turn in range(3):
+                post = _fake_service(_model_request())
+                seen.append(_run_worker(_stub_config(stub, provider_id, "claude-haiku-5-5"), post))
+                seen.append([body for _route, body in post.calls])
+    finally:
+        stub.close()
+    assert SENTINEL_KEY not in repr(seen)
+    assert stub.requests, "the turns must have reached the provider"
+    for request in stub.requests:
+        assert SENTINEL_KEY not in json.dumps(request["body"])
+        assert SENTINEL_KEY in str(request["headers"])
+
+
+def test_the_key_cannot_be_printed_by_accident():
+    key = ApiKey(SENTINEL_KEY)
+    config = ProviderConfig(provider_by_id("openai"), "m", key)
+    for text in (repr(key), str(key), f"{key}", repr(config)):
+        assert SENTINEL_KEY not in text
+    assert key.reveal() == SENTINEL_KEY and bool(key) and not ApiKey("  ")
+
+
+def test_the_tracked_client_config_has_nowhere_for_a_key():
+    tracked = Path(__file__).parents[1] / "napari" / "assistant_config.json"
+    assert set(json.loads(tracked.read_text())) <= {"endpoint", "timeout"}
+    source = (
+        Path(__file__).parents[1] / "behav3d" / "napari" / "_assistant_settings.py"
+    ).read_text()
+    assert "assistant_config.json`" in source and "write_text" not in source
+
+
+def _own_key_dock(key=SENTINEL_KEY, model="model-a"):
+    dock = _plan_dock()
+    dock._provider_config = ProviderConfig(provider_by_id("mistral"), model, ApiKey(key))
+    return dock
+
+
+def test_a_message_containing_the_key_is_not_sent():
+    dock = _own_key_dock()
+    stack, requests = _captured_requests()
+    with stack:
+        dock.input.setPlainText(f"my key is {SENTINEL_KEY} please use it")
+        dock._on_send()
+    assert requests == [] and dock._history == []
+    assert SENTINEL_KEY not in " ".join(dock._md_log)
+    assert "not sent" in dock._md_log[-1]
+
+
+def test_a_missing_key_stops_the_turn_instead_of_using_the_shared_service():
+    for key, model in (("", "model-a"), (SENTINEL_KEY, "")):
+        dock = _own_key_dock(key, model)
+        stack, requests = _captured_requests()
+        with stack:
+            dock._send_message("Set the radius")
+        assert requests == [] and dock._history == []
+        assert "nothing was sent" in dock._md_log[-1]
+
+
+def test_the_dock_passes_its_provider_and_a_fresh_cancel_flag_to_the_worker():
+    dock = _own_key_dock()
+    stack, requests = _captured_requests()
+    with stack:
+        dock._send_message("First")
+        first = requests[-1]["cancel"]
+        _finish_reply(dock, "Done")
+        dock._send_message("Second")
+    assert requests[-1]["provider"] is dock._provider_config
+    assert requests[-1]["cancel"] is not first
+    assert isinstance(first, threading.Event)
+
+
+def test_new_chat_cancels_the_request_in_flight():
+    dock = _own_key_dock()
+    stack, requests = _captured_requests()
+    with stack:
+        dock._send_message("Set the radius")
+        cancel = requests[-1]["cancel"]
+        assert not cancel.is_set()
+        dock._reset_conversation()
+    assert cancel.is_set()
+
+
+def test_a_refused_turn_leaves_nothing_for_the_next_request():
+    dock = _own_key_dock()
+    stack, _requests = _captured_requests()
+    with stack:
+        dock._send_message("How do T cells kill targets?")
+        dock._on_token("**Plan**\n\n1. Run Tracking.\n2. Run Filtering.")
+        dock._on_refused({"label": "Anthropic Claude", "category": "bio"})
+        dock._on_finished()
+    assert dock._history == [], "the declined turn would otherwise repeat in every prompt"
+    assert not dock._plan.steps, "a partial reply must not create a plan"
+    assert "(stopped)" in dock._md_log[-2]
+    assert "declined this request (bio)" in dock._md_log[-1]
+    assert dock._request_outcome == "refused"
+
+
+def test_an_own_provider_failure_promises_no_automatic_recovery():
+    dock = _own_key_dock()
+    dock._on_error("Mistral rejected the API key.")
+    assert "rejected the API key" in dock._md_log[-1]
+    assert "recovery" not in dock._md_log[-1], "no recheck can fix a wrong key"
+
+    shared = _plan_dock()
+    shared._on_error("Modal is down.")
+    assert "recovery" in shared._md_log[-1]
+
+
+def test_a_refusal_leaves_a_settled_status():
+    dock = _own_key_dock()
+    dock._set_service_status({
+        "level": "working", "stage": "streaming", "message": "Receiving...",
+    })
+    dock._on_refused({"label": "Mistral", "category": ""})
+    assert dock.status_label.text() == "Online · Mistral"
+
+
+def test_the_settings_dialog_never_cuts_off_its_text():
+    _plan_dock()
+    fake = _FakeKeyring()
+    with _isolated_settings(), patch.dict(sys.modules, {"keyring": fake}):
+        dialog = _assistant_settings.ProviderSettingsDialog()
+        dialog.show()
+        for index in range(dialog.provider.count()):
+            dialog.provider.setCurrentIndex(index)
+            _settle(60)
+            notice = dialog.notice
+            assert notice.height() >= notice.heightForWidth(notice.width()), index
+        dialog.provider.setCurrentIndex(dialog.provider.findData("anthropic"))
+        _settle(60)
+        name_width = dialog.model.fontMetrics().horizontalAdvance("claude-sonnet-5-5")
+        assert dialog.model.lineEdit().width() >= name_width
+        for button in (dialog.btn_remove_key, dialog.btn_load_models):
+            assert button.height() >= button.minimumSizeHint().height(), button.text()
+        dialog.close()
+
+
+def test_a_required_edit_with_no_tool_call_is_called_out():
+    dock = _own_key_dock()
+    stack, _requests = _captured_requests()
+    with stack:
+        dock._send_message("Set the radius to 5")
+        dock._on_token("I have set the radius to 5.")
+        dock._on_missing_tool()
+        dock._on_finished()
+    assert "I have set the radius" in dock._md_log[-2], "order follows the conversation"
+    assert "No change was proposed" in dock._md_log[-1]
+    assert any("No change was proposed" in outcome for outcome in dock._outcomes)
+
+
+def test_notices_follow_the_text_they_are_about():
+    dock = _own_key_dock()
+    dock._streaming_text = "A reply that was cut"
+    dock._on_notice("It stopped early.")
+    assert "A reply that was cut" in dock._md_log[-2]
+    assert "It stopped early." in dock._md_log[-1]
+
+
+def test_a_bad_key_is_not_treated_as_an_outage():
+    dock = _own_key_dock()
+    dock._set_service_status({
+        "level": "error", "code": "byok_bad_key", "component": "byok",
+        "stage": "provider", "message": "Rejected.",
+    })
+    assert not dock._recovery_timer.isActive(), "a recovery check would report Online"
+    assert not dock._recovery_probe_provider
+    assert "Rejected." in dock.status_label.text()
+
+    dock._set_service_status({"level": "online", "stage": "complete", "message": "ok"})
+    assert dock.status_label.text() == "Online · Mistral"
+
+
+def test_status_text_names_the_active_model():
+    dock = _plan_dock()
+    assert "DeepSeek" in dock.btn_check_status.toolTip()
+    assert dock._model_label() == "DeepSeek"
+    assert _own_key_dock()._model_label() == "Mistral"
+
+
+def test_health_checks_never_use_the_shared_account_for_an_own_key():
+    stub = ProviderStub()
+    config = _stub_config(stub, "mistral")
+    healthy = {"modal": "online", "level": "online", "byok_contract": "1", "message": "ok"}
+    try:
+        assert check_own_provider(healthy, config, probe=False) == healthy
+        assert stub.requests == [], "a background check should not contact the provider"
+
+        result = check_own_provider(healthy, config, probe=True)
+        assert result["own_provider"] == "online" and "Mistral" in result["message"]
+        assert stub.requests[-1]["path"].endswith("/models")
+
+        stub.queue({"status": 401})
+        failed = check_own_provider(healthy, config, probe=True)
+        assert failed["code"] == "byok_bad_key" and failed["level"] == "error"
+    finally:
+        stub.close()
+    offline = {"modal": "offline", "level": "offline"}
+    assert check_own_provider(offline, config, probe=True) == offline
+    old = check_own_provider({"modal": "online"}, config, probe=False)
+    assert old["code"] == "byok_service_too_old"
+
+
+class _FakeKeyring:
+    def __init__(self):
+        self.saved = {}
+
+    def get_keyring(self):
+        return self
+
+    def get_password(self, service, name):
+        return self.saved.get((service, name))
+
+    def set_password(self, service, name, value):
+        self.saved[(service, name)] = value
+
+    def delete_password(self, service, name):
+        self.saved.pop((service, name), None)
+
+
+def test_an_environment_without_the_sdks_says_so_instead_of_crashing():
+    config = ProviderConfig(provider_by_id("anthropic"), "m", ApiKey(SENTINEL_KEY))
+    with patch.dict(sys.modules, {"anthropic": None}):
+        try:
+            stream_reply(config, _PROVIDER_REQUEST, lambda _text: None)
+            raise AssertionError("expected a failure")
+        except ProviderError as failure:
+            assert failure.kind == "missing_package"
+            assert "anthropic" in failure.message and "Reinstall" in failure.message
+    openai_config = ProviderConfig(provider_by_id("openai"), "m", ApiKey(SENTINEL_KEY))
+    with patch.dict(sys.modules, {"openai": None}):
+        try:
+            list_models(openai_config)
+            raise AssertionError("expected a failure")
+        except ProviderError as failure:
+            assert failure.kind == "missing_package" and "openai" in failure.message
+
+
+def test_an_environment_without_keyring_keeps_the_key_for_the_session():
+    with patch.dict(sys.modules, {"keyring": None}):
+        assert not _assistant_providers.keychain_available()
+        assert _assistant_providers.save_api_key("mistral", ApiKey(SENTINEL_KEY)) is False
+        assert _assistant_providers.load_api_key("mistral").reveal() == SENTINEL_KEY
+        _assistant_providers.delete_api_key("mistral")
+        assert not _assistant_providers.load_api_key("mistral")
+
+
+def test_keys_are_kept_in_the_keychain():
+    fake = _FakeKeyring()
+    with patch.dict(sys.modules, {"keyring": fake}):
+        assert _assistant_providers.keychain_available()
+        assert _assistant_providers.save_api_key("openai", ApiKey(SENTINEL_KEY)) is True
+        assert _assistant_providers.load_api_key("openai").reveal() == SENTINEL_KEY
+        _assistant_providers.delete_api_key("openai")
+        assert not _assistant_providers.load_api_key("openai")
+
+
+def test_keys_are_session_only_without_a_secure_keychain():
+    class PlaintextKeyring(_FakeKeyring):
+        pass
+
+    fake = PlaintextKeyring()
+    with patch.dict(sys.modules, {"keyring": fake}):
+        assert not _assistant_providers.keychain_available(), "plain text is not secure"
+        assert _assistant_providers.save_api_key("openai", ApiKey(SENTINEL_KEY)) is False
+        assert fake.saved == {}
+        assert _assistant_providers.load_api_key("openai").reveal() == SENTINEL_KEY
+        _assistant_providers.delete_api_key("openai")
+        assert not _assistant_providers.load_api_key("openai")
+
+
+def _isolated_settings():
+    from qtpy.QtCore import QSettings
+
+    folder = tempfile.mkdtemp()
+    return patch.object(
+        _assistant_settings, "_settings",
+        lambda: QSettings(os.path.join(folder, "assistant.ini"), QSettings.IniFormat),
+    )
+
+
+def test_a_chosen_provider_without_a_key_is_still_the_chosen_provider():
+    with _isolated_settings(), patch.object(
+        _assistant_settings, "load_api_key", return_value=ApiKey(""),
+    ):
+        assert _assistant_settings.load_active_provider() is None
+        _assistant_settings.save_active_provider("anthropic", "")
+        config = _assistant_settings.load_active_provider()
+        assert config.spec.id == "anthropic", "falling back would be a silent data change"
+        assert config.model == "claude-opus-5-5" and not config.key
+        _assistant_settings.save_active_provider("")
+        assert _assistant_settings.load_active_provider() is None
+
+
+def test_the_settings_dialog_says_where_data_goes():
+    shared = _assistant_settings.data_notice()
+    assert "DeepSeek" in shared and "never the images" in shared
+    own = _assistant_settings.data_notice(provider_by_id("mistral"))
+    assert "stays on this computer" in own and "Mistral" in own
+    assert "DeepSeek" not in own and "20,000 tokens" in own
+    assert "Mistral" in own and "another Claude model" not in own
+    assert "another Claude model" in _assistant_settings.data_notice(
+        provider_by_id("anthropic")
+    )
+
+
+def test_the_settings_dialog_saves_a_provider_and_its_key():
+    _plan_dock()
+    fake = _FakeKeyring()
+    with _isolated_settings(), patch.dict(sys.modules, {"keyring": fake}):
+        dialog = _assistant_settings.ProviderSettingsDialog()
+        assert not dialog.key.isEnabled(), "the shared service needs no key"
+
+        dialog.provider.setCurrentIndex(dialog.provider.findData("anthropic"))
+        assert dialog.key.isEnabled()
+        assert dialog.model.currentText() == "claude-opus-5-5"
+        assert dialog.key.echoMode() == dialog.key.EchoMode.Password
+
+        dialog._save()
+        assert "Enter your Anthropic Claude API key" in dialog.message.text()
+        assert fake.saved == {}
+
+        dialog.key.setText(SENTINEL_KEY)
+        dialog._save()
+        config = _assistant_settings.load_active_provider()
+        assert config.spec.id == "anthropic" and config.key.reveal() == SENTINEL_KEY
+
+        reopened = _assistant_settings.ProviderSettingsDialog()
+        assert reopened.provider.currentData() == "anthropic"
+        assert reopened.key.text() == "", "a saved key is never shown again"
+        assert reopened.key.placeholderText() == "Saved on this computer"
+
+        reopened.provider.setCurrentIndex(0)
+        reopened._save()
+        assert _assistant_settings.load_active_provider() is None
 
 
 # --------------------------------------------------------------------------

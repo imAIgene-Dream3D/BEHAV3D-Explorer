@@ -16,6 +16,9 @@ Endpoints (FastAPI, public):
         {"type":"token","text":...}        streamed assistant text
         {"type":"tool_calls","calls":[...]}  proposed actions (client confirms)
         {"type":"done"} | {"type":"error","message":...}
+  POST /prepare, POST /finish   -> a researcher's own model: the service builds the
+        request and checks the reply, and the plugin calls the provider between them,
+        so their key never reaches this service.
 
 Tool calls use DeepSeek's native function-calling; `set_ui_value.control_id` is
 constrained to the live control registry so the model can't invent fields.
@@ -47,6 +50,7 @@ _TOOL_NAMES = (
 )
 _TOOL_NAME_PATTERN = "|".join(re.escape(name) for name in _TOOL_NAMES)
 CONTROL_CONTRACT_VERSION = "3.3"
+BYOK_CONTRACT_VERSION = "1"
 _RESEARCHER_LABELS = {
     "pixel_distance_xy": "XY pixel size",
     "pixel_distance_z": "Z pixel size",
@@ -4335,6 +4339,92 @@ def assemble_tool_calls(fragments: list[dict]) -> list[dict]:
     return calls
 
 
+def turn_policy(context: dict, messages: list[dict], tools: list[dict]) -> dict:
+    """Decide what the model may do this turn. Order matters: each step narrows
+    the tools the next one sees."""
+    user_msg = next((m["content"] for m in reversed(messages)
+                     if m.get("role") == "user"), "")
+    force_bulk = should_force_bulk_metadata(context, user_msg, tools)
+    if force_bulk:
+        tools = [tool for tool in tools if tool.get("name") == "bulk_fill_metadata"]
+    force_edit = should_require_edit_action(context, user_msg, tools)
+    plan_call = plan_navigation_call(context)
+    if plan_call:
+        tools = [
+            tool for tool in tools if tool.get("name") not in _NAVIGATION_TOOLS
+        ]
+    return {
+        "user_msg": user_msg,
+        "tools": tools,
+        "force_bulk": force_bulk,
+        "force_edit": force_edit,
+        "plan_call": plan_call,
+    }
+
+
+def retrieval_target(context: dict, policy: dict) -> tuple[dict, str]:
+    """Return the context and text to search guidance with."""
+    retrieval_context = context
+    plan_call = policy["plan_call"]
+    if plan_call:
+        # Ground the reply in the module being opened, not the one left.
+        retrieval_context = {
+            **context,
+            "current_step": plan_call["arguments"].get("step", "analysis"),
+        }
+    return retrieval_context, plan_retrieval_text(context, policy["user_msg"])
+
+
+def build_model_request(
+    context: dict, messages: list[dict], policy: dict, retrieved: list[dict],
+) -> dict:
+    """Build the provider-neutral request for this turn."""
+    system = build_system_prompt(context, retrieved, policy["tools"], policy["user_msg"])
+    control_ids = [
+        item.get("id")
+        for item in (context.get("ui_state", {}) or {}).get("controls", [])
+        if item.get("id") and item.get("enabled") and item.get("visible")
+    ]
+    oai_tools = to_openai_tools(policy["tools"], key_enum=control_ids)
+    tool_choice, thinking_override = model_tool_policy(
+        policy["force_bulk"], bool(oai_tools), policy["force_edit"]
+    )
+    return {
+        "system": system,
+        "messages": [m for m in messages if m.get("role") != "system"],
+        "tools": oai_tools,
+        "tool_choice": tool_choice,
+        "thinking_override": thinking_override,
+    }
+
+
+def finalize_calls(
+    fragments: list[dict], content: str, context: dict, policy: dict,
+) -> tuple[list[dict], bool]:
+    """Turn a model reply into validated calls. Also reports whether a turn that
+    had to change something produced nothing, which plan navigation must not hide."""
+    calls = assemble_tool_calls(fragments)
+    if not calls:                       # fallback: call embedded in text
+        _, calls = parse_tool_calls(content)
+    calls = recover_single_control_action(
+        calls, context, policy["user_msg"], content
+    )
+    if policy["force_bulk"]:
+        for call in calls:
+            if call.get("name") == "bulk_fill_metadata":
+                call["arguments"] = sanitize_bulk_metadata_arguments(
+                    call.get("arguments", {}), policy["user_msg"]
+                )
+    calls = normalize_metadata_line_calls(calls)
+    must_call_tool = policy["force_bulk"] or (
+        policy["force_edit"] and bool(policy["tools"])
+    )
+    missing_required_tool = must_call_tool and not calls
+    if policy["plan_call"]:
+        calls = [policy["plan_call"], *calls]
+    return calls, missing_required_tool
+
+
 def deterministic_turn_response(
     context: dict, messages: list[dict], tools: list[dict],
 ) -> dict | None:
@@ -4484,6 +4574,7 @@ if modal is not None:
         import time
         import uuid
         from fastapi import FastAPI, Request
+        from fastapi.concurrency import run_in_threadpool
         from fastapi.responses import StreamingResponse
         from openai import OpenAI
         from embeddings import Embedder, VectorIndex
@@ -4510,6 +4601,32 @@ if modal is not None:
             timeout=60.0,
             max_retries=1,
         )
+
+        def search_guidance(context, policy, request_id):
+            """Return guidance for a turn, and whether the document search failed."""
+            retrieval_context, retrieval_msg = retrieval_target(context, policy)
+            query = f"{retrieval_context.get('current_step','')} {retrieval_msg}"
+            developer = developer_options_enabled(context)
+            degraded = False
+            try:
+                # Fetch extra results so dropping dev-only cards still leaves six.
+                retrieved = index.search(
+                    embedder.encode([query])[0], k=6 + len(DEVELOPER_ONLY_PARAMETERS)
+                )
+            except Exception as error:
+                print(f"RAG retrieval failed for {request_id} ({type(error).__name__}): {error}")
+                retrieved = []
+                degraded = True
+
+            if not developer:
+                retrieved = [chunk for chunk in retrieved if not is_developer_only(chunk)]
+            retrieved = retrieved[:6]
+
+            intent = (context.get("assistant_session", {}) or {}).get("intent")
+            guidance_cards = select_guidance_cards(
+                retrieval_context, retrieval_msg, intent, developer_options=developer
+            )
+            return guidance_cards + retrieved, degraded
 
         @api.get("/health")
         def health(probe_provider: bool = False):
@@ -4554,6 +4671,7 @@ if modal is not None:
                 "model": deepseek_model,
                 "control_contract_version": CONTROL_CONTRACT_VERSION,
                 "knowledge_version": KNOWLEDGE_VERSION,
+                "byok_contract": BYOK_CONTRACT_VERSION,
             }
 
         @api.post("/chat")
@@ -4597,17 +4715,7 @@ if modal is not None:
                     deterministic_action_stream(), media_type="text/event-stream"
                 )
 
-            user_msg = next((m["content"] for m in reversed(messages)
-                             if m.get("role") == "user"), "")
-            force_bulk = should_force_bulk_metadata(context, user_msg, tools)
-            if force_bulk:
-                tools = [tool for tool in tools if tool.get("name") == "bulk_fill_metadata"]
-            force_edit = should_require_edit_action(context, user_msg, tools)
-            plan_call = plan_navigation_call(context)
-            if plan_call:
-                tools = [
-                    tool for tool in tools if tool.get("name") not in _NAVIGATION_TOOLS
-                ]
+            policy = turn_policy(context, messages, tools)
 
             def event_stream():
                 content = ""
@@ -4621,24 +4729,8 @@ if modal is not None:
                     "message": "Checking BEHAV3D guidance for this question...",
                 })
 
-                retrieval_msg = plan_retrieval_text(context, user_msg)
-                retrieval_context = context
-                if plan_call:
-                    # Ground the reply in the module being opened, not the one left.
-                    retrieval_context = {
-                        **context,
-                        "current_step": plan_call["arguments"].get("step", "analysis"),
-                    }
-                query = f"{retrieval_context.get('current_step','')} {retrieval_msg}"
-                developer = developer_options_enabled(context)
-                try:
-                    # Fetch extra results so dropping dev-only cards still leaves six.
-                    retrieved = index.search(
-                        embedder.encode([query])[0], k=6 + len(DEVELOPER_ONLY_PARAMETERS)
-                    )
-                except Exception as error:
-                    print(f"RAG retrieval failed for {request_id} ({type(error).__name__}): {error}")
-                    retrieved = []
+                retrieved, retrieval_degraded = search_guidance(context, policy, request_id)
+                if retrieval_degraded:
                     yield sse({
                         "type": "status",
                         "level": "degraded",
@@ -4650,28 +4742,12 @@ if modal is not None:
                             "built-in guidance."
                         ),
                     })
-
-                if not developer:
-                    retrieved = [chunk for chunk in retrieved if not is_developer_only(chunk)]
-                retrieved = retrieved[:6]
-
-                intent = (context.get("assistant_session", {}) or {}).get("intent")
-                guidance_cards = select_guidance_cards(
-                    retrieval_context, retrieval_msg, intent, developer_options=developer
-                )
-                retrieved = guidance_cards + retrieved
-                system = build_system_prompt(context, retrieved, tools, user_msg)
-                convo = [{"role": "system", "content": system}]
-                convo += [m for m in messages if m.get("role") != "system"]
-                control_ids = [
-                    item.get("id")
-                    for item in (context.get("ui_state", {}) or {}).get("controls", [])
-                    if item.get("id") and item.get("enabled") and item.get("visible")
-                ]
-                oai_tools = to_openai_tools(tools, key_enum=control_ids)
-                tool_choice, thinking_override = model_tool_policy(
-                    force_bulk, bool(oai_tools), force_edit
-                )
+                model_request = build_model_request(context, messages, policy, retrieved)
+                convo = [{"role": "system", "content": model_request["system"]}]
+                convo += model_request["messages"]
+                oai_tools = model_request["tools"]
+                tool_choice = model_request["tool_choice"]
+                thinking_override = model_request["thinking_override"]
 
                 yield sse({
                     "type": "status",
@@ -4751,25 +4827,60 @@ if modal is not None:
                 )
                 if visible:
                     yield sse({"type": "token", "text": visible})
-                calls = assemble_tool_calls(tool_frags)
-                if not calls:                       # fallback: call embedded in text
-                    _, calls = parse_tool_calls(content)
-                calls = recover_single_control_action(
-                    calls, context, user_msg, content
+                calls, _missing_required_tool = finalize_calls(
+                    tool_frags, content, context, policy
                 )
-                if force_bulk:
-                    for call in calls:
-                        if call.get("name") == "bulk_fill_metadata":
-                            call["arguments"] = sanitize_bulk_metadata_arguments(
-                                call.get("arguments", {}), user_msg
-                            )
-                calls = normalize_metadata_line_calls(calls)
-                if plan_call:
-                    calls = [plan_call, *calls]
                 if calls:
                     yield sse({"type": "tool_calls", "calls": calls})
                 yield sse({"type": "done"})
 
             return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+        @api.post("/prepare")
+        async def prepare(request: Request):
+            body = await request.json()
+            messages = body.get("messages", [])
+            context = body.get("context", {})
+            tools = tools_for_context(body.get("tools", []), context)
+            request_id = uuid.uuid4().hex[:12]
+
+            deterministic = deterministic_turn_response(context, messages, tools)
+            if deterministic:
+                return {
+                    "kind": "final",
+                    "stage": "local_guidance",
+                    "text": deterministic["text"],
+                    "calls": deterministic.get("calls", []),
+                    "request_id": request_id,
+                }
+            policy = turn_policy(context, messages, tools)
+            # Embedding is CPU work and would stall every other request in this route.
+            retrieved, degraded = await run_in_threadpool(
+                search_guidance, context, policy, request_id
+            )
+            model_request = build_model_request(context, messages, policy, retrieved)
+            return {
+                "kind": "model_request",
+                "system": model_request["system"],
+                "messages": model_request["messages"],
+                "tools": model_request["tools"],
+                "must_call_tool": model_request["tool_choice"] == "required",
+                "plan_call": policy["plan_call"],
+                "retrieval_degraded": degraded,
+                "request_id": request_id,
+            }
+
+        @api.post("/finish")
+        async def finish(request: Request):
+            body = await request.json()
+            messages = body.get("messages", [])
+            context = body.get("context", {})
+            tools = tools_for_context(body.get("tools", []), context)
+            policy = turn_policy(context, messages, tools)
+            calls, missing_required_tool = finalize_calls(
+                body.get("tool_fragments", []), str(body.get("content") or ""),
+                context, policy,
+            )
+            return {"calls": calls, "missing_required_tool": missing_required_tool}
 
         return api

@@ -7,7 +7,7 @@ reference to the main ``BEHAV3DWidget`` so it can read live workflow context
 (:mod:`_assistant_actions`) after the user confirms.
 
 Layout (top → bottom):
-  • context bar          — 📍 step · N samples · output dir · M queued (live)
+  • context bar          — 📍 step · N samples · output dir · M queued (live) + ⚙ model
   • chat transcript      — one markdown bubble per message, streamed assistant tokens
   • proposed-action tray — confirm cards: "old -> new  [Fill it in] [Dismiss]"
   • plan panel           — pinned checklist of recommended steps + Continue
@@ -18,6 +18,7 @@ All network I/O happens on a QThread worker (``ChatWorker``); the GUI never bloc
 """
 from __future__ import annotations
 
+import threading
 import time
 from typing import Optional
 
@@ -39,6 +40,9 @@ from behav3d.napari._assistant_client import (
     ChatWorker, HealthWorker, load_client_config,
 )
 from behav3d.napari._assistant_plan import PlanState, extract_plan, record_outcome
+from behav3d.napari._assistant_settings import (
+    ProviderSettingsDialog, load_active_provider,
+)
 from behav3d.napari._assistant_widgets import (
     CHAT_STYLESHEET, _ChatTranscript, _PlanPanel,
 )
@@ -390,6 +394,9 @@ class AssistantDock(QWidget):
         self._declined: set[tuple] = set()  # changes the researcher kept the old value for
         self._turn_reply = ""        # assistant text of the request in flight
         self._turn_canned = False    # that text came from a deterministic handler
+        self._provider_config = load_active_provider()   # None means the shared service
+        self._service_supports_own_keys = True
+        self._cancel_request = threading.Event()
         self._conversation_generation = 0
         self._request_active = False
         self._request_outcome = "idle"
@@ -458,6 +465,11 @@ class AssistantDock(QWidget):
         self.btn_new_chat.setStyleSheet("padding:7px 9px; font-size:11px;")
         self.btn_new_chat.clicked.connect(self._reset_conversation)
         context_row.addWidget(self.btn_new_chat)
+        self.btn_settings = QPushButton("⚙")
+        self.btn_settings.setToolTip("Choose the assistant's model")
+        self.btn_settings.setStyleSheet("padding:7px 9px; font-size:11px;")
+        self.btn_settings.clicked.connect(self._open_provider_settings)
+        context_row.addWidget(self.btn_settings)
         root.addLayout(context_row)
 
         status_row = QHBoxLayout()
@@ -468,7 +480,7 @@ class AssistantDock(QWidget):
         status_row.addWidget(self.status_label, stretch=1)
         self.btn_check_status = QPushButton("Check status")
         self.btn_check_status.setToolTip(
-            "Test Modal, the BEHAV3D guidance index, and DeepSeek"
+            f"Test Modal, the BEHAV3D guidance index, and {self._model_label()}"
         )
         self.btn_check_status.setStyleSheet("padding:4px 7px; font-size:10px;")
         self.btn_check_status.clicked.connect(
@@ -623,17 +635,25 @@ class AssistantDock(QWidget):
         details = []
         labels = {
             "modal": "Modal",
-            "deepseek": "DeepSeek",
             "retrieval": "BEHAV3D guidance",
             "model": "Model",
             "chunks": "Guidance chunks",
             "latency_ms": "Health latency",
-            "provider_latency_ms": "DeepSeek latency",
-            "provider_error": "DeepSeek error",
             "request_id": "Request ID",
             "code": "Status code",
             "endpoint": "Endpoint",
         }
+        if self._provider_config is None:
+            labels.update({
+                "deepseek": "DeepSeek",
+                "provider_latency_ms": "DeepSeek latency",
+                "provider_error": "DeepSeek error",
+            })
+        else:
+            labels.pop("model")
+            details.append(
+                f"Model: {self._provider_config.spec.label} {self._provider_config.model}"
+            )
         for key, label in labels.items():
             value = self._status_info.get(key)
             if value not in (None, ""):
@@ -646,7 +666,8 @@ class AssistantDock(QWidget):
             self._recovery_probe_provider = False
         elif level in {"offline", "error"}:
             code = self._status_info.get("code")
-            if code != "endpoint_missing":
+            # A bad key is not an outage: a recovery check would report Online.
+            if code != "endpoint_missing" and not str(code).startswith("byok"):
                 self._recovery_probe_provider = (
                     self._recovery_probe_provider
                     or self._status_info.get("component") == "deepseek"
@@ -660,6 +681,9 @@ class AssistantDock(QWidget):
         level = info.get("level", "working")
         message = info.get("message") or "Assistant status unavailable."
         if level == "online":
+            if self._provider_config is not None:
+                self.status_label.setText(f"Online · {self._model_label()}")
+                return
             fully_checked = (
                 info.get("deepseek") == "online"
                 or info.get("stage") == "complete"
@@ -698,13 +722,15 @@ class AssistantDock(QWidget):
                 "stage": "health",
                 "component": "service",
                 "message": (
-                    "Checking Modal, BEHAV3D guidance, and DeepSeek..."
+                    f"Checking Modal, BEHAV3D guidance, and {self._model_label()}..."
                     if probe_provider else
                     "Checking Modal and BEHAV3D guidance..."
                 ),
             })
 
-        worker = HealthWorker(probe_provider=probe_provider)
+        worker = HealthWorker(
+            probe_provider=probe_provider, provider=self._provider_config,
+        )
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -717,9 +743,26 @@ class AssistantDock(QWidget):
         thread.start()
 
     def _on_health_result(self, info: dict):
+        if info.get("modal") == "online":
+            self._service_supports_own_keys = bool(info.get("byok_contract"))
         if self._request_active and self._health_check_background:
             return
         self._set_service_status(info)
+
+    def _model_label(self) -> str:
+        config = self._provider_config
+        return config.spec.label if config is not None else "DeepSeek"
+
+    def _open_provider_settings(self):
+        dialog = ProviderSettingsDialog(
+            self, service_supported=self._service_supports_own_keys,
+        )
+        if dialog.exec():
+            self._provider_config = load_active_provider()
+            self.btn_check_status.setToolTip(
+                f"Test Modal, the BEHAV3D guidance index, and {self._model_label()}"
+            )
+            self._refresh_status_label()
 
     def _on_health_finished(self, thread, worker):
         self._health_check_active = False
@@ -742,6 +785,7 @@ class AssistantDock(QWidget):
         # Invalidate callbacks from an in-flight worker. The thread may finish in
         # the background, but it can no longer repopulate this fresh conversation.
         self._conversation_generation += 1
+        self._cancel_request.set()   # an own-key stream would otherwise keep billing
         self._set_busy(False)
         self._request_outcome = "idle"
         self._history = []
@@ -829,6 +873,14 @@ class AssistantDock(QWidget):
         if not text:
             return
         self.input.clear()
+        config = self._provider_config
+        if config is not None and config.key and config.key.reveal() in text:
+            # Chat text goes to the service, the provider and assistant_log.md.
+            self._append_md(
+                "That message contains your API key, so it was not sent. If it was "
+                "pasted by accident, nothing left this computer."
+            )
+            return
         # Deterministic metadata wizard owns the input while it's running (the
         # questions and answers never touch the LLM, so it cannot stall or loop).
         if self._md_current is not None:
@@ -853,6 +905,14 @@ class AssistantDock(QWidget):
         intent: str = "free_form",
     ):
         if self._request_active:
+            return
+        config = self._provider_config
+        if config is not None and not (config.key and config.model):
+            # Never fall back to the shared service: they chose not to use it.
+            self._append_md(
+                f"Your {config.spec.label} key or model is missing, so nothing was "
+                "sent. Open ⚙ to add it, or choose the BEHAV3D service there."
+            )
             return
         self._current_intent = intent
         self._turn_reply = ""
@@ -888,7 +948,14 @@ class AssistantDock(QWidget):
         self._refresh_plan_panel()
 
         messages = [{"role": "system", "content": _SYSTEM_PRIMER}] + self._history
-        worker = ChatWorker(messages=messages, context=ctx, tools=TOOL_SCHEMA)
+        self._cancel_request = threading.Event()
+        worker = ChatWorker(
+            messages=messages,
+            context=ctx,
+            tools=TOOL_SCHEMA,
+            provider=self._provider_config,
+            cancel=self._cancel_request,
+        )
         thread = QThread()
         generation = self._conversation_generation
         worker.moveToThread(thread)
@@ -915,6 +982,19 @@ class AssistantDock(QWidget):
             lambda message, g=generation: self._dispatch_request_signal(
                 g, self._on_error, message
             )
+        )
+        worker.notice.connect(
+            lambda message, g=generation: self._dispatch_request_signal(
+                g, self._on_notice, message
+            )
+        )
+        worker.refused.connect(
+            lambda info, g=generation: self._dispatch_request_signal(
+                g, self._on_refused, info
+            )
+        )
+        worker.missing_tool.connect(
+            lambda g=generation: self._dispatch_request_signal(g, self._on_missing_tool)
         )
         worker.finished.connect(thread.quit)
         worker.finished.connect(
@@ -991,13 +1071,52 @@ class AssistantDock(QWidget):
         self._finalize_streaming()
         request_id = (self._status_info or {}).get("request_id")
         support_ref = f"\n\nRequest ID: `{request_id}`" if request_id else ""
+        # With an own provider nothing is rechecked: a wrong key needs the researcher.
+        recovery = "" if self._provider_config is not None else (
+            "\n\nThe assistant will keep checking for recovery automatically."
+        )
         self._append_md(
-            f"**Request failed**\n\n{message}{support_ref}\n\n"
-            "The assistant will keep checking for recovery automatically."
+            f"**Request failed**\n\n{message}{support_ref}{recovery}"
         )
         # Defensive: ensure the dock never stays stuck "thinking" if signal
         # ordering ever changes (worker.finished still clears busy too).
         self._set_busy(False)
+
+    def _on_notice(self, message: str):
+        self._finalize_streaming()
+        self._append_md(message)
+
+    def _on_refused(self, info: dict):
+        """Show a declined turn without letting it shape the rest of the chat."""
+        self._request_outcome = "refused"
+        partial = str(self._streaming_text or "").strip()
+        self._streaming_text = None
+        if partial:
+            self._md_log.append(f"**BEHAV3D Assistant**\n\n{partial}\n\n*(stopped)*")
+        if self._history and self._history[-1]["role"] == "user":
+            self._history.pop()
+        label = (info or {}).get("label") or "The provider"
+        category = (info or {}).get("category")
+        reason = f" ({category})" if category else ""
+        self._append_md(
+            f"{label} declined this request{reason}. Biology questions can trigger "
+            "this even when they are harmless. Try rewording it, or choose another "
+            "model in ⚙."
+        )
+        self._set_service_status({
+            "level": "online", "stage": "complete", "component": "service",
+            "message": "Response completed.",
+        })
+
+    def _on_missing_tool(self):
+        self._finalize_streaming()
+        self._outcomes = record_outcome(
+            self._outcomes, "No change was proposed for the last request"
+        )
+        self._append_md(
+            "**No change was proposed.** Nothing was changed, whatever the reply above "
+            "says. Try asking again, or choose another model in ⚙."
+        )
 
     def _on_tool_calls(self, calls: list):
         try:
@@ -1226,7 +1345,7 @@ class AssistantDock(QWidget):
         self._finalize_streaming()
         self._render()
         self._set_busy(False)
-        if self._request_outcome not in {"offline", "error"}:
+        if self._request_outcome not in {"offline", "error", "refused"}:
             self._request_outcome = "complete"
             self._set_service_status({
                 "level": "online",
@@ -1258,6 +1377,7 @@ class AssistantDock(QWidget):
         """
         if not hasattr(self, "_zombie_threads"):
             self._zombie_threads = []
+        self._cancel_request.set()
         still_running = 0
         for thread, worker in list(self._threads):
             try:

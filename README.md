@@ -409,6 +409,10 @@ DEEPSEEK_MODEL=deepseek-v4-pro python -m modal deploy chatbot/app.py
 
 Available options: `deepseek-v4-flash` (fast, cheap), `deepseek-v4-pro` (stronger, pricier).
 
+### Researchers' own providers
+
+Researchers can choose OpenAI, Anthropic, Gemini, Mistral or DeepSeek with their own key in the assistant's **⚙** settings. The plugin calls the provider directly, so their key never reaches this service and their usage is not billed to your DeepSeek account. See `chatbot/README.md`.
+
 ### Monitoring costs
 
 - DeepSeek usage: [platform.deepseek.com](https://platform.deepseek.com) → Usage
