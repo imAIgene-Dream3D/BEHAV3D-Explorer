@@ -139,6 +139,20 @@ def _pixel_fill_case() -> dict:
     }
 
 
+def _pixel_correction_case() -> dict:
+    case = _pixel_fill_case()
+    return {
+        **case,
+        "name": "pixel_correction_beats_the_earlier_value",
+        "messages": [
+            {"role": "user", "content": "XY pixel size is 0.5 um and Z spacing is 2 um."},
+            {"role": "assistant", "content": "I can use those values."},
+            {"role": "user", "content": "Correct the XY pixel size from 0.5 um to 0.6 um"},
+        ],
+        "check": _check_pixel_correction,
+    }
+
+
 def _metadata_structure_correction_case() -> dict:
     controls = [_control(
         "metadata.number_of_immune_types",
@@ -2491,6 +2505,17 @@ def _check_metadata_setup(result: dict) -> list[str]:
     return errors
 
 
+def _check_pixel_correction(result: dict) -> list[str]:
+    values = {
+        call.get("control_id"): call.get("value")
+        for call in _tool_calls(result, "set_ui_value")
+    }
+    expected = {
+        f"metadata.samples.{index}.pixel_distance_xy": 0.6 for index in range(3)
+    }
+    return [] if values == expected else [f"expected XY 0.6 only, got {values!r}"]
+
+
 def _check_pixel_fill(result: dict) -> list[str]:
     calls = _tool_calls(result, "set_ui_value")
     changed = {call.get("control_id"): call.get("value") for call in calls}
@@ -3708,6 +3733,7 @@ SCENARIOS = [
     _open_population_dynamics_case,
     _metadata_setup_case,
     _pixel_fill_case,
+    _pixel_correction_case,
     _metadata_structure_correction_case,
     _segmentation_case,
     _apoc_threshold_defaults_case,

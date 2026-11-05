@@ -423,6 +423,78 @@ def test_metadata_pixel_size_action_reuses_user_supplied_values():
     assert "time unit is unchanged" in result["text"]
 
 
+def _pixel_size_reply(*user_messages):
+    import app
+
+    controls = [
+        {"id": "metadata.samples.0.pixel_distance_xy", "value": 0.5},
+        {"id": "metadata.samples.0.pixel_distance_z", "value": 2.0},
+    ]
+    messages = [{
+        "role": "user",
+        "content": "XY pixel size is 0.5 um and Z spacing is 2 um. Fill the pixel size.",
+    }]
+    for text in user_messages:
+        messages += [
+            {"role": "assistant", "content": "I am proposing those values."},
+            {"role": "user", "content": text},
+        ]
+    return app.metadata_pixel_size_action(
+        {"current_step": "data_preparation", "ui_state": {"controls": controls}}, messages,
+    )
+
+
+def _pixel_size_changes(result):
+    return {
+        call["arguments"]["control_id"].rsplit(".", 1)[-1]: call["arguments"]["value"]
+        for call in result["calls"]
+    }
+
+
+def test_metadata_pixel_size_correction_beats_the_earlier_value():
+    for text, expected in (
+        ("XY pixel size is 0.6 um. Fill the pixel size.", {"pixel_distance_xy": 0.6}),
+        ("Set the XY pixel size to 0.6 um", {"pixel_distance_xy": 0.6}),
+        ("Correct the XY pixel size from 0.5 um to 0.6 um", {"pixel_distance_xy": 0.6}),
+        ("Correct the XY pixel size from 0.5 to 0.6 um", {"pixel_distance_xy": 0.6}),
+        (
+            "Update the pixel size: XY pixel size should be 0.6 um",
+            {"pixel_distance_xy": 0.6},
+        ),
+        ("Set the Z spacing to 3 um", {"pixel_distance_z": 3.0}),
+    ):
+        assert _pixel_size_changes(_pixel_size_reply(text)) == expected, text
+
+    # The newest correction wins, and it is what later requests reuse.
+    assert _pixel_size_changes(_pixel_size_reply(
+        "Set the XY pixel size to 0.6 um", "Set the XY pixel size to 0.7 um",
+    )) == {"pixel_distance_xy": 0.7}
+    assert _pixel_size_changes(_pixel_size_reply(
+        "Set the XY pixel size to 0.7 um", "Can you fill in the correct pixel size?",
+    )) == {"pixel_distance_xy": 0.7}
+
+
+def test_metadata_pixel_size_leaves_unreadable_corrections_to_the_model():
+    # An older value must never answer a new one, so hand these to the model.
+    for text in (
+        "Set the XY pixel size to 500 nm",
+        "Set the XY pixel size to 0.6",
+        "Set the pixel size to 0.6",
+        "Set the XY pixel size to 0.6 um and the Z spacing to 500 nm",
+    ):
+        assert _pixel_size_reply(text) is None, text
+
+
+def test_metadata_pixel_size_reuses_values_when_none_is_stated():
+    for text in (
+        "Can you fill in the correct pixel size?",
+        "Fill the pixel size for all 3 samples",
+    ):
+        result = _pixel_size_reply(text)
+        assert result is not None and result["calls"] == [], text
+        assert "already use" in result["text"], text
+
+
 def test_metadata_pixel_size_action_does_not_intercept_fresh_setup():
     import app
 

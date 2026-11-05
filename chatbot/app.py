@@ -1053,6 +1053,20 @@ def metadata_time_conversion_action(
     }
 
 
+_RESOLUTION_VALUE = (
+    r"\s*(?:from\s+\d+(?:\.\d+)?\s*(?:µm|um)?\s+)?"
+    r"(?:(?:is|was|=|:|of|to|at|now|should be|must be)\s*)*"
+    r"(\d+(?:\.\d+)?)\s*(?:µm|um)\b"
+)
+_XY_RESOLUTION = r"\bxy(?:\s+pixel)?\s+size" + _RESOLUTION_VALUE
+_Z_RESOLUTION = (
+    r"\bz(?:[- ]?spacing|[- ]?step|(?:\s+pixel)?\s+size)" + _RESOLUTION_VALUE
+)
+_RESOLUTION_STATEMENT = (
+    r"\b(?:size|spacing|step|resolution)\b[^.\d]{0,20}(?:\bto\b|\bis\b|=|:|\bbe\b)\s*\d"
+)
+
+
 def metadata_pixel_size_action(
     context: dict, messages: list[dict],
 ) -> dict | None:
@@ -1079,26 +1093,26 @@ def metadata_pixel_size_action(
     ):
         return None
 
+    # A new value these patterns cannot read, such as 500 nm, is for the model:
+    # answering from history would reject the correction with an older value.
+    readable = sum(
+        len(re.findall(pattern, latest)) for pattern in (_XY_RESOLUTION, _Z_RESOLUTION)
+    )
+    if len(re.findall(_RESOLUTION_STATEMENT, latest)) > readable:
+        return None
+
     user_history = " ".join(
         str(message.get("content") or "").lower()
         for message in messages
         if message.get("role") == "user"
     )
-    xy_match = re.search(
-        r"\bxy(?:\s+pixel)?\s+size\s+(?:is|=|of)?\s*"
-        r"(\d+(?:\.\d+)?)\s*(?:µm|um)\b",
-        user_history,
-    )
-    z_match = re.search(
-        r"\bz(?:[- ]?spacing|[- ]?step|(?:\s+pixel)?\s+size)\s+"
-        r"(?:is|=|of)?\s*(\d+(?:\.\d+)?)\s*(?:µm|um)\b",
-        user_history,
-    )
     supplied = {}
-    if xy_match:
-        supplied["pixel_distance_xy"] = float(xy_match.group(1))
-    if z_match:
-        supplied["pixel_distance_z"] = float(z_match.group(1))
+    for field, pattern in (
+        ("pixel_distance_xy", _XY_RESOLUTION), ("pixel_distance_z", _Z_RESOLUTION),
+    ):
+        values = re.findall(pattern, user_history)
+        if values:
+            supplied[field] = float(values[-1])  # corrections come after the original
     if not supplied:
         return None
 
