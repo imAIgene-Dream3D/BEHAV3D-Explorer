@@ -339,7 +339,7 @@ When the window or threshold differs from what your extracted features were made
 - **Killing efficiency per cell (cell means):** each cell gives one value, the mean of its timepoints in that state. `n` is the number of cells.
 - **Killing efficiency per timepoint:** each timepoint gives one value, so cells that stay longer in a state weigh more. `n` is the number of timepoints.
 
-In both, the bar is the mean and the error bar is the SEM of the panel's values.
+In both, the bar is the mean and the error bar, drawn upward from the top of the bar, is the SEM of the panel's values.
 
 The two panels have **separate y-axes**, because single timepoints reach much higher values than cell means. Compare states within a panel, not heights across panels.
 

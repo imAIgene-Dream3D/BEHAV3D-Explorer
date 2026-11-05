@@ -529,11 +529,42 @@ def test_bar_plots_show_means_with_sem_and_handle_sparse_states():
         error_bars = cell_ax.containers[-1].errorbar
         segments = error_bars.lines[2][0].get_segments()
         low, high = segments[0][:, 1]
-        assert (high - low) / 2 == pytest.approx(pd.Series([1.0, 2.0, 6.0]).sem())
+        assert low == pytest.approx(3.0)  # the error bar only goes up from the top of the bar
+        assert high == pytest.approx(3.0 + pd.Series([1.0, 2.0, 6.0]).sem())
         assert segments[1].size == 0  # one value has no SEM, so no error bar is drawn
         assert [t.get_text().splitlines()[-1] for t in cell_ax.get_xticklabels()] == [
             "n = 3", "n = 1", "n = 0",
         ]
+    finally:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize("values", [
+    [0.1, 0.2, 0.3],
+    [3.0, 3.1, 3.2],
+    [0.0, 10.0],  # SEM 5, so the error bar ends exactly on a round number
+    [0.5],  # one value has no error bar
+    [0.0, 0.0],
+    [-2.0, -1.0],
+    [1e-4, 3e-4],
+    [100.0, 900.0],
+])
+def test_y_axis_ends_on_a_tick_above_the_error_bars(values):
+    table = pd.DataFrame({
+        "state": ["A"] * len(values),
+        "mean_killing_efficiency": values,
+        "killing_efficiency": values,
+    })
+    series = pd.Series(values)
+    top = max(series.mean() + (series.sem() if len(values) > 1 else 0), 0)
+    fig = _fig_two_bar_plots(table, table, ["A", "Empty"], {"A": "#1f77b4", "Empty": "#2ca02c"}, "subtitle")
+    try:
+        fig.canvas.draw()
+        for ax in fig.axes:
+            ticks = ax.get_yticks()
+            assert ticks[-1] > top
+            assert ax.get_ylim()[1] == pytest.approx(ticks[-1])
+            assert (ticks[:-1] <= top).all()  # no extra tick beyond the first one above
     finally:
         plt.close(fig)
 

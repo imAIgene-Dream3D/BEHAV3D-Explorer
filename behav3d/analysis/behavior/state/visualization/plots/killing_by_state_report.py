@@ -79,16 +79,35 @@ def _add_subtitle(fig, subtitle):
     fig.tight_layout(rect=(0, 0, 1, 1 - line_height * (subtitle.count("\n") + 1) - 0.005))
 
 
+def _end_y_axis_on_tick_above(ax, top):
+    """End the y-axis on the first tick above `top`. The ticks are fixed, as the locator could
+    otherwise pick a wider spacing for the new limits and lose that tick."""
+    bottom = ax.get_ylim()[0]
+    ticks = ax.yaxis.get_major_locator().tick_values(bottom, top)
+    if ticks[-1] <= top:
+        ticks = np.append(ticks, ticks[-1] + (ticks[-1] - ticks[-2]))
+    ticks = ticks[ticks >= bottom]
+    above = ticks[ticks > top][0]
+    ax.set_yticks(ticks[ticks <= above])
+    ax.set_ylim(bottom, above)
+
+
 def _draw_bars(ax, values_per_state, colors, state_order):
-    """Mean with SEM per state. A state with no values has no bar, and one value has no error bar."""
+    """Mean with an upward SEM per state. A state with no values has no bar, and one value has no
+    error bar."""
     positions = np.arange(len(state_order))
     values = [pd.Series(v, dtype=float) for v in values_per_state]
+    means = np.array([v.mean() for v in values], dtype=float)
+    sems = np.array([v.sem() for v in values], dtype=float)
     ax.bar(
-        positions, [v.mean() for v in values], yerr=[v.sem() for v in values], width=0.62,
+        positions, means, yerr=[(sems * 0).tolist(), sems.tolist()], width=0.62,
         color=[colors[s] for s in state_order], edgecolor=INK, linewidth=0.9,
         error_kw={"ecolor": INK, "elinewidth": 0.9, "capsize": 3, "capthick": 0.9},
     )
     ax.set_xticks(positions)
+    tops = means + np.nan_to_num(sems)
+    if np.isfinite(tops).any():
+        _end_y_axis_on_tick_above(ax, max(np.nanmax(tops), 0))
 
 
 def _fig_two_bar_plots(cell_state, used_timepoints, state_order, colors, subtitle):
