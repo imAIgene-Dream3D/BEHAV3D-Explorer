@@ -239,12 +239,15 @@ Which full behavioural states cells switch between, and how often. Settings are 
 
 | Control | Default | What it does |
 |---|---|---|
-| **Min probability cutoff:** | `0.0 %` | In the circular diagram, transitions below this probability are dropped, so rare transitions do not clutter the plot. |
+| **Min bout length:** | `1 timepoints` | Bouts shorter than this many timepoints are merged into the neighbouring state before anything is counted, so brief flickers do not show up as transitions. Applies to the whole report: matrices, circular diagrams, sequence rankings and Sankey diagrams. `1` keeps every bout. |
+| **Min probability cutoff:** | `0.0 %` | In the circular diagram, transitions below this probability are dropped, so rare transitions do not clutter the plot. The remaining arrows keep the same thickness. |
 | **Emphasis (gamma):** | `1.0` (0.5–5) | How fast line width and opacity fall off for weaker transitions; `1.0` is linear, 2–3 makes the strongest transitions stand out. |
 | **Node labels:** | `Side legend` | State names written **On dots**, or in a numbered **Side legend** (better for long names or many states). |
 | **Transition matrix heatmap** | on | Adds the transition matrix page. |
 | **Circular transition diagram** | on | Adds the circular diagram pages. |
 | **Include self-transitions** | off | Off: arrows show how a state's *switches* are split between the other states (no self-loops). On: staying in the same state is drawn as a loop beside each node and every arrow shows its share of all timepoints, which makes arrows thin for states that rarely switch. |
+| **Auto-arrange nodes (reduce overlap)** | on | Places the nodes so that arrows cross and run on top of each other as little as possible at your cutoff, in the same arrangement on all circular pages. The arrangement can change when you change the cutoff, and the legend numbers follow it. Turn off to set the order yourself in the node order list. |
+| **Node order** | your saved state order | Used when **Auto-arrange nodes** is off. Drag the states into the order you want: the top state is node 1 at the bottom of the circle, and the rest follow counter-clockwise. **Reset to saved order** undoes your changes. **Use last auto-arranged order** starts from the layout of your last auto-arranged report, so you can move just a node or two. Applies to all circular pages. |
 | **Show per-cluster breakdown grid** | on | Adds two pages with one small diagram per state (outgoing and incoming), useful when the overlaid diagram is too busy. |
 | **N-gram rankings** | on | Adds rankings of the most common state sequences. |
 | **Sankey diagrams (all state pairs)** | off | Adds Sankey diagrams of the paths cells take from each state to each other state. The slowest part of the report. |

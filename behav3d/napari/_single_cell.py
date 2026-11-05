@@ -1037,6 +1037,90 @@ def _apply_report_widget_value(widget, value) -> bool:
     return True
 
 
+class NodeOrderList(QWidget):
+    """Drag-to-order list of a circular diagram's nodes, active while auto-arranging is off.
+
+    Keeps the user's order while the data refreshes: states that disappear are dropped and new
+    ones go last. `Reset` returns to the saved state order, `Use last auto-arranged order` copies
+    the order of the last auto-arranged report, so a layout can be fine-tuned instead of redone.
+    """
+
+    def __init__(self, item_name, parent=None):
+        super().__init__(parent)
+        self._saved_order = []
+        self._last_auto_order = []
+        self._auto_arranging = False
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+        self.label = QLabel(
+            f"Node order - drag {item_name} to reorder (untick Auto-arrange nodes to use it). "
+            "The top item is node 1 at the bottom of the circle, then counter-clockwise:"
+        )
+        self.label.setWordWrap(True)
+        self.label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        layout.addWidget(self.label)
+        self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.list_widget.setDragDropMode(QAbstractItemView.InternalMove)
+        self.list_widget.setDefaultDropAction(Qt.MoveAction)
+        layout.addWidget(self.list_widget)
+        buttons = QHBoxLayout()
+        self.btn_reset = QPushButton("Reset to saved order")
+        self.btn_reset.clicked.connect(self.reset_to_saved_order)
+        self.btn_use_auto = QPushButton("Use last auto-arranged order")
+        self.btn_use_auto.clicked.connect(lambda: self.set_order(self._last_auto_order))
+        buttons.addWidget(self.btn_reset)
+        buttons.addWidget(self.btn_use_auto)
+        layout.addLayout(buttons)
+        self._update_height()
+        self._update_enabled()
+
+    def _update_height(self):
+        _fit_list_widget_height(self.list_widget, max_rows=10)
+
+    def _update_enabled(self):
+        manual = not self._auto_arranging
+        self.label.setEnabled(manual)
+        self.list_widget.setEnabled(manual)
+        self.btn_reset.setEnabled(manual)
+        self.btn_use_auto.setEnabled(manual and bool(self._last_auto_order))
+
+    def order(self):
+        return _list_widget_items(self.list_widget)
+
+    def set_labels(self, saved_order):
+        """Set which nodes exist, in the saved state order."""
+        self._saved_order = list(saved_order)
+        current = self.order()
+        if set(current) != set(saved_order):
+            self.set_order(current)
+
+    def set_order(self, order):
+        """Reorder the list; labels it doesn't have are ignored, and any it has but `order` leaves
+        out go last, in saved order."""
+        order = [str(label) for label in order]
+        known = set(self._saved_order)
+        ordered = [label for label in dict.fromkeys(order) if label in known]
+        ordered += [label for label in self._saved_order if label not in set(ordered)]
+        self.list_widget.clear()
+        self.list_widget.addItems(ordered)
+        self._update_height()
+
+    def reset_to_saved_order(self):
+        self.set_order(self._saved_order)
+
+    def set_last_auto_order(self, order):
+        self._last_auto_order = [str(label) for label in order or []]
+        self._update_enabled()
+
+    def set_auto_arranging(self, auto_arranging):
+        self._auto_arranging = bool(auto_arranging)
+        self._update_enabled()
+
+
 class _ReportSettingsMixin:
     """Saves the settings a report ran with to behav3d_parameters.yml, under
     ``<_REPORT_SECTION>.<cell type>.<report>``, and restores them on reload.
@@ -1048,6 +1132,31 @@ class _ReportSettingsMixin:
 
     _REPORT_SECTION = ""
     _REPORT_SETTINGS: dict = {}
+
+    def _transition_node_order_items(self):
+        return self.transition_node_order.order()
+
+    def _restore_transition_node_order(self, order) -> bool:
+        if not self.transition_node_order.order():
+            return False  # the data isn't loaded yet, so there is nothing to order
+        self.transition_node_order.set_order(order or [])
+        return True
+
+    def _refresh_transition_node_order(self, adata, cluster_col):
+        """Offer the nodes of `adata`'s `cluster_col`, in its saved state order."""
+        from behav3d.analysis.behavior.state.utils import (
+            _apply_state_order,
+            _get_classification_state_order,
+        )
+        from behav3d.analysis.behavior.utils import _natural_sort_key
+        if adata is None or cluster_col is None:
+            self.transition_node_order.set_labels([])
+            return
+        labels = {str(label).strip() for label in adata.obs[cluster_col].dropna().unique()}
+        self.transition_node_order.set_labels(_apply_state_order(
+            sorted(labels, key=_natural_sort_key),
+            _get_classification_state_order(adata, cluster_col),
+        ))
 
     def _persist_report_settings(self, ct, *reports):
         params = getattr(self.metadata_loader, "behav3d_parameters", None)
@@ -1131,12 +1240,15 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
             "time_bin_size": "spin_state_composition_time_bin",
         },
         "transition": {
+            "min_bout_length": "spin_state_transition_min_bout",
             "min_prob_percent": "spin_state_transition_min_prob",
             "emphasis_gamma": "spin_state_transition_gamma",
             "label_style": "combo_state_transition_label_style",
             "include_transition_matrix": "chk_state_transition_include_matrix",
             "include_circular_diagram": "chk_state_transition_include_circular",
             "include_self_transitions": "chk_state_transition_include_self",
+            "auto_node_order": "chk_state_transition_auto_order",
+            "node_order": ("_transition_node_order_items", "_restore_transition_node_order"),
             "include_per_cluster": "chk_state_transition_include_per_cluster",
             "include_ngram_rankings": "chk_state_transition_include_ngrams",
             "include_sankey_pairs": "chk_state_transition_include_sankey",
@@ -1739,6 +1851,16 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         adv_state_transition = CollapsibleSection("⚙ Advanced Configuration", expanded=True)
         st_trans_form = QFormLayout()
         st_trans_form.setSpacing(3)
+        self.spin_state_transition_min_bout = QSpinBox()
+        self.spin_state_transition_min_bout.setRange(1, 1000)
+        self.spin_state_transition_min_bout.setValue(1)
+        self.spin_state_transition_min_bout.setSuffix(" timepoints")
+        st_trans_form.addRow("Min bout length:", make_help_row(
+            self.spin_state_transition_min_bout, "Min Bout Length",
+            "Bouts shorter than this are merged into the neighbouring state before "
+            "transitions, n-grams and Sankey paths are counted, so brief flickers between "
+            "states don't count as transitions. 1 = keep every bout."
+        ))
         self.spin_state_transition_min_prob = QDoubleSpinBox()
         self.spin_state_transition_min_prob.setRange(0.0, 100.0)
         self.spin_state_transition_min_prob.setDecimals(1)
@@ -1798,6 +1920,20 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
             "including time spent not switching - drawn as a loop beside each node - which "
             "dilutes the arrows for clusters that mostly self-transition."
         ))
+        self.chk_state_transition_auto_order = QCheckBox("Auto-arrange nodes (reduce overlap)")
+        self.chk_state_transition_auto_order.setChecked(True)
+        adv_state_transition.addLayout(_make_chk_help_row(
+            self.chk_state_transition_auto_order, "Auto-Arrange Nodes",
+            "Places the circular diagram's nodes so that arrows cross and run on top of each other "
+            "as little as possible at your probability cutoff, using the same arrangement on all "
+            "circular pages. The arrangement "
+            "can change when you change the cutoff. Turn off to set the order yourself in the "
+            "node order list below."
+        ))
+        self.transition_node_order = NodeOrderList("states")
+        adv_state_transition.addWidget(self.transition_node_order)
+        self.chk_state_transition_auto_order.toggled.connect(self.transition_node_order.set_auto_arranging)
+        self.transition_node_order.set_auto_arranging(self.chk_state_transition_auto_order.isChecked())
         self.chk_state_transition_include_per_cluster = QCheckBox("Show per-cluster breakdown grid")
         self.chk_state_transition_include_per_cluster.setChecked(True)
         adv_state_transition.addLayout(_make_chk_help_row(
@@ -3462,6 +3598,7 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
 
         self._refresh_composition_group_cols()
         self._refresh_state_heatmap_features()
+        self._refresh_transition_node_order(self._model_adata, full_col)
         self._apply_pending_report_settings()
 
     def _cluster_count(self, adata, col) -> int:
@@ -4658,6 +4795,7 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         out = self._out_dir()
         self._log(f"▶ Generating state transition report for '{ct}'…")
 
+        min_bout_length = self.spin_state_transition_min_bout.value()
         circular_min_prob_to_draw = self.spin_state_transition_min_prob.value() / 100.0
         circular_emphasis_gamma = self.spin_state_transition_gamma.value()
         circular_label_style = (
@@ -4666,6 +4804,8 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         include_transition_matrix = self.chk_state_transition_include_matrix.isChecked()
         include_circular_diagram = self.chk_state_transition_include_circular.isChecked()
         circular_include_self_transitions = self.chk_state_transition_include_self.isChecked()
+        circular_auto_node_order = self.chk_state_transition_auto_order.isChecked()
+        circular_custom_node_order = None if circular_auto_node_order else self.transition_node_order.order()
         include_circular_diagram_per_cluster = self.chk_state_transition_include_per_cluster.isChecked()
         include_ngram_rankings = self.chk_state_transition_include_ngrams.isChecked()
         include_sankey_pairs = self.chk_state_transition_include_sankey.isChecked()
@@ -4701,9 +4841,12 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
                 circular_emphasis_gamma=circular_emphasis_gamma,
                 circular_label_style=circular_label_style,
                 circular_include_self_transitions=circular_include_self_transitions,
+                circular_auto_node_order=circular_auto_node_order,
+                circular_custom_node_order=circular_custom_node_order,
                 include_circular_diagram_per_cluster=include_circular_diagram_per_cluster,
                 include_ngram_rankings=include_ngram_rankings,
                 include_sankey_pairs=include_sankey_pairs,
+                min_bout_length=min_bout_length,
                 verbose=True,
             )
 
@@ -4717,6 +4860,9 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
             inject_progress=False,
             on_done=lambda r: (
                 self._log(f"✅ Transition report done for '{ct}'."),
+                circular_auto_node_order and self.transition_node_order.set_last_auto_order(
+                    r.get("circular_node_order")
+                ),
                 self._update_view_buttons(),
                 self._notify_results(),
             ),
@@ -6147,6 +6293,8 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             "include_transition_matrix": "chk_transanalysis_include_matrix",
             "include_circular_diagram": "chk_transanalysis_include_circular",
             "include_self_transitions": "chk_transanalysis_include_self",
+            "auto_node_order": "chk_transanalysis_auto_order",
+            "node_order": ("_transition_node_order_items", "_restore_transition_node_order"),
             "include_per_cluster": "chk_transanalysis_include_per_cluster",
             "include_window_sankey": "chk_transanalysis_include_window_sankey",
         },
@@ -7232,6 +7380,20 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             "including windows spent not switching - drawn as a loop beside each node - which "
             "dilutes the arrows for clusters that mostly self-transition."
         ))
+        self.chk_transanalysis_auto_order = QCheckBox("Auto-arrange nodes (reduce overlap)")
+        self.chk_transanalysis_auto_order.setChecked(True)
+        adv_transition_analysis.addLayout(_make_chk_help_row(
+            self.chk_transanalysis_auto_order, "Auto-Arrange Nodes",
+            "Places the circular diagram's nodes so that arrows cross and run on top of each other "
+            "as little as possible at your probability cutoff, using the same arrangement on all "
+            "circular pages. The arrangement "
+            "can change when you change the cutoff. Turn off to set the order yourself in the "
+            "node order list below."
+        ))
+        self.transition_node_order = NodeOrderList("clusters")
+        adv_transition_analysis.addWidget(self.transition_node_order)
+        self.chk_transanalysis_auto_order.toggled.connect(self.transition_node_order.set_auto_arranging)
+        self.transition_node_order.set_auto_arranging(self.chk_transanalysis_auto_order.isChecked())
         self.chk_transanalysis_include_per_cluster = QCheckBox("Show per-cluster breakdown grid")
         self.chk_transanalysis_include_per_cluster.setChecked(True)
         adv_transition_analysis.addLayout(_make_chk_help_row(
@@ -8994,6 +9156,8 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         self._refresh_track_proportion_group_cols()
         self._refresh_contact_columns()
         self._refresh_feature_heatmap_features()
+        from behav3d.napari._rename_dialog import _track_cluster_col
+        self._refresh_transition_node_order(self._track_adata, _track_cluster_col(self._track_adata))
         self._apply_pending_report_settings()
 
     def _set_feature_heatmap_picked(self, picked):
@@ -10931,6 +11095,8 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         include_transition_matrix = self.chk_transanalysis_include_matrix.isChecked()
         include_circular_diagram = self.chk_transanalysis_include_circular.isChecked()
         circular_include_self_transitions = self.chk_transanalysis_include_self.isChecked()
+        auto_node_order = self.chk_transanalysis_auto_order.isChecked()
+        custom_node_order = None if auto_node_order else self.transition_node_order.order()
         include_circular_diagram_per_cluster = self.chk_transanalysis_include_per_cluster.isChecked()
         include_window_sankey = self.chk_transanalysis_include_window_sankey.isChecked()
         include_pooled = (
@@ -10975,6 +11141,8 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
                     include_transition_matrix=include_transition_matrix,
                     include_circular_diagram=include_circular_diagram,
                     circular_include_self_transitions=circular_include_self_transitions,
+                    auto_node_order=auto_node_order,
+                    custom_node_order=custom_node_order,
                     include_circular_diagram_per_cluster=include_circular_diagram_per_cluster,
                     verbose=True,
                 )
@@ -11001,6 +11169,9 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             inject_progress=False,
             on_done=lambda r: (
                 self._log(f"✅ Transition analysis done for '{ct}'."),
+                auto_node_order and self.transition_node_order.set_last_auto_order(
+                    r.get("transition_analysis", {}).get("circular_node_order")
+                ),
                 self._update_view_buttons(),
                 self._notify_results(),
             ),

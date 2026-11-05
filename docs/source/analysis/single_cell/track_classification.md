@@ -289,12 +289,14 @@ Options (**⚙ Advanced Configuration**, open by default):
 
 | Control | Default | What it does |
 |---|---|---|
-| **Min probability cutoff** | `3.0 %` | Transitions below this are not drawn in the circular diagram. |
+| **Min probability cutoff** | `3.0 %` | Transitions below this are not drawn in the circular diagram. The remaining arrows keep the same thickness. |
 | **Emphasis (gamma)** | `2.0` | How strongly line width and opacity favour the strongest transitions (1 = linear). |
 | **Node labels** | On dots | Cluster names inside the dots, or in a numbered **Side legend**. |
 | **Transition matrix heatmap** | on | Page with the transition counts / probabilities. |
 | **Circular transition diagram** | on | Circular diagrams weighted by outgoing and by incoming probability. |
 | **Include self-transitions** | off | Off: arrows show how a cluster splits among the clusters it switches to. On: probabilities include windows that stay in the same cluster, drawn as a loop beside each node. |
+| **Auto-arrange nodes (reduce overlap)** | on | Places the nodes so that arrows cross and run on top of each other as little as possible at your cutoff, in the same arrangement on all circular pages. The arrangement can change when you change the cutoff, and the legend numbers follow it. Turn off to set the order yourself in the node order list. |
+| **Node order** | your saved cluster order | Used when **Auto-arrange nodes** is off. Drag the clusters into the order you want: the top cluster is node 1 at the bottom of the circle, and the rest follow counter-clockwise. **Reset to saved order** undoes your changes. **Use last auto-arranged order** starts from the layout of your last auto-arranged report, so you can move just a node or two. Applies to all circular pages. |
 | **Show per-cluster breakdown grid** | on | Two pages with one small diagram per cluster (outgoing, incoming). |
 | **Window transition Sankey (per sample)** | on | See below; its own **👁** reopens it. |
 
