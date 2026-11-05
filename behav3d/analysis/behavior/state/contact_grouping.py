@@ -79,7 +79,7 @@ def compute_state_contact_type_cluster_proportions(
     """Per-(track, contact_col) state-composition proportions, restricted to each track's
     timepoints where that contact_col is True — i.e. "for T cells with organoid contact,
     what's the proportion of behavioral states while touching organoid type X", feeding a
-    Welch's-t-test cluster-size-difference + stacked-composition comparison across 2+
+    cluster-size-difference + stacked-composition comparison across 2+
     contact_cols (generalizes to N organoid/contact types, not just 2).
 
     A track touching multiple selected contact_cols contributes one independent unit row per

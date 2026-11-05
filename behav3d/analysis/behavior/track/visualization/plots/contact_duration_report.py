@@ -8,10 +8,7 @@ morphology class — round / elongated / plastic — it touched), compared:
 - pairwise between every two classes, and
 - each class vs. every other class pooled together ("rest"),
 
-using either an unpaired Welch's t-test (the default, matching the rest of the app) or a paired
-t-test where the pairs are formed by averaging within a user-chosen column (typically
-``sample_name``) before pairing — mirroring a manual R workflow of
-``group_by(sample_name, class) |> summarise(mean(...)) |> pivot_wider() |> t.test(paired=TRUE)``.
+shown per track and, on a companion page, as per-sample means.
 """
 import textwrap
 from itertools import combinations
@@ -19,7 +16,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.lines import Line2D
@@ -28,8 +24,6 @@ from matplotlib.patches import Patch
 from behav3d.analysis.behavior.utils import _contact_analysis_dir, _mixed_label_sort_key
 from behav3d.analysis.behavior.general.visualization.plots.proportion_bars import (
     hash_stable_label_color_map,
-    welch_ttest_stars,
-    SIGNIFICANCE_LEGEND_TEXT,
     compute_class_by_stack_proportions,
     draw_stacked_proportion_barv,
     legend_layout,
@@ -46,8 +40,6 @@ from behav3d.analysis.behavior.track.contact_grouping import (
     _contact_class_mean_col_name,
     _contact_class_max_bout_col_name,
 )
-
-_MIN_GROUP_N_FOR_TEST = 2
 
 # Cycled (not hashed, so neighboring samples stay visually distinct even when there are only a
 # handful) per sorted sample name to give each one a stable marker shape -- used by the
@@ -100,40 +92,11 @@ def _build_comparisons(class_order):
     return comparisons
 
 
-def _welch_stats(values_a, values_b):
-    values_a = np.asarray(values_a, dtype=float)
-    values_b = np.asarray(values_b, dtype=float)
-    n_a, n_b = int(len(values_a)), int(len(values_b))
-    mean_a = float(np.mean(values_a)) if n_a else float("nan")
-    mean_b = float(np.mean(values_b)) if n_b else float("nan")
-    if n_a >= _MIN_GROUP_N_FOR_TEST and n_b >= _MIN_GROUP_N_FOR_TEST:
-        t_stat, p_value = stats.ttest_ind(values_b, values_a, equal_var=False, nan_policy="omit")
-        t_stat, p_value = float(t_stat), float(p_value)
-    else:
-        t_stat, p_value = float("nan"), float("nan")
-    return dict(n_a=n_a, n_b=n_b, mean_a=mean_a, mean_b=mean_b, t_stat=t_stat, p_value=p_value)
-
-
-def _paired_stats(values_a, values_b):
-    """``values_a``/``values_b`` are already the aligned per-pairing-unit mean durations (equal
-    length, same pairing-unit order) — the caller does the inner join."""
-    n = int(len(values_a))
-    mean_a = float(np.mean(values_a)) if n else float("nan")
-    mean_b = float(np.mean(values_b)) if n else float("nan")
-    if n >= _MIN_GROUP_N_FOR_TEST:
-        t_stat, p_value = stats.ttest_rel(values_b, values_a, nan_policy="omit")
-        t_stat, p_value = float(t_stat), float(p_value)
-    else:
-        t_stat, p_value = float("nan"), float("nan")
-    return dict(n_a=n, n_b=n, mean_a=mean_a, mean_b=mean_b, t_stat=t_stat, p_value=p_value)
-
-
 def _paired_sample_frame(duration_df, *, classes_a, classes_b, sample_col):
     """Per ``sample_col`` unit, the inner-joined mean ``duration_timepoints``/``duration_fraction``
-    for ``classes_a`` vs. ``classes_b`` — the data behind the "connected by sample" plot (and its
-    own paired significance test), always paired by ``sample_col`` regardless of whatever
-    ``pairing_col``/``test_mode`` the main comparison uses. Joining both metrics in one frame
-    (rather than two separate joins) guarantees the same sample set backs both panels.
+    for ``classes_a`` vs. ``classes_b`` — the data behind the "connected by sample" plot. Joining
+    both metrics in one frame (rather than two separate joins) guarantees the same sample set backs
+    both panels.
     """
     per_unit = duration_df.groupby([sample_col, "target_class"])[["duration_timepoints", "duration_fraction"]].mean()
     target_level = per_unit.index.get_level_values("target_class")
@@ -144,121 +107,59 @@ def _paired_sample_frame(duration_df, *, classes_a, classes_b, sample_col):
     return joined
 
 
-def _values_and_stats_for_column(duration_df, value_col, *, classes_a, classes_b, test_mode, pairing_col):
-    """Shared welch/paired value-selection + stats logic for one metric column (``duration_timepoints``
-    or ``duration_fraction``) — factored out of ``_comparison_row`` so both metrics reuse it."""
-    if test_mode == "paired":
-        per_unit = duration_df.groupby([pairing_col, "target_class"])[value_col].mean()
-        target_level = per_unit.index.get_level_values("target_class")
-        side_a = per_unit[target_level.isin(classes_a)].groupby(level=pairing_col).mean()
-        side_b = per_unit[target_level.isin(classes_b)].groupby(level=pairing_col).mean()
-        joined = pd.concat({"a": side_a, "b": side_b}, axis=1).dropna()
-        values_a = joined["a"].to_numpy()
-        values_b = joined["b"].to_numpy()
-        stats_row = _paired_stats(values_a, values_b)
-    else:
-        values_a = duration_df.loc[duration_df["target_class"].isin(classes_a), value_col].to_numpy()
-        values_b = duration_df.loc[duration_df["target_class"].isin(classes_b), value_col].to_numpy()
-        stats_row = _welch_stats(values_a, values_b)
-    return values_a, values_b, stats_row
+def _class_values(duration_df, value_col, classes):
+    return duration_df.loc[duration_df["target_class"].isin(classes), value_col].to_numpy()
 
 
-def _comparison_row(
-    duration_df, *, label_a, classes_a, label_b, classes_b, test_mode, pairing_col,
-    sample_col, pairing_col_label=None,
-):
-    """Compute stats plus the actual values tested, for one comparison — both on bout-length
-    (``duration_timepoints``) and on time-in-contact fraction (``duration_fraction``), as two
-    independent statistical tests (fraction is not a unit conversion of bout-length, so it gets
-    its own t-stat/p-value/stars).
+def _mean_or_nan(values):
+    return float(np.mean(values)) if len(values) else float("nan")
 
-    ``pairing_col`` is the actual dataframe column grouped on (may be an internal composite
-    column when multiple pairing columns were combined); ``pairing_col_label`` is the
-    human-readable name recorded in the output (defaults to ``pairing_col`` itself).
 
-    Also always computes the per-``sample_col`` paired view (see ``_paired_sample_frame``) used by
-    the "connected by sample" companion plot/CSV, independent of ``test_mode``/``pairing_col``.
+def _diff_or_nan(mean_a, mean_b):
+    return mean_b - mean_a if np.isfinite(mean_a) and np.isfinite(mean_b) else float("nan")
+
+
+def _comparison_row(duration_df, *, label_a, classes_a, label_b, classes_b, sample_col):
+    """Per-track values and means for one comparison, on both bout length
+    (``duration_timepoints``) and time-in-contact fraction (``duration_fraction``), plus the
+    per-``sample_col`` view (see ``_paired_sample_frame``) used by the "connected by sample"
+    companion plot/CSV.
     """
-    values_a, values_b, stats_row = _values_and_stats_for_column(
-        duration_df, "duration_timepoints", classes_a=classes_a, classes_b=classes_b,
-        test_mode=test_mode, pairing_col=pairing_col,
-    )
-    diff = (
-        stats_row["mean_b"] - stats_row["mean_a"]
-        if np.isfinite(stats_row["mean_a"]) and np.isfinite(stats_row["mean_b"])
-        else float("nan")
-    )
-    stats_row.update(
+    values_a = _class_values(duration_df, "duration_timepoints", classes_a)
+    values_b = _class_values(duration_df, "duration_timepoints", classes_b)
+    mean_a, mean_b = _mean_or_nan(values_a), _mean_or_nan(values_b)
+    frac_values_a = _class_values(duration_df, "duration_fraction", classes_a)
+    frac_values_b = _class_values(duration_df, "duration_fraction", classes_b)
+    frac_mean_a, frac_mean_b = _mean_or_nan(frac_values_a), _mean_or_nan(frac_values_b)
+    sample_frame = _paired_sample_frame(duration_df, classes_a=classes_a, classes_b=classes_b, sample_col=sample_col)
+    return dict(
         group_a=label_a,
         group_b=label_b,
-        diff=diff,
-        stars=welch_ttest_stars(stats_row["p_value"]),
-        test_mode=test_mode,
-        pairing_col=(pairing_col_label or pairing_col) if test_mode == "paired" else None,
+        n_a=int(len(values_a)),
+        n_b=int(len(values_b)),
+        mean_a=mean_a,
+        mean_b=mean_b,
+        diff=_diff_or_nan(mean_a, mean_b),
         values_a=values_a,
         values_b=values_b,
-    )
-
-    frac_values_a, frac_values_b, frac_stats = _values_and_stats_for_column(
-        duration_df, "duration_fraction", classes_a=classes_a, classes_b=classes_b,
-        test_mode=test_mode, pairing_col=pairing_col,
-    )
-    fraction_diff = (
-        frac_stats["mean_b"] - frac_stats["mean_a"]
-        if np.isfinite(frac_stats["mean_a"]) and np.isfinite(frac_stats["mean_b"])
-        else float("nan")
-    )
-    stats_row.update(
-        fraction_n_a=frac_stats["n_a"],
-        fraction_n_b=frac_stats["n_b"],
-        fraction_mean_a=frac_stats["mean_a"],
-        fraction_mean_b=frac_stats["mean_b"],
-        fraction_diff=fraction_diff,
-        fraction_t_stat=frac_stats["t_stat"],
-        fraction_p_value=frac_stats["p_value"],
-        fraction_stars=welch_ttest_stars(frac_stats["p_value"]),
+        fraction_mean_a=frac_mean_a,
+        fraction_mean_b=frac_mean_b,
+        fraction_diff=_diff_or_nan(frac_mean_a, frac_mean_b),
         fraction_values_a=frac_values_a,
         fraction_values_b=frac_values_b,
-    )
-
-    sample_frame = _paired_sample_frame(duration_df, classes_a=classes_a, classes_b=classes_b, sample_col=sample_col)
-    sample_tp_a = sample_frame["duration_timepoints_a"].to_numpy()
-    sample_tp_b = sample_frame["duration_timepoints_b"].to_numpy()
-    sample_frac_a = sample_frame["duration_fraction_a"].to_numpy()
-    sample_frac_b = sample_frame["duration_fraction_b"].to_numpy()
-    sample_stats_tp = _paired_stats(sample_tp_a, sample_tp_b)
-    sample_stats_frac = _paired_stats(sample_frac_a, sample_frac_b)
-    stats_row.update(
         sample_names=sample_frame.index.tolist(),
-        sample_values_a=sample_tp_a,
-        sample_values_b=sample_tp_b,
+        sample_values_a=sample_frame["duration_timepoints_a"].to_numpy(),
+        sample_values_b=sample_frame["duration_timepoints_b"].to_numpy(),
         sample_n=int(len(sample_frame)),
-        sample_p_value=sample_stats_tp["p_value"],
-        sample_stars=welch_ttest_stars(sample_stats_tp["p_value"]),
-        sample_fraction_values_a=sample_frac_a,
-        sample_fraction_values_b=sample_frac_b,
-        sample_fraction_p_value=sample_stats_frac["p_value"],
-        sample_fraction_stars=welch_ttest_stars(sample_stats_frac["p_value"]),
+        sample_fraction_values_a=sample_frame["duration_fraction_a"].to_numpy(),
+        sample_fraction_values_b=sample_frame["duration_fraction_b"].to_numpy(),
     )
-    return stats_row
 
 
-def _add_significance_annotation(ax, finite_vals, stars):
-    """Shared bracket/"n.s." annotation for a 2-box comparison panel at x-positions 1, 2 — factored
-    out of ``_draw_pair_box`` so ``_draw_pair_connected_box`` draws the identical annotation."""
-    if not finite_vals:
+def _add_no_data_note(ax, data):
+    """"no data" placeholder for a 2-box comparison panel with no finite values."""
+    if not any(np.isfinite(arr).any() for arr in data if len(arr)):
         ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes, fontsize=7)
-        return
-    y_max, y_min = max(finite_vals), min(finite_vals)
-    span = max(y_max - y_min, 1e-9)
-    if stars and stars != "n.s.":
-        y = y_max + span * 0.08
-        tick = span * 0.03
-        ax.plot([1, 1, 2, 2], [y, y + tick, y + tick, y], lw=0.8, color="black")
-        ax.text(1.5, y + tick, stars, ha="center", va="bottom", fontsize=8)
-        ax.set_ylim(top=y + tick + span * 0.15)
-    elif stars == "n.s.":
-        ax.text(0.5, 1.02, "n.s.", transform=ax.transAxes, ha="center", va="bottom", fontsize=6.5, color="#666")
 
 
 def _draw_box_shell(ax, data, *, label_a, label_b, colors, widths, alpha):
@@ -277,7 +178,7 @@ def _draw_box_shell(ax, data, *, label_a, label_b, colors, widths, alpha):
     return bp
 
 
-def _draw_pair_box(ax, values_a, values_b, *, label_a, label_b, ylabel, stars, colors):
+def _draw_pair_box(ax, values_a, values_b, *, label_a, label_b, ylabel, colors):
     data = [np.asarray(values_a, dtype=float), np.asarray(values_b, dtype=float)]
     _draw_box_shell(ax, data, label_a=label_a, label_b=label_b, colors=colors, widths=0.8, alpha=0.55)
     rng = np.random.default_rng(0)
@@ -290,12 +191,11 @@ def _draw_pair_box(ax, values_a, values_b, *, label_a, label_b, ylabel, stars, c
     ax.tick_params(axis="x", labelsize=6.5)
     ax.tick_params(axis="y", labelsize=7)
 
-    finite_vals = [v for arr in data if len(arr) for v in arr[np.isfinite(arr)]]
-    _add_significance_annotation(ax, finite_vals, stars)
+    _add_no_data_note(ax, data)
 
 
 def _draw_pair_connected_box(
-    ax, sample_names, values_a, values_b, *, label_a, label_b, ylabel, stars, colors,
+    ax, sample_names, values_a, values_b, *, label_a, label_b, ylabel, colors,
     sample_colors, sample_markers,
 ):
     """Same box as ``_draw_pair_box``, but each dot pair is one ``sample_col`` unit, drawn with a
@@ -327,8 +227,7 @@ def _draw_pair_connected_box(
     ax.tick_params(axis="x", labelsize=6.5)
     ax.tick_params(axis="y", labelsize=7)
 
-    finite_vals = [v for arr in data if len(arr) for v in arr[np.isfinite(arr)]]
-    _add_significance_annotation(ax, finite_vals, stars)
+    _add_no_data_note(ax, data)
 
 
 def _draw_pair_connected_lines(ax, sample_names, values_a, values_b, *, label_a, label_b, colors):
@@ -365,8 +264,8 @@ def _draw_pair_connected_lines(ax, sample_names, values_a, values_b, *, label_a,
 
 
 def _plot_duration_comparison_page(
-    page_rows, *, contact_col, target_cell_type_label, test_mode, pairing_col, minutes_per_frame,
-    ncols, label_colors, section_label=None, pairing_col_label=None,
+    page_rows, *, contact_col, target_cell_type_label, minutes_per_frame,
+    ncols, label_colors, section_label=None,
 ):
     n = len(page_rows)
     show_minutes = minutes_per_frame is not None
@@ -377,9 +276,7 @@ def _plot_duration_comparison_page(
     panel_w, panel_h = 2.3, 3.0
     fig_w = max(6.0, panel_w * n_panels * ncols_page)
 
-    subtitle = f"contact_col={contact_col}  target={target_cell_type_label}  test={test_mode}"
-    if test_mode == "paired":
-        subtitle += f"  pairing_col={pairing_col_label or pairing_col}"
+    subtitle = f"contact_col={contact_col}  target={target_cell_type_label}"
     if not show_minutes:
         subtitle += "  (minutes unavailable — no time metadata)"
     title = f"Contact duration comparison — bout length & contact-time fraction by {target_cell_type_label} class"
@@ -391,7 +288,7 @@ def _plot_duration_comparison_page(
 
     # Title lines + the per-comparison panel title above the first row.
     header_h = 0.55 + 0.19 * _title_lines(full_title, fig_w)
-    # Two-line wrapped class tick labels + two footnote lines.
+    # Two-line wrapped class tick labels + the footnote.
     footer_h = 0.95
     fig_h = header_h + footer_h + panel_h * nrows
     fig = plt.figure(figsize=(fig_w, fig_h))
@@ -408,7 +305,7 @@ def _plot_duration_comparison_page(
         _draw_pair_box(
             ax_tp, row["values_a"], row["values_b"],
             label_a=row["group_a"], label_b=row["group_b"],
-            ylabel="Duration (timepoints)", stars=row["stars"], colors=label_colors,
+            ylabel="Duration (timepoints)", colors=label_colors,
         )
         ax_tp.set_title(
             textwrap.fill(f"{row['group_a']} vs {row['group_b']}", width=20), fontsize=7,
@@ -421,18 +318,18 @@ def _plot_duration_comparison_page(
                 np.asarray(row["values_a"], dtype=float) * minutes_per_frame,
                 np.asarray(row["values_b"], dtype=float) * minutes_per_frame,
                 label_a=row["group_a"], label_b=row["group_b"],
-                ylabel="Duration (minutes)", stars=row["stars"], colors=label_colors,
+                ylabel="Duration (minutes)", colors=label_colors,
             )
             next_panel += 1
         ax_frac = fig.add_subplot(inner[0, next_panel])
         _draw_pair_box(
             ax_frac, row["fraction_values_a"], row["fraction_values_b"],
             label_a=row["group_a"], label_b=row["group_b"],
-            ylabel="Fraction of window in contact", stars=row["fraction_stars"], colors=label_colors,
+            ylabel="Fraction of window in contact", colors=label_colors,
         )
 
     _wrapped_suptitle(fig, full_title, fig_w)
-    footnote, _ = wrap_title_to_width(f"{_BOX_LEGEND_TEXT}\n{SIGNIFICANCE_LEGEND_TEXT}", fig_w * 1.3, fontsize=7)
+    footnote, _ = wrap_title_to_width(_BOX_LEGEND_TEXT, fig_w * 1.3, fontsize=7)
     fig.text(0.5, 0.06 / fig_h, footnote, ha="center", va="bottom", fontsize=7, linespacing=1.4)
     return fig
 
@@ -465,7 +362,7 @@ def _plot_duration_comparison_connected_page(
         row_height_in=0.16, base_margin_in=0.4,
     )
 
-    subtitle = f"contact_col={contact_col}  target={target_cell_type_label}  paired by {sample_col}"
+    subtitle = f"contact_col={contact_col}  target={target_cell_type_label}  per {sample_col}"
     if not show_minutes:
         subtitle += "  (minutes unavailable — no time metadata)"
     title = f"Contact duration comparison — connected by {sample_col} (box = per-sample means)"
@@ -493,14 +390,14 @@ def _plot_duration_comparison_connected_page(
         left=left_margin_in / fig_w, right=1 - right_margin_in / fig_w,
     )
 
-    def _draw_metric_group(cell, values_a, values_b, ylabel, stars, row):
+    def _draw_metric_group(cell, values_a, values_b, ylabel, row):
         pair = cell.subgridspec(1, 2, width_ratios=[box_w, lines_w], wspace=0.15)
         ax_box = fig.add_subplot(pair[0, 0])
         ax_lines = fig.add_subplot(pair[0, 1], sharey=ax_box)
         _draw_pair_connected_box(
             ax_box, row["sample_names"], values_a, values_b,
             label_a=row["group_a"], label_b=row["group_b"],
-            ylabel=ylabel, stars=stars, colors=label_colors,
+            ylabel=ylabel, colors=label_colors,
             sample_colors=sample_colors, sample_markers=sample_markers,
         )
         _draw_pair_connected_lines(
@@ -514,7 +411,7 @@ def _plot_duration_comparison_connected_page(
         inner = outer[r, c].subgridspec(1, n_panels, wspace=0.6)
         ax_tp = _draw_metric_group(
             inner[0, 0], row["sample_values_a"], row["sample_values_b"],
-            "Duration (timepoints)", row["sample_stars"], row,
+            "Duration (timepoints)", row,
         )
         ax_tp.set_title(
             textwrap.fill(f"{row['group_a']} vs {row['group_b']}", width=20), fontsize=7,
@@ -525,12 +422,12 @@ def _plot_duration_comparison_connected_page(
                 inner[0, next_panel],
                 np.asarray(row["sample_values_a"], dtype=float) * minutes_per_frame,
                 np.asarray(row["sample_values_b"], dtype=float) * minutes_per_frame,
-                "Duration (minutes)", row["sample_stars"], row,
+                "Duration (minutes)", row,
             )
             next_panel += 1
         _draw_metric_group(
             inner[0, next_panel], row["sample_fraction_values_a"], row["sample_fraction_values_b"],
-            "Fraction of window in contact", row["sample_fraction_stars"], row,
+            "Fraction of window in contact", row,
         )
 
     _wrapped_suptitle(fig, full_title, fig_w)
@@ -557,16 +454,16 @@ def _plot_duration_comparison_connected_page(
             handlelength=1.3, labelspacing=0.3, columnspacing=1.0,
         )
     footnote, _ = wrap_title_to_width(
-        f"{_CONNECTED_BOX_LEGEND_TEXT}\n{SIGNIFICANCE_LEGEND_TEXT}", fig_w * 1.3, fontsize=7,
+        _CONNECTED_BOX_LEGEND_TEXT, fig_w * 1.3, fontsize=7,
     )
     fig.text(0.5, 0.06 / fig_h, footnote, ha="center", va="bottom", fontsize=7, linespacing=1.4)
     return fig
 
 
 def _render_duration_comparison_section(
-    pdf, sub_duration_df, *, class_order, contact_col, target_cell_type_label, test_mode,
-    pairing_col, sample_col, sample_colors, sample_markers, minutes_per_frame, ncols, class_colors,
-    comparisons_per_page, section_label=None, pairing_col_label=None,
+    pdf, sub_duration_df, *, class_order, contact_col, target_cell_type_label,
+    sample_col, sample_colors, sample_markers, minutes_per_frame, ncols, class_colors,
+    comparisons_per_page, section_label=None,
 ):
     """Build + render the pairwise/one-vs-rest comparison page(s) for one data subset — either
     the pooled "general" set (``section_label=None``) or one ``group_cols`` page-split's slice.
@@ -576,7 +473,7 @@ def _render_duration_comparison_section(
     class simply skips comparisons involving it rather than erroring.
 
     Also renders one "connected by sample" companion page right after each original page (see
-    ``_plot_duration_comparison_connected_page``) — same comparisons, but paired by ``sample_col``,
+    ``_plot_duration_comparison_connected_page``) — same comparisons, but per ``sample_col``,
     with box dots colored/shaped by sample and the connecting lines drawn in their own panel next
     to each box instead of unlinked jittered dots.
 
@@ -605,8 +502,7 @@ def _render_duration_comparison_section(
     rows = [
         _comparison_row(
             sub_duration_df, label_a=label_a, classes_a=classes_a, label_b=label_b, classes_b=classes_b,
-            test_mode=test_mode, pairing_col=pairing_col, sample_col=sample_col,
-            pairing_col_label=pairing_col_label,
+            sample_col=sample_col,
         )
         for label_a, classes_a, label_b, classes_b in comparisons
     ]
@@ -618,9 +514,8 @@ def _render_duration_comparison_section(
     for page_rows in pages:
         fig = _plot_duration_comparison_page(
             page_rows, contact_col=contact_col, target_cell_type_label=target_cell_type_label,
-            test_mode=test_mode, pairing_col=pairing_col, minutes_per_frame=minutes_per_frame,
+            minutes_per_frame=minutes_per_frame,
             ncols=ncols, label_colors=label_colors, section_label=section_label,
-            pairing_col_label=pairing_col_label,
         )
         pdf.savefig(fig)
         plt.close(fig)
@@ -647,10 +542,6 @@ def _render_duration_comparison_section(
             "diff_timepoints": row["diff"], "mean_a_minutes": m_a, "mean_b_minutes": m_b,
             "mean_a_fraction": row["fraction_mean_a"], "mean_b_fraction": row["fraction_mean_b"],
             "diff_fraction": row["fraction_diff"],
-            "t_stat": row["t_stat"], "p_value": row["p_value"], "stars": row["stars"],
-            "t_stat_fraction": row["fraction_t_stat"], "p_value_fraction": row["fraction_p_value"],
-            "stars_fraction": row["fraction_stars"],
-            "test_mode": row["test_mode"], "pairing_col": row["pairing_col"],
         })
         for sample_name, tp_a, tp_b, frac_a, frac_b in zip(
             row["sample_names"], row["sample_values_a"], row["sample_values_b"],
@@ -1065,8 +956,6 @@ def save_track_contact_duration_comparison(
     target_cell_type_label,
     class_order=None,
     class_colors=None,
-    test_mode="welch",
-    pairing_col=None,
     minutes_per_frame=None,
     long_contact_threshold=None,
     long_contact_unit="minutes",
@@ -1078,13 +967,7 @@ def save_track_contact_duration_comparison(
 ):
     """For every class of ``target_cell_type_label`` actually touched, compare how long tracks
     stay in contact with that class — pairwise between classes, and each class vs. every other
-    class pooled ("rest") — using an unpaired Welch's t-test or a paired t-test (pairs formed by
-    averaging within ``pairing_col`` before pairing).
-
-    ``pairing_col`` (only used when ``test_mode="paired"``) is a single column name (e.g.
-    ``"sample_name"``) or a list of column names — when more than one is given, pairing units are
-    formed on the combination of all of them (e.g. ``sample_name`` + ``exp_nr``), joined with
-    ``" | "``; the CSV's ``pairing_col`` field records the human-readable ``" + "``-joined name(s).
+    class pooled ("rest").
 
     Requires the per-cell contact-attribution path (``target_class_lookup``/``touching_col`` —
     see ``contact_grouping.build_target_class_lookup_from_state_adata`` /
@@ -1127,9 +1010,8 @@ def save_track_contact_duration_comparison(
     Right after each of those pages (and the long-contact percentage page, when requested), a
     "connected by sample" companion page is rendered: the same comparison, but each dot is a
     per-``sample_col`` mean, colored by sample and joined by a line across the two (or, for
-    long-contact, all touched) classes, so an individual sample's shift is traceable — with its
-    own paired significance test (independent of ``test_mode``, which always pairs by
-    ``sample_col`` for this view). The per-sample values behind those dots are written to
+    long-contact, all touched) classes, so an individual sample's shift is traceable. The
+    per-sample values behind those dots are written to
     ``contact_duration_comparison_paired_samples.csv`` and, when ``long_contact_threshold`` is
     set, ``contact_long_contact_percentage_per_sample.csv``.
 
@@ -1137,20 +1019,6 @@ def save_track_contact_duration_comparison(
     ``long_contact_per_sample_csv_path``) plus ``n_comparisons``/``n_pages``/``class_order``/
     ``sample_col``/``group_cols``/``page_groups``.
     """
-    test_mode = str(test_mode).strip().lower()
-    if test_mode not in ("welch", "paired"):
-        raise ValueError(f"test_mode must be 'welch' or 'paired', got {test_mode!r}.")
-
-    pairing_cols = []
-    if test_mode == "paired":
-        pairing_cols = (
-            [str(pairing_col)] if isinstance(pairing_col, str)
-            else [str(c) for c in (pairing_col or []) if str(c).strip()]
-        )
-        if not pairing_cols:
-            raise ValueError("pairing_col is required when test_mode='paired'.")
-    pairing_col_label = " + ".join(pairing_cols) if pairing_cols else None
-
     if long_contact_threshold is not None:
         long_contact_unit = str(long_contact_unit).strip().lower()
         if long_contact_unit not in _LONG_CONTACT_UNITS:
@@ -1204,7 +1072,7 @@ def save_track_contact_duration_comparison(
 
     group_cols = [str(c) for c in group_cols] if group_cols else []
 
-    extra_cols_needed = [c for c in pairing_cols + group_cols if c not in duration_df.columns]
+    extra_cols_needed = [c for c in group_cols if c not in duration_df.columns]
     if extra_cols_needed:
         missing_from_obs = [c for c in extra_cols_needed if c not in adata_tracks.obs.columns]
         if missing_from_obs:
@@ -1217,14 +1085,6 @@ def save_track_contact_duration_comparison(
             adata_tracks.obs[groupby_cols + extra_cols_needed].drop_duplicates(subset=groupby_cols)
         )
         duration_df = duration_df.merge(extra_lookup, on=groupby_cols, how="left")
-
-    pairing_col_actual = None
-    if pairing_cols:
-        if len(pairing_cols) == 1:
-            pairing_col_actual = pairing_cols[0]
-        else:
-            duration_df["_pairing_composite"] = _make_group_label(duration_df, pairing_cols)
-            pairing_col_actual = "_pairing_composite"
 
     if long_contact_threshold is not None:
         if long_contact_unit == "percent":
@@ -1261,8 +1121,6 @@ def save_track_contact_duration_comparison(
         "page_group", "group_a", "group_b", "n_a", "n_b", "mean_a_timepoints", "mean_b_timepoints",
         "diff_timepoints", "mean_a_minutes", "mean_b_minutes",
         "mean_a_fraction", "mean_b_fraction", "diff_fraction",
-        "t_stat", "p_value", "stars", "t_stat_fraction", "p_value_fraction", "stars_fraction",
-        "test_mode", "pairing_col",
     ]
     paired_csv_columns = [
         "page_group", "group_a", "group_b", sample_col,
@@ -1305,10 +1163,9 @@ def save_track_contact_duration_comparison(
         else:
             general_rows, general_paired_rows, general_pages = _render_duration_comparison_section(
                 pdf, duration_df, class_order=resolved_class_order, contact_col=contact_col,
-                target_cell_type_label=target_cell_type_label, test_mode=test_mode,
-                pairing_col=pairing_col_actual, sample_col=sample_col, sample_colors=sample_colors,
+                target_cell_type_label=target_cell_type_label,
+                sample_col=sample_col, sample_colors=sample_colors,
                 sample_markers=sample_markers,
-                pairing_col_label=pairing_col_label,
                 minutes_per_frame=minutes_per_frame, ncols=ncols,
                 class_colors=class_colors, comparisons_per_page=comparisons_per_page,
                 section_label=None,
@@ -1323,10 +1180,9 @@ def save_track_contact_duration_comparison(
                     continue
                 group_rows, group_paired_rows, group_pages = _render_duration_comparison_section(
                     pdf, sub_df, class_order=resolved_class_order, contact_col=contact_col,
-                    target_cell_type_label=target_cell_type_label, test_mode=test_mode,
-                    pairing_col=pairing_col_actual, sample_col=sample_col, sample_colors=sample_colors,
+                    target_cell_type_label=target_cell_type_label,
+                    sample_col=sample_col, sample_colors=sample_colors,
                     sample_markers=sample_markers,
-                    pairing_col_label=pairing_col_label,
                     minutes_per_frame=minutes_per_frame, ncols=ncols,
                     class_colors=class_colors, comparisons_per_page=comparisons_per_page,
                     section_label=page_group,
@@ -1380,7 +1236,7 @@ def save_track_contact_duration_comparison(
         )
         print(
             f"Saved contact duration comparison ({len(csv_rows)} comparisons, {total_pages} page(s)"
-            f"{group_note}, test_mode={test_mode}{long_note}): {pdf_path}"
+            f"{group_note}{long_note}): {pdf_path}"
         )
 
     return {
@@ -1393,8 +1249,6 @@ def save_track_contact_duration_comparison(
         "csv_dir": str(csv_dir),
         "n_comparisons": len(csv_rows),
         "n_pages": total_pages,
-        "test_mode": test_mode,
-        "pairing_col": pairing_col_label,
         "sample_col": str(sample_col),
         "class_order": resolved_class_order,
         "minutes_per_frame": minutes_per_frame,

@@ -207,7 +207,7 @@ STATE_REPORTS_ENTRY = {
     "concept": None,
     "what_get": (
         "A choice of report PDFs: clustering diagnostics, state composition, "
-        "state transitions, and/or a two-condition statistical comparison."
+        "state transitions, and/or a condition comparison."
     ),
     "decide": [],
     "start_label": "Generate analysis and plots  ▸",
@@ -329,29 +329,23 @@ STATE_FEATURE_HEATMAP = {
 STATE_COMPARISON_REPORT = {
     "id": "state_comparison",
     "title": "Condition Comparison Report",
-    "subtitle": "Do state proportions differ significantly between conditions?",
+    "subtitle": "How do state proportions differ between conditions?",
     "color": "#4a90d9",
     "what_does": (
         "Compares overall state proportions between every pair of levels of "
-        "a condition column (or two custom pooled groups) using Welch's "
-        "t-test, optionally split by another column."
+        "a condition column (or two custom pooled groups), optionally split by "
+        "another column."
     ),
-    "concept": {
-        "term": "Welch's t-test",
-        "text": (
-            "compares two group means without assuming equal variances — "
-            "safer than a standard t-test when group sizes or spreads differ."
-        ),
-    },
-    "what_get": "A condition-comparison PDF with significance annotations.",
+    "concept": None,
+    "what_get": "A condition-comparison PDF showing the mean difference for each pair of levels.",
     "decide": [
         _decide("Which condition column to compare (optionally pooled into two groups)", _ONLY_YOU),
         _decide("Column to split by", _SUGGESTED),
     ],
     "has_params": True,
     "seed": (
-        "Explain the BEHAV3D state Condition Comparison Report: what "
-        "Welch's t-test compares here and how to choose condition/levels/facet."
+        "Explain the BEHAV3D state Condition Comparison Report: what the "
+        "difference bars show and how to choose condition/levels/facet."
     ),
 }
 
@@ -368,7 +362,7 @@ STATE_CONTACT_ANALYSIS = {
     ),
     "concept": None,
     "what_get": (
-        "A contact-type comparison PDF (per-state differences with Welch's t-test, "
+        "A contact-type comparison PDF (per-state differences, "
         "plus stacked composition) and its CSVs."
     ),
     "decide": [
@@ -549,29 +543,23 @@ TRACK_TRANSITION_ANALYSIS = {
 TRACK_COMPARISON_REPORT = {
     "id": "track_comparison",
     "title": "Condition Comparison Report",
-    "subtitle": "Do track-cluster proportions differ significantly between conditions?",
+    "subtitle": "How do track-cluster proportions differ between conditions?",
     "color": "#c98a2c",
     "what_does": (
         "Compares overall track cluster proportions between every pair of "
-        "levels of a condition column (or two custom pooled groups) using "
-        "Welch's t-test, optionally split by another column."
+        "levels of a condition column (or two custom pooled groups), "
+        "optionally split by another column."
     ),
-    "concept": {
-        "term": "Welch's t-test",
-        "text": (
-            "compares two group means without assuming equal variances — "
-            "safer than a standard t-test when group sizes or spreads differ."
-        ),
-    },
-    "what_get": "A condition-comparison PDF with significance annotations.",
+    "concept": None,
+    "what_get": "A condition-comparison PDF showing the mean difference for each pair of levels.",
     "decide": [
         _decide("Which condition column to compare (optionally pooled into two groups)", _ONLY_YOU),
         _decide("Column to split by", _SUGGESTED),
     ],
     "has_params": True,
     "seed": (
-        "Explain the BEHAV3D track Condition Comparison Report: what "
-        "Welch's t-test compares here and how to choose condition/levels/facet."
+        "Explain the BEHAV3D track Condition Comparison Report: what the "
+        "difference bars show and how to choose condition/levels/facet."
     ),
 }
 

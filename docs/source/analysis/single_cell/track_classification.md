@@ -308,17 +308,17 @@ Reconnects the windows of each physical track (same `TrackID`) and shows, as a S
 
 ### Condition Comparison Report
 
-Tests whether cluster proportions differ between the levels of a metadata column (e.g. organoid lines).
+Compares cluster proportions between the levels of a metadata column (e.g. organoid lines).
 
 | Control | Default | What it does |
 |---|---|---|
-| **Compare condition** | first column | The column whose levels are compared pairwise for each cluster (Welch's t-test). |
+| **Compare condition** | first column | The column whose levels are compared pairwise for each cluster. |
 | **Group in X** | (none) | Splits the comparison into side-by-side columns by a second column (with **Group conditions**, see the tip above). |
 | **Group in Y** | — | Read-only: shows the **Compare condition**. |
 | **Group conditions** | off | Pools the compared column's levels into two groups and runs one comparison. |
 | **Group per page** | none selected | Columns that paginate the report. |
 
-Click **▶ Condition Comparison Report**. Each cluster gets a signed bar of the proportion difference with significance stars (`*` to `****`); an extra page shows each cluster's prevalence over time per condition.
+Click **▶ Condition Comparison Report**. Each cluster gets a signed bar of the proportion difference with a whisker for its standard error; an extra page shows each cluster's prevalence over time per condition.
 
 ### Contact analysis
 
@@ -353,7 +353,7 @@ Cluster composition of contact vs. no_contact tracks, in the Group in X / Y / pa
 
 #### Contact Condition Comparison
 
-Welch's t-test comparison of cluster composition between the contact and no_contact groups — the contact version of the [Condition Comparison Report](#condition-comparison-report). **▶ Create Contact Condition Comparison**.
+Comparison of cluster composition between the contact and no_contact groups — the contact version of the [Condition Comparison Report](#condition-comparison-report). **▶ Create Contact Condition Comparison**.
 
 #### Contact Cluster Heatmap
 
@@ -361,23 +361,19 @@ Per trajectory cluster of the tracks themselves: longest contact bout (in minute
 
 #### Contact Duration Comparison
 
-Requires **Use contact cell classification**. For every class of the touched cells, how long tracks stay in sustained contact with that class, compared between every pair of classes and each class vs. all others pooled ("rest") — e.g. round-vs-elongated, …, round-vs-rest. Durations are shown in timepoints and, with valid time metadata, minutes.
+Requires **Use contact cell classification**. For every class of the touched cells, how long tracks stay in sustained contact with that class, compared between every pair of classes and each class vs. all others pooled ("rest") — e.g. round-vs-elongated, …, round-vs-rest. Durations are shown in timepoints and, with valid time metadata, minutes. Each comparison gets a page of per-track values and a page of per-sample means, where a line follows each sample between the two classes.
 
 | Control | Default | What it does |
 |---|---|---|
-| **Test** | Welch's t-test (unpaired) | `Welch's t-test (unpaired)` compares the per-track durations. `Paired t-test` first averages durations per **Pairing column(s)** value, then pairs the two classes' averages (values missing on one side are dropped). |
-| **Pairing column(s)** | `sample_name` | Only for the paired test; Ctrl/Cmd-click for several (combined). |
 | **Comparisons per page** | `12` | Number of comparison plots per PDF page. |
 | **Long contact threshold** | `(off)` | Above 0, adds a page per group: among tracks that touched a class, the % with "long" vs. "short" contact. In `Percent of time window`: at least this % of the classified window in contact (gaps allowed, no time metadata needed). In `Seconds` / `Minutes` / `Hours`: longest sustained bout at least this long (needs time metadata). |
 | **Long contact unit** | Minutes | Unit of the threshold. |
-
-**Choosing the test.** Welch's test treats every track as an independent replicate, but tracks from the same sample share that sample's well, cells and imaging. When every sample contributes contacts with both classes, the **Paired t-test** with `sample_name` as pairing column makes the sample the replicate; also check that the difference points the same way in each sample rather than being driven by one. Keep the per-track result as a description of the pooled distribution.
 
 **▶ Create Contact Duration Comparison**.
 
 #### Contact Type Comparison
 
-Mean contact fraction per cluster, side by side for several contact columns (e.g. healthy vs. tumor organoid contact). Descriptive only, no statistical test (unlike [Behavioral State's contact type comparison](state_classification.md)). Select **Contact columns to compare** (Ctrl/Cmd-click for 2 or more), then **▶ Create Contact Type Comparison**.
+Mean contact fraction per cluster, side by side for several contact columns (e.g. healthy vs. tumor organoid contact). Select **Contact columns to compare** (Ctrl/Cmd-click for 2 or more), then **▶ Create Contact Type Comparison**.
 
 #### Track Contact Overview
 

@@ -3172,8 +3172,6 @@ def test_experiment_reference_reports_only_settings_in_effect(tmp_path=None):
             "      target_state_col: full_behavioral_state",
             "      group_x: (none)",
             "    contact_duration:",
-            "      test_mode: Welch's t-test (unpaired)",
-            "      pairing_cols: []",
             "      long_contact_unit: Percent of time window",
             "      long_contact_threshold: 30.0",
             "      comparisons_per_page: 12",
@@ -3242,7 +3240,6 @@ def test_experiment_reference_reports_only_settings_in_effect(tmp_path=None):
                 "target_class_source": "Track classification",
             },
             "contact_duration": {
-                "test_mode": "Welch's t-test (unpaired)",
                 "long_contact_unit": "Percent of time window",
                 "long_contact_threshold": 30.0,
             },

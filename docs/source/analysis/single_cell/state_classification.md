@@ -281,7 +281,7 @@ A heatmap of states × features: the mean of each selected per-timepoint feature
 
 ### Condition Comparison Report
 
-Tests whether the proportions of the full behavioural states differ between the levels of one metadata column (e.g. organoid lines).
+Compares the proportions of the full behavioural states between the levels of one metadata column (e.g. organoid lines).
 
 | Control | Default | What it does |
 |---|---|---|
@@ -293,12 +293,12 @@ Tests whether the proportions of the full behavioural states differ between the 
 
 **▶ Condition Comparison Report** writes one PDF and its CSVs:
 
-- **Proportion difference per state** — a signed bar for each pair of levels, with Welch's t-test stars (`*` to `****`), using each sample as a replicate.
-- **Prevalence over time** — each state's prevalence for each level, as lines with a standard-error band. Descriptive only, with no test; the underlying values are saved as CSVs so you can test them yourself.
+- **Proportion difference per state** — a signed bar for each pair of levels, with a whisker for the standard error of the difference, using each sample as a replicate.
+- **Prevalence over time** — each state's prevalence for each level, as lines with a standard-error band. The underlying values are saved as CSVs.
 
 ## Contact Analysis
 
-Found as the **Contact analysis** card in the report list. It needs only this classification and the features table, not State Trajectory. It compares the **state composition of contacting timepoints** between contact columns, e.g. *for T cells touching organoids, does the mix of behaviours differ between healthy and tumour organoids?* This is the statistically tested counterpart of State Trajectory's descriptive [Contact Type Comparison](track_classification.md#contact-type-comparison).
+Found as the **Contact analysis** card in the report list. It needs only this classification and the features table, not State Trajectory. It compares the **state composition of contacting timepoints** between contact columns, e.g. *for T cells touching organoids, does the mix of behaviours differ between healthy and tumour organoids?* This is the behavioural-state counterpart of State Trajectory's [Contact Type Comparison](track_classification.md#contact-type-comparison).
 
 | Control | Default | What it does |
 |---|---|---|
@@ -306,7 +306,7 @@ Found as the **Contact analysis** card in the report list. It needs only this cl
 | **State column:** | `full_behavioral_state` | `full_behavioral_state`, `hmm_intrinsic_behavioral_state` or `raw_hmm_state` (original numbered states). |
 | **Contact columns to compare (Ctrl/Cmd click for 2+):** | none | The contact columns of the features table; select at least two. |
 
-**▶ Create Contact Type Comparison** (enabled when the table has at least two contact columns) writes a PDF with per-state differences between contact columns (Welch's t-test, one row per pair) and the stacked state composition per contact column, plus two CSVs. Each combination of columns gets its own folder, so different comparisons do not overwrite each other.
+**▶ Create Contact Type Comparison** (enabled when the table has at least two contact columns) writes a PDF with per-state differences between contact columns (one row per pair) and the stacked state composition per contact column, plus two CSVs. Each combination of columns gets its own folder, so different comparisons do not overwrite each other.
 
 ## Killing by State
 

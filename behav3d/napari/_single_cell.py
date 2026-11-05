@@ -2034,7 +2034,7 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         g_state_comparison = QVBoxLayout(self.grp_state_comparison)
         g_state_comparison.setSpacing(4)
         g_state_comparison.addWidget(_make_info_label(
-            "Condition comparison (overall proportions, Welch's t-test): each row is one pairwise "
+            "Condition comparison (overall proportions): each row is one pairwise "
             "comparison of \"Compare condition\"'s levels; \"Group in X\" splits it into side-by-side "
             "columns from another condition. Tick \"Group conditions\" to instead pool levels into "
             "two custom groups and compare just those."
@@ -2199,7 +2199,7 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         g_state_contact.addWidget(_make_info_label(
             "Contact type comparison — compares contacting-state proportions between "
             "selected contact columns (e.g. healthy vs. tumor organoid contact): "
-            "cluster-size difference (Welch's t-test) plus stacked composition."
+            "cluster-size difference plus stacked composition."
         ))
         state_contact_type_form = QFormLayout()
         state_contact_type_form.setSpacing(3)
@@ -6329,8 +6329,6 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             "group_cols": "list_contact_group_cols",
         },
         "contact_duration": {
-            "test_mode": "combo_duration_test_mode",
-            "pairing_cols": "list_duration_pairing_cols",
             # Unit before threshold: the unit sets the threshold's range.
             "long_contact_unit": "combo_long_contact_unit",
             "long_contact_threshold": "spin_long_contact_threshold",
@@ -7421,7 +7419,7 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         g_track_comparison = QVBoxLayout(self.grp_track_comparison)
         g_track_comparison.setSpacing(4)
         g_track_comparison.addWidget(_make_info_label(
-            "Condition comparison (overall proportions, Welch's t-test): each row is one pairwise "
+            "Condition comparison (overall proportions): each row is one pairwise "
             "comparison of \"Compare condition\"'s levels; \"Group in X\" splits it into side-by-side "
             "columns from another condition. Tick \"Group conditions\" to instead pool levels into "
             "two custom groups and compare just those."
@@ -7600,7 +7598,7 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         g_contact.addLayout(contact_composition_row)
 
         g_contact.addWidget(_make_info_label(
-            "Contact condition comparison (Welch's t-test grid of class composition between "
+            "Contact condition comparison (grid of class composition differences between "
             "contact/no-contact groups):"
         ))
         contact_condition_comparison_row = QHBoxLayout()
@@ -7627,28 +7625,6 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             "Contact duration comparison (how long tracks stay in contact with each touched class "
             "of 'Use contact cell classification', pairwise and each class vs. the rest):"
         ))
-        duration_form = QFormLayout()
-        duration_form.setSpacing(3)
-        self.combo_duration_test_mode = QComboBox()
-        self.combo_duration_test_mode.addItem("Welch's t-test (unpaired)", "welch")
-        self.combo_duration_test_mode.addItem("Paired t-test", "paired")
-        self.combo_duration_test_mode.currentIndexChanged.connect(self._on_duration_test_mode_changed)
-        duration_form.addRow("Test:", make_help_row(
-            self.combo_duration_test_mode, "Comparison test",
-            "'Welch's t-test': compares the per-track contact durations (each track's longest bout "
-            "with the class, and its contact-time fraction) between the two groups without "
-            "assuming equal variances. 'Paired t-test': averages durations within each 'Pairing "
-            "column(s)' value (combined, if more than one is selected) first, then pairs the two "
-            "groups' averages for the same value (e.g. the same sample) — pairing units missing "
-            "either side are dropped."
-        ))
-        g_contact.addLayout(duration_form)
-        self.label_duration_pairing_cols = QLabel("Pairing column(s) (Ctrl/Cmd click for multiple):")
-        self.label_duration_pairing_cols.setWordWrap(True)
-        g_contact.addWidget(self.label_duration_pairing_cols)
-        self.list_duration_pairing_cols = QListWidget()
-        self.list_duration_pairing_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        g_contact.addWidget(self.list_duration_pairing_cols)
         duration_form2 = QFormLayout()
         duration_form2.setSpacing(3)
         self.spin_duration_comparisons_per_page = QSpinBox()
@@ -7690,12 +7666,10 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.btn_view_duration_comparison = _make_view_btn()
         duration_row.addWidget(self.btn_view_duration_comparison)
         g_contact.addLayout(duration_row)
-        self._on_duration_test_mode_changed()
 
         g_contact.addWidget(_make_info_label(
             "Contact type comparison (mean contact fraction per cluster, side by side across "
-            "selected contact columns — e.g. healthy vs. tumor organoid contact; purely "
-            "descriptive, no significance test):"
+            "selected contact columns — e.g. healthy vs. tumor organoid contact):"
         ))
         g_contact.addWidget(_make_info_label("Contact columns to compare (Ctrl/Cmd click for 2+):"))
         self.list_contact_type_compare_cols = QListWidget()
@@ -9328,17 +9302,6 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         self._sync_track_comparison_group_y_text()
         self._refresh_track_comparison_group_levels()
 
-        # Pairing column(s) for the paired contact-duration test: "sample_name" is always offered
-        # first (the common case, matching a typical R paired-t-test workflow) even though it's
-        # not itself one of the condition-like candidate_cols above, and is pre-selected by
-        # default so a fresh list behaves like the old single-select combo box did.
-        pairing_options = ["sample_name"] + [c for c in candidate_cols if c != "sample_name"]
-        _refill_list_keep_selection(self.list_duration_pairing_cols, pairing_options)
-        _fit_list_widget_height(self.list_duration_pairing_cols)
-        if not self.list_duration_pairing_cols.selectedItems():
-            for item in self.list_duration_pairing_cols.findItems("sample_name", Qt.MatchExactly):
-                item.setSelected(True)
-
     def _on_track_proportion_group_x_changed(self, _text):
         self._refresh_track_proportion_group_x_levels()
 
@@ -9557,11 +9520,6 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             and use_target
             and available
         )
-
-    def _on_duration_test_mode_changed(self, *_args):
-        is_paired = self.combo_duration_test_mode.currentData() == "paired"
-        self.label_duration_pairing_cols.setVisible(is_paired)
-        self.list_duration_pairing_cols.setVisible(is_paired)
 
     def _on_long_contact_unit_changed(self, *_args):
         unit = self.combo_long_contact_unit.currentData()
@@ -11826,15 +11784,6 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         if not csv_path or not csv_path.exists():
             self._contact_warn_or_skip(chain_next, "No data", "Track-features CSV not found. Run feature extraction first.")
             return
-        test_mode = self.combo_duration_test_mode.currentData()
-        pairing_cols = []
-        if test_mode == "paired":
-            pairing_cols = [item.text() for item in self.list_duration_pairing_cols.selectedItems()]
-            if not pairing_cols:
-                self._contact_warn_or_skip(
-                    chain_next, "Missing selection", "Select at least one pairing column for the paired t-test.",
-                )
-                return
         from behav3d.core.utils import minutes_per_frame_from_metadata
         long_contact_threshold_raw = self.spin_long_contact_threshold.value()
         long_contact_unit = self.combo_long_contact_unit.currentData()
@@ -11876,7 +11825,7 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             contact_dir = _resolve_track_paths(str(out) if out else "", ct).outfolder
 
             cols_to_merge = [
-                c for c in pairing_cols + selected_extra_cols
+                c for c in selected_extra_cols
                 if c not in track_adata.obs.columns
             ]
             if cols_to_merge and md is not None:
@@ -11909,8 +11858,6 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
                 touching_col=touching_col,
                 time_varying=time_varying,
                 target_cell_type_label=target_ct,
-                test_mode=test_mode,
-                pairing_col=pairing_cols or None,
                 minutes_per_frame=minutes_per_frame if minutes_valid else None,
                 long_contact_threshold=long_contact_threshold,
                 long_contact_unit=long_contact_unit,

@@ -3,9 +3,7 @@
 Lets a user pick multiple per-organoid-type contact columns (e.g. `healthy_organoid_contact`
 vs. `tumor_organoid_contact`, both aggregated into `any_organoid_contact` by
 `behav3d.features.timepoint_features`) and compare, per behavioral cluster, the mean contact
-fraction for each selected type side by side — purely descriptive (mean +/- SEM, no
-significance test), matching the "descriptive only" convention already used by
-`proportion_bars.plot_condition_time_series_grid`.
+fraction for each selected type side by side (mean +/- SEM).
 """
 from pathlib import Path
 
@@ -60,7 +58,7 @@ def save_track_contact_type_comparison(
     `merge_track_contact_features_into_obs` once per contact column (unchanged; same as
     `contact_cluster_heatmap.save_track_contact_cluster_heatmap`), then melts the resulting
     per-track `{contact_col}_mean_fraction` columns to long form and aggregates to mean/SEM per
-    (cluster, contact column) — no significance test, no p-values.
+    (cluster, contact column).
 
     Writes `contact_analysis/contact_type_comparison/<contact_cols joined by "_vs_">/contact_type_comparison.pdf`
     (one grouped bar chart page) and a sibling `csv/contact_type_comparison.csv` (the long-form

@@ -370,7 +370,7 @@ def summarize_state_shift_track_fractions(
     period_col="period",
 ):
     """Per-track, per-period fraction of timepoints spent in each state — the per-track summary
-    the before/after Welch's-t-test diff-bar panel needs (each track is exactly one independent
+    the before/after diff-bar panel needs (each track is exactly one independent
     observation), as opposed to the per-timepoint pooling the stacked-composition panel uses.
 
     Returns a DataFrame indexed by ``(*groupby_cols, period_col)`` with one column per
