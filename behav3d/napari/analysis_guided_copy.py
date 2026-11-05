@@ -390,7 +390,7 @@ STATE_KILLING_REPORT = {
     "concept": None,
     "what_get": (
         "CSVs per timepoint, cell, image and state, ready for your own statistics, plus "
-        "a PDF with box plots per cell and per timepoint side by side."
+        "a PDF with bar plots per cell and per timepoint side by side."
     ),
     "decide": [
         _decide("Which state column to use", _SUGGESTED),
@@ -400,7 +400,7 @@ STATE_KILLING_REPORT = {
     "seed": (
         "Explain the BEHAV3D Killing by State report: how killing efficiency is linked to "
         "behavioral states, why solo contacts and full windows are the default, and the "
-        "difference between the per-cell and per-timepoint box plots."
+        "difference between the per-cell and per-timepoint plots."
     ),
 }
 

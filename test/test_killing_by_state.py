@@ -17,6 +17,8 @@ import yaml
 
 matplotlib.use("Agg", force=True)
 
+import matplotlib.pyplot as plt
+
 from behav3d.analysis.behavior.state.killing_by_state import (
     KillingSettings,
     build_killing_timepoints,
@@ -30,6 +32,8 @@ from behav3d.analysis.behavior.state.killing_by_state import (
     summarize_killing_by_state,
 )
 from behav3d.analysis.behavior.state.visualization.plots.killing_by_state_report import (
+    BAR_KEY,
+    _fig_two_bar_plots,
     _settings_subtitle,
     save_state_killing_report,
 )
@@ -501,6 +505,41 @@ def test_report_says_when_it_differs_from_extracted_features(tmp_path):
     assert result["differences"] == ["Window 3 tp differs from extracted features (5 tp)."]
     assert "Recomputed: Window 3 tp differs" in _settings_subtitle(settings, True, True)
     assert not (tmp_path / "analysis" / CT / "active_killing").exists()
+
+
+def test_bar_plots_show_means_with_sem_and_handle_sparse_states():
+    cells = pd.DataFrame({
+        "state": ["A", "A", "A", "B"],
+        "mean_killing_efficiency": [1.0, 2.0, 6.0, 4.0],
+    })
+    timepoints = pd.DataFrame({
+        "state": ["A", "A", "B", "B"],
+        "killing_efficiency": [0.0, 10.0, 2.0, 4.0],
+    })
+    order = ["A", "B", "Empty"]
+    colors = {"A": "#1f77b4", "B": "#ff7f0e", "Empty": "#2ca02c"}
+    fig = _fig_two_bar_plots(cells, timepoints, order, colors, "subtitle")
+    try:
+        cell_ax, timepoint_ax = fig.axes
+        heights = [p.get_height() for p in cell_ax.patches]
+        assert heights[:2] == pytest.approx([3.0, 4.0])
+        assert np.isnan(heights[2])
+        assert [p.get_height() for p in timepoint_ax.patches][:2] == pytest.approx([5.0, 3.0])
+
+        error_bars = cell_ax.containers[-1].errorbar
+        segments = error_bars.lines[2][0].get_segments()
+        low, high = segments[0][:, 1]
+        assert (high - low) / 2 == pytest.approx(pd.Series([1.0, 2.0, 6.0]).sem())
+        assert segments[1].size == 0  # one value has no SEM, so no error bar is drawn
+        assert [t.get_text().splitlines()[-1] for t in cell_ax.get_xticklabels()] == [
+            "n = 3", "n = 1", "n = 0",
+        ]
+    finally:
+        plt.close(fig)
+
+
+def test_subtitle_explains_the_bars():
+    assert BAR_KEY in _settings_subtitle(_settings(), True, True)
 
 
 def test_report_repeats_per_group_and_adds_group_columns(tmp_path):

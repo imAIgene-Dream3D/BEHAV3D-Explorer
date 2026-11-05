@@ -1,6 +1,6 @@
 """Killing by State report: descriptive killing efficiency per behavioral state.
 
-Writes the CSVs for a downstream analysis of killing efficiency per state, plus one PDF with box
+Writes the CSVs for a downstream analysis of killing efficiency per state, plus one PDF with bar
 plots per cell and per timepoint side by side. No model is fitted and no test is run.
 """
 import textwrap
@@ -37,7 +37,7 @@ TIMEPOINT_TITLE = "Killing efficiency per timepoint"
 TIMEPOINT_DESCRIPTION = (
     "Each timepoint gives one value, so cells that stay longer in a state weigh more. n = timepoints."
 )
-BOX_KEY = "Box: median and quartiles. Whiskers: 1.5 x IQR. Dots: values beyond them. Diamond: mean."
+BAR_KEY = "Bar: mean. Error bar: SEM."
 
 
 def _style_axis(ax):
@@ -64,7 +64,7 @@ def _settings_subtitle(settings, solo_only, full_windows_only, group_label=None)
     parts = [f"window {settings.window} tp, threshold {threshold}"]
     parts.append("solo contacts" if solo_only else "all contacts")
     parts.append("full windows only" if full_windows_only else "all windows")
-    lines = [" · ".join(parts), BOX_KEY]
+    lines = [" · ".join(parts), BAR_KEY]
     if group_label:
         lines.insert(0, group_label)
     if settings.needs_recompute:
@@ -79,25 +79,19 @@ def _add_subtitle(fig, subtitle):
     fig.tight_layout(rect=(0, 0, 1, 1 - line_height * (subtitle.count("\n") + 1) - 0.005))
 
 
-def _draw_boxes(ax, values_per_state, colors, state_order):
+def _draw_bars(ax, values_per_state, colors, state_order):
+    """Mean with SEM per state. A state with no values has no bar, and one value has no error bar."""
     positions = np.arange(len(state_order))
-    box = ax.boxplot(
-        values_per_state, positions=positions, widths=0.62, patch_artist=True, showmeans=True,
-        medianprops={"color": INK, "linewidth": 1.4},
-        boxprops={"edgecolor": INK, "linewidth": 0.9},
-        whiskerprops={"color": INK, "linewidth": 0.9},
-        capprops={"color": INK, "linewidth": 0.9},
-        flierprops={"marker": "o", "markersize": 2.2, "markerfacecolor": "white",
-                    "markeredgecolor": INK, "markeredgewidth": 0.4},
-        meanprops={"marker": "D", "markersize": 4.5, "markerfacecolor": "white",
-                   "markeredgecolor": "black", "markeredgewidth": 0.9},
+    values = [pd.Series(v, dtype=float) for v in values_per_state]
+    ax.bar(
+        positions, [v.mean() for v in values], yerr=[v.sem() for v in values], width=0.62,
+        color=[colors[s] for s in state_order], edgecolor=INK, linewidth=0.9,
+        error_kw={"ecolor": INK, "elinewidth": 0.9, "capsize": 3, "capthick": 0.9},
     )
-    for patch, state in zip(box["boxes"], state_order):
-        patch.set_facecolor(colors[state])
     ax.set_xticks(positions)
 
 
-def _fig_two_boxplots(cell_state, used_timepoints, state_order, colors, subtitle):
+def _fig_two_bar_plots(cell_state, used_timepoints, state_order, colors, subtitle):
     width = max(7.6, 1.5 + 2 * 0.72 * len(state_order))
     # About 21 characters per inch at this size; keeps each description within its own panel.
     description_chars = int((width - 1.2) / 2 * 21)
@@ -113,7 +107,7 @@ def _fig_two_boxplots(cell_state, used_timepoints, state_order, colors, subtitle
     title_pad = 8 + 8.5 * description_lines
     for ax, table, column, title, description in panels:
         values = [table.loc[table["state"] == s, column].to_numpy() for s in state_order]
-        _draw_boxes(ax, values, colors, state_order)
+        _draw_bars(ax, values, colors, state_order)
         counts = {s: len(v) for s, v in zip(state_order, values)}
         ax.set_xticklabels(_state_tick_labels(state_order, counts))
         ax.set_title(title, fontsize=9.5, fontweight="bold", loc="left", color="black", pad=title_pad)
@@ -230,7 +224,7 @@ def save_state_killing_report(
                         pdf.savefig(fig)
                         plt.close(fig)
                         continue
-                    fig = _fig_two_boxplots(group_cells, group_timepoints, state_order, colors, subtitle)
+                    fig = _fig_two_bar_plots(group_cells, group_timepoints, state_order, colors, subtitle)
                     pdf.savefig(fig, bbox_inches="tight")
                     plt.close(fig)
 

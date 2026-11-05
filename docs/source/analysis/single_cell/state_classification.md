@@ -334,12 +334,12 @@ When the window or threshold differs from what your extracted features were made
 
 ### Plot
 
-`killing_by_state.pdf` shows two box plots side by side, with one page per group if you group. Running the report again replaces the PDF and CSVs of the previous run, so copy them elsewhere to keep them. The window, threshold and filters a run used are printed at the top of the plot.
+`killing_by_state.pdf` shows two bar plots side by side, with one page per group if you group. Running the report again replaces the PDF and CSVs of the previous run, so copy them elsewhere to keep them. The window, threshold and filters a run used are printed at the top of the plot.
 
 - **Killing efficiency per cell (cell means):** each cell gives one value, the mean of its timepoints in that state. `n` is the number of cells.
 - **Killing efficiency per timepoint:** each timepoint gives one value, so cells that stay longer in a state weigh more. `n` is the number of timepoints.
 
-In both, the box shows the median and quartiles, the whiskers reach 1.5 times the interquartile range, the dots are values beyond them, and the diamond is the mean. Killing efficiency is usually very skewed, so the median can sit near 0 while the mean is clearly higher.
+In both, the bar is the mean and the error bar is the SEM of the panel's values.
 
 The two panels have **separate y-axes**, because single timepoints reach much higher values than cell means. Compare states within a panel, not heights across panels.
 

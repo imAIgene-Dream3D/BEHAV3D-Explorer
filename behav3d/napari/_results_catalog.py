@@ -226,7 +226,7 @@ FILE_CATALOG: list[tuple[str, str]] = [
     ),
     (
         "killing_by_state.pdf",
-        "Killing efficiency per behavioral state: box plots per cell and per timepoint.",
+        "Killing efficiency per behavioral state: bar plots per cell and per timepoint.",
     ),
     (
         "*_confusion_matrices.pdf",
