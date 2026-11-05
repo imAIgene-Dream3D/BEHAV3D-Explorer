@@ -8,8 +8,9 @@ reference to the main ``BEHAV3DWidget`` so it can read live workflow context
 
 Layout (top → bottom):
   • context bar          — 📍 step · N samples · output dir · M queued (live)
-  • chat transcript      — QTextBrowser, markdown, streamed assistant tokens
+  • chat transcript      — one markdown bubble per message, streamed assistant tokens
   • proposed-action tray — confirm cards: "old -> new  [Fill it in] [Dismiss]"
+  • plan panel           — pinned checklist of recommended steps + Continue
   • quick actions        — Explain this screen · Tell me about my data
   • input row            — text box + Send
 
@@ -23,7 +24,7 @@ from typing import Optional
 from qtpy.QtCore import Qt, QThread, QTimer, Signal
 from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
-    QPlainTextEdit, QProgressBar, QTextBrowser, QFrame, QSizePolicy, QScrollArea,
+    QPlainTextEdit, QProgressBar, QFrame, QSizePolicy, QScrollArea,
 )
 
 from behav3d.napari._assistant_context import (
@@ -36,6 +37,10 @@ from behav3d.napari._assistant_actions import (
 )
 from behav3d.napari._assistant_client import (
     ChatWorker, HealthWorker, load_client_config,
+)
+from behav3d.napari._assistant_plan import PlanState, extract_plan, record_outcome
+from behav3d.napari._assistant_widgets import (
+    CHAT_STYLESHEET, _ChatTranscript, _PlanPanel,
 )
 
 
@@ -75,12 +80,6 @@ def _pending_action_identity(action: ProposedAction) -> tuple | None:
     }:
         return (kind,)
     return None
-
-_CHAT_ROLE_COLORS = {
-    "assistant": "#30363b",
-    "user": "#173847",
-}
-
 
 def _coerce_bool(value) -> bool:
     if isinstance(value, str):
@@ -227,6 +226,7 @@ def _fill_value_matches_current(
     return False
 
 
+_SENT_PREFIX = "Sent to the interface: "
 _SYSTEM_PRIMER = (
     "Answer as the BEHAV3D Assistant. Use researcher-facing labels, read the live "
     "interface context before asking for values, and keep answers concise."
@@ -288,14 +288,12 @@ def streaming_transcript_block(
     return f"**BEHAV3D Assistant**\n\n{body}"
 
 
-def transcript_block_role(text: str, current_role: str | None = None) -> str | None:
-    """Track the speaker while walking blocks produced by ``setMarkdown``."""
-    label = str(text or "").strip()
-    if label == "You":
-        return "user"
-    if label == "BEHAV3D Assistant":
-        return "assistant"
-    return current_role
+def split_transcript_block(block: str) -> tuple[str, str]:
+    """Separate a transcript block into its speaker and message text."""
+    for role, label in (("user", "**You**"), ("assistant", "**BEHAV3D Assistant**")):
+        if block.startswith(label):
+            return role, block[len(label):].strip()
+    return "assistant", block
 
 
 class _ChatInput(QPlainTextEdit):
@@ -384,6 +382,14 @@ class AssistantDock(QWidget):
         self._md_queue: list[dict] = []
         self._md_phase: str | None = None
         self._current_intent: str = "free_form"
+        # Steps a reply recommended and what happened in the interface. Both travel
+        # in assistant_session, so they outlive the message window without adding
+        # text that the handlers reading the previous assistant message would see.
+        self._plan = PlanState()
+        self._outcomes: list[str] = []
+        self._declined: set[tuple] = set()  # changes the researcher kept the old value for
+        self._turn_reply = ""        # assistant text of the request in flight
+        self._turn_canned = False    # that text came from a deterministic handler
         self._conversation_generation = 0
         self._request_active = False
         self._request_outcome = "idle"
@@ -399,12 +405,12 @@ class AssistantDock(QWidget):
         # Coalesce streamed-token re-renders. Re-rendering the whole transcript on
         # every token saturates the GUI thread on long answers (the napari window
         # freezes until the stream ends). This single-shot timer batches tokens into
-        # at most one render per interval; the expensive full-document style walk is
-        # applied only on the final render of the turn.
+        # at most one render per interval, and each render touches only the bubble
+        # whose text changed.
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.setInterval(90)
-        self._render_timer.timeout.connect(self._render_streaming)
+        self._render_timer.timeout.connect(self._render)
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(1000)
         self._status_timer.timeout.connect(self._refresh_status_label)
@@ -414,18 +420,8 @@ class AssistantDock(QWidget):
         self._recovery_timer.timeout.connect(self._run_recovery_check)
 
         # Cohesive dark-theme styling for the whole dock (matches napari surfaces).
-        self.setStyleSheet("""
+        self.setStyleSheet(CHAT_STYLESHEET + """
             AssistantDock { background-color: #2a2d30; }
-            QTextBrowser {
-                background-color: #232629;
-                color: #e6e6e6;
-                border: 1px solid #3a3f44;
-                border-radius: 4px;
-                padding: 10px;
-                font-family: "Helvetica Neue", "Segoe UI", Arial, sans-serif;
-                font-size: 13px;
-                selection-background-color: #3d6b8a;
-            }
             QLineEdit, QPlainTextEdit {
                 background-color: #2f3338; color: #e6e6e6;
                 border: 1px solid #3a3f44; border-radius: 4px;
@@ -488,10 +484,7 @@ class AssistantDock(QWidget):
         root.addWidget(self.thinking_progress)
 
         # --- transcript ---------------------------------------------------
-        self.transcript = QTextBrowser()
-        self.transcript.setOpenExternalLinks(True)
-        self.transcript.setFrameShape(QFrame.NoFrame)
-        self.transcript.document().setDocumentMargin(2)
+        self.transcript = _ChatTranscript()
         root.addWidget(self.transcript, stretch=1)
 
         # --- proposed-action tray ----------------------------------------
@@ -508,7 +501,7 @@ class AssistantDock(QWidget):
         self.btn_clear_actions = QPushButton("Dismiss all")
         self.btn_clear_actions.setToolTip("Discard every pending proposed change")
         self.btn_clear_actions.setStyleSheet("padding:3px 6px; font-size:10px;")
-        self.btn_clear_actions.clicked.connect(self._clear_action_cards)
+        self.btn_clear_actions.clicked.connect(self._dismiss_all_actions)
         action_header.addWidget(self.btn_clear_actions)
         action_panel_layout.addLayout(action_header)
 
@@ -525,6 +518,15 @@ class AssistantDock(QWidget):
         action_panel_layout.addWidget(self.action_scroll)
         self.action_tray_panel.setVisible(False)
         root.addWidget(self.action_tray_panel)
+
+        # --- plan panel ---------------------------------------------------
+        self.plan_panel = _PlanPanel()
+        self.plan_panel.setVisible(False)
+        self.plan_panel.advanceRequested.connect(self._on_plan_advance)
+        self.plan_panel.dismissRequested.connect(self._on_plan_dismissed)
+        self.plan_panel.offerAccepted.connect(self._on_plan_offer_accepted)
+        self.plan_panel.stepToggled.connect(self._on_plan_step_toggled)
+        root.addWidget(self.plan_panel)
 
         # --- quick actions (rebuilt on tab switch) ------------------------
         self.quick_widget = QWidget()
@@ -750,6 +752,11 @@ class AssistantDock(QWidget):
         self._md_queue = []
         self._md_phase = None
         self._current_intent = "free_form"
+        self._plan.clear()
+        self._outcomes = []
+        self._declined = set()
+        self._turn_reply = ""
+        self._turn_canned = False
         self._render_timer.stop()
         self.input.clear()
         self._clear_action_cards()
@@ -764,16 +771,8 @@ class AssistantDock(QWidget):
     # ------------------------------------------------------------------
     # Transcript helpers
     # ------------------------------------------------------------------
-    def _render(self, style: bool = True):
-        """Re-render the whole transcript as markdown.
-
-        QTextCursor.insertMarkdown does not exist in PyQt5, so we keep a log of
-        markdown blocks and render the document with QTextEdit.setMarkdown (which
-        does render bold/italic/lists/code), then pin the scrollbar to the bottom.
-
-        ``style=False`` skips the full-document style walk — used for the throttled
-        renders during token streaming so a long answer doesn't freeze the GUI.
-        """
+    def _render(self):
+        """Show the finalised blocks and any reply in progress, one bubble each."""
         # Any direct/full render supersedes a pending throttled one.
         self._render_timer.stop()
         blocks = list(self._md_log)
@@ -784,61 +783,13 @@ class AssistantDock(QWidget):
         )
         if streaming:
             blocks.append(streaming)
-        try:
-            self.transcript.setMarkdown("\n\n".join(blocks))
-        except Exception:
-            # Fallback for any Qt build lacking setMarkdown.
-            self.transcript.setPlainText("\n\n".join(blocks))
-        else:
-            if style:
-                try:
-                    self._style_blocks()
-                except Exception:
-                    pass  # spacing only; keep the rendered markdown
-        sb = self.transcript.verticalScrollBar()
-        sb.setValue(sb.maximum())
-
-    def _render_streaming(self):
-        """Throttled render during streaming — skips the expensive style walk,
-        which is applied once when the turn finishes (_on_finished → _render)."""
-        self._render(style=False)
+        self.transcript.set_blocks([split_transcript_block(block) for block in blocks])
 
     def _schedule_render(self):
         """Request a render soon, coalescing bursts of streamed tokens into at
         most one render per timer interval."""
         if not self._render_timer.isActive():
             self._render_timer.start()
-
-    def _style_blocks(self):
-        """setMarkdown renders paragraphs/lists very tightly. Walk the document
-        and add line spacing + paragraph spacing so responses are readable."""
-        try:
-            from qtpy.QtGui import (
-                QBrush, QColor, QTextCursor, QTextBlockFormat,
-            )
-        except Exception:
-            return
-        # Qt 6 takes the line-height type as an int, which PyQt6 enums are not.
-        proportional = getattr(QTextBlockFormat.ProportionalHeight, "value",
-                               QTextBlockFormat.ProportionalHeight)
-        doc = self.transcript.document()
-        block = doc.begin()
-        role = None
-        while block.isValid():
-            cur = QTextCursor(block)
-            bf = cur.blockFormat()
-            previous_role = role
-            role = transcript_block_role(block.text(), role)
-            is_role_label = role != previous_role
-            bf.setLineHeight(140, proportional)  # 1.4× line spacing
-            bf.setTopMargin(8.0 if is_role_label else 2.0)
-            bf.setBottomMargin(5.0)
-            if role in _CHAT_ROLE_COLORS:
-                bf.setBackground(QBrush(QColor(_CHAT_ROLE_COLORS[role])))
-                bf.setLeftMargin(10.0)
-                bf.setRightMargin(10.0)
-            cur.setBlockFormat(bf)
-            block = block.next()
 
     def _append_md(self, markdown: str):
         content = str(markdown or "").lstrip()
@@ -849,6 +800,7 @@ class AssistantDock(QWidget):
 
     def _append_user(self, text: str):
         self._append_md(f"**You**\n\n{text}")
+        self.transcript.scroll_to_end()
 
     # ------------------------------------------------------------------
     # Sending
@@ -882,6 +834,7 @@ class AssistantDock(QWidget):
         if self._md_current is not None:
             self._md_handle_answer(text)
             return
+        self._plan.handle_message(text)
         # Short replies such as "APOC", "3 is fine", or "next" remain part of a
         # button-started guide. Longer questions return to normal free-form mode.
         guided_reply = self._guided_flow_active and len(text) <= 100
@@ -902,6 +855,8 @@ class AssistantDock(QWidget):
         if self._request_active:
             return
         self._current_intent = intent
+        self._turn_reply = ""
+        self._turn_canned = False
         if reset_guidance:
             # Any LLM-bound send (free-form or another guide button) cancels the
             # deterministic metadata wizard.
@@ -924,9 +879,13 @@ class AssistantDock(QWidget):
             ctx = build_context(self.main_widget)
             ctx["assistant_session"] = {
                 "intent": self._current_intent,
+                "plan": self._plan.to_context(),
+                "recent_outcomes": list(self._outcomes),
             }
         except Exception:
             ctx = {}
+        self._plan.finish_request_setup()
+        self._refresh_plan_panel()
 
         messages = [{"role": "system", "content": _SYSTEM_PRIMER}] + self._history
         worker = ChatWorker(messages=messages, context=ctx, tools=TOOL_SCHEMA)
@@ -983,6 +942,7 @@ class AssistantDock(QWidget):
         else:
             self._status_timer.stop()
             self._refresh_status_label()
+        self._refresh_plan_panel()
         # Leave the input box editable while a turn is in flight so the user can
         # type their next answer without waiting for the stream to finish.
         for i in range(self._quick_layout.count()):
@@ -1005,9 +965,11 @@ class AssistantDock(QWidget):
         level = (info or {}).get("level")
         if level in {"offline", "error"}:
             self._request_outcome = level
+        if (info or {}).get("stage") == "local_guidance":
+            self._turn_canned = True
         self._set_service_status(info)
         if self._request_active and not self._streaming_text:
-            self._render(style=False)
+            self._render()
 
     def _on_token(self, chunk: str):
         if self._streaming_text is None:
@@ -1071,6 +1033,14 @@ class AssistantDock(QWidget):
                     action.message = "That analysis view is already open."
         except Exception:
             actions = []
+        proposed = len(actions)
+        actions = [action for action in actions if not self._repeats_declined(action)]
+        if proposed and not actions and not str(self._streaming_text or "").strip():
+            self._streaming_text = (
+                "You kept the current value for that change, so it stays as it is."
+            )
+            self._finalize_streaming()
+            self._render()
         if (
             actions
             and all(self._is_noop_action(action) for action in actions)
@@ -1106,6 +1076,7 @@ class AssistantDock(QWidget):
                         except Exception:
                             ok = False
                         if ok:
+                            self._record_applied(act)
                             if act.data.get("result_markdown"):
                                 self._append_action_result(act.data["result_markdown"])
                             elif act.kind == "bulk_fill_metadata":
@@ -1117,8 +1088,12 @@ class AssistantDock(QWidget):
                                     "and tell me anything you'd like to change."
                                 )
                             # Only count as a meaningful change if it wasn't a structural
-                            # trigger or a same-value no-op re-call from the model.
-                            elif not _silent_auto:
+                            # trigger or a same-value no-op re-call from the model. A tab
+                            # switch needs no note when the reply already speaks for it.
+                            elif not _silent_auto and not (
+                                act.kind in ("navigate_to_step", "open_analysis_view")
+                                and self._turn_reply
+                            ):
                                 auto_previews.append(act.preview)
                             if not batch:
                                 self.refresh_context_bar()
@@ -1131,6 +1106,12 @@ class AssistantDock(QWidget):
 
         if auto_previews:
             self._append_md("Filled in: " + " · ".join(auto_previews))
+        if actions and not self._turn_reply:
+            # A reply of tool calls alone leaves no assistant turn, so the model reads
+            # the request as unanswered and acts on it again, even after a decline.
+            sent = "; ".join(action.preview or action.kind for action in actions)
+            self._history.append({"role": "assistant", "content": _SENT_PREFIX + sent})
+        self._refresh_plan_panel()
         # A no-op means the proposed value was already present. Treat that as
         # confirmation from the user's previous answer and move forward silently
         # instead of rendering a scary "Already set" card.
@@ -1237,6 +1218,7 @@ class AssistantDock(QWidget):
             self._streaming_text = researcher_facing_text(self._streaming_text)
             self._md_log.append(f"**BEHAV3D Assistant**\n\n{self._streaming_text}")
             self._history.append({"role": "assistant", "content": self._streaming_text})
+            self._turn_reply = f"{self._turn_reply}\n\n{self._streaming_text}".strip()
         self._streaming_text = None
 
     def _on_finished(self):
@@ -1253,6 +1235,12 @@ class AssistantDock(QWidget):
                 "message": "Response completed.",
                 "request_id": (self._status_info or {}).get("request_id"),
             })
+            # Only here: tool calls finalize the text early, and a failed request can
+            # leave a partial list.
+            plan = extract_plan(self._turn_reply, canned=self._turn_canned)
+            if plan is not None:
+                self._plan.adopt(*plan)
+            self._refresh_plan_panel()
         if had_text:
             self._append_log()
 
@@ -1335,7 +1323,7 @@ class AssistantDock(QWidget):
                     self._remove_card(existing)
         card = _ActionCard(action)
         card.confirmed.connect(self._apply_action)
-        card.dismissed.connect(lambda a, c=card: self._remove_card(c))
+        card.dismissed.connect(lambda a, c=card: self._dismiss_action(a, c))
         self.action_tray_layout.addWidget(card)
         self._update_action_tray_visibility()
         QTimer.singleShot(
@@ -1362,6 +1350,106 @@ class AssistantDock(QWidget):
 
     def _update_action_tray_visibility(self):
         self.action_tray_panel.setVisible(self.action_tray_layout.count() > 0)
+        self._refresh_plan_panel()
+
+    def _dismiss_action(self, action: ProposedAction, card: _ActionCard):
+        self._record_declined(action)
+        self._remove_card(card)
+
+    def _dismiss_all_actions(self):
+        for index in range(self.action_tray_layout.count()):
+            card = self.action_tray_layout.itemAt(index).widget()
+            if isinstance(card, _ActionCard):
+                self._record_declined(card.action)
+        self._clear_action_cards()
+
+    def _record_declined(self, action: ProposedAction):
+        self._outcomes = record_outcome(self._outcomes, f"Declined: {action.preview}")
+        self._note_in_history(action, "declined, so the value did not change")
+        identity = _pending_action_identity(action)
+        if identity is not None and "value" in action.data:
+            self._declined.add((identity, repr(action.data["value"])))
+
+    def _repeats_declined(self, action: ProposedAction) -> bool:
+        """A declined change stays declined until the researcher asks for it again."""
+        identity = _pending_action_identity(action)
+        if "value" not in action.data:
+            return False
+        value = action.data["value"]
+        if (identity, repr(value)) not in self._declined:
+            return False
+        latest = next((
+            message["content"] for message in reversed(self._history)
+            if message["role"] == "user"
+        ), "")
+        return (f"{value:g}" if isinstance(value, float) else str(value)) not in latest
+
+    def _note_in_history(self, action: ProposedAction, note: str):
+        """Settle a tool-only turn where the model reads it, not just in the prompt."""
+        for message in reversed(self._history):
+            content = message["content"]
+            if content.startswith(_SENT_PREFIX) and action.preview in content:
+                message["content"] = content.replace(
+                    action.preview, f"{action.preview} ({note})", 1
+                )
+                return
+
+    def _record_applied(self, action: ProposedAction):
+        """Note an applied action for the next request and move the plan with it."""
+        if action.kind in ("navigate_to_step", "open_analysis_view"):
+            target = action.data.get("step") or action.data.get("view")
+            label = str(target or "").replace("_", " ")
+            self._outcomes = record_outcome(self._outcomes, f"Opened {label}")
+            self._plan.note_navigation(label)
+        else:
+            self._outcomes = record_outcome(
+                self._outcomes, f"Applied: {action.preview}"
+            )
+            self._note_in_history(action, "applied")
+            self._plan.note_applied()
+
+    # ------------------------------------------------------------------
+    # Plan panel
+    # ------------------------------------------------------------------
+    def _refresh_plan_panel(self):
+        self.plan_panel.show_plan(
+            self._plan,
+            # _send_message drops input during a request, and a send would cancel
+            # the metadata wizard.
+            enabled=not self._request_active and self._md_current is None,
+            emphasis=self._plan.applied and self.action_tray_layout.count() == 0,
+        )
+
+    def _on_plan_advance(self):
+        step = self._plan.advance()
+        if step is None:
+            self._finish_plan()
+            return
+        self._guided_flow_active = False
+        # Fixed wording: a step title could trip a keyword handler, or make a value
+        # the model wrote look as though the researcher supplied it.
+        self._send_message(f"Continue with step {step}")
+
+    def _finish_plan(self):
+        self._plan.clear()
+        self._outcomes = record_outcome(self._outcomes, "Finished the plan")
+        self._append_md("All plan steps are done.")
+        self._refresh_plan_panel()
+
+    def _on_plan_dismissed(self):
+        self._plan.clear()
+        self._refresh_plan_panel()
+
+    def _on_plan_offer_accepted(self):
+        self._plan.accept_offer()
+        self._refresh_plan_panel()
+
+    def _on_plan_step_toggled(self, index: int):
+        self._plan.toggle(index)
+        if self._plan.active:
+            self._refresh_plan_panel()
+        else:
+            self._finish_plan()
 
     def _append_action_result(self, markdown: str):
         """Display a deterministic action result and retain it for follow-ups."""
@@ -1376,6 +1464,7 @@ class AssistantDock(QWidget):
         except Exception as e:
             self._append_md(f"\nCould not apply: {e}")
         if ok:
+            self._record_applied(action)
             if action.data.get("result_markdown"):
                 self._append_action_result(action.data["result_markdown"])
             elif action.kind == "set_parameter" and not action.data.get("widget_updated"):
@@ -1396,6 +1485,9 @@ class AssistantDock(QWidget):
                 self._append_md(message)
             self.refresh_context_bar()
         else:
+            self._outcomes = record_outcome(
+                self._outcomes, f"Could not apply: {action.preview}"
+            )
             self._append_md(f"Could not apply: {action.preview}")
         # remove all cards for this action
         for i in reversed(range(self.action_tray_layout.count())):
@@ -1483,6 +1575,7 @@ class AssistantDock(QWidget):
         if self._md_queue:
             self._md_current = self._md_queue.pop(0)
             self._append_md(f"**BEHAV3D Assistant**\n\n{self._md_current['question']}")
+            self._refresh_plan_panel()
             return
         if self._md_phase == "counts":
             # Counts done → build the cell-type name fields, then ask each name.
@@ -1624,6 +1717,10 @@ class AssistantDock(QWidget):
         dp = getattr(self.main_widget, "data_prep_tab", None)
         dead_cb = getattr(dp, "include_dead_cb", None)
         dead_field = ", **Dead ch #**" if dead_cb is not None and dead_cb.isChecked() else ""
+        self._outcomes = record_outcome(
+            self._outcomes, "Finished the guided Metadata Builder setup"
+        )
+        self._refresh_plan_panel()
         self._append_md(
             "All set — the cell-type fields and per-sample forms are ready below. "
             f"For each sample, fill in the **image path**{dead_field} and acquisition settings; use "

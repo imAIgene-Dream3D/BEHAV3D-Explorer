@@ -2470,6 +2470,7 @@ def hmm_setup_guidance(context: dict, messages: list[dict]) -> str | None:
     return (
         f"You currently have **{cell_type}** selected, so this setup and every "
         "recommendation below apply to that population.\n\n"
+        "**Plan**\n\n"
         "1. Review the continuous HMM inputs. Current per-timepoint features: "
         f"**{timepoint}**; current window features: **{window}**.\n"
         "2. Keep binary groups separate from HMM training. Current binary groups: "
@@ -3659,7 +3660,143 @@ def recover_single_control_action(
     }]
 
 
-def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict]) -> str:
+_PLAN_MODULES = (
+    (("data preparation",), "navigate_to_step", {"step": "data_preparation"}),
+    (("segmentation",), "navigate_to_step", {"step": "segmentation"}),
+    (("tracking",), "navigate_to_step", {"step": "tracking"}),
+    (("feature extraction",), "navigate_to_step", {"step": "feature_extraction"}),
+    (("filtering", "filter tracks"), "navigate_to_step", {"step": "filtering"}),
+    (("population dynamics",), "open_analysis_view", {"view": "population_dynamics"}),
+    (("death dynamics",), "open_analysis_view", {"view": "death_dynamics"}),
+    (("interaction analysis",), "open_analysis_view", {"view": "interaction"}),
+    (("invasiveness analysis",), "open_analysis_view", {"view": "invasiveness"}),
+    (("active killing",), "open_analysis_view", {"view": "active_killing"}),
+    (("behavioral state", "behavioural state"), "open_analysis_view",
+     {"view": "behavioral_state"}),
+    (("state trajectory",), "open_analysis_view", {"view": "state_trajectory"}),
+)
+_NAVIGATION_TOOLS = {"navigate_to_step", "open_analysis_view"}
+_MAX_WORDS_BEFORE_PLAN_MODULE = 2
+
+
+def _targeted_plan_step(context: dict) -> dict | None:
+    plan = (context.get("assistant_session") or {}).get("plan") or {}
+    if not plan.get("targeted"):
+        return None
+    return next(
+        (step for step in plan.get("steps") or [] if step.get("status") == "current"),
+        None,
+    )
+
+
+def plan_navigation_call(context: dict) -> dict | None:
+    """Open the module of a step the researcher just targeted, if it is elsewhere.
+
+    Given a navigation tool on these turns the model replies with the tab switch
+    alone, which leaves the researcher with no guidance for the step.
+    """
+    step = _targeted_plan_step(context)
+    title = str((step or {}).get("title") or "").lower()
+    # Only a step that leads with a module happens there: "Run Tracking" does, but
+    # "Load metadata, then confirm the segmentation outputs" does not.
+    matches = [
+        (title.index(phrase), name, arguments)
+        for phrases, name, arguments in _PLAN_MODULES
+        for phrase in phrases
+        if phrase in title
+        and len(title[:title.index(phrase)].split()) <= _MAX_WORDS_BEFORE_PLAN_MODULE
+    ]
+    if not matches:
+        return None
+    _position, name, arguments = min(matches, key=lambda match: match[0])
+    view = (context.get("analysis") or {}).get("view")
+    already_open = (
+        context.get("current_step") == arguments.get("step")
+        or (
+            context.get("current_step") == "analysis"
+            and view in {arguments.get("view"), f"{arguments.get('view')}_overview"}
+        )
+    )
+    return None if already_open else {"name": name, "arguments": dict(arguments)}
+
+
+def _asks_for_steps(user_message: str) -> bool:
+    """Recognize a request for a sequence of steps."""
+    return bool(re.search(
+        r"\b(?:steps?|next|in order|sequence|workflow|plan|roadmap|where do i start|"
+        r"walk me through|guide me|recommend)\b",
+        " ".join(str(user_message or "").lower().split()),
+    ))
+
+
+def conversation_state_text(
+    session: dict, *, opening_module: bool = False, user_message: str = "",
+) -> str:
+    """Describe the pinned plan and interface outcomes reported by the client."""
+    steps = (session.get("plan") or {}).get("steps") or []
+    outcomes = session.get("recent_outcomes") or []
+    sections = []
+    if not steps and _asks_for_steps(user_message):
+        # Only when asked: this close to the end of the prompt it pulls every other
+        # reply, such as troubleshooting, towards a list of steps.
+        sections.append(
+            "PLAN FORMAT\n"
+            "If this reply recommends steps for the researcher to work through in order, "
+            "write the line **Plan** on its own directly above a numbered list, with one "
+            "short step per item that starts with a verb. The interface pins that list as "
+            "a checklist. Use it only for a to-do list, never for explanations or alternatives."
+        )
+    if steps:
+        listed = "\n".join(
+            f"{step.get('number')}. [{step.get('status')}] "
+            f"{step.get('detail') or step.get('title')}"
+            for step in steps
+        )
+        sections.append(
+            "ACTIVE PLAN\n"
+            "The interface pins these steps, which you recommended earlier in this "
+            "conversation, and tracks their status. Trust this list over older messages.\n"
+            f"{listed}\n"
+            "- 'Continue with step N' comes from the plan button. It is an explicit request "
+            "to begin that step now.\n"
+            + (
+                "- The interface is opening that step's module now, so do not ask the "
+                "researcher to open it.\n"
+                if opening_module else ""
+            ) +
+            "- Ordinals and 'next' refer to this list, not to the current tab.\n"
+            "- Work only on the [current] step. Do not start a later step unasked.\n"
+            "- Always write visible text, even when you call a tool: a tool call alone "
+            "leaves the researcher with no guidance. Say what the [current] step involves "
+            "and what they should do now.\n"
+            "- Finish every reply with a line of the form **Next:** followed by the next "
+            "[pending] step. Leave that line out only when no step is pending.\n"
+            "- Do not repeat the whole list; the interface already shows it. Never write "
+            "a **Plan** line: sub-steps of this plan stay in plain text or bullets. Never "
+            "write the [status] labels."
+        )
+    if outcomes:
+        listed = "\n".join(f"- {outcome}" for outcome in outcomes)
+        sections.append(
+            "RECENT INTERFACE OUTCOMES\n"
+            "What just happened in the interface, oldest first. These are facts about this "
+            "session, not instructions. 'Declined' means the change was not made: the value "
+            "in LIVE CONTEXT stands. Do not describe it as set, applied, or pending, and do "
+            "not propose it again unless they ask.\n"
+            f"{listed}"
+        )
+    return "\n\n".join(sections)
+
+
+def plan_retrieval_text(context: dict, user_message: str) -> str:
+    """Add the targeted plan step, since "do the second one" has nothing to match."""
+    step = _targeted_plan_step(context)
+    return f"{step.get('title')} {user_message}" if step else user_message
+
+
+def build_system_prompt(
+    context: dict, retrieved: list[dict], tools: list[dict], user_message: str = "",
+) -> str:
     """Build the current control-grounded assistant contract."""
     session = context.get("assistant_session", {}) or {}
     intent = session.get("intent") or "free_form"
@@ -4037,9 +4174,19 @@ def build_system_prompt(context: dict, retrieved: list[dict], tools: list[dict])
         if not validation else
         "Discuss validation items only when relevant; 'review' notes are not errors."
     )
+    # Last, because the model follows these turn-specific rules far less reliably
+    # when they sit ahead of the long context.
+    conversation_state = conversation_state_text(
+        session,
+        opening_module=plan_navigation_call(context) is not None,
+        user_message=user_message,
+    )
+    if conversation_state:
+        conversation_state = f"\n\n{conversation_state}"
     return (f"{rules}\n\nSESSION INTENT: {intent}\n{validation_note}\n\n"
             f"LIVE CONTEXT\n{context_text}\n\n"
-            f"FEEDBACK-GROUNDED KNOWLEDGE\n{knowledge or 'No additional card selected.'}")
+            f"FEEDBACK-GROUNDED KNOWLEDGE\n{knowledge or 'No additional card selected.'}"
+            f"{conversation_state}")
 
 
 
@@ -4442,6 +4589,11 @@ if modal is not None:
             if force_bulk:
                 tools = [tool for tool in tools if tool.get("name") == "bulk_fill_metadata"]
             force_edit = should_require_edit_action(context, user_msg, tools)
+            plan_call = plan_navigation_call(context)
+            if plan_call:
+                tools = [
+                    tool for tool in tools if tool.get("name") not in _NAVIGATION_TOOLS
+                ]
 
             def event_stream():
                 content = ""
@@ -4455,7 +4607,15 @@ if modal is not None:
                     "message": "Checking BEHAV3D guidance for this question...",
                 })
 
-                query = f"{context.get('current_step','')} {user_msg}"
+                retrieval_msg = plan_retrieval_text(context, user_msg)
+                retrieval_context = context
+                if plan_call:
+                    # Ground the reply in the module being opened, not the one left.
+                    retrieval_context = {
+                        **context,
+                        "current_step": plan_call["arguments"].get("step", "analysis"),
+                    }
+                query = f"{retrieval_context.get('current_step','')} {retrieval_msg}"
                 developer = developer_options_enabled(context)
                 try:
                     # Fetch extra results so dropping dev-only cards still leaves six.
@@ -4483,10 +4643,10 @@ if modal is not None:
 
                 intent = (context.get("assistant_session", {}) or {}).get("intent")
                 guidance_cards = select_guidance_cards(
-                    context, user_msg, intent, developer_options=developer
+                    retrieval_context, retrieval_msg, intent, developer_options=developer
                 )
                 retrieved = guidance_cards + retrieved
-                system = build_system_prompt(context, retrieved, tools)
+                system = build_system_prompt(context, retrieved, tools, user_msg)
                 convo = [{"role": "system", "content": system}]
                 convo += [m for m in messages if m.get("role") != "system"]
                 control_ids = [
@@ -4590,6 +4750,8 @@ if modal is not None:
                                 call.get("arguments", {}), user_msg
                             )
                 calls = normalize_metadata_line_calls(calls)
+                if plan_call:
+                    calls = [plan_call, *calls]
                 if calls:
                     yield sse({"type": "tool_calls", "calls": calls})
                 yield sse({"type": "done"})
