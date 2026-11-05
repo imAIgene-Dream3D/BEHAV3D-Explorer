@@ -92,6 +92,13 @@ PyQt6-Qt6!=6.11.0,!=6.11.1
 qtpy>=2.4
 magicgui>=0.10
 superqt>=0.7.8
+
+# -----------------------------------------------------------------------------
+# Assistant: a researcher's own model provider
+# -----------------------------------------------------------------------------
+openai>=3.46,<4
+anthropic>=2.5,<3
+keyring>=25.7
 napari-console>=0.1.4
 napari-svg>=0.2
 ipywidgets>=8.1

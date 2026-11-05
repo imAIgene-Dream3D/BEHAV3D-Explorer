@@ -14,6 +14,10 @@ does not require a bearer token. If the endpoint is missing or unreachable, the
 napari client falls back to a limited local responder that can explain parameter
 cards but cannot use the LLM.
 
+A researcher can instead use their own provider and key; see
+[Own provider](#own-provider). The plugin then makes the model call itself, so
+their key never reaches this service.
+
 ## Design principles
 
 1. **Live state is authoritative.** The assistant should not ask for values that
@@ -29,10 +33,11 @@ cards but cannot use the LLM.
    them directly or show a confirmation card.
 5. **Knowledge is scoped and provenance-aware.** A setting from another module,
    method, or historical experiment is not evidence for the current workflow.
-6. **One user turn produces one request.** Applying an action does not trigger a
-   hidden model continuation. The next turn starts from freshly serialized UI
-   state. The plan panel's Continue button is an explicit input, so it sends one
-   request like any other.
+6. **One user turn produces one model request.** Applying an action does not
+   trigger a hidden model continuation. The next turn starts from freshly
+   serialized UI state. The plan panel's Continue button is an explicit input, so
+   it sends one request like any other. With an own provider a turn also calls
+   `/prepare` and `/finish`, which do not run a model.
 
 ## Architecture
 
@@ -132,6 +137,56 @@ assistant turn. Without it the model sees the request as unanswered and acts on 
 again, even after a decline. Apply and Keep current then annotate that entry. The dock
 also drops a repeat of a declined value unless the latest message asks for it.
 
+### Own provider
+
+The service keeps document search, the keyword handlers, prompt building and tool
+checks. Only the model call moves to the researcher's computer:
+
+1. `POST /prepare` returns a deterministic reply, or the model request with
+   `must_call_tool` and `plan_call`. Deterministic replies need no key.
+2. `_assistant_providers.py` streams from the provider with the key.
+3. `POST /finish` takes the original body plus the raw reply and returns checked
+   calls. It is stateless because each input is reproducible from that body.
+
+`/chat` is unchanged, and it shares `turn_policy`, `build_model_request` and
+`finalize_calls` with these routes so the two paths cannot drift apart.
+
+Providers are not interchangeable, so each adapter speaks its own API:
+
+| Adapter | Providers | Why |
+|---|---|---|
+| `openai_responses` | OpenAI | Chat Completions cannot call tools on current models. Send `store: false`, or OpenAI keeps the conversation. |
+| `anthropic` | Claude | Current models reject `temperature`, a forced `tool_choice`, and `thinking: disabled`. The first message must be `user`. |
+| `chat_completions` | Gemini, Mistral, DeepSeek | DeepSeek needs thinking off when a tool call is forced. |
+
+Rules to keep when changing this path:
+
+- **A provider failure never falls back.** Not to `LocalResponder`, and not to the
+  shared service, which would send data somewhere the researcher did not choose. The
+  same applies to a chosen provider whose key is missing.
+- **`/finish` never re-enters the provider.** If it fails, the text stays, only
+  `plan_call` is applied, and unchecked calls are dropped.
+- **Failure codes are `byok_*`.** `provider*` codes trigger a probe of the shared
+  DeepSeek account, which would spend its quota and then report Online.
+- **The key travels as `ApiKey`, and SDK errors become fixed messages raised
+  `from None`.** Error text reaches `logs/`, `_history` and the next request. Keys
+  live in the OS keychain, and in memory for the session if none is available.
+- **A refusal leaves no trace.** Claude's biology classifier can decline with HTTP
+  200. The turn skips `/finish` and stays out of `_history`, `_turn_reply` and the log.
+- **`missing_required_tool` is shown.** Where a tool call cannot be forced, the model
+  can claim a change it never proposed, so the dock says none was made.
+
+Bump `BYOK_CONTRACT_VERSION` when `/prepare` or `/finish` change incompatibly. A client
+disables the option when `/health` does not report one.
+
+Prompts were tuned on DeepSeek. To measure another model, run the smoke suite through
+this path; the key comes from the keychain, or from `BEHAV3D_SMOKE_API_KEY`:
+
+```bash
+conda run -n behav3d python chatbot/smoke_test.py --path byok --provider anthropic \
+  --model claude-opus-5-5
+```
+
 ### Wire protocol
 
 The client sends:
@@ -184,6 +239,8 @@ diagnosis, not as a high-frequency monitor.
 | `behav3d/napari/_assistant_widgets.py` | Message bubbles, the scrolling transcript, the plan panel, and their stylesheet. | Changing how messages or the plan look. |
 | `behav3d/napari/_assistant_plan.py` | Pure plan capture, step rules, and outcome bookkeeping. | Changing what counts as a plan or how steps advance. |
 | `behav3d/napari/_assistant_client.py` | Endpoint configuration, background HTTP/SSE and health workers, classified failures, automatic retry, and offline fallback. | Changing transport, timeouts, health checks, authentication, or degraded behavior. |
+| `behav3d/napari/_assistant_providers.py` | Provider adapters, the own-key turn, and keychain storage. No Qt. | Adding a provider or changing how one is called. |
+| `behav3d/napari/_assistant_settings.py` | The ⚙ dialog, and where the choice of provider is stored. | Changing what a researcher can configure. |
 | `behav3d/napari/_assistant_context.py` | Defensive serialization of live BEHAV3D state and experiment references. | The assistant needs to read a new piece of UI, metadata, log, result, or experiment state. |
 | `behav3d/napari/_assistant_controls.py` | Live editable-control registry, getters, setters, units, choices, visibility, and persistence callbacks. | The assistant should be able to inspect or edit a real UI control. |
 | `behav3d/napari/_assistant_actions.py` | Tool schemas, tool-call validation, `ProposedAction`, and action application. | Adding a new action or changing how an action is validated/applied. |
@@ -298,7 +355,7 @@ The order in `POST /chat` is intentional:
 3. **Preflight guards** return one focused question or a scoped explanation when
    required evidence is missing. Examples include unknown channel mapping,
    segmentation signal quality, tracking motion, and missing log evidence.
-4. **Model path** retrieves guidance, builds the prompt, calls DeepSeek, and
+4. **Model path** retrieves guidance, builds the prompt, calls the model, and
    streams text plus native tool calls.
 
 Within the deterministic and preflight chains, the first non-`None` handler
@@ -462,11 +519,14 @@ Before merging an assistant change, verify:
 - A declined change is not proposed again unless the researcher asks for it.
 - A step in the plan is completed only by the researcher moving on, never by Apply.
 - Sensitive/existing values follow the intended confirmation policy.
-- One user input produces at most one server request.
+- One user input produces at most one model request.
+- No key reaches the service, a log, or `assistant_log.md`.
+- A provider failure stays visible and never falls back to the shared service.
 
 ## Local configuration
 
-The client reads `napari/assistant_config.json`, which is gitignored. Start from
+The client reads `napari/assistant_config.json`. This file is **tracked in a public
+repository**, so never put a secret in it. Start from
 `napari/assistant_config.example.json`:
 
 ```json

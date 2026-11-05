@@ -12,6 +12,9 @@ import requests
 
 from behav3d.napari._assistant_actions import TOOL_SCHEMA
 from behav3d.napari._assistant_plan import extract_plan
+from behav3d.napari._assistant_providers import (
+    PROVIDERS, ApiKey, ProviderConfig, load_api_key, provider_by_id, run_own_model_turn,
+)
 
 
 DATASET_DESCRIPTION = (
@@ -3836,6 +3839,30 @@ def _request(endpoint: str, case: dict, timeout: int) -> dict:
     return {"text": "".join(text_parts).strip(), "calls": calls}
 
 
+def _request_own_model(
+    endpoint: str, case: dict, timeout: int, config: ProviderConfig,
+) -> dict:
+    text_parts: list[str] = []
+    result = run_own_model_turn(
+        endpoint,
+        {"messages": case["messages"], "context": case["context"], "tools": TOOL_SCHEMA},
+        config,
+        on_text=text_parts.append,
+        timeout=(10, timeout),
+    )
+    if result.get("refused"):
+        raise RuntimeError(f"declined ({result.get('refusal_category') or 'no category'})")
+    return {"text": "".join(text_parts).strip(), "calls": result.get("calls") or []}
+
+
+def _own_provider(provider_id: str, model: str | None) -> ProviderConfig:
+    spec = provider_by_id(provider_id)
+    key = ApiKey(os.environ.get("BEHAV3D_SMOKE_API_KEY", ""))
+    return ProviderConfig(
+        spec, model or spec.default_model, key if key else load_api_key(spec.id)
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--endpoint", default=_default_endpoint())
@@ -3846,9 +3873,25 @@ def main() -> int:
         help="Run only this scenario; repeat to select several.",
     )
     parser.add_argument("--json-out", type=Path)
+    parser.add_argument(
+        "--path", choices=("chat", "byok"), default="chat",
+        help="byok runs each turn through a researcher's own provider.",
+    )
+    parser.add_argument("--provider", choices=[spec.id for spec in PROVIDERS])
+    parser.add_argument("--model")
     args = parser.parse_args()
     if not args.endpoint:
         parser.error("Provide --endpoint or configure BEHAV3D_ASSISTANT_ENDPOINT")
+    config = None
+    if args.path == "byok":
+        if not args.provider:
+            parser.error("--path byok needs --provider")
+        config = _own_provider(args.provider, args.model)
+        if not (config.key and config.model):
+            parser.error(
+                "No key or model. Save them in the assistant's settings, or set "
+                "BEHAV3D_SMOKE_API_KEY and --model."
+            )
 
     selected = [factory() for factory in SCENARIOS]
     if args.scenario:
@@ -3858,7 +3901,10 @@ def main() -> int:
     for case in selected:
         print(f"\n=== {case['name']} ===", flush=True)
         try:
-            result = _request(args.endpoint, case, args.timeout)
+            if config is None:
+                result = _request(args.endpoint, case, args.timeout)
+            else:
+                result = _request_own_model(args.endpoint, case, args.timeout, config)
             errors = case["check"](result)
         except Exception as exc:
             result, errors = {"text": "", "calls": []}, [str(exc)]

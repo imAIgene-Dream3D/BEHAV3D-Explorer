@@ -36,6 +36,7 @@ _MIN_TEXT_WIDTH = 80
 _STICK_TOLERANCE = 24
 _REFIT_DELAY_MS = 30
 _PLAN_LIST_MAX_HEIGHT = 132
+_PLAN_LIST_SLACK = 4   # rows that exactly fit still get a scrollbar without this
 _PLAN_ROW_MARKS = {"done": "✓", "current": "▸", "pending": "·"}
 
 CHAT_STYLESHEET = f"""
@@ -421,7 +422,7 @@ class _PlanPanel(QFrame):
         for row in self.row_labels():
             row.ensurePolished()
         height = self._rows_layout.totalHeightForWidth(self._steps.viewport().width())
-        self._steps.setFixedHeight(min(height, _PLAN_LIST_MAX_HEIGHT))
+        self._steps.setFixedHeight(min(height + _PLAN_LIST_SLACK, _PLAN_LIST_MAX_HEIGHT))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
