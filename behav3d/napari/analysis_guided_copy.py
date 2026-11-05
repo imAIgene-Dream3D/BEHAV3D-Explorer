@@ -383,6 +383,33 @@ STATE_CONTACT_ANALYSIS = {
     ),
 }
 
+STATE_KILLING_REPORT = {
+    "id": "state_killing",
+    "title": "Killing by state",
+    "subtitle": "How much killing goes with each behavioral state?",
+    "color": "#4a90d9",
+    "what_does": (
+        "Links each contact timepoint's Active Killing efficiency to the cell's behavioral "
+        "state at that moment, by default using only solo contacts with a full observation "
+        "window. Descriptive only: no statistical tests are run."
+    ),
+    "concept": None,
+    "what_get": (
+        "CSVs per timepoint, cell, image and state, ready for your own statistics, plus "
+        "a PDF with box plots per cell and per timepoint side by side."
+    ),
+    "decide": [
+        _decide("Which state column to use", _SUGGESTED),
+        _decide("Which states and contacts to include", _SUGGESTED),
+    ],
+    "has_params": True,
+    "seed": (
+        "Explain the BEHAV3D Killing by State report: how killing efficiency is linked to "
+        "behavioral states, why solo contacts and full windows are the default, and the "
+        "difference between the per-cell and per-timepoint box plots."
+    ),
+}
+
 TRACK_PLOTS_ENTRY = {
     "id": "track_plots",
     "title": "Reports & Plots",
@@ -608,7 +635,7 @@ TRACK_EXEMPLAR_TRACKS = {
 # Level-1 pipeline lists, in display order (matches existing widget order).
 STATE_REPORT_PIPELINES = [
     STATE_DIAGNOSTICS, STATE_COMPOSITION_REPORT, STATE_TRANSITION_REPORT, STATE_FEATURE_HEATMAP,
-    STATE_COMPARISON_REPORT, STATE_CONTACT_ANALYSIS,
+    STATE_COMPARISON_REPORT, STATE_CONTACT_ANALYSIS, STATE_KILLING_REPORT,
 ]
 TRACK_PLOT_PIPELINES = [
     TRACK_DIAGNOSTICS, TRACK_EXEMPLAR_TRACKS, TRACK_FEATURE_HEATMAP, TRACK_PROPORTIONS,

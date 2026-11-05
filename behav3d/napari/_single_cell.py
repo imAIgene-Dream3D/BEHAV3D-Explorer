@@ -1169,6 +1169,16 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
             "state_col": "combo_state_shift_state_col",
             "group_cols": "list_state_contact_group_cols",
         },
+        "killing_by_state": {
+            "state_col": "combo_state_killing_state_col",
+            "group_cols": "list_state_killing_group_cols",
+            "solo_only": "chk_state_killing_solo",
+            "full_windows_only": "chk_state_killing_full_windows",
+            "states": "list_state_killing_states",
+            "override": "chk_state_killing_override",
+            "window": "spin_state_killing_window",
+            "threshold": "spin_state_killing_threshold",
+        },
     }
 
     def __init__(self, viewer=None, metadata_loader=None, cell_type_getter=None,
@@ -1947,6 +1957,93 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         comparison_row.addWidget(self.btn_view_condition_comparison)
         g_state_comparison.addLayout(comparison_row)
 
+        self.grp_state_killing = QGroupBox("Killing by State")
+        g_state_killing = QVBoxLayout(self.grp_state_killing)
+        g_state_killing.setSpacing(4)
+        g_state_killing.addWidget(_make_info_label(
+            "Killing efficiency per behavioral state, from Active Killing's per-timepoint values. "
+            "Descriptive only: writes the CSVs for your own statistics, plus a PDF plot. No tests are run."
+        ))
+        state_killing_form = QFormLayout()
+        state_killing_form.setSpacing(3)
+        self.combo_state_killing_state_col = QComboBox()
+        self.combo_state_killing_state_col.addItems(
+            [FULL_STATE_COL, INTRINSIC_STATE_COL, "raw_hmm_state"]
+        )
+        state_killing_form.addRow("State column:", self.combo_state_killing_state_col)
+        g_state_killing.addLayout(state_killing_form)
+        g_state_killing.addWidget(_make_info_label("Group per page (Ctrl/Cmd click for multiple):"))
+        self.list_state_killing_group_cols = QListWidget()
+        self.list_state_killing_group_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        g_state_killing.addWidget(self.list_state_killing_group_cols)
+
+        adv_state_killing = CollapsibleSection("⚙ Advanced Configuration", expanded=False)
+        self.chk_state_killing_solo = QCheckBox("Solo contacts only")
+        self.chk_state_killing_solo.setChecked(True)
+        adv_state_killing.addLayout(_make_chk_help_row(
+            self.chk_state_killing_solo, "Solo contacts only",
+            "Leaves out timepoints where another cell touches any of this cell's targets during "
+            "the observation window, so the death signal can't come from that other cell. "
+            "Timepoints without a recorded target are left out too. Cells removed by Filtering "
+            "are not counted as other cells."
+        ))
+        self.chk_state_killing_full_windows = QCheckBox("Only full windows")
+        self.chk_state_killing_full_windows.setChecked(True)
+        adv_state_killing.addLayout(_make_chk_help_row(
+            self.chk_state_killing_full_windows, "Only full windows",
+            "Leaves out timepoints closer to the end of the video than the observation window. "
+            "Their window is cut short, so they had less time to show an increase in death signal."
+        ))
+        adv_state_killing.addWidget(_make_info_label(
+            "States to include (Ctrl/Cmd click for multiple). None selected: every state with at "
+            "least one timepoint in contact with a target."
+        ))
+        self.list_state_killing_states = QListWidget()
+        self.list_state_killing_states.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        adv_state_killing.addWidget(self.list_state_killing_states)
+        self.chk_state_killing_override = QCheckBox("Override Active Killing window and threshold")
+        adv_state_killing.addLayout(_make_chk_help_row(
+            self.chk_state_killing_override, "Override window and threshold",
+            "Off: uses the window and threshold set on the Active Killing tab. On: killing "
+            "efficiency is recomputed with your values for this report only, using Active "
+            "Killing's calculation. The features table is not changed."
+        ))
+        state_killing_override_form = QFormLayout()
+        state_killing_override_form.setSpacing(3)
+        self.spin_state_killing_window = QSpinBox()
+        self.spin_state_killing_window.setRange(1, 100000)
+        self.spin_state_killing_window.setSuffix(" timepoints")
+        self.spin_state_killing_window.setMaximumWidth(140)
+        state_killing_override_form.addRow("Window:", self.spin_state_killing_window)
+        self.label_state_killing_threshold = QLabel("Threshold:")
+        self.spin_state_killing_threshold = QDoubleSpinBox()
+        self.spin_state_killing_threshold.setRange(0.0, 1e9)
+        self.spin_state_killing_threshold.setMaximumWidth(140)
+        state_killing_override_form.addRow(
+            self.label_state_killing_threshold, self.spin_state_killing_threshold
+        )
+        adv_state_killing.addLayout(state_killing_override_form)
+        g_state_killing.addWidget(adv_state_killing)
+
+        self.label_state_killing_warning = QLabel("")
+        self.label_state_killing_warning.setWordWrap(True)
+        self.label_state_killing_warning.setStyleSheet(
+            "QLabel { background: #3d1010; color: #ff8a80; border: 1px solid #d9534f; "
+            "border-radius: 4px; padding: 6px 8px; font-size: 11px; }"
+        )
+        self.label_state_killing_warning.hide()
+        g_state_killing.addWidget(self.label_state_killing_warning)
+        state_killing_row = QHBoxLayout()
+        self.btn_state_killing_report = QPushButton("▶ Create Killing by State Report")
+        _style_secondary(self.btn_state_killing_report)
+        self.btn_state_killing_report.setEnabled(False)
+        state_killing_row.addWidget(self.btn_state_killing_report, stretch=1)
+        self.btn_view_state_killing_report = _make_view_btn()
+        state_killing_row.addWidget(self.btn_view_state_killing_report)
+        g_state_killing.addLayout(state_killing_row)
+        self._state_killing_baseline = None
+        self._state_killing_error = None
+
         self.grp_state_contact = QGroupBox("Contact Analysis")
         g_state_contact = QVBoxLayout(self.grp_state_contact)
         g_state_contact.setSpacing(4)
@@ -2097,6 +2194,7 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         pipeline_content_lay.addWidget(self.grp_state_feature_heatmap)
         pipeline_content_lay.addWidget(self.grp_state_comparison)
         pipeline_content_lay.addWidget(self.grp_state_contact)
+        pipeline_content_lay.addWidget(self.grp_state_killing)
         pipeline_content_lay.addStretch()
         self._pipeline_scroll.setWidget(pipeline_content)
         reset_scroll_on_page_change(self._plots_stack)
@@ -2333,6 +2431,20 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         )
         self.btn_state_contact_shift.clicked.connect(self._on_state_contact_shift)
         _wire_view_btn(self.btn_view_state_contact_shift, self._on_view, "state_contact_shift")
+        self.btn_state_killing_report.clicked.connect(self._on_state_killing_report)
+        _wire_view_btn(self.btn_view_state_killing_report, self._on_view, "state_killing_report")
+        self.combo_state_killing_state_col.currentTextChanged.connect(
+            lambda _text: self._refresh_state_killing_states()
+        )
+        self.chk_state_killing_override.toggled.connect(
+            lambda _checked: self._update_state_killing_controls()
+        )
+        self.spin_state_killing_window.valueChanged.connect(
+            lambda _value: self._update_state_killing_controls()
+        )
+        self.spin_state_killing_threshold.valueChanged.connect(
+            lambda _value: self._update_state_killing_controls()
+        )
         self.btn_browse_hmm.clicked.connect(self._browse_hmm_artifact)
         self.btn_apply_hmm.clicked.connect(self._on_apply_hmm)
         self.btn_show_state_bp.clicked.connect(self._on_show_state_bp)
@@ -2439,13 +2551,17 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
             "state_feature_heatmap": {self.grp_state_feature_heatmap},
             "state_comparison": {self.grp_state_comparison},
             "state_contact": {self.grp_state_contact},
+            "state_killing": {self.grp_state_killing},
         }.get(pipeline_id, set())
         for group in (
             self.grp_state_diagnostics, self.grp_state_composition,
             self.grp_state_transition, self.grp_state_feature_heatmap, self.grp_state_comparison,
-            self.grp_state_contact,
+            self.grp_state_contact, self.grp_state_killing,
         ):
             group.setVisible(group in visible)
+        if pipeline_id == "state_killing":
+            # Active Killing may have been re-run on another tab since the last refresh.
+            self._refresh_state_killing_source()
         title = next(
             (s["title"] for s in STATE_REPORT_PIPELINES if s["id"] == pipeline_id), ""
         )
@@ -2653,6 +2769,104 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         has_full_states = bool(full_path and full_path.exists())
         self.btn_state_contact_type_comparison.setEnabled(len(contact_cols) >= 2 and has_full_states)
         self.btn_state_contact_shift.setEnabled(len(contact_cols) > 0 and has_full_states)
+        self._refresh_state_killing_source()
+
+    def _refresh_state_killing_source(self):
+        """Re-read what the Killing by State report depends on: the extracted killing features,
+        the Active Killing settings, the group columns and the state names."""
+        import pandas as pd
+        ct = self._cell_type()
+        out = self._out_dir()
+        self._state_killing_baseline = None
+        self._state_killing_error = None
+        full_path = self._full_adata_path(ct) if ct else None
+        if full_path and full_path.exists():
+            try:
+                from behav3d.analysis.behavior.state.killing_by_state import (
+                    resolve_killing_features_csv,
+                    resolve_killing_settings,
+                )
+                params = getattr(self.metadata_loader, "behav3d_parameters", None) or {}
+                table = resolve_killing_features_csv(out, ct, self._state_track_features_csv_path(ct))
+                self._state_killing_baseline = resolve_killing_settings(
+                    params.get("active_killing"), out, ct, pd.read_csv(table, nrows=0).columns,
+                )
+            except Exception as exc:
+                self._state_killing_error = str(exc)
+        _refill_list_keep_selection(
+            self.list_state_killing_group_cols, self._composition_candidate_columns()
+        )
+        _fit_list_widget_height(self.list_state_killing_group_cols)
+        self._refresh_state_killing_states()
+        self._update_state_killing_controls()
+
+    def _refresh_state_killing_states(self):
+        """Offer the labels of the chosen state column under 'States to include'."""
+        from behav3d.core.state_columns import HMM_INTRINSIC_RAW_STATE_COL
+        ct = self._cell_type()
+        full_path = self._full_adata_path(ct) if ct else None
+        labels = []
+        if full_path and full_path.exists():
+            choice = self.combo_state_killing_state_col.currentText()
+            state_col = HMM_INTRINSIC_RAW_STATE_COL if choice == "raw_hmm_state" else choice
+            try:
+                from behav3d.analysis.behavior.state.killing_by_state import read_state_labels
+                labels = read_state_labels(full_path, state_col)
+            except Exception:
+                traceback.print_exc()
+        _refill_list_keep_selection(self.list_state_killing_states, labels)
+        _fit_list_widget_height(self.list_state_killing_states, max_rows=8)
+
+    def _update_state_killing_controls(self):
+        """Keep the override fields, the warning box and the run button in line with the settings."""
+        from dataclasses import replace
+        base = self._state_killing_baseline
+        override = self.chk_state_killing_override.isChecked()
+        self.spin_state_killing_window.setEnabled(base is not None and override)
+        self.spin_state_killing_threshold.setEnabled(base is not None and override)
+        self.btn_state_killing_report.setEnabled(base is not None)
+        message = ""
+        if base is not None:
+            self.label_state_killing_threshold.setText(
+                "Threshold (multiplier):" if base.threshold_mode == "multiplier" else "Threshold (absolute):"
+            )
+            # Same precision as the Active Killing tab: rounding here would change the threshold.
+            if base.threshold_mode == "multiplier":
+                decimals, step = 2, 0.1
+            elif base.death_signal_column == "nr_dead_mask_pixels":
+                decimals, step = 0, 1.0
+            elif base.death_signal_column == "percentage_dead_mask":
+                decimals, step = 4, 0.001
+            else:
+                decimals, step = 4, 0.01
+            self.spin_state_killing_threshold.blockSignals(True)
+            self.spin_state_killing_threshold.setDecimals(decimals)
+            self.spin_state_killing_threshold.setSingleStep(step)
+            self.spin_state_killing_threshold.blockSignals(False)
+            if override:
+                used = replace(
+                    base,
+                    window=int(self.spin_state_killing_window.value()),
+                    threshold=float(self.spin_state_killing_threshold.value()),
+                )
+            else:
+                used = base
+                for spin, value in (
+                    (self.spin_state_killing_window, int(base.window)),
+                    (self.spin_state_killing_threshold, float(base.threshold)),
+                ):
+                    spin.blockSignals(True)
+                    spin.setValue(value)
+                    spin.blockSignals(False)
+            if used.differences:
+                message = (
+                    "⚠ " + " ".join(used.differences) + " Killing efficiency is recomputed for "
+                    "this report only; the features table is not changed."
+                )
+        elif self._state_killing_error:
+            message = f"⚠ {self._state_killing_error}"
+        self.label_state_killing_warning.setText(message)
+        self.label_state_killing_warning.setVisible(bool(message))
 
     def _reload(self):
         try:
@@ -3578,6 +3792,7 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
                 self.btn_view_transition, self.btn_view_condition_comparison,
                 self.btn_view_state_feature_heatmap,
                 self.btn_view_state_contact_type_comparison, self.btn_view_state_contact_shift,
+                self.btn_view_state_killing_report,
             ):
                 btn.setEnabled(False)
             return
@@ -3603,6 +3818,9 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         )
         self.btn_view_state_contact_shift.setEnabled(
             len(self._get_view_candidates("state_contact_shift", ct)) > 0
+        )
+        self.btn_view_state_killing_report.setEnabled(
+            len(self._get_view_candidates("state_killing_report", ct)) > 0
         )
 
     def _update_bp_buttons(self):
@@ -4270,6 +4488,90 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
                 self._notify_results(),
             ),
             on_failed=lambda e: self._log(f"❌ Contact type comparison failed: {e}"),
+        )
+
+    def _on_state_killing_report(self):
+        ct = self._cell_type()
+        if not ct:
+            return
+        if self._bg.is_running():
+            QMessageBox.warning(self, "Busy", "Another operation is running.")
+            return
+        full_path = self._full_adata_path(ct)
+        if not full_path or not full_path.exists():
+            QMessageBox.warning(self, "No data", "Run state classification first.")
+            return
+        self._refresh_state_killing_source()
+        if self._state_killing_baseline is None:
+            QMessageBox.warning(
+                self, "No killing efficiency",
+                self._state_killing_error or "Run Active Killing first, then Filtering.",
+            )
+            return
+        override = self.chk_state_killing_override.isChecked()
+        window_override = int(self.spin_state_killing_window.value()) if override else None
+        threshold_override = float(self.spin_state_killing_threshold.value()) if override else None
+        solo_only = self.chk_state_killing_solo.isChecked()
+        full_windows_only = self.chk_state_killing_full_windows.isChecked()
+        states = [item.text() for item in self.list_state_killing_states.selectedItems()]
+        state_col_choice = self.combo_state_killing_state_col.currentText()
+        selected_extra_cols = [item.text() for item in self.list_state_killing_group_cols.selectedItems()]
+        params = getattr(self.metadata_loader, "behav3d_parameters", None) or {}
+        active_killing_cfg = dict(params.get("active_killing") or {})
+        preferred_csv = self._state_track_features_csv_path(ct)
+        _raw_md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
+        md_snapshot = _raw_md.copy() if _raw_md is not None else None
+        out = self._out_dir()
+        self._log(f"▶ Running Killing by State report for '{ct}'…")
+
+        def _run(**kw):
+            from behav3d.analysis.behavior.state.killing_by_state import (
+                read_killing_table,
+                resolve_killing_features_csv,
+                resolve_killing_settings,
+            )
+            from behav3d.analysis.behavior.state.utils import _resolve_state_paths
+            from behav3d.analysis.behavior.state.visualization.plots.killing_by_state_report import (
+                save_state_killing_report,
+            )
+            adata = _read_h5ad_shared(str(full_path))
+            state_col = _resolve_ui_state_col(adata, state_col_choice)
+            df_table = read_killing_table(resolve_killing_features_csv(out, ct, preferred_csv))
+            settings = resolve_killing_settings(
+                active_killing_cfg, out, ct, df_table.columns,
+                window_override=window_override, threshold_override=threshold_override,
+            )
+            state_dir = _resolve_state_paths(out, ct).state_outdir
+            _inject_known_metadata_cols(adata, md_snapshot)
+            return save_state_killing_report(
+                adata,
+                df_table,
+                state_dir,
+                output_dir=out,
+                cell_type=ct,
+                state_col=state_col,
+                settings=settings,
+                states=states or None,
+                solo_only=solo_only,
+                full_windows_only=full_windows_only,
+                extra_group_cols=selected_extra_cols or None,
+                verbose=True,
+            )
+
+        self._persist_report_settings(ct, "killing_by_state")
+        self._bg.run(
+            fn=_run,
+            desc=f"Killing by State report ({ct})…",
+            progress_row=self.progress_row,
+            buttons=[self.btn_state_killing_report],
+            viewer=self.viewer,
+            inject_progress=False,
+            on_done=lambda r: (
+                self._log(f"✅ Killing by State report done for '{ct}' ({r['counts']['used']} timepoints used)."),
+                self._update_view_buttons(),
+                self._notify_results(),
+            ),
+            on_failed=lambda e: self._log(f"❌ Killing by State report failed: {e}"),
         )
 
     def _on_state_contact_shift(self):
@@ -5348,6 +5650,9 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
                 (f.parent.name, f)
                 for f in sorted(contact_dir.glob("*/contact_state_shift.pdf"))
             ]
+        if kind == "state_killing_report":
+            pdf = out / "analysis" / ct / "behavioral_states" / "killing_by_state" / "killing_by_state.pdf"
+            return [("killing_by_state", pdf)] if pdf.exists() else []
         return []
 
     def _open_pdf(self, path: Path):
