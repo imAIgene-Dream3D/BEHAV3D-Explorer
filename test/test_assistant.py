@@ -36,7 +36,10 @@ from behav3d.napari._assistant_recommendations import (
 )
 from behav3d.napari._assistant import (
     AssistantDock, _pending_action_identity, researcher_facing_text,
-    streaming_transcript_block, transcript_block_role,
+    split_transcript_block, streaming_transcript_block,
+)
+from behav3d.napari._assistant_plan import (
+    MAX_OUTCOMES, PlanState, extract_plan, parse_plan_command, record_outcome, step_title,
 )
 from behav3d.napari._assistant_client import (
     ChatWorker, classify_request_failure, diagnose_assistant_service,
@@ -52,6 +55,10 @@ from behav3d.analysis.behavior.track.visualization.backprojection import (
     _resolve_track_cluster_label,
 )
 from behav3d.napari._results_catalog import scan_outputs
+
+# Every dock queues a startup health check, and any test that spins the event loop
+# would run all of them: real network threads on docks about to be collected.
+AssistantDock._check_service_status = lambda self, **_kwargs: None
 
 
 # --------------------------------------------------------------------------
@@ -414,6 +421,78 @@ def test_metadata_pixel_size_action_reuses_user_supplied_values():
         "metadata.samples.1.pixel_distance_z": 4.0,
     }
     assert "time unit is unchanged" in result["text"]
+
+
+def _pixel_size_reply(*user_messages):
+    import app
+
+    controls = [
+        {"id": "metadata.samples.0.pixel_distance_xy", "value": 0.5},
+        {"id": "metadata.samples.0.pixel_distance_z", "value": 2.0},
+    ]
+    messages = [{
+        "role": "user",
+        "content": "XY pixel size is 0.5 um and Z spacing is 2 um. Fill the pixel size.",
+    }]
+    for text in user_messages:
+        messages += [
+            {"role": "assistant", "content": "I am proposing those values."},
+            {"role": "user", "content": text},
+        ]
+    return app.metadata_pixel_size_action(
+        {"current_step": "data_preparation", "ui_state": {"controls": controls}}, messages,
+    )
+
+
+def _pixel_size_changes(result):
+    return {
+        call["arguments"]["control_id"].rsplit(".", 1)[-1]: call["arguments"]["value"]
+        for call in result["calls"]
+    }
+
+
+def test_metadata_pixel_size_correction_beats_the_earlier_value():
+    for text, expected in (
+        ("XY pixel size is 0.6 um. Fill the pixel size.", {"pixel_distance_xy": 0.6}),
+        ("Set the XY pixel size to 0.6 um", {"pixel_distance_xy": 0.6}),
+        ("Correct the XY pixel size from 0.5 um to 0.6 um", {"pixel_distance_xy": 0.6}),
+        ("Correct the XY pixel size from 0.5 to 0.6 um", {"pixel_distance_xy": 0.6}),
+        (
+            "Update the pixel size: XY pixel size should be 0.6 um",
+            {"pixel_distance_xy": 0.6},
+        ),
+        ("Set the Z spacing to 3 um", {"pixel_distance_z": 3.0}),
+    ):
+        assert _pixel_size_changes(_pixel_size_reply(text)) == expected, text
+
+    # The newest correction wins, and it is what later requests reuse.
+    assert _pixel_size_changes(_pixel_size_reply(
+        "Set the XY pixel size to 0.6 um", "Set the XY pixel size to 0.7 um",
+    )) == {"pixel_distance_xy": 0.7}
+    assert _pixel_size_changes(_pixel_size_reply(
+        "Set the XY pixel size to 0.7 um", "Can you fill in the correct pixel size?",
+    )) == {"pixel_distance_xy": 0.7}
+
+
+def test_metadata_pixel_size_leaves_unreadable_corrections_to_the_model():
+    # An older value must never answer a new one, so hand these to the model.
+    for text in (
+        "Set the XY pixel size to 500 nm",
+        "Set the XY pixel size to 0.6",
+        "Set the pixel size to 0.6",
+        "Set the XY pixel size to 0.6 um and the Z spacing to 500 nm",
+    ):
+        assert _pixel_size_reply(text) is None, text
+
+
+def test_metadata_pixel_size_reuses_values_when_none_is_stated():
+    for text in (
+        "Can you fill in the correct pixel size?",
+        "Fill the pixel size for all 3 samples",
+    ):
+        result = _pixel_size_reply(text)
+        assert result is not None and result["calls"] == [], text
+        assert "already use" in result["text"], text
 
 
 def test_metadata_pixel_size_action_does_not_intercept_fresh_setup():
@@ -1720,10 +1799,11 @@ def test_chat_worker_offline_fallback_keeps_reason_and_always_finishes():
     assert "Assistant endpoint is not configured" in degraded[0]
     assert "local parameter reference" in degraded[0]
     assert finished == [True]
-    role = transcript_block_role("You")
-    assert role == "user"
-    assert transcript_block_role("My question", role) == "user"
-    assert transcript_block_role("BEHAV3D Assistant", role) == "assistant"
+    assert split_transcript_block("**You**\n\nMy question") == ("user", "My question")
+    assert split_transcript_block("**BEHAV3D Assistant**\n\nAn answer") == (
+        "assistant", "An answer",
+    )
+    assert split_transcript_block("Filled in: Well") == ("assistant", "Filled in: Well")
 
 
 def test_metadata_absence_values_are_csv_safe():
@@ -1951,7 +2031,8 @@ def test_finished_reply_keeps_rendered_markdown():
     dock._render()
     text = dock.transcript.toPlainText()
     assert "Data Preparation" in text and "**" not in text
-    assert dock.transcript.document().begin().blockFormat().lineHeight() == 140
+    bubble = dock.transcript.bubbles()[-1]
+    assert bubble.document().begin().blockFormat().lineHeight() == 140
 
 
 def test_metadata_wizard_asks_for_the_dead_channel_after_counts():
@@ -4404,7 +4485,7 @@ def test_feedback_guidance_fixtures():
 
     fixture = Path(__file__).parent / "fixtures" / "assistant_feedback_transcripts.json"
     cases = json.loads(fixture.read_text(encoding="utf-8"))
-    assert KNOWLEDGE_VERSION == "2026.10.30.2"
+    assert KNOWLEDGE_VERSION == "2026.11.05.1"
     for case in cases:
         cards = select_guidance_cards(
             {"current_step": case["step"]}, case["user"], case.get("intent"),
@@ -4440,6 +4521,796 @@ def test_assistant_has_no_hidden_model_continuation():
     assert "_dispatch_proactive" not in source
     assert "Checking your setup" not in source
     assert CONTROL_CONTRACT_VERSION == "3.3"
+
+
+PLAN_REPLY = (
+    "You are close.\n\n"
+    "**Plan**\n\n"
+    "1. Run **Tracking** for each population.\n"
+    "   - Check the IDs in Visualization.\n"
+    "2. **Feature Extraction** — run it per cell type.\n"
+    "3. Run **Filtering** to remove short tracks.\n\n"
+    "Start with Tracking."
+)
+PLAN_ITEMS = extract_plan(PLAN_REPLY)[0]
+
+
+def _plan() -> PlanState:
+    plan = PlanState()
+    plan.adopt(PLAN_ITEMS, True)
+    return plan
+
+
+def _plan_statuses(plan: PlanState) -> list[str]:
+    return [plan.status(index) for index in range(len(plan.steps))]
+
+
+def _plan_dock() -> AssistantDock:
+    from types import SimpleNamespace
+    from qtpy.QtWidgets import QApplication
+
+    # Held on the class: a QApplication nothing references is destroyed at once.
+    AssistantDock._test_app = QApplication.instance() or QApplication([])
+    return AssistantDock(SimpleNamespace())
+
+
+def _captured_requests():
+    """Replace the network worker, recording what each request would send."""
+    from contextlib import ExitStack
+    from unittest.mock import MagicMock, patch
+
+    requests = []
+
+    def worker(messages, context, tools):
+        requests.append({"messages": messages, "context": context})
+        return MagicMock()
+
+    stack = ExitStack()
+    stack.enter_context(patch("behav3d.napari._assistant.ChatWorker", side_effect=worker))
+    stack.enter_context(patch("behav3d.napari._assistant.QThread"))
+    stack.enter_context(
+        patch("behav3d.napari._assistant.build_context", return_value={})
+    )
+    return stack, requests
+
+
+def _finish_reply(dock: AssistantDock, text: str, *, canned: bool = False):
+    if canned:
+        dock._on_worker_status({"stage": "local_guidance", "level": "working"})
+    dock._on_token(text)
+    dock._on_finished()
+
+
+def _settle(milliseconds: int = 120):
+    from qtpy.QtTest import QTest
+
+    QTest.qWait(milliseconds)
+
+
+def test_plan_extraction_separates_plans_from_explanations():
+    items, marked = extract_plan(PLAN_REPLY)
+    assert marked and len(items) == 3
+    assert [step_title(item) for item in items] == [
+        "Run Tracking for each population",
+        "Feature Extraction",
+        "Run Filtering to remove short tracks",
+    ]
+    explanation = (
+        "How tracking works:\n\n1. Detection finds objects.\n"
+        "2. Linking joins them.\n3. Gaps are closed."
+    )
+    verbs = "Do this:\n\n1. Open Tracking.\n2. Set the radius.\n3. Run it."
+    assert extract_plan(explanation) is None
+    assert extract_plan(verbs) == (["Open Tracking.", "Set the radius.", "Run it."], False)
+    assert extract_plan(verbs, canned=True) is None
+    modules = (
+        "**What comes after segmentation**\n\n"
+        "1. **Tracking** — link segments across timepoints.\n"
+        "2. **Feature Extraction** — per-track measurements.\n"
+        "3. **Filtering** — apply a minimum track length."
+    )
+    assert extract_plan(modules)[1] is False
+    assert [step_title(item) for item in extract_plan(modules)[0]] == [
+        "Tracking", "Feature Extraction", "Filtering",
+    ]
+    assert extract_plan(modules, canned=True) is None
+    assert step_title("Data Preparation — load the metadata first.") == "Data Preparation"
+    assert step_title("Run **Filtering** — it writes the table.") == "Run Filtering"
+    assert extract_plan("1. Open Tracking.\n2. Set the radius.") is None
+    assert extract_plan("1. **Data Preparation** - load metadata\n2. **Segmentation**") is None
+    assert extract_plan("Plan\n1. Open Tracking.\n2. Move on to Filtering.")[1] is True
+    assert extract_plan("The plan\n1. Open Tracking.\n2. Move on to Filtering.") is None
+    assert extract_plan("**Plan**\n\nThere is nothing left to do.") is None
+    assert extract_plan("**Plan**\n\n1. Only one step.") is None
+
+
+def test_plan_extraction_reads_canned_replies_by_marker_only():
+    import app
+
+    blockers = app.metadata_completion_summary(
+        {"metadata": {}, "metadata_builder": {}},
+        [{"role": "user", "content": "what is still missing"}],
+    )
+    assert "**Next actions**" in blockers
+    assert extract_plan(blockers, canned=True) is None
+
+    setup = app.hmm_setup_guidance(
+        _tcell_hmm_context(),
+        [{"role": "user", "content": (
+            "I want to do behavioral analysis, can you take me through the steps?"
+        )}],
+    )
+    items, marked = extract_plan(setup, canned=True)
+    assert marked and len(items) == 6
+    assert step_title(items[0]) == "Review the continuous HMM inputs"
+
+
+def test_plan_commands_separate_instructions_from_questions():
+    for text, expected in (
+        ("do the second one", ("focus", 1)),
+        ("Ok let's do the first one.", ("focus", 0)),
+        ("step 3", ("focus", 2)),
+        ("next", ("next", None)),
+        ("ok, next step", ("next", None)),
+        ("let's do the next one", ("next", None)),
+        ("done", ("done", None)),
+        ("done, what's next?", ("done", None)),
+        ("ok done with step 1", ("done", 0)),
+        ("what's next?", None),
+        ("What was the second thing you mentioned?", None),
+        ("what does step 2 do?", None),
+        ("is step 2 needed?", None),
+        ("set the number of samples to 3", None),
+        ("Complete the metadata form", None),
+        ("Next, set the radius to 5", None),
+        ("continue tracking with btrack", None),
+        ("Ok, open feature extraction", None),
+    ):
+        assert parse_plan_command(text) == expected, text
+
+
+def test_plan_steps_advance_only_when_the_researcher_moves_on():
+    plan = _plan()
+    assert _plan_statuses(plan) == ["current", "pending", "pending"]
+    assert plan.action_label() == "Start step 1"
+
+    # Starting a step must not complete it.
+    assert plan.advance() == 1
+    assert _plan_statuses(plan) == ["current", "pending", "pending"]
+    assert plan.action_label() == "Continue to step 2"
+
+    # Applying a change never completes a step, because a step can need several.
+    plan.note_applied()
+    assert _plan_statuses(plan) == ["current", "pending", "pending"]
+
+    plan.handle_message("what's next?")
+    assert _plan_statuses(plan) == ["current", "pending", "pending"]
+
+    assert plan.advance() == 2
+    assert _plan_statuses(plan) == ["done", "current", "pending"]
+
+    plan.handle_message("do the third one")
+    assert _plan_statuses(plan) == ["done", "pending", "current"]
+    assert plan.action_label() == "Continue to step 2"
+
+    plan.handle_message("done")
+    assert _plan_statuses(plan) == ["done", "current", "done"]
+    assert plan.action_label() == "Start step 2"
+    assert plan.advance() == 2
+    assert plan.action_label() == "Finish"
+    assert plan.advance() is None
+    assert not plan.active
+
+
+def test_plan_ignores_steps_that_do_not_exist():
+    plan = _plan()
+    plan.handle_message("do step 9")
+    plan.handle_message("done with step 9")
+    assert _plan_statuses(plan) == ["current", "pending", "pending"]
+
+
+def test_plan_rows_toggle_without_losing_focus():
+    plan = _plan()
+    plan.toggle(0)
+    assert _plan_statuses(plan) == ["done", "current", "pending"]
+    plan.toggle(2)
+    assert _plan_statuses(plan) == ["done", "current", "done"]
+    plan.toggle(0)
+    assert _plan_statuses(plan) == ["pending", "current", "done"]
+    plan.toggle(1)
+    assert _plan_statuses(plan) == ["current", "done", "done"]
+
+
+def test_sub_lists_never_replace_an_unfinished_plan():
+    plan = _plan()
+    plan.advance()
+    titles = [step.title for step in plan.steps]
+
+    plan.adopt(["Open Tracking.", "Set the radius.", "Run it."], False)
+    assert [step.title for step in plan.steps] == titles and plan.offer is None
+
+    plan.adopt(PLAN_ITEMS, True)
+    assert plan.offer is None, "a restated plan is not a new plan"
+
+    other = ["Load the metadata.", "Choose a segmentation method."]
+    plan.adopt(other, True)
+    assert [step.title for step in plan.steps] == titles
+    assert plan.offer == other
+    plan.accept_offer()
+    assert [step.title for step in plan.steps] == [
+        "Load the metadata", "Choose a segmentation method",
+    ]
+
+    finished = _plan()
+    for index in range(3):
+        finished.complete(index)
+    finished.adopt(other, False)
+    assert len(finished.steps) == 2 and finished.active
+
+
+def test_plan_follows_applied_navigation():
+    plan = _plan()
+    plan.note_navigation("feature extraction")
+    assert _plan_statuses(plan) == ["pending", "current", "pending"]
+    assert plan.started
+
+    plan.note_navigation("segmentation")
+    assert _plan_statuses(plan) == ["pending", "current", "pending"]
+
+    open_only = PlanState()
+    open_only.adopt(["Open Feature Extraction.", "Run Filtering."], True)
+    open_only.note_navigation("feature extraction")
+    assert _plan_statuses(open_only) == ["done", "current"]
+
+    open_and_edit = PlanState()
+    open_and_edit.adopt(
+        ["Open Feature Extraction and set the contact distance.", "Run Filtering."], True
+    )
+    open_and_edit.note_navigation("feature extraction")
+    assert _plan_statuses(open_and_edit) == ["current", "pending"]
+
+
+def test_recent_outcomes_are_bounded():
+    outcomes = []
+    for index in range(MAX_OUTCOMES + 3):
+        outcomes = record_outcome(outcomes, f"Applied: field {index}")
+    assert len(outcomes) == MAX_OUTCOMES
+    assert outcomes[-1] == f"Applied: field {MAX_OUTCOMES + 2}"
+    assert record_outcome(outcomes, "   ") == outcomes
+
+
+def test_plan_reaches_the_model_outside_the_message_history():
+    import app
+
+    plan = _plan()
+    plan.handle_message("do the second one")
+    session = {
+        "intent": "free_form",
+        "plan": plan.to_context(),
+        "recent_outcomes": ["Declined: Search radius -> 30"],
+    }
+    prompt = app.build_system_prompt({"assistant_session": session}, [], [])
+    assert "ACTIVE PLAN" in prompt and "RECENT INTERFACE OUTCOMES" in prompt
+    assert "2. [current] Feature Extraction — run it per cell type." in prompt
+    assert "Declined: Search radius -> 30" in prompt
+
+    plain = app.build_system_prompt({}, [], [])
+    assert "ACTIVE PLAN\nThe interface" not in plain
+    assert "RECENT INTERFACE OUTCOMES\nWhat" not in plain
+
+    # The format rule pulls replies towards lists, so it only appears when asked.
+    assert "PLAN FORMAT" not in plain
+    assert "PLAN FORMAT" not in app.build_system_prompt(
+        {}, [], [], "The Visualization tab is empty after I converted my files"
+    )
+    for request in (
+        "I've finished segmentation. What are the main steps I should do next?",
+        "Help me get from raw movies to results. What should I do, in order?",
+        "I have tracks now. Recommend what to do next.",
+    ):
+        assert "**Plan** on its own" in app.build_system_prompt({}, [], [], request), request
+
+
+def test_retrieval_uses_the_targeted_step_only():
+    import app
+
+    plan = _plan()
+    plan.handle_message("do the second one")
+    context = {"assistant_session": {"plan": plan.to_context()}}
+    assert app.plan_retrieval_text(context, "do the second one") == (
+        "Feature Extraction do the second one"
+    )
+    plan.finish_request_setup()
+    context = {"assistant_session": {"plan": plan.to_context()}}
+    assert app.plan_retrieval_text(context, "why?") == "why?"
+    assert app.plan_retrieval_text({}, "why?") == "why?"
+
+
+def test_targeted_plan_step_opens_its_module_once():
+    import app
+
+    def context(current_step, title, *, targeted=True, analysis=None):
+        return {
+            "current_step": current_step,
+            "analysis": analysis or {},
+            "assistant_session": {"plan": {
+                "targeted": targeted,
+                "steps": [{"title": title, "status": "current"}],
+            }},
+        }
+
+    feature = {"name": "navigate_to_step", "arguments": {"step": "feature_extraction"}}
+    assert app.plan_navigation_call(context("tracking", "Run Feature Extraction")) == feature
+    assert app.plan_navigation_call(
+        context("feature_extraction", "Run Feature Extraction")
+    ) is None
+    assert app.plan_navigation_call(
+        context("tracking", "Run Feature Extraction", targeted=False)
+    ) is None
+    assert app.plan_navigation_call(context("tracking", "Set the radius")) is None
+    assert app.plan_navigation_call(context("tracking", "Filter tracks by length")) == {
+        "name": "navigate_to_step", "arguments": {"step": "filtering"},
+    }
+    assert app.plan_navigation_call(context("tracking", "Run the Filtering step")) == {
+        "name": "navigate_to_step", "arguments": {"step": "filtering"},
+    }
+    # A module mentioned in passing is not where the step happens.
+    assert app.plan_navigation_call(context(
+        "data_preparation", "Load metadata, then confirm the segmentation outputs",
+    )) is None
+    # The module named first wins when a step mentions several.
+    assert app.plan_navigation_call(
+        context("segmentation", "Run Tracking, then review Feature Extraction")
+    )["arguments"] == {"step": "tracking"}
+
+    trajectory = context("tracking", "Review State Trajectory")
+    assert app.plan_navigation_call(trajectory) == {
+        "name": "open_analysis_view", "arguments": {"view": "state_trajectory"},
+    }
+    assert app.plan_navigation_call(context(
+        "analysis", "Review State Trajectory", analysis={"view": "state_trajectory"},
+    )) is None
+    assert app.plan_navigation_call({}) is None
+
+
+def test_plan_prompt_tells_the_model_when_a_module_is_opening():
+    import app
+
+    plan = _plan()
+    plan.handle_message("do the second one")
+    context = {
+        "current_step": "tracking",
+        "assistant_session": {"intent": "free_form", "plan": plan.to_context()},
+    }
+    assert "opening that step's module now" in app.build_system_prompt(context, [], [])
+    context["current_step"] = "feature_extraction"
+    assert "opening that step's module now" not in app.build_system_prompt(context, [], [])
+
+
+def test_plan_continue_text_matches_no_canned_handler():
+    import app
+
+    tools = [{"name": name} for name in app._TOOL_NAMES]
+    messages = [{"role": "user", "content": "Continue with step 2"}]
+    for step in (
+        "data_preparation", "segmentation", "tracking", "feature_extraction",
+        "filtering", "analysis",
+    ):
+        context = {"current_step": step, "metadata": {"loaded": True}}
+        assert app.deterministic_turn_response(context, messages, tools) is None, step
+
+
+def test_dock_pins_a_plan_and_sends_it_with_each_request():
+    dock = _plan_dock()
+    stack, requests = _captured_requests()
+    with stack:
+        dock._send_message("What should I do next?")
+        assert "plan" not in {
+            key for key, value in requests[0]["context"]["assistant_session"].items()
+            if value
+        }
+        assert not dock.plan_panel.isVisibleTo(dock)
+        _finish_reply(dock, PLAN_REPLY)
+        assert dock.plan_panel.isVisibleTo(dock)
+        assert dock.plan_panel.btn_advance.text() == "Start step 1"
+        assert len(dock.plan_panel.row_labels()) == 3
+
+        dock.input.setPlainText("do the second one")
+        dock._on_send()
+        session = requests[1]["context"]["assistant_session"]
+        assert session["plan"]["targeted"] is True
+        assert session["plan"]["steps"][1]["status"] == "current"
+        assert dock._plan.targeted is False, "targeting applies to one request"
+
+
+def test_plan_survives_a_canned_navigation_turn_and_tab_switch():
+    dock = _plan_dock()
+    stack, requests = _captured_requests()
+    with stack:
+        dock._send_message("What should I do next?")
+        _finish_reply(dock, PLAN_REPLY)
+        dock._send_message("Ok, open feature extraction")
+        action = ProposedAction("navigate_to_step", step="feature_extraction")
+        dock._record_applied(action)
+        _finish_reply(dock, "Opening **Feature Extraction**.", canned=True)
+
+        assert dock._plan.status(1) == "current"
+        assert dock.plan_panel.isVisibleTo(dock)
+        dock._on_tab_changed(4)
+        assert dock.plan_panel.isVisibleTo(dock)
+        assert dock._outcomes == ["Opened feature extraction"]
+
+        dock._reset_conversation()
+        assert not dock._plan.steps and dock._outcomes == []
+        assert not dock.plan_panel.isVisibleTo(dock)
+
+
+def test_tab_switch_needs_no_note_when_the_reply_speaks_for_it():
+    from unittest.mock import patch
+
+    def navigate(dock):
+        with patch("behav3d.napari._assistant.apply_action", return_value=True), patch(
+            "behav3d.napari._assistant.build_context", return_value={}
+        ), patch(
+            "behav3d.napari._assistant_schema.flatten_config_to_cards", return_value=[]
+        ):
+            dock.main_widget.data_prep_tab = None
+            dock._on_tool_calls([{
+                "name": "navigate_to_step", "arguments": {"step": "tracking"},
+            }])
+
+    explained = _plan_dock()
+    explained._streaming_text = "Tracking needs one measurement."
+    navigate(explained)
+    assert "Filled in" not in explained._md_log[-1]
+    assert explained._outcomes == ["Opened tracking"]
+
+    silent = _plan_dock()
+    silent._streaming_text = ""
+    navigate(silent)
+    assert "Go to the tracking tab" in silent._md_log[-1]
+
+
+def test_tool_only_reply_still_leaves_an_assistant_turn():
+    from unittest.mock import patch
+
+    dock = _plan_dock()
+    dock.main_widget.data_prep_tab = None
+    dock._history = [{"role": "user", "content": "Set the radius to 30"}]
+    dock._streaming_text = ""
+    with patch("behav3d.napari._assistant.build_context", return_value={}), patch(
+        "behav3d.napari._assistant.apply_action", return_value=True,
+    ):
+        dock._on_tool_calls([{"name": "navigate_to_step", "arguments": {"step": "tracking"}}])
+
+    # Otherwise the model reads the request as unanswered and acts on it again.
+    assert dock._history[-1] == {
+        "role": "assistant", "content": "Sent to the interface: Go to the tracking tab",
+    }
+    assert not any("Sent to the interface" in block for block in dock._md_log)
+
+    answered = _plan_dock()
+    answered.main_widget.data_prep_tab = None
+    answered._history = [{"role": "user", "content": "Open tracking"}]
+    answered._streaming_text = "Opening **Tracking**."
+    with patch("behav3d.napari._assistant.build_context", return_value={}), patch(
+        "behav3d.napari._assistant.apply_action", return_value=True,
+    ):
+        answered._on_tool_calls([{
+            "name": "navigate_to_step", "arguments": {"step": "tracking"},
+        }])
+    assert answered._history[-1]["content"] == "Opening **Tracking**."
+
+
+def _radius_action(value=30.0):
+    action = ProposedAction(
+        "set_ui_value", control_id="tracking.tcell.radius", value=value
+    )
+    action.preview = f"Search radius: 12.0 -> {value}"
+    return action
+
+
+def test_declined_change_is_not_proposed_again():
+    dock = _plan_dock()
+    declined = _radius_action()
+    dock._add_action_card(declined)
+    dock.action_tray_layout.itemAt(0).widget().dismissed.emit(declined)
+
+    dock._history = [{"role": "user", "content": "Continue with step 1"}]
+    assert dock._repeats_declined(_radius_action())
+    assert not dock._repeats_declined(_radius_action(25.0)), "a new value is a new change"
+
+    dock._history = [{"role": "user", "content": "Actually set the radius to 30"}]
+    assert not dock._repeats_declined(_radius_action()), "asking again is allowed"
+
+    other = ProposedAction("bulk_fill_metadata", samples=[])
+    assert not dock._repeats_declined(other)
+
+    dock._reset_conversation()
+    dock._history = [{"role": "user", "content": "Continue with step 1"}]
+    assert not dock._repeats_declined(_radius_action())
+
+
+def test_dropped_repeat_with_no_text_still_answers():
+    from unittest.mock import patch
+
+    dock = _plan_dock()
+    dock.main_widget.data_prep_tab = None
+    declined = _radius_action()
+    dock._add_action_card(declined)
+    dock.action_tray_layout.itemAt(0).widget().dismissed.emit(declined)
+    dock._history = [{"role": "user", "content": "Continue with step 1"}]
+    dock._streaming_text = ""
+    with patch("behav3d.napari._assistant.build_context", return_value={}), patch(
+        "behav3d.napari._assistant.build_actions", return_value=[_radius_action()],
+    ):
+        dock._on_tool_calls([{"name": "set_ui_value", "arguments": {}}])
+    assert dock.action_tray_layout.count() == 0
+    assert "kept the current value" in dock._md_log[-1]
+
+
+def test_card_decisions_settle_a_tool_only_history_entry():
+    dock = _plan_dock()
+    declined, applied = _radius_action(), _radius_action(25.0)
+    dock._history = [
+        {"role": "user", "content": "Set the radius to 30"},
+        {"role": "assistant", "content": f"Sent to the interface: {declined.preview}"},
+        {"role": "user", "content": "Try 25 instead"},
+        {"role": "assistant", "content": f"Sent to the interface: {applied.preview}"},
+    ]
+    dock._record_declined(declined)
+    dock._record_applied(applied)
+    assert "declined, so the value did not change" in dock._history[1]["content"]
+    assert dock._history[3]["content"].endswith("(applied)")
+
+
+def test_failed_reply_does_not_create_a_plan():
+    dock = _plan_dock()
+    stack, _requests = _captured_requests()
+    with stack:
+        dock._send_message("What should I do next?")
+        dock._on_token(PLAN_REPLY)
+        dock._on_error("The stream was cut off.")
+        dock._on_finished()
+    assert not dock._plan.steps
+
+
+def test_plan_continue_sends_one_fixed_message_and_waits():
+    dock = _plan_dock()
+    stack, requests = _captured_requests()
+    with stack:
+        dock._send_message("What should I do next?")
+        _finish_reply(dock, PLAN_REPLY)
+        assert dock.plan_panel.btn_advance.isEnabled()
+        dock.plan_panel.btn_advance.click()
+        assert requests[-1]["messages"][-1]["content"] == "Continue with step 1"
+        assert len(requests) == 2
+        assert not dock.plan_panel.btn_advance.isEnabled(), "a request is in flight"
+        _finish_reply(dock, "Tracking needs one measurement.")
+        assert len(requests) == 2, "no hidden continuation"
+
+        dock.plan_panel.btn_advance.click()
+        assert requests[-1]["messages"][-1]["content"] == "Continue with step 2"
+        assert dock._plan.status(0) == "done"
+
+
+def test_plan_rows_are_visible_at_any_dock_width():
+    dock = _plan_dock()
+    dock._plan.adopt([f"Run a step with quite a long description {n}." for n in range(3)], True)
+    for width in (300, 520):
+        dock.resize(width, 700)
+        dock.show()
+        dock._refresh_plan_panel()
+        _settle()
+        # Rows rebuilt on a visible panel are what collapsed to nothing. Check before
+        # the event loop runs, because a later resize can mask it.
+        dock._refresh_plan_panel()
+        assert dock.plan_panel._steps.height() > 0, width
+        _settle()
+        rows = dock.plan_panel.row_labels()
+        assert len(rows) == 3
+        for row in rows:
+            assert row.isVisible() and row.height() >= row.fontMetrics().height(), width
+        visible_area = dock.plan_panel._steps.viewport().height()
+        assert visible_area >= sum(row.height() for row in rows), width
+    dock.close()
+
+
+def test_long_plans_scroll_instead_of_squeezing_the_chat():
+    dock = _plan_dock()
+    dock._plan.adopt([f"Run a step with a long description {n}." for n in range(10)], True)
+    dock.resize(300, 700)
+    dock.show()
+    dock._refresh_plan_panel()
+    _settle()
+    assert dock.plan_panel._steps.height() <= 132
+    assert dock.transcript.height() > 200
+    dock.close()
+
+
+def test_plan_continue_is_disabled_during_the_metadata_wizard():
+    dock = _plan_dock()
+    dock._plan.adopt(PLAN_ITEMS, True)
+    dock._md_queue = [dict(step) for step in AssistantDock._MD_COUNT_STEPS]
+    dock._md_ask_next()
+    assert not dock.plan_panel.btn_advance.isEnabled()
+
+
+def test_plan_finish_needs_no_request():
+    dock = _plan_dock()
+    stack, requests = _captured_requests()
+    with stack:
+        dock._plan.adopt(["Open Tracking.", "Run Filtering."], True)
+        dock._plan.complete(0)
+        dock._plan.advance()
+        dock._refresh_plan_panel()
+        assert dock.plan_panel.btn_advance.text() == "Finish"
+        dock.plan_panel.btn_advance.click()
+    assert requests == []
+    assert not dock.plan_panel.isVisibleTo(dock)
+    assert "All plan steps are done." in dock._md_log[-1]
+
+
+def test_action_outcomes_stay_out_of_the_message_history():
+    from unittest.mock import patch
+
+    dock = _plan_dock()
+    dock.refresh_context_bar = lambda: None
+    dock._plan.adopt(PLAN_ITEMS, True)
+    applied = ProposedAction("set_ui_value", control_id="tracking.radius", value=12)
+    applied.preview = "Search radius -> 12"
+    declined = ProposedAction("set_ui_value", control_id="tracking.gap", value=3)
+    declined.preview = "Maximum gap -> 3"
+    swept = ProposedAction("set_ui_value", control_id="tracking.size", value=4)
+    swept.preview = "Minimum size -> 4"
+    failed = ProposedAction("set_ui_value", control_id="tracking.mode", value="a")
+    failed.preview = "Mode -> a"
+
+    with patch("behav3d.napari._assistant.apply_action", return_value=True):
+        dock._add_action_card(applied)
+        dock._apply_action(applied)
+    with patch("behav3d.napari._assistant.apply_action", return_value=False):
+        dock._apply_action(failed)
+    dock._add_action_card(declined)
+    card = dock.action_tray_layout.itemAt(0).widget()
+    card.dismissed.emit(declined)
+    dock._add_action_card(swept)
+    dock.btn_clear_actions.click()
+
+    assert dock._outcomes == [
+        "Applied: Search radius -> 12",
+        "Could not apply: Mode -> a",
+        "Declined: Maximum gap -> 3",
+        "Declined: Minimum size -> 4",
+    ]
+    assert dock._history == []
+    assert dock._plan.status(0) == "current", "Apply must not complete a step"
+
+    # An emptied tray points at Continue, and New chat is not a dismissal.
+    assert dock.plan_panel.btn_advance.property("emphasis") == "true"
+    dock._add_action_card(declined)
+    assert dock.plan_panel.btn_advance.property("emphasis") == "false"
+    outcomes = list(dock._outcomes)
+    dock._clear_action_cards()
+    assert dock._outcomes == outcomes
+
+
+def test_each_message_gets_its_own_bubble():
+    dock = _plan_dock()
+    dock._append_user("First question")
+    dock._append_md("First answer")
+    dock._append_md("Filled in: Well")
+    bubbles = dock.transcript.bubbles()
+    assert [bubble.role for bubble in bubbles] == [
+        "assistant", "user", "assistant", "assistant",
+    ]
+    assert bubbles[1].toPlainText() == "First question"
+    assert "**You**" not in dock.transcript.toPlainText()
+
+    captions = [caption for _bubble, caption in dock.transcript._rows]
+    assert captions[2] is not None and captions[3] is None, "one caption per speaker run"
+
+    dock._reset_conversation()
+    assert len(dock.transcript.bubbles()) == 1
+    assert "Filled in" not in dock.transcript.toPlainText()
+
+
+def test_styling_failure_keeps_rendered_markdown():
+    from unittest.mock import patch
+
+    dock = _plan_dock()
+    with patch(
+        "behav3d.napari._assistant_widgets.style_transcript_document",
+        side_effect=TypeError("enum"),
+    ):
+        dock._append_md("**Bold** text")
+    assert dock.transcript.bubbles()[-1].toPlainText() == "Bold text"
+
+
+def test_streaming_rerenders_only_the_latest_bubble():
+    dock = _plan_dock()
+    dock._append_user("A question")
+    older = dock.transcript.bubbles()[1]
+    older_document = older.document()
+    rendered = []
+    older.setMarkdown = lambda text: rendered.append(text)
+
+    dock._streaming_text = "Partial"
+    dock._render()
+    latest = dock.transcript.bubbles()[-1]
+    dock._streaming_text = "Partial answer"
+    dock._render()
+
+    assert rendered == []
+    assert older.document() is older_document
+    assert dock.transcript.bubbles()[-1] is latest
+    assert latest.toPlainText() == "Partial answer"
+
+
+def test_bubbles_fit_a_narrow_dock_and_refit_on_resize():
+    dock = _plan_dock()
+    dock.resize(300, 700)
+    dock.show()
+    _settle()
+    dock._append_user("Short question")
+    dock._append_md("A long reply. " * 40)
+    dock._append_md(
+        "| Analysis | What it answers |\n|---|---|\n"
+        "| **Death Dynamics** | How the signal-positive fraction changes over time. |"
+    )
+    _settle()
+
+    transcript = dock.transcript
+    _greeting, short, long, table = transcript.bubbles()
+    available = transcript._available_width()
+    for bubble in transcript.bubbles():
+        assert bubble.width() <= available
+        assert bubble.height() >= bubble.document().size().height()
+    assert short.width() < long.width(), "a short message shrinks to its text"
+    assert table.width() >= long.width() * 0.9, "tables take the full width"
+    assert short.x() + short.width() > long.x() + long.width() - 1, "you sit on the right"
+
+    narrow_height = long.height()
+    dock.resize(520, 700)
+    _settle()
+    assert transcript._available_width() > available
+    assert long.height() < narrow_height, "a wider dock reflows the text"
+    dock.close()
+
+
+def test_transcript_follows_the_end_only_while_reading_there():
+    dock = _plan_dock()
+    dock.resize(320, 420)
+    dock.show()
+    _settle()
+    for index in range(8):
+        dock._append_md(f"Message {index}. " * 30)
+    _settle()
+    bar = dock.transcript.verticalScrollBar()
+    assert bar.value() == bar.maximum() > 0
+
+    bar.setValue(0)
+    _settle()
+    dock._append_md("A later reply. " * 30)
+    _settle()
+    assert bar.value() == 0, "reading older messages is not interrupted"
+
+    dock._append_user("A new question")
+    _settle()
+    assert bar.value() == bar.maximum()
+    dock.close()
+
+
+def test_bubble_links_only_open_web_addresses():
+    from unittest.mock import patch
+    from qtpy.QtCore import QUrl
+    from behav3d.napari._assistant_widgets import _MessageBubble
+
+    with patch("behav3d.napari._assistant_widgets.QDesktopServices.openUrl") as open_url:
+        _MessageBubble._open_link(QUrl("file:///etc/passwd"))
+        open_url.assert_not_called()
+        _MessageBubble._open_link(QUrl("https://behav3d.readthedocs.io"))
+        open_url.assert_called_once()
 
 
 # --------------------------------------------------------------------------

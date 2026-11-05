@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 
-KNOWLEDGE_VERSION = "2026.10.30.2"
+KNOWLEDGE_VERSION = "2026.11.05.1"
 
 
 GUIDANCE_CARDS = {

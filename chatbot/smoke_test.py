@@ -11,6 +11,7 @@ from typing import Any
 import requests
 
 from behav3d.napari._assistant_actions import TOOL_SCHEMA
+from behav3d.napari._assistant_plan import extract_plan
 
 
 DATASET_DESCRIPTION = (
@@ -135,6 +136,20 @@ def _pixel_fill_case() -> dict:
             metadata_builder={"open": True, "n_samples": 3},
         ),
         "check": _check_pixel_fill,
+    }
+
+
+def _pixel_correction_case() -> dict:
+    case = _pixel_fill_case()
+    return {
+        **case,
+        "name": "pixel_correction_beats_the_earlier_value",
+        "messages": [
+            {"role": "user", "content": "XY pixel size is 0.5 um and Z spacing is 2 um."},
+            {"role": "assistant", "content": "I can use those values."},
+            {"role": "user", "content": "Correct the XY pixel size from 0.5 um to 0.6 um"},
+        ],
+        "check": _check_pixel_correction,
     }
 
 
@@ -2490,6 +2505,17 @@ def _check_metadata_setup(result: dict) -> list[str]:
     return errors
 
 
+def _check_pixel_correction(result: dict) -> list[str]:
+    values = {
+        call.get("control_id"): call.get("value")
+        for call in _tool_calls(result, "set_ui_value")
+    }
+    expected = {
+        f"metadata.samples.{index}.pixel_distance_xy": 0.6 for index in range(3)
+    }
+    return [] if values == expected else [f"expected XY 0.6 only, got {values!r}"]
+
+
 def _check_pixel_fill(result: dict) -> list[str]:
     calls = _tool_calls(result, "set_ui_value")
     changed = {call.get("control_id"): call.get("value") for call in calls}
@@ -3535,6 +3561,161 @@ def _check_name_neutral_tracking(result: dict) -> list[str]:
     return errors
 
 
+def _plan_context(step: str, **session) -> dict:
+    controls = [
+        _control(
+            "tracking.Tcell.btrack.maximum_search_radius",
+            "Tcell: btrack maximum search radius", 12.0,
+            unit="um", cell_type="Tcell",
+        ),
+    ]
+    context = _context(step, controls, active_cell_type="Tcell")
+    context["assistant_session"] = {"intent": "free_form", **session}
+    return context
+
+
+def _active_plan(current: int) -> dict:
+    steps = (
+        "Run Tracking for each population.",
+        "Run Feature Extraction per cell type.",
+        "Run Filtering to remove short tracks.",
+    )
+    return {
+        "steps": [
+            {
+                "number": number,
+                "title": text.rstrip("."),
+                "detail": text,
+                "status": (
+                    "done" if number < current
+                    else "current" if number == current else "pending"
+                ),
+            }
+            for number, text in enumerate(steps, start=1)
+        ],
+        "targeted": True,
+    }
+
+
+def _plan_recommendation_case() -> dict:
+    return {
+        "name": "plan_recommendation_uses_the_marker",
+        "messages": [{"role": "user", "content": (
+            "I've finished segmentation. What are the main steps I should do next?"
+        )}],
+        "context": _plan_context("tracking"),
+        "check": _check_plan_recommendation,
+    }
+
+
+def _plan_explanation_case() -> dict:
+    return {
+        "name": "plan_marker_stays_off_explanations",
+        "messages": [{"role": "user", "content": (
+            "How does tracking link an object from one frame to the next?"
+        )}],
+        "context": _plan_context("tracking"),
+        "check": _check_no_plan_marker,
+    }
+
+
+def _plan_continue_case() -> dict:
+    return {
+        "name": "plan_continue_works_the_current_step",
+        "messages": [
+            {"role": "user", "content": "What steps should I do next?"},
+            {"role": "assistant", "content": (
+                "**Plan**\n\n1. Run Tracking for each population.\n"
+                "2. Run Feature Extraction per cell type.\n"
+                "3. Run Filtering to remove short tracks."
+            )},
+            {"role": "user", "content": "Continue with step 2"},
+        ],
+        "context": _plan_context("tracking", plan=_active_plan(2)),
+        "check": _check_plan_continue,
+    }
+
+
+def _plan_sub_steps_case() -> dict:
+    return {
+        "name": "plan_sub_steps_do_not_start_a_new_plan",
+        "messages": [{"role": "user", "content": "Walk me through step 1 in detail"}],
+        "context": _plan_context("tracking", plan=_active_plan(1)),
+        "check": _check_no_plan_marker,
+    }
+
+
+def _plan_declined_change_case() -> dict:
+    return {
+        "name": "plan_declined_change_is_not_proposed_again",
+        "messages": [{"role": "user", "content": (
+            "What should I look at next on this tab?"
+        )}],
+        "context": _plan_context(
+            "tracking",
+            plan=_active_plan(1),
+            recent_outcomes=[
+                "Declined: Tcell: btrack maximum search radius: 12.0 -> 30.0",
+            ],
+        ),
+        "check": _check_declined_change_not_reproposed,
+    }
+
+
+def _plan_declined_then_continue_case() -> dict:
+    preview = "Tcell: btrack maximum search radius: 12.0 -> 30.0"
+    return {
+        "name": "plan_continue_leaves_a_declined_change_alone",
+        "messages": [
+            {"role": "user", "content": "Set the Tcell maximum search radius to 30"},
+            {"role": "assistant", "content": (
+                f"Sent to the interface: {preview} "
+                "(declined, so the value did not change)"
+            )},
+            {"role": "user", "content": "Continue with step 1"},
+        ],
+        "context": _plan_context(
+            "tracking", plan=_active_plan(1), recent_outcomes=[f"Declined: {preview}"],
+        ),
+        "check": _check_declined_change_not_reproposed,
+    }
+
+
+def _check_plan_recommendation(result: dict) -> list[str]:
+    if extract_plan(result["text"]) is None:
+        return ["expected a list the plan panel can pin"]
+    return []
+
+
+def _check_no_plan_marker(result: dict) -> list[str]:
+    if "**Plan**" in result["text"]:
+        return ["unexpected **Plan** marker"]
+    return []
+
+
+def _check_plan_continue(result: dict) -> list[str]:
+    text = result["text"].lower()
+    errors = _check_no_plan_marker(result)
+    if "feature extraction" not in text:
+        errors.append("expected visible text beginning Feature Extraction")
+    if _tool_calls(result, "navigate_to_step") != [{"step": "feature_extraction"}]:
+        errors.append(f"expected one Feature Extraction navigation, got {result['calls']!r}")
+    if not re.search(r"\*\*next:?\*\*:?.*filtering", text):
+        errors.append("expected a **Next:** line naming Filtering")
+    if "[current]" in text or "[pending]" in text:
+        errors.append("leaked a plan status label")
+    return errors
+
+
+def _check_declined_change_not_reproposed(result: dict) -> list[str]:
+    if any(
+        call.get("arguments", {}).get("value") in (30, 30.0)
+        for call in result["calls"]
+    ):
+        return ["proposed the declined value again"]
+    return []
+
+
 SCENARIOS = [
     _metadata_taxonomy_case,
     _multicolor_definition_case,
@@ -3552,6 +3733,7 @@ SCENARIOS = [
     _open_population_dynamics_case,
     _metadata_setup_case,
     _pixel_fill_case,
+    _pixel_correction_case,
     _metadata_structure_correction_case,
     _segmentation_case,
     _apoc_threshold_defaults_case,
@@ -3610,6 +3792,12 @@ SCENARIOS = [
     _functional_experiment_context_case,
     _safety_profiling_context_case,
     _experiment_reference_metadata_conflict_case,
+    _plan_recommendation_case,
+    _plan_explanation_case,
+    _plan_continue_case,
+    _plan_sub_steps_case,
+    _plan_declined_change_case,
+    _plan_declined_then_continue_case,
 ]
 
 

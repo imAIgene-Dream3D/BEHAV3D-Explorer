@@ -31,7 +31,8 @@ cards but cannot use the LLM.
    method, or historical experiment is not evidence for the current workflow.
 6. **One user turn produces one request.** Applying an action does not trigger a
    hidden model continuation. The next turn starts from freshly serialized UI
-   state.
+   state. The plan panel's Continue button is an explicit input, so it sends one
+   request like any other.
 
 ## Architecture
 
@@ -60,8 +61,8 @@ flowchart LR
 ### Request lifecycle
 
 1. `AssistantDock` records the user turn and keeps at most 12 user/assistant
-   exchanges. Long-lived facts come from structured live context, not old chat
-   text.
+   exchanges. Long-lived facts come from structured live context and the
+   conversation state below, not old chat text.
 2. `build_context(main_widget)` snapshots the active tab, metadata, unsaved
    Metadata Builder draft, validation state, visible controls, active method and
    cell type, queue, logs, result files, analysis state, and optional experiment
@@ -89,6 +90,48 @@ path: while it is active, `_assistant.py` handles short answers locally and
 updates its deterministic question queue. A free-form send cancels that wizard
 and returns to the normal request lifecycle.
 
+### Conversation state
+
+Message history cannot carry a multi-step task by itself: the service is stateless,
+canned replies never reach the model, and the window drops early messages. The dock
+therefore keeps two small structures and resends them in `assistant_session` with
+every request.
+
+- **`plan`**: the steps a reply recommended, shown as a pinned checklist above the
+  message box. `_assistant_plan.py` holds the rules, without Qt.
+- **`recent_outcomes`**: the last six things that happened in the interface, such
+  as `Applied: ...`, `Declined: ...`, and `Opened ...`.
+
+A reply declares a plan with a line reading `**Plan**` above a numbered list. The
+model often omits that line, so an unmarked list also counts when it comes from the
+model, has at least three items, and every item starts with a verb or a pipeline
+module. Bullets stay out because the system prompt reserves them for alternatives.
+A canned reply must use the marker. If nothing is captured, no checklist appears and
+the turn behaves as it would without a plan.
+
+| Event | Effect on the plan |
+|---|---|
+| New plan while one is unfinished | Never replaces it. A list given during a step is usually that step's sub-steps. A different marked list only offers "Use these N steps". |
+| "do the second one" | Moves the focus. Nothing is completed. |
+| "next", or the Continue button | Starts the focus step, or completes it and starts the lowest pending step. |
+| "done" | Completes the focus step. |
+| A question, including "what's next?" | Nothing. The model answers from the plan. |
+| Applied navigation, including canned turns | Focuses the matching step, and completes it only if opening the module was the whole step. |
+| Apply | Never completes a step, because a step can need several. An emptied tray highlights Continue. |
+| Clicking a row | Toggles it locally without a request. |
+
+Continue sends only the fixed text `Continue with step N`. A step title could trip a
+keyword handler, or make a value the model wrote look as though the researcher
+supplied it. When the targeted step lives on another tab, the server emits the
+navigation itself and withholds the navigation tools for that turn; with them
+available the model replies with the tab switch alone and no guidance.
+
+Keep outcomes out of `messages`: handlers read the previous assistant text. The one
+exception is a reply of tool calls alone, which records a `Sent to the interface: ...`
+assistant turn. Without it the model sees the request as unanswered and acts on it
+again, even after a decline. Apply and Keep current then annotate that entry. The dock
+also drops a repeat of a declined value unless the latest message asks for it.
+
 ### Wire protocol
 
 The client sends:
@@ -96,10 +139,24 @@ The client sends:
 ```json
 {
   "messages": [{"role": "user", "content": "Explain btrack search radius"}],
-  "context": {"current_step": "tracking"},
+  "context": {
+    "current_step": "tracking",
+    "assistant_session": {
+      "intent": "free_form",
+      "plan": {
+        "steps": [{"number": 1, "title": "Run Tracking", "detail": "...", "status": "current"}],
+        "targeted": true
+      },
+      "recent_outcomes": ["Applied: Tcell: btrack maximum search radius: 12.0 -> 15.0"]
+    }
+  },
   "tools": [{"name": "set_ui_value", "parameters": {}}]
 }
 ```
+
+`plan` is `null` when there is none. `targeted` means the message being sent named a
+step, so retrieval adds that step's title; "do the second one" has nothing else to
+match.
 
 `POST /chat` returns an SSE stream containing newline-delimited JSON events:
 
@@ -124,6 +181,8 @@ diagnosis, not as a high-frequency monitor.
 | File | Responsibility | Change it when |
 |---|---|---|
 | `behav3d/napari/_assistant.py` | Chat UI, quick buttons, local metadata wizard, history, streaming, action cards, no-op handling, and apply/confirm policy. | Changing the chat experience or how validated actions are presented/applied. |
+| `behav3d/napari/_assistant_widgets.py` | Message bubbles, the scrolling transcript, the plan panel, and their stylesheet. | Changing how messages or the plan look. |
+| `behav3d/napari/_assistant_plan.py` | Pure plan capture, step rules, and outcome bookkeeping. | Changing what counts as a plan or how steps advance. |
 | `behav3d/napari/_assistant_client.py` | Endpoint configuration, background HTTP/SSE and health workers, classified failures, automatic retry, and offline fallback. | Changing transport, timeouts, health checks, authentication, or degraded behavior. |
 | `behav3d/napari/_assistant_context.py` | Defensive serialization of live BEHAV3D state and experiment references. | The assistant needs to read a new piece of UI, metadata, log, result, or experiment state. |
 | `behav3d/napari/_assistant_controls.py` | Live editable-control registry, getters, setters, units, choices, visibility, and persistence callbacks. | The assistant should be able to inspect or edit a real UI control. |
@@ -367,6 +426,13 @@ explicit intent; they should not expose hidden technical instructions as if the
 user typed them. Preserve the single-request rule and ensure a new free-form
 question cancels stale guided state.
 
+Each message is its own `_MessageBubble` in `_assistant_widgets.py`. A bubble wraps
+at a fixed pixel width and sets its own size in `fit()`, because the default wrap mode
+resets the document to a viewport that does not have its real size yet. Measure only
+after `ensurePolished()`, since the stylesheet font applies at polish. Check layout
+changes in the real application: offscreen tests can pass while a panel renders
+empty.
+
 ### Reproduce new feedback
 
 1. Reduce the transcript to the smallest context and message sequence that
@@ -393,6 +459,8 @@ Before merging an assistant change, verify:
 - The model does not claim a configured step ran without a corresponding result.
 - Visible text uses UI labels rather than variable, control, or tool names.
 - Same-value and already-open actions do not loop.
+- A declined change is not proposed again unless the researcher asks for it.
+- A step in the plan is completed only by the researcher moving on, never by Apply.
 - Sensitive/existing values follow the intended confirmation policy.
 - One user input produces at most one server request.
 
@@ -524,6 +592,10 @@ When only server code or guidance cards change, a deploy is sufficient:
 ```bash
 python -m modal deploy chatbot/app.py
 ```
+
+Deploy the server before releasing a client that relies on new session keys. An old
+client on a new server only sees an extra `**Plan**` heading, but a new client on an
+old server shows a plan the model is never told about.
 
 The index is stored in the `behav3d-assistant-index` Modal Volume as
 `index.npy` and `index.json`. The embedding model is
