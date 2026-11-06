@@ -205,17 +205,26 @@ def _stream_stderr(proc: subprocess.Popen, tail: deque, lock: threading.Lock) ->
     ``model.eval()`` call gives zero terminal feedback until it's already
     finished. Streaming it concurrently surfaces that chatter - including
     cellpose's own progress bars - live while the call is still running.
+
+    This loop must keep draining for as long as the worker lives: once the pipe
+    fills, the worker blocks on its next stderr write (a tqdm refresh is enough),
+    which hangs whatever it was doing with no error. So a failed echo is ignored
+    rather than allowed to end the loop.
     """
     if proc.stderr is None:
         return
     try:
         for line in proc.stderr:
-            sys.stderr.write(line)
-            sys.stderr.flush()
             with lock:
                 tail.append(line.rstrip("\n"))
-    except Exception:
-        pass
+            try:
+                sys.stderr.write(line)
+                sys.stderr.flush()
+            except Exception:
+                pass
+    except Exception as exc:
+        with lock:
+            tail.append(f"[stderr reader stopped: {exc!r}]")
 
 
 def _run_worker(
@@ -240,6 +249,11 @@ def _run_worker(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            # build_worker_env makes the worker write UTF-8. Left to the default, this
+            # end decodes with the locale's encoding (cp1252 on Windows), which raises
+            # on tqdm's block characters and kills the stderr reader.
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             env=build_worker_env(device=device, force_cpu=force_cpu, n_threads=n_threads),
         )

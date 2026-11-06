@@ -109,6 +109,9 @@ def build_worker_env(
     - matters more than peak throughput.
     """
     env = os.environ.copy()
+    # Every reader of a sidecar subprocess decodes as UTF-8, so don't depend on
+    # having been started through launch_napari.py, which also sets this.
+    env["PYTHONIOENCODING"] = "utf-8"
 
     if n_threads is not None:
         n_threads = max(1, int(n_threads))
@@ -173,6 +176,8 @@ def cpsam_env_status(config: dict | None = None, refresh: bool = False) -> dict:
             [str(python), "-c", probe],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=180,
             env=build_worker_env(),
         )
@@ -250,6 +255,8 @@ def create_cpsam_env(
             [sys.executable, "-m", "venv", "--system-site-packages", str(env_dir)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if proc.returncode != 0 or not python.exists():
             raise RuntimeError(
@@ -270,6 +277,8 @@ def create_cpsam_env(
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env=build_worker_env(),
     )
     if proc.returncode != 0:
