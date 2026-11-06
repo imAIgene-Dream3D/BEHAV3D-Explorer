@@ -389,7 +389,8 @@ def start_display():
     _wait(lambda: _run(["xdpyinfo", "-display", DISPLAY], check=False).returncode == 0,
           30, "Xvfb")
 
-    # A window manager is what gives napari a title bar, resizing and focus.
+    # A window manager is what gives napari focus and lets us maximise it.
+    _write_fluxbox_rules()          # must exist before fluxbox starts
     _spawn("fluxbox", ["fluxbox"])
     time.sleep(1)
 
@@ -435,23 +436,82 @@ def launch_napari(repo_dir=None, timeout=300):
     return proc
 
 
+def _x11(cmd):
+    """Run an X11 command-line tool against the virtual display."""
+    return _run(cmd, check=False, env={**os.environ, "DISPLAY": DISPLAY})
+
+
+def _window_ids():
+    """Visible X windows whose title matches the viewer (Qt6 may create several)."""
+    res = _x11(["xdotool", "search", "--onlyvisible", "--name", WINDOW_TITLE])
+    return [i for i in res.stdout.split() if i.strip()]
+
+
+def _window_size(wid):
+    """(width, height) of an X window, or (0, 0) if it cannot be read."""
+    out = _x11(["xdotool", "getwindowgeometry", "--shell", wid]).stdout
+    vals = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    try:
+        return int(vals["WIDTH"]), int(vals["HEIGHT"])
+    except (KeyError, ValueError):
+        return 0, 0
+
+
 def _window_id():
-    res = _run(["xdotool", "search", "--name", WINDOW_TITLE], check=False,
-               env={**os.environ, "DISPLAY": DISPLAY})
-    ids = [i for i in res.stdout.split() if i.strip()]
-    return ids[-1] if ids else None
+    """The main viewer window: the largest visible one carrying the viewer title.
+
+    The dock widget is also called "BEHAV3D Explorer", and with PyQt6/napari 0.9
+    it (or a transient helper window) can be mapped as its own X window, so the
+    last match is not reliably the main window.
+    """
+    ids = _window_ids()
+    if not ids:
+        return None
+    return max(ids, key=lambda i: (lambda s: s[0] * s[1])(_window_size(i)))
 
 
-def _maximise():
-    """Fill the virtual screen so the visitor sees the whole GUI immediately."""
-    wid = _window_id()
-    if not wid:
-        return
-    w, h = SCREEN.split("x")[:2]
-    env = {**os.environ, "DISPLAY": DISPLAY}
-    _run(["xdotool", "windowmove", wid, "0", "0"], check=False, env=env)
-    _run(["xdotool", "windowsize", wid, w, h], check=False, env=env)
-    _run(["xdotool", "windowactivate", wid], check=False, env=env)
+def _write_fluxbox_rules():
+    """Tell fluxbox to open the viewer maximised and undecorated.
+
+    Doing it in the window manager means the window is *born* full-screen, so it
+    does not depend on racing Qt's own startup resize (which, since PyQt6/napari
+    0.9, lands after the window first appears and used to leave the GUI as a
+    small window in a corner of the desktop).
+    """
+    rules = (
+        f"[app] (title={WINDOW_TITLE}.*)\n"
+        "  [Maximized] {yes}\n"
+        "  [Deco] {NONE}\n"
+        "  [Position] (UPPERLEFT) {0 0}\n"
+        "[end]\n"
+    )
+    fluxbox_dir = Path.home() / ".fluxbox"
+    fluxbox_dir.mkdir(parents=True, exist_ok=True)
+    (fluxbox_dir / "apps").write_text(rules)
+
+
+def _maximise(timeout=20):
+    """Make the viewer fill the virtual screen, and keep it that way.
+
+    Qt can resize/move the window after it first appears (restoring geometry,
+    adding the dock widget), so a single move+resize is not enough: re-apply
+    until the window has held the full screen size for a moment.
+    """
+    w, h = (int(v) for v in SCREEN.split("x")[:2])
+    deadline, stable = time.time() + timeout, 0
+    while time.time() < deadline:
+        wid = _window_id()
+        if wid:
+            if _window_size(wid) == (w, h):
+                stable += 1
+                if stable >= 3:
+                    break
+            else:
+                stable = 0
+                _x11(["xdotool", "windowmove", wid, "0", "0"])
+                _x11(["xdotool", "windowsize", wid, str(w), str(h)])
+                _x11(["xdotool", "windowactivate", wid])
+        time.sleep(0.5)
 
 
 # ==========================================================================
