@@ -1456,6 +1456,437 @@ def _reported_channel_counts(context: dict) -> list[int]:
     return sorted(counts)
 
 
+# Found in the question below; marks that the researcher has already been asked.
+_DEAD_SIGNAL_MARKER = "dead signal also required"
+_NON_TARGET_CHANNEL_WORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "both", "ch", "channel", "clean", "for",
+    "from", "has", "in", "is", "it", "its", "my", "of", "on", "only", "or", "our",
+    "pick", "select", "shows", "signal", "that", "the", "this", "to", "use", "used",
+    "using", "with",
+})
+_CHANNEL_MODEL_SCOPE_WORDS = frozenset({
+    "apoc", "classifier", "classifiers", "each", "every", "model", "models",
+    "segmentation", "that", "these", "this", "training",
+})
+_DEAD_MODEL_NAMES = frozenset({"dead", "death"})
+
+
+def _parse_channel_map(text: str) -> list[tuple[str, int]]:
+    """Return the (name, channel) pairs stated in a lowercased channel map."""
+    found = []
+    for match in re.finditer(
+        r"\b([a-z0-9_-]+)\s+(?:is\s+)?(?:(?:in|on)\s+)?(?:ch|channel)\s*(\d+)\b", text,
+    ):
+        found.append((match.start(), match.group(1), int(match.group(2))))
+    for match in re.finditer(
+        r"\b(?:ch|channel)\s*(\d+)\s*(?:is|shows|contains|holds|has|=|:|->)\s*([^;.,\n]+)",
+        text,
+    ):
+        for part in re.split(r"\band\b|[&+/]", match.group(2)):
+            name = next((
+                word for word in re.findall(r"[a-z0-9_-]+", part)
+                if word not in {"the", "both", "only", "my", "our"}
+            ), None)
+            if name:
+                found.append((match.start(), name, int(match.group(1))))
+    pairs = []
+    for _position, name, index in sorted(found, key=lambda item: item[0]):
+        if (
+            name not in _NON_TARGET_CHANNEL_WORDS
+            and not name.isdigit()
+            and (name, index) not in pairs
+        ):
+            pairs.append((name, index))
+    return pairs
+
+
+def _invalid_channel_pairs(
+    pairs: list[tuple[str, int]], context: dict,
+) -> list[tuple[str, int]]:
+    counts = _reported_channel_counts(context)
+    return [
+        (name, index) for name, index in pairs
+        if counts and index >= min(counts)
+    ]
+
+
+def _apoc_channel_controls_not_ready(context: dict) -> bool:
+    apoc_state = (context.get("segmentation", {}) or {}).get("apoc", {}) or {}
+    active = str(context.get("active_cell_type") or "")
+    active_state = (apoc_state.get("cell_types", {}) or {}).get(active, {}) or {}
+    return (
+        apoc_state.get("training_data_loaded") is False
+        or active_state.get("channel_controls_ready") is False
+    )
+
+
+def _user_history(messages: list[dict]) -> list[str]:
+    return [
+        " ".join(str(message.get("content") or "").lower().split())
+        for message in messages
+        if message.get("role") == "user"
+    ]
+
+
+def _apoc_dead_channels(context: dict, messages: list[dict]) -> list[int]:
+    """Return every raw dead-channel index from metadata and the user's own map."""
+    found = set()
+    for record in (context.get("metadata", {}) or {}).get("records", []) or []:
+        if not isinstance(record, dict):
+            continue
+        try:
+            found.add(int(float(record.get("dead_channel"))))
+        except (TypeError, ValueError, OverflowError):
+            continue
+    for text in _user_history(messages):
+        found.update(
+            index for name, index in _parse_channel_map(text) if "dead" in name
+        )
+    return sorted(found)
+
+
+def _apoc_channel_controls(context: dict) -> dict[str, dict]:
+    """Map each non-dead APOC model name to its usable channel-input control."""
+    prefix, suffix = "segmentation.apoc.", ".input_channels"
+    controls = {}
+    for control in (context.get("ui_state", {}) or {}).get("controls", []) or []:
+        control_id = str(control.get("id") or "")
+        if (
+            control_id.startswith(prefix)
+            and control_id.endswith(suffix)
+            and control.get("visible", True)
+            and control.get("enabled", True)
+        ):
+            name = control_id[len(prefix):-len(suffix)]
+            if name.lower() not in _DEAD_MODEL_NAMES:
+                controls[name] = control
+    return controls
+
+
+def _apoc_target_names(context: dict) -> list[str]:
+    """List the objects with an APOC model, from the most specific live source."""
+    apoc_state = (context.get("segmentation", {}) or {}).get("apoc", {}) or {}
+    categories = (context.get("metadata", {}) or {}).get("cell_types", {}) or {}
+    for source in (
+        _apoc_channel_controls(context),
+        apoc_state.get("cell_types", {}) or {},
+        [
+            name
+            for category in ("organoid", "immune", "other", "merged")
+            for name in categories.get(category, []) or []
+        ],
+    ):
+        names = [
+            str(name) for name in source
+            if str(name).lower() not in _DEAD_MODEL_NAMES
+        ]
+        if names:
+            return names
+    return []
+
+
+def _apoc_has_dead_signal(context: dict, messages: list[dict]) -> bool:
+    if _apoc_dead_channels(context, messages):
+        return True
+    apoc_state = (context.get("segmentation", {}) or {}).get("apoc", {}) or {}
+    model_names = [str(name) for name in (apoc_state.get("cell_types", {}) or {})]
+    model_names += [
+        str(control.get("id") or "").split(".")[2]
+        for control in (context.get("ui_state", {}) or {}).get("controls", []) or []
+        if str(control.get("id") or "").startswith("segmentation.apoc.")
+        and str(control.get("id") or "").count(".") >= 3
+    ]
+    return any(name.lower() in _DEAD_MODEL_NAMES for name in model_names)
+
+
+def _dead_signal_question(context: dict) -> str:
+    example = ", ".join(_apoc_target_names(context)[:2])
+    reply = (
+        f"the objects that need it (for example, **{example}**), or **none**"
+        if example else
+        "the objects that need it, or **none**"
+    )
+    return (
+        "**Dead signal: one detail needed**\n\n"
+        "For any of your objects, is the dead signal also required to correctly "
+        "segment the full object (for example, dying or falling-apart objects that "
+        "lose their original dye)?\n\n"
+        f"**Reply with:** {reply}."
+    )
+
+
+def _dead_signal_question_asked(messages: list[dict]) -> bool:
+    return any(
+        _DEAD_SIGNAL_MARKER in str(message.get("content") or "").lower()
+        for message in messages
+        if message.get("role") == "assistant"
+    )
+
+
+def _dead_signal_decided(messages: list[dict]) -> bool:
+    """True when the researcher already said whether a model uses the dead signal."""
+    for text in _user_history(messages):
+        statements = re.sub(r"[^.?!;]*\?", " ", text)
+        if re.search(
+            r"\b(?:include|includes|including|add|adding|use|using|keep|exclude|"
+            r"excluding|without|skip|no|not)\b(?:\s+(?:the|any|a|channel\s*\d+))*"
+            r"\s+dead\b"
+            r"|\bdead\s+(?:channel|signal)\s+(?:too|as well|also)\b",
+            statements,
+        ):
+            return True
+    return False
+
+
+def _states_per_model_channels(latest: str) -> bool:
+    """True for an explicit instruction such as 'use Channel 1 for 27t'."""
+    return any(
+        match.group(1) not in _CHANNEL_MODEL_SCOPE_WORDS
+        for match in re.finditer(
+            r"\b(?:use|using|select|check|keep|only)\b[^.;]*?\b(?:channels?|ch)\s*\d"
+            r"[^.;]*?\bfor\s+(?:(?:both|the|only|my|our)\s+)*([a-z0-9_-]+)",
+            latest,
+        )
+    )
+
+
+def apoc_dead_signal_question(
+    context: dict, messages: list[dict],
+) -> str | None:
+    """Ask about the dead signal before a stated channel map narrows APOC inputs."""
+    if context.get("current_step") != "segmentation":
+        return None
+    latest = _normalized_user_message(messages)
+    segmentation = context.get("segmentation", {}) or {}
+    method = str(segmentation.get("method") or "")
+    if "apoc" not in method.lower() and "apoc" not in latest:
+        return None
+    if (
+        str((context.get("assistant_session") or {}).get("intent") or "")
+        == "compare_segmentation_methods"
+        or "segmentation method" in latest
+        or "cellpose" in latest
+    ):
+        return None
+
+    mapped = _parse_channel_map(latest)
+    states_map = (
+        "?" not in latest
+        and any("dead" not in name for name, _index in mapped)
+    )
+    set_request = (
+        "apoc" in latest and "channel" in latest
+        and bool(re.search(r"\b(?:set|apply|select|configure|fill|update)\b", latest))
+    )
+    previous = _previous_assistant_message(messages).lower()
+    clean_reply = "clean" in latest and (
+        ("apoc" in previous and "channel" in previous)
+        or ("?" not in latest and bool(re.search(r"\b(?:ch|channel)\s*\d", latest)))
+    )
+    if not (states_map or set_request or clean_reply):
+        return None
+    if (
+        not _apoc_has_dead_signal(context, messages)
+        or _dead_signal_question_asked(messages)
+        or _dead_signal_decided(messages)
+        or _states_per_model_channels(latest)
+        or _invalid_channel_pairs(mapped, context)
+        or _apoc_channel_controls_not_ready(context)
+    ):
+        return None
+    return _dead_signal_question(context)
+
+
+def _apoc_targets_named_in(
+    text: str, context: dict, targets: list[str],
+) -> list[str]:
+    """Return the targets a text names directly or by organoid/immune category."""
+    def named(word: str) -> bool:
+        return bool(re.search(
+            rf"(?<![a-z0-9_-]){re.escape(word.lower())}s?(?![a-z0-9_-])", text,
+        ))
+
+    return [
+        target for target in targets
+        if named(target)
+        or any(
+            named(category) and _cell_type_category(context, target) == category
+            for category in ("organoid", "immune")
+        )
+    ]
+
+
+def _apoc_target_channels_from_history(
+    messages: list[dict], context: dict, targets: list[str],
+) -> dict[str, list[int]]:
+    """Return each target's mapped channels; a later statement replaces an earlier one."""
+    channels: dict[str, list[int]] = {}
+    for text in _user_history(messages):
+        stated: dict[str, list[int]] = {}
+        for name, index in _parse_channel_map(text):
+            if "dead" in name:
+                continue
+            for target in _apoc_targets_named_in(name, context, targets):
+                stated.setdefault(target, []).append(index)
+        channels.update(stated)
+    return channels
+
+
+def apoc_dead_signal_answer_action(
+    context: dict, messages: list[dict],
+) -> dict | None:
+    """Turn the answer to the dead-signal question into per-target channel edits."""
+    if context.get("current_step") != "segmentation":
+        return None
+    if _DEAD_SIGNAL_MARKER not in _previous_assistant_message(messages).lower():
+        return None
+    latest = _normalized_user_message(messages)
+    # A question or a long message is a new request, not an answer.
+    if "?" in latest or len(latest.split()) > 25:
+        return None
+
+    controls = _apoc_channel_controls(context)
+    targets = _apoc_target_names(context)
+    excluded = [
+        target for target in targets
+        if re.search(
+            r"\b(?:not|except|excluding|without|but not|no)\s+(?:(?:for|the)\s+)*"
+            rf"{re.escape(target.lower())}s?(?![a-z0-9_-])"
+            rf"|(?<![a-z0-9_-]){re.escape(target.lower())}s?\s*(?::|=|-)?\s*"
+            r"(?:no|not|doesn't|does not)\b",
+            latest,
+        )
+    ]
+    named = [
+        target for target in _apoc_targets_named_in(latest, context, targets)
+        if target not in excluded
+    ]
+    if re.search(r"\b(?:all|every|everything|each)\b", latest):
+        selected = [target for target in targets if target not in excluded]
+    elif named:
+        selected = named
+    elif excluded:
+        return None
+    elif re.search(
+        r"^(?:none|no|nope|neither)\b|\b(?:none|not needed|not required)\b", latest,
+    ):
+        selected = []
+    elif re.search(r"^(?:yes|yep|yeah|correct|sure)\b", latest):
+        if len(targets) != 1:
+            return {
+                "text": "Which of your objects need it?\n\n"
+                + _dead_signal_question(context),
+                "calls": [],
+            }
+        selected = list(targets)
+    else:
+        return None
+
+    dead_channels = _apoc_dead_channels(context, messages)
+    if selected and len(dead_channels) != 1:
+        problem = (
+            f"the samples and your channel map list different dead channels "
+            f"({', '.join(f'Channel {index}' for index in dead_channels)}), and one "
+            "model must stay tied to one physical channel"
+            if dead_channels else
+            "I do not have the dead-channel number"
+        )
+        return {
+            "text": (
+                f"**{', '.join(selected)}** should use the dead signal, but {problem}. "
+                "Which channel holds the dead signal for these samples?"
+            ),
+            "calls": [],
+        }
+    dead_label = f"Channel {dead_channels[0]}" if selected else None
+    selected_text = ", ".join(selected)
+    if not controls:
+        if not selected:
+            return {
+                "text": (
+                    "Understood: the dead channel stays out of the target models. "
+                    "Select each target's own channels in **Image Channel Inputs** "
+                    "once **Generate Training Data** has finished."
+                ),
+                "calls": [],
+            }
+        return {
+            "text": (
+                f"Understood: **{selected_text}** should also use **{dead_label}**. "
+                "The Image Channel Inputs are not available yet. Click **Generate "
+                "Training Data**, wait for it to finish, and then I can set them."
+            ),
+            "calls": [],
+        }
+
+    mapped = _apoc_target_channels_from_history(messages, context, list(controls))
+    calls = []
+    rows = []
+    unresolved = []
+    for target, control in controls.items():
+        wants_dead = target in selected
+        if not wants_dead and target not in mapped:
+            continue
+        choices = [str(choice) for choice in control.get("choices") or []]
+        current = control.get("value")
+        current = [str(item) for item in current] if isinstance(current, list) else []
+        base = (
+            [f"Channel {index}" for index in mapped[target]]
+            if target in mapped else current
+        )
+        if wants_dead and not base:
+            unresolved.append(target)
+            continue
+        value = list(base)
+        if wants_dead and dead_label not in value:
+            value.append(dead_label)
+        if choices and any(label not in choices for label in value):
+            unresolved.append(target)
+            continue
+        if choices:
+            value = [choice for choice in choices if choice in value]
+        rows.append(f"- **{target}:** {', '.join(value)}")
+        if value != current:
+            calls.append({
+                "name": "set_ui_value",
+                "arguments": {"control_id": control["id"], "value": value},
+            })
+
+    with_dead = [target for target in selected if target not in unresolved]
+    if with_dead:
+        lead = (
+            f"**{', '.join(with_dead)}** will also use the dead signal "
+            f"(**{dead_label}**), so the classifier keeps following those objects "
+            "after they lose their original dye."
+        )
+        if set(with_dead) != set(controls):
+            lead += " Other models do not use it."
+    elif selected:
+        lead = f"The dead signal (**{dead_label}**) has not been added yet."
+    else:
+        lead = "Understood: the dead channel stays out of the target models."
+    parts = [lead]
+    if rows:
+        parts.append("**Suggested Image Channel Inputs:**\n" + "\n".join(rows))
+        parts.append(
+            "These inputs need confirming before they change. Then train the "
+            "affected classifiers and check the preview on dying objects."
+            if calls else
+            "These inputs are already set, so no edit is needed."
+        )
+    elif not selected:
+        parts.append(
+            "No channel inputs were changed. Select each target's own channels in "
+            "**Image Channel Inputs**, or give me the channel map."
+        )
+    if unresolved:
+        parts.append(
+            f"I could not build a valid channel list for **{', '.join(unresolved)}**. "
+            "Which channels show that object's own signal?"
+        )
+    return {"text": "\n\n".join(parts), "calls": calls}
+
+
 def apoc_channel_selection_guidance(
     context: dict, messages: list[dict],
 ) -> str | None:
@@ -1476,16 +1907,9 @@ def apoc_channel_selection_guidance(
     )):
         return None
 
-    mapped = re.findall(
-        r"\b([a-z0-9_]+)\s+(?:is\s+)?(?:ch|channel)\s*(\d+)\b",
-        latest, re.IGNORECASE,
-    )
+    mapped = _parse_channel_map(latest)
     counts = _reported_channel_counts(context)
-    invalid = [
-        (name, int(index))
-        for name, index in mapped
-        if counts and int(index) >= min(counts)
-    ]
+    invalid = _invalid_channel_pairs(mapped, context)
     if invalid:
         count_text = (
             f"{counts[0]} channels, indexed 0-{counts[0] - 1}"
@@ -1500,14 +1924,7 @@ def apoc_channel_selection_guidance(
             "channels? I need that resolved before recommending APOC inputs."
         )
 
-    apoc_state = (context.get("segmentation", {}) or {}).get("apoc", {}) or {}
-    active = str(context.get("active_cell_type") or "")
-    active_state = (apoc_state.get("cell_types", {}) or {}).get(active, {}) or {}
-    controls_not_ready = (
-        apoc_state.get("training_data_loaded") is False
-        or active_state.get("channel_controls_ready") is False
-    )
-    if controls_not_ready:
+    if _apoc_channel_controls_not_ready(context):
         return (
             "The APOC Image Channel Inputs are not available in the current live "
             "controls yet. Click **Generate Training Data** and wait for it to finish; "
@@ -1518,14 +1935,10 @@ def apoc_channel_selection_guidance(
         )
 
     target_pairs = [
-        (name, int(index))
-        for name, index in mapped
-        if "dead" not in name.lower()
+        (name, index) for name, index in mapped if "dead" not in name
     ]
     dead_pairs = [
-        (name, int(index))
-        for name, index in mapped
-        if "dead" in name.lower()
+        (name, index) for name, index in mapped if "dead" in name
     ]
     mapping_text = ""
     if target_pairs:
@@ -1538,6 +1951,13 @@ def apoc_channel_selection_guidance(
         "to those target models. "
         if dead_pairs else
         "Do not automatically add the dead-signal channel to a target model. "
+    )
+    dead_question = (
+        "\n\n" + _dead_signal_question(context)
+        if _apoc_has_dead_signal(context, messages)
+        and not _dead_signal_question_asked(messages)
+        and not _dead_signal_decided(messages)
+        else ""
     )
     return (
         mapping_text
@@ -1552,6 +1972,7 @@ def apoc_channel_selection_guidance(
         "that specific target model, for example when a dying target loses its own "
         "marker while the dead dye still marks its remnants, so including the dead "
         "channel keeps those remnants segmented."
+        + dead_question
     )
 
 
@@ -4023,7 +4444,11 @@ def build_system_prompt(
         "when they provide useful target signal or intentionally chosen context. Do not add a dead "
         "channel merely as a negative class, to exclude dead cells, or to identify background: a dead "
         "target remains part of that target population. Include the dead channel only when the "
-        "researcher confirms that its signal is genuinely informative for that target model. If "
+        "researcher confirms that its signal is genuinely informative for that target model. When a "
+        "dead channel exists and the researcher has not decided, ask once before proposing APOC "
+        "inputs, for any of their objects, whether the dead signal is also required to correctly "
+        "segment the full object (for example, dying or falling-apart objects that lose their "
+        "original dye). Then add the dead channel only to the targets they name. If "
         "segmentation.apoc.training_data_loaded is false or "
         "channel_controls_ready is false, explain that Generate Training Data must finish before those "
         "checkboxes become available; this does not mean APOC uses all channels and is never a reason "
@@ -4439,6 +4864,7 @@ def deterministic_turn_response(
         or metadata_time_conversion_action(context, messages)
         or metadata_pixel_size_action(context, messages)
         or analysis_navigation_action(context, messages)
+        or apoc_dead_signal_answer_action(context, messages)
         or apoc_feature_preset_action(context, messages)
         or segmentation_minimum_size_action(context, messages)
         or tracking_radius_action(context, messages)
@@ -4471,6 +4897,7 @@ def deterministic_turn_response(
         or hmm_binary_group_guidance(context, messages)
         or hmm_movement_feature_guidance(context, messages)
         or apoc_channel_selection_guidance(context, messages)
+        or apoc_dead_signal_question(context, messages)
         or apoc_feature_grid_guidance(context, messages)
         or edt_direction_guidance(context, messages)
         or apoc_probability_threshold_defaults_guidance(context, messages)

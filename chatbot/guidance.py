@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 
-KNOWLEDGE_VERSION = "2026.11.05.1"
+KNOWLEDGE_VERSION = "2026.11.06.1"
 
 
 GUIDANCE_CARDS = {
@@ -108,9 +108,12 @@ GUIDANCE_CARDS = {
         "channels when they contain useful target signal or context. Do not add a dead channel merely "
         "as a negative class, to exclude dead cells, or to identify background: a dead target is still "
         "the same target population. Include it only when the researcher confirms that its signal is "
-        "genuinely informative for that target model. One valid case is a large target whose own marker "
-        "fades as it dies while the dead dye still marks its remnants; the dead channel then keeps those "
-        "remnants segmented. When Multicolor colors are dye combinations, give every color model every "
+        "genuinely informative for that target model. When a dead channel exists and the researcher has "
+        "not decided, ask once, for any of their objects, whether the dead signal is also required to "
+        "correctly segment the full object, then add it only to the targets they name. For example, a "
+        "target's own marker can fade as it dies or falls apart while the dead dye still marks its "
+        "remnants; the dead channel then keeps those remnants segmented. When Multicolor colors are dye "
+        "combinations, give every color model every "
         "dye channel: a double-labeled cell is recognized only when both channels are bright together. "
         "If channel checkboxes are not ready, that means "
         "training data is not "

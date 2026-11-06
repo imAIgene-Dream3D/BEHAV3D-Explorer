@@ -2257,6 +2257,351 @@ def test_apoc_channel_guidance_waits_for_training_controls():
     assert "not a reason to switch" in result
 
 
+def _dead_signal_context(records=None, ready=True, models=("27t", "mdo", "tcell", "dead")):
+    choices = ["Channel 0", "Channel 1", "Channel 2", "Channel 3"]
+    return {
+        "current_step": "segmentation",
+        "active_cell_type": models[0],
+        "metadata": {
+            "image_dimensions": [{"channel_count": 4}],
+            "cell_types": {"organoid": ["27t", "mdo"], "immune": ["tcell"]},
+            "records": [{"dead_channel": 3}] if records is None else records,
+        },
+        "segmentation": {
+            "method": "APOC (GPU)",
+            "apoc": {
+                "training_data_loaded": ready,
+                "cell_types": {
+                    model: {"channel_controls_ready": ready} for model in models
+                },
+            },
+        },
+        "ui_state": {"controls": [
+            {
+                "id": f"segmentation.apoc.{model}.input_channels",
+                "value": list(choices),
+                "choices": choices,
+                "cell_type": model,
+                "enabled": True,
+                "visible": True,
+            }
+            for model in (models if ready else ())
+        ]},
+    }
+
+
+_DEAD_SIGNAL_MAP = (
+    "Channel 1 is 27t, it's clean, Channel 2 is mdo, Channel 0 is tcell, "
+    "Channel 3 is dead. Please set the APOC channels."
+)
+
+
+def _dead_signal_turns(answer):
+    return [
+        {"role": "user", "content": _DEAD_SIGNAL_MAP},
+        {"role": "assistant", "content": (
+            "For any of your objects, is the dead signal also required to correctly "
+            "segment the full object?"
+        )},
+        {"role": "user", "content": answer},
+    ]
+
+
+def _dead_signal_values(result):
+    return {
+        call["arguments"]["control_id"].split(".")[2]: call["arguments"]["value"]
+        for call in result["calls"]
+    }
+
+
+def test_parse_channel_map_reads_both_orders_and_skips_non_targets():
+    import app
+
+    assert app._parse_channel_map(
+        "13t is ch1, blue ch0, dead ch2. channel 2 shows both 27t and mdo; "
+        "use channel 3 for it; channel 1: the organoid"
+    ) == [
+        ("13t", 1), ("blue", 0), ("dead", 2), ("27t", 2), ("mdo", 2), ("organoid", 1),
+    ]
+    assert app._parse_channel_map("channel 1 is clean") == []
+
+
+def test_dead_signal_question_is_asked_before_a_clean_channel_is_applied():
+    import app
+
+    question = app.apoc_dead_signal_question(
+        _dead_signal_context(), [{"role": "user", "content": _DEAD_SIGNAL_MAP}],
+    )
+    assert "for any of your objects" in question.lower()
+    assert "dead signal also required" in question.lower()
+    assert "lose their original dye" in question
+    assert "**27t, mdo**" in question
+
+    response = app.deterministic_turn_response(
+        _dead_signal_context(), [{"role": "user", "content": _DEAD_SIGNAL_MAP}],
+        [{"name": "set_ui_value"}],
+    )
+    assert response == {"text": question, "calls": []}
+
+
+def test_dead_signal_question_uses_a_dead_tab_or_mapped_dead_channel():
+    import app
+
+    assert app.apoc_dead_signal_question(
+        _dead_signal_context(records=[]),
+        [{"role": "user", "content": "Channel 1 is 27t and it is clean."}],
+    )
+    assert app.apoc_dead_signal_question(
+        _dead_signal_context(records=[], models=("27t",)),
+        [{"role": "user", "content": "27t is ch1, dead is ch3. Set the APOC channels."}],
+    )
+
+
+def test_dead_signal_question_is_asked_when_a_channel_is_called_clean():
+    import app
+
+    for message in ("Channel 1 is clean.", "The target is clean in ch1."):
+        assert app.apoc_dead_signal_question(
+            _dead_signal_context(), [{"role": "user", "content": message}],
+        ), message
+    assert app.apoc_dead_signal_question(
+        _dead_signal_context(), [{"role": "user", "content": "Is channel 1 clean?"}],
+    ) is None
+
+
+def test_dead_signal_question_stays_quiet_when_it_does_not_apply():
+    import app
+
+    no_dead = _dead_signal_context(records=[], models=("27t", "tcell"))
+    mask_only = _dead_signal_context(
+        records=[{"dead_channel": None, "dead_mask_path": "dead.zarr"}],
+        models=("27t", "tcell"),
+    )
+    latest = "Channel 1 is 27t and it is clean. Please set the APOC channels."
+    for context in (no_dead, mask_only):
+        assert app.apoc_dead_signal_question(
+            context, [{"role": "user", "content": latest}],
+        ) is None
+
+    for message in (
+        "Use Channel 1 for 27t and Channel 0 for tcell. Please set the APOC channels.",
+        "Channel 1 is 27t. Keep the dead channel out and set the APOC channels.",
+        "Channel 1 is 27t. Include the dead channel and set the APOC channels.",
+        "27t is ch9. Please set the APOC channels.",
+        "Channel 1 is 27t. Why does the preview look wrong?",
+        "Channel 1 is 27t. Which segmentation method is best?",
+    ):
+        assert app.apoc_dead_signal_question(
+            _dead_signal_context(), [{"role": "user", "content": message}],
+        ) is None, message
+
+    assert app.apoc_dead_signal_question(
+        _dead_signal_context(ready=False),
+        [{"role": "user", "content": latest}],
+    ) is None
+    assert app.apoc_dead_signal_question(
+        _dead_signal_context(), _dead_signal_turns(latest),
+    ) is None
+
+
+def test_dead_signal_question_scopes_a_bare_clean_channel_reply():
+    import app
+
+    method_question = app.segmentation_signal_question(
+        {
+            "current_step": "segmentation",
+            "assistant_session": {"intent": "compare_segmentation_methods"},
+        },
+        [{"role": "user", "content": "Which segmentation method should I use?"}],
+    )
+    assert app.apoc_dead_signal_question(
+        _dead_signal_context(),
+        [
+            {"role": "user", "content": "Which segmentation method should I use?"},
+            {"role": "assistant", "content": method_question},
+            {"role": "user", "content": "clean channel"},
+        ],
+    ) is None
+    assert app.apoc_dead_signal_question(
+        _dead_signal_context(),
+        [
+            {"role": "user", "content": "Help with my APOC inputs."},
+            {"role": "assistant", "content": (
+                "Is the target clean in its APOC input channel?"
+            )},
+            {"role": "user", "content": "clean channel"},
+        ],
+    )
+
+
+def test_apoc_channel_guidance_ends_with_the_dead_signal_question_once():
+    import app
+
+    first = [{"role": "user", "content": (
+        "Which APOC channels should I use, and should I include the dead channel?"
+    )}]
+    result = app.apoc_channel_selection_guidance(_dead_signal_context(), first)
+    assert "negative/background class" in result
+    assert result.rstrip().endswith("or **none**.")
+    assert "for any of your objects" in result.lower()
+
+    repeat = [
+        *first,
+        {"role": "assistant", "content": result},
+        {"role": "user", "content": "Which APOC channels should I pick for 27t?"},
+    ]
+    assert "for any of your objects" not in app.apoc_channel_selection_guidance(
+        _dead_signal_context(), repeat,
+    ).lower()
+    assert "for any of your objects" not in app.apoc_channel_selection_guidance(
+        _dead_signal_context(records=[], models=("27t",)),
+        [{"role": "user", "content": "Which APOC channels should I pick?"}],
+    ).lower()
+
+
+def test_dead_signal_answer_adds_the_channel_only_to_named_targets():
+    import app
+
+    result = app.apoc_dead_signal_answer_action(
+        _dead_signal_context(), _dead_signal_turns("27t"),
+    )
+    assert _dead_signal_values(result) == {
+        "27t": ["Channel 1", "Channel 3"],
+        "mdo": ["Channel 2"],
+        "tcell": ["Channel 0"],
+    }
+    assert "**27t** will also use the dead signal (**Channel 3**)" in result["text"]
+    assert "need confirming" in result["text"]
+
+    response = app.deterministic_turn_response(
+        _dead_signal_context(), _dead_signal_turns("27t"), [{"name": "set_ui_value"}],
+    )
+    assert response["calls"] == result["calls"]
+
+
+def test_dead_signal_answer_understands_all_none_categories_and_exclusions():
+    import app
+
+    every_result = app.apoc_dead_signal_answer_action(
+        _dead_signal_context(), _dead_signal_turns("all of them"),
+    )
+    every = _dead_signal_values(every_result)
+    assert every["tcell"] == ["Channel 0", "Channel 3"]
+    assert "dead" not in every
+    assert "Other models" not in every_result["text"]
+
+    none = app.apoc_dead_signal_answer_action(
+        _dead_signal_context(), _dead_signal_turns("none"),
+    )
+    assert _dead_signal_values(none) == {
+        "27t": ["Channel 1"], "mdo": ["Channel 2"], "tcell": ["Channel 0"],
+    }
+    assert "stays out" in none["text"]
+
+    organoids = _dead_signal_values(app.apoc_dead_signal_answer_action(
+        _dead_signal_context(), _dead_signal_turns("the organoids"),
+    ))
+    assert organoids["27t"] == ["Channel 1", "Channel 3"]
+    assert organoids["mdo"] == ["Channel 2", "Channel 3"]
+    assert organoids["tcell"] == ["Channel 0"]
+
+    for answer in ("all except tcell", "27t yes, tcell no"):
+        values = _dead_signal_values(app.apoc_dead_signal_answer_action(
+            _dead_signal_context(), _dead_signal_turns(answer),
+        ))
+        assert values["27t"] == ["Channel 1", "Channel 3"], answer
+        assert values["tcell"] == ["Channel 0"], answer
+
+
+def test_dead_signal_answer_clarifies_or_defers_unclear_replies():
+    import app
+
+    ambiguous = app.apoc_dead_signal_answer_action(
+        _dead_signal_context(), _dead_signal_turns("yes"),
+    )
+    assert ambiguous["calls"] == []
+    assert "Which of your objects need it?" in ambiguous["text"]
+
+    only_target = app.apoc_dead_signal_answer_action(
+        _dead_signal_context(models=("27t", "dead")),
+        _dead_signal_turns("yes"),
+    )
+    assert _dead_signal_values(only_target)["27t"] == ["Channel 1", "Channel 3"]
+
+    for answer in ("what does that do?", "maybe later", "not tcell"):
+        assert app.apoc_dead_signal_answer_action(
+            _dead_signal_context(), _dead_signal_turns(answer),
+        ) is None, answer
+    assert app.apoc_dead_signal_answer_action(
+        _dead_signal_context(),
+        [{"role": "user", "content": "27t"}],
+    ) is None
+
+
+def test_dead_signal_answer_gives_text_only_when_it_cannot_build_channels():
+    import app
+
+    unknown = app.apoc_dead_signal_answer_action(
+        _dead_signal_context(records=[]),
+        [
+            {"role": "user", "content": "Channel 1 is 27t. Set the APOC channels."},
+            {"role": "assistant", "content": "Is the dead signal also required?"},
+            {"role": "user", "content": "27t"},
+        ],
+    )
+    assert unknown["calls"] == []
+    assert "do not have the dead-channel number" in unknown["text"]
+
+    conflict = app.apoc_dead_signal_answer_action(
+        _dead_signal_context(records=[{"dead_channel": 3}, {"dead_channel": 2}]),
+        _dead_signal_turns("27t"),
+    )
+    assert conflict["calls"] == []
+    assert "one physical channel" in conflict["text"]
+
+    not_ready = app.apoc_dead_signal_answer_action(
+        _dead_signal_context(ready=False), _dead_signal_turns("27t"),
+    )
+    assert not_ready["calls"] == []
+    assert "Generate Training Data" in not_ready["text"]
+
+    out_of_range = _dead_signal_context(records=[{"dead_channel": 7}])
+    invalid = app.apoc_dead_signal_answer_action(
+        out_of_range,
+        [
+            {"role": "user", "content": "Channel 1 is 27t. Set the APOC channels."},
+            {"role": "assistant", "content": "Is the dead signal also required?"},
+            {"role": "user", "content": "27t"},
+        ],
+    )
+    assert invalid["calls"] == []
+    assert "could not build a valid channel list for **27t**" in invalid["text"]
+    assert "will also use" not in invalid["text"]
+
+
+def test_dead_signal_answer_without_a_map_extends_the_current_selection():
+    import app
+
+    context = _dead_signal_context()
+    for control in context["ui_state"]["controls"]:
+        control["value"] = ["Channel 1"]
+    result = app.apoc_dead_signal_answer_action(context, [
+        {"role": "user", "content": "Set the APOC channels."},
+        {"role": "assistant", "content": "Is the dead signal also required?"},
+        {"role": "user", "content": "27t"},
+    ])
+    assert _dead_signal_values(result) == {"27t": ["Channel 1", "Channel 3"]}
+
+    context["ui_state"]["controls"][0]["value"] = ["Channel 1", "Channel 3"]
+    settled = app.apoc_dead_signal_answer_action(context, [
+        {"role": "user", "content": "Set the APOC channels."},
+        {"role": "assistant", "content": "Is the dead signal also required?"},
+        {"role": "user", "content": "27t"},
+    ])
+    assert settled["calls"] == []
+    assert "already set" in settled["text"]
+
+
 def test_apoc_feature_grid_guidance_names_real_filters_and_scope():
     import app
 
@@ -4498,7 +4843,7 @@ def test_feedback_guidance_fixtures():
 
     fixture = Path(__file__).parent / "fixtures" / "assistant_feedback_transcripts.json"
     cases = json.loads(fixture.read_text(encoding="utf-8"))
-    assert KNOWLEDGE_VERSION == "2026.11.05.1"
+    assert KNOWLEDGE_VERSION == "2026.11.06.1"
     for case in cases:
         cards = select_guidance_cards(
             {"current_step": case["step"]}, case["user"], case.get("intent"),

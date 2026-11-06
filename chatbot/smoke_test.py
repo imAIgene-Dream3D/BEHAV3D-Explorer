@@ -371,6 +371,55 @@ def _apoc_channel_map_case() -> dict:
     }
 
 
+def _apoc_asks_dead_signal_before_channels_case() -> dict:
+    choices = ["Channel 0", "Channel 1", "Channel 2", "Channel 3"]
+    controls = [
+        _control(
+            f"segmentation.apoc.{cell_type}.input_channels",
+            f"{cell_type}: APOC image channel inputs",
+            list(choices),
+            choices=choices,
+            method="APOC",
+            cell_type=cell_type,
+        )
+        for cell_type in ("27t", "tcell", "dead")
+    ]
+    metadata = {
+        "loaded": True,
+        "records": [{**record, "dead_channel": 3} for record in _metadata_records()],
+        "validation": [],
+    }
+    return {
+        "name": "apoc_asks_dead_signal_before_channels",
+        "messages": [{
+            "role": "user",
+            "content": (
+                "Channel 1 is 27t and it is clean, Channel 0 is tcell, Channel 3 is "
+                "dead. Please set the APOC image channel inputs."
+            ),
+        }],
+        "context": _context(
+            "segmentation", controls, active_cell_type="27t", metadata=metadata,
+            segmentation={
+                "method": "APOC (GPU)",
+                "apoc": {
+                    "training_data_loaded": True,
+                    "cell_types": {
+                        cell_type: {
+                            "available_input_channels": choices,
+                            "selected_input_channels": choices,
+                            "channel_controls_ready": True,
+                            "trained_classifier_found": False,
+                        }
+                        for cell_type in ("27t", "tcell", "dead")
+                    },
+                },
+            },
+        ),
+        "check": _check_apoc_asks_dead_signal,
+    }
+
+
 def _apoc_channels_wait_for_training_data_case() -> dict:
     return {
         "name": "apoc_channels_wait_for_training_data",
@@ -2648,6 +2697,16 @@ def _check_apoc_channel_map(result: dict) -> list[str]:
     return errors
 
 
+def _check_apoc_asks_dead_signal(result: dict) -> list[str]:
+    text = result["text"].lower()
+    errors = []
+    if "for any of your objects" not in text or "dead signal" not in text:
+        errors.append("did not ask whether the dead signal is needed for any object")
+    if result["calls"]:
+        errors.append("set channel inputs before the dead-signal question was answered")
+    return errors
+
+
 def _check_apoc_channels_wait_for_training_data(result: dict) -> list[str]:
     text = result["text"].lower()
     errors = []
@@ -3744,6 +3803,7 @@ SCENARIOS = [
     _cellpose_requires_bleed_confirmation_case,
     _confirmed_bleed_through_case,
     _apoc_channel_map_case,
+    _apoc_asks_dead_signal_before_channels_case,
     _apoc_channels_wait_for_training_data_case,
     _apoc_feature_preset_case,
     _swapped_channel_metadata_case,
