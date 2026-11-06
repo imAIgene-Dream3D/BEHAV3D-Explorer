@@ -453,7 +453,7 @@ boundary and lists its `omitted_sections`; a note that gets no budget at all is
 listed in `omitted_notes`, and either case adds a `truncation_caveat`. The saved
 configuration keeps only settings in effect: the selected tracking method's block,
 the State Trajectory keys that apply to the saved clustering basis and method, and
-the contact-analysis definitions. Notebook-era `behavioral_*` template blocks are
+the contact-analysis definitions. Legacy `behavioral_*` template blocks are
 dropped once the per-cell-type block exists.
 
 Keep paths, large feature arrays, and irrelevant defaults out of model context.

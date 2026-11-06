@@ -115,7 +115,7 @@ html_theme_options = {
 
 # Public URL where the wiki is published once GitHub Pages is enabled.
 # Used by Sphinx for sitemap / canonical link tags.
-html_baseurl = "https://imAIgene-Dream3D.github.io/BEHAV3D/"
+html_baseurl = "https://imaigene-dream3d.github.io/BEHAV3D-Explorer/"
 
 # ── Napoleon (Google-style docstrings) ─────────────────────────────────────
 napoleon_google_docstring = True

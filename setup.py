@@ -3,7 +3,7 @@ from setuptools import setup
 
 setup(
     name='BEHAV3D',
-    version='3.0',
+    version='0.1.0',
     description='Module for the analysis of cell behaviour in fluorescent imaging',
     author='SdeBlank',
     author_email='S.deBlank-3@prinsesmaximacentrum.nl',

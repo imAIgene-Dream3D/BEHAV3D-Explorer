@@ -1,7 +1,7 @@
-# BEHAV3D Explorer — online demo
+# BEHAV3D Explorer: online demo
 
 > [!IMPORTANT]
-> This demo is a hands-on preview of the BEHAV3D Explorer interface only — it is not meant to run BEHAV3D for real analysis. It's free, but runs on Colab's shared, resource-limited cloud machines (CPU-only, capped RAM and session time). To use BEHAV3D Explorer at full capability, [install it locally](../README.md#installation).
+> This demo is a hands-on preview of the BEHAV3D Explorer interface only; it is not meant to run BEHAV3D for real analysis. It's free, but runs on Colab's shared, resource-limited cloud machines (CPU-only, capped RAM and session time). To use BEHAV3D Explorer at full capability, [install it locally](../README.md#installation).
 
 Try the **real** BEHAV3D Explorer GUI in your browser, with no installation, for free, on Google
 Colab. **Part 1** is for anyone who just wants to run it. **Part 2** is the maintainer guide for
@@ -13,23 +13,23 @@ building and hosting the demo from source.
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/imAIgene-Dream3D/BEHAV3D-Explorer/blob/main/demo/colab/BEHAV3D_Explorer_Colab.ipynb)
 
-1. Click the badge above — it opens `demo/colab/BEHAV3D_Explorer_Colab.ipynb` in Google Colab
+1. Click the badge above; it opens `demo/colab/BEHAV3D_Explorer_Colab.ipynb` in Google Colab
    (you need a Google account; nothing is installed on your computer).
 2. **Runtime ▸ Run all** and wait ~4 minutes while the prebuilt environment and the demo dataset
    download.
-3. Click the link the last cell prints — the actual napari GUI opens in a **new browser tab**,
+3. Click the link the last cell prints; the actual napari GUI opens in a **new browser tab**,
    streamed from your own private Colab machine.
 
-**What you get.** The identical GUI to a local install — same window, menus, dock widget and layer
+**What you get.** The identical GUI to a local install: same window, menus, dock widget and layer
 list. The demo dataset ships with **segmentation and tracking already computed**, so you land
 straight on the interesting parts: visualisation, track editing, feature extraction and the
 behaviour analysis tabs.
 
 **Good to know.**
 
-* It runs entirely on **CPU** — no GPU runtime needed. Software OpenGL makes 2D views smooth and
+* It runs entirely on **CPU**; no GPU runtime needed. Software OpenGL makes 2D views smooth and
   the 3D view slow, so stay in 2D for a comfortable tour.
-* Colab disconnects after ~90 minutes idle (12 h max) and **saves nothing** — it is a test drive,
+* Colab disconnects after ~90 minutes idle (12 h max) and **saves nothing**; it is a test drive,
   not a workspace. Download anything you want to keep.
 * To point the demo at **your own data**, see the *Using your own data* section at the bottom of
   the notebook.
@@ -74,7 +74,7 @@ files for free. Visitors need a Google account (unavoidable at zero cost).
 
 ---
 
-## Step 1 — Build the environment tarball
+## Step 1: Build the environment tarball
 
 Solving `installation/environment.yml` inside Colab takes 10+ minutes and breaks whenever
 conda-forge moves. Solve it once here instead, inside Ubuntu 22.04 (Colab's own base), and ship the
@@ -88,10 +88,10 @@ result as a [conda-pack](https://conda.github.io/conda-pack/) archive that resto
 * Produces `dist/behav3d-env.tar.gz` (~2.5 GB).
 * CPU-only by design: the Colab X display has no GPU, so PyTorch is always the CPU wheel and a
   CUDA build would only make the download bigger for no benefit.
-* The build fails loudly if `napari`, `torch`, `cellpose`, `pyopencl` or `qtpy` cannot be imported —
+* The build fails loudly if `napari`, `torch`, `cellpose`, `pyopencl` or `qtpy` cannot be imported:
   better here than in front of a visitor.
 
-## Step 2 — Host the tarball
+## Step 2: Host the tarball
 
 A free Hugging Face account can host **dataset** repos (only *Spaces* need PRO), files up to 50 GB,
 on a fast CDN. GitHub Releases cap at 2 GB per file, which this tarball exceeds.
@@ -112,7 +112,7 @@ The direct URL is then:
 https://huggingface.co/datasets/<your-org>/behav3d-demo-env/resolve/main/behav3d-env.tar.gz
 ```
 
-## Step 3 — Assemble the demo bundle
+## Step 3: Assemble the demo bundle
 
 Run BEHAV3D locally once on the demo sample so the heavy steps are already done, keeping
 **everything under one common folder** (the path rewriter finds the old root as the common parent
@@ -146,7 +146,7 @@ python demo/colab/prepare_demo.py --root /path/to/behav3d_demo --dry-run
 
 It should report the old root, the number of paths it would rewrite, and **no missing files**.
 
-## Step 4 — Publish the bundle on Zenodo
+## Step 4: Publish the bundle on Zenodo
 
 Zenodo is free, gives 50 GB per record and a citable DOI, and you already use it for the Cellpose
 models (record 18872978). Create a new record, upload `behav3d_demo.tar.gz`, publish, then take the
@@ -156,7 +156,7 @@ direct file URL:
 https://zenodo.org/records/<RECORD_ID>/files/behav3d_demo.tar.gz?download=1
 ```
 
-## Step 5 — Fill in the two URLs
+## Step 5: Fill in the two URLs
 
 In `demo/colab/colab_setup.py`, replace the two placeholders:
 
@@ -169,7 +169,7 @@ Both are also overridable at runtime via `BEHAV3D_ENV_URL` / `BEHAV3D_DEMO_URL`,
 notebook lets visitors point at their own data. The bootstrap refuses to run while a placeholder is
 still in place, with a message saying which step to go back to.
 
-## Step 6 — Dry run locally (do this before touching Colab)
+## Step 6: Dry run locally (do this before touching Colab)
 
 This catches every Qt / xcb / OpenGL problem on your own machine, in the same Ubuntu base Colab
 uses, in about a minute:
@@ -202,7 +202,7 @@ Two options for the dry run:
 The napari window with the BEHAV3D Explorer dock widget must appear. If it does not, read
 `/tmp/behav3d_logs/napari.log` inside the container.
 
-## Step 7 — Test on Colab
+## Step 7: Test on Colab
 
 Push to `main`, then open:
 
@@ -213,24 +213,24 @@ https://colab.research.google.com/github/imAIgene-Dream3D/BEHAV3D-Explorer/blob/
 Check, in order:
 
 1. Run all completes in under ~5 minutes on a cold runtime.
-2. The new tab shows the GUI and it is **interactive** — drag a slider, open a menu, switch tabs.
+2. The new tab shows the GUI and it is **interactive**: drag a slider, open a menu, switch tabs.
 3. The two paths printed by Step 2 load in the Data Preparation tab.
 4. Run the `start_cloudflared()` cell and confirm that route works too.
-5. Watch RAM in the Colab resource panel with the demo loaded — stay under ~10 GB.
+5. Watch RAM in the Colab resource panel with the demo loaded; stay under ~10 GB.
 
 > The demo tracks `main`. The branch name `main` is baked into: the Colab link above, the badge in
 > Part 1, the badge in the root `README.md`, and the notebook's `REPO_REF` + its screenshot URL, and
 > `REPO_REF` in `colab_setup.py` (`grep -rn "blob/main\|BEHAV3D_REPO_REF" demo` finds them). If you
 > ever stage demo changes on a separate branch, point those at it while testing, then back to `main`.
 
-## Step 8 — Maintenance
+## Step 8: Maintenance
 
 The tarball only needs rebuilding when `installation/environment.yml` changes; nothing else moves.
 `.github/workflows/build-demo-env.yml` handles it two ways:
 
-* **automatically** — any push to `main` that touches `installation/environment.yml` rebuilds the
+* **automatically**: any push to `main` that touches `installation/environment.yml` rebuilds the
   tarball and re-uploads it to Hugging Face. No action needed.
-* **manually** — Actions ▸ *Build Colab demo environment* ▸ *Run workflow*, with a checkbox to
+* **manually**: Actions ▸ *Build Colab demo environment* ▸ *Run workflow*, with a checkbox to
   build without uploading (the tarball is then kept as a workflow artifact for 7 days).
 
 Both paths need these two repository settings:
@@ -262,13 +262,13 @@ workflow uploads to `behav3d-env.tar.gz` at the repo root, which is the path
 
 ## Other hosting routes considered
 
-* **GitHub Codespaces** — works well with the `desktop-lite` devcontainer feature (8 GB, no GPU,
+* **GitHub Codespaces**: works well with the `desktop-lite` devcontainer feature (8 GB, no GPU,
   spends the *visitor's* free 120 core-hours). A good second front door; the same
   `colab_setup.py --local` entry point drives it.
-* **Hugging Face Docker Space** — the only genuinely no-login option, but creating a Docker Space
+* **Hugging Face Docker Space**: the only genuinely no-login option, but creating a Docker Space
   now requires PRO ($9/month) and a Space is a *single shared container*: two simultaneous visitors
   would fight over one mouse.
-* **mybinder.org** — free and login-free, but capped at 2 GB RAM; napari + torch + the dataset do
+* **mybinder.org**: free and login-free, but capped at 2 GB RAM; napari + torch + the dataset do
   not fit.
-* **usegalaxy.eu** — napari is already an interactive tool there, sessions are per-user and last up
+* **usegalaxy.eu**: napari is already an interactive tool there, sessions are per-user and last up
   to 30 days. Free and durable, but it needs the Galaxy team to accept a BEHAV3D wrapper.

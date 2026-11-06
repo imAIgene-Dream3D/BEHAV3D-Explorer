@@ -83,7 +83,7 @@ python install_behav3d.py --reinstall
 
 The installer automatically detects and prefers the fastest available package manager:
 
-1. **mamba** (fastest — included with Miniforge/Mambaforge)
+1. **mamba** (fastest, included with Miniforge/Mambaforge)
 2. **micromamba** (lightweight standalone alternative)
 3. **conda** (fallback)
 

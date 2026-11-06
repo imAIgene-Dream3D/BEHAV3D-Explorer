@@ -1,4 +1,4 @@
-# btrack — Bayesian Cell Tracking in BEHAV3D
+# btrack: Bayesian Cell Tracking in BEHAV3D
 
 btrack uses a **Kalman filter** to predict object motion frame-by-frame, and optionally a **global hypothesis model** to resolve track initiations, terminations, and gap-bridging in a second pass.
 
@@ -6,7 +6,7 @@ btrack uses a **Kalman filter** to predict object motion frame-by-frame, and opt
 
 ## Recommended Workflow
 
-### Step 1 — Kalman filter linking (always runs)
+### Step 1: Kalman filter linking (always runs)
 
 Step 2 is optional. Looking at the Step 1 result on its own first can help you see what the optimizer changes when you turn it on.
 
@@ -22,7 +22,7 @@ Check the result in napari before proceeding:
 - Tracks jumping between unrelated cells → reduce *max search radius*
 - Too many short track fragments → increase *max search radius* or `max_lost` in the config JSON
 
-### Step 2 — Global hypothesis optimizer (opt-in)
+### Step 2: Global hypothesis optimizer (opt-in)
 
 Resolves false positives, track starts/ends, and gap-bridging globally.
 It works on the track pieces left by Step 1, so it tends to give the best results when Step 1 is already reasonable.
@@ -82,9 +82,9 @@ When **Use visual features** is enabled, BEHAV3D adds these skimage-derived feat
 
 Each run produces two files per sample:
 
-- `<sample>_tracks.csv` — BEHAV3D standard track table  
+- `<sample>_tracks.csv`: BEHAV3D standard track table  
   Columns: `TrackID`, `SegmentID`, `position_t`, `position_x/y/z`, `pixel_position_x/y/z`
-- `<sample>_tracked.zarr` — Segmentation image with labels replaced by `TrackID`
+- `<sample>_tracked.zarr`: Segmentation image with labels replaced by `TrackID`
 
 ---
 

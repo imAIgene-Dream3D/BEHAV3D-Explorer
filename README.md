@@ -21,7 +21,7 @@ There's no one-size-fits-all solution, so BEHAV3D-Explorer is built as a set of 
 > [!TIP]
 > ## Try it online, no installation
 >
-> **This is a quick, hands-on preview of the BEHAV3D Explorer interface — not a way to run BEHAV3D itself.** It's free but limited by Colab's shared cloud resources (CPU-only, capped time and RAM). Install it locally for full capability.
+> **This is a quick, hands-on preview of the BEHAV3D Explorer interface, not a way to run BEHAV3D itself.** It's free but limited by Colab's shared cloud resources (CPU-only, capped time and RAM). Install it locally for full capability.
 >
 > [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/imAIgene-Dream3D/BEHAV3D-Explorer/blob/main/demo/colab/BEHAV3D_Explorer_Colab.ipynb)
 >
@@ -33,8 +33,8 @@ There's no one-size-fits-all solution, so BEHAV3D-Explorer is built as a set of 
 > straight to visualisation, track editing and the analysis tabs.
 >
 > Colab disconnects after ~90 minutes idle and saves nothing, so it is a test drive, not a workspace.
-> For real analysis, install it below. Full details — and the maintainer guide for building the demo
-> from source — are in [`demo/README.md`](demo/README.md).
+> For real analysis, install it below. Full details, and the maintainer guide for building the demo
+> from source, are in [`demo/README.md`](demo/README.md).
 
 ## Installation (3 steps, no code)
 
@@ -94,23 +94,6 @@ mamba install nomkl
 ```bash
 pip uninstall cellpose -y
 mamba install -c conda-forge cellpose
-```
-</details>
-
-<details>
-<summary><strong>I want to use Jupyter Notebook instead of the graphical panel</strong></summary>
-
-Built for advanced users who want more control over each step of the pipeline.
-
-1. Install [VS Code](https://code.visualstudio.com/Download) with the Python and Jupyter extensions.
-2. Open the BEHAV3D folder.
-3. Open `notebooks/run_behav3d.ipynb`.
-4. Select the kernel: Python Environments > behav3d.
-
-Or from a web browser:
-```bash
-mamba activate behav3d
-jupyter notebook notebooks/run_behav3d.ipynb
 ```
 </details>
 
@@ -211,8 +194,8 @@ Then open the BEHAV3D plugin from the **Plugins** menu.
 | Column Name                    | Explanation                                                                                         |
 |-------------------------------|-----------------------------------------------------------------------------------------------------|
 | sample_name                   | Name to assign to the sample; used for naming output files/folders.                                |
-| organoid_line                 | Name of the multicellular structure line used in the experiment (e.g. `lineA`, `lineB` — a patient-derived organoid line, a spheroid line, etc.). Analysis visual results will be split on organoid lines                                     |
-| tcell_line                    | Name or type of immune population used (e.g. `lineA` — a CAR-T product, an engineered T-cell line, a donor identifier). Analysis visual results will be split on tcell lines                                 |
+| organoid_line                 | Name of the multicellular structure line used in the experiment (e.g. `lineA`, `lineB`, such as a patient-derived organoid line, a spheroid line, etc.). Analysis visual results will be split on organoid lines                                     |
+| tcell_line                    | Name or type of immune population used (e.g. `lineA`, such as a CAR-T product, an engineered T-cell line, a donor identifier). Analysis visual results will be split on tcell lines                                 |
 | exp_nr                        | Experiment number for tracking and reproducibility.                                                |
 | well                          | Well identifier on the experimental plate (e.g. `well01`).                                          |
 | tcell_channel                 | Index of the fluorescence channel representing T cells in the raw image. (Channel indexing starts at 0)                                      |
@@ -241,47 +224,35 @@ Then open the BEHAV3D plugin from the **Plugins** menu.
 <details>
 <summary><strong>Segmentation with Cellpose</strong></summary>
 
-To use **Cellpose** for 3D segmentation with pretrained models using the `run_behav3d.ipynb` notebook:
+**Cellpose** performs 3D segmentation with pretrained models. You run it in the **Segmentation** tab of the napari plugin.
+
+### Workflow in the napari plugin
+
+1. **Get a model** (see [Pretrained Models](#pretrained-models) below). Models are single files with no extension.
+2. **Prepare your data** in the **Data Preparation** tab: load or build `metadata.csv` and click **Convert All Images to Zarr** (samples that are not converted are skipped).
+3. Open the **Segmentation** tab and pick **Cellpose (Deep Learning)** in **Method:**.
+4. **Section 1 · Channel Configuration**: choose **Same for all** or **Per sample**, assign a population (or `dead`) to each channel, then click **💾 Save Channel Configuration**. Check this mapping carefully: the model only sees the channel mapped to the population you segment.
+5. **Section 2 · Model & Cell Type**: **Browse…** to the model file and click **📂 Load Model**. Choose the **Cell type to segment** that matches the model. Keep **Process all timepoints** ticked, or set **Start:** / **End:**.
+6. Click **▶ Run Cellpose — *cell type***. It runs in the background on every sample, with no preview, so check the first result in the **Visualization** tab before processing everything.
+7. To segment another population (e.g. organoids and T cells), repeat steps 5–6 with the matching model.
+8. **Dead-stain channel?** Click **☠ Run Dead Mask (Otsu)** to create the dead mask used later by Feature Extraction.
+9. Optionally, queue the runs with the **+🛒** buttons to launch them together with the rest of the pipeline.
+
+> [!NOTE]
+> A run on a timepoint range replaces the whole segmentation of that population: timepoints outside the range are left empty. Test a model on a short range, then run all timepoints.
+
+Full details, every control, tuning tips and output paths are in the wiki: [Cellpose segmentation page](https://imaigene-dream3d.github.io/BEHAV3D-Explorer/processing/segmentation/cellpose.html).
 
 ### Pretrained Models
-You can find and download pretrained T cell and Organoid Cellpose models in [Zenodo](https://zenodo.org/records/18872978) or in the `behav3d/preprocessing/segmentation/models` folder.
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18872977.svg)](https://doi.org/10.5281/zenodo.18872977)
+
+You can find and download pretrained T cell and Organoid Cellpose models on [Zenodo](https://doi.org/10.5281/zenodo.18872977) (together with the demo dataset and the manuscript config files) or in the `behav3d/preprocessing/segmentation/models` folder.
 
 
 ### Prerequisites
 
 1.  **Metadata**: Ensure your `metadata.csv` is correctly populated with `sample_name`, `raw_image_path`, and cell type categories (Organoid, Immune, Other).
-2.  **Image Format**: Input images should be converted to **Zarr** format (using the "Convert to Zarr" button in the notebook) for efficient multiprocessing.
-
-
-### Workflow in `run_behav3d.ipynb`
-
-#### 1. Configure Channel Labels
-Before running segmentation, you must map your image channels to cell type labels.
--   Locate the **Configure Channel Labels** section.
--   Select **"Same labels for all samples"** or **"Per-sample configuration"**.
--   Assign the correct label (e.g., `tcell`, `organoid`, `dead`) to each channel index.
--   Click **"Save Channel Configuration"**.
-
-#### 2. Run Cellpose Segmentation
-There are separate panels for different cell categories:
-
-##### **Organoid Segmentation**
--   **Pretrained Model**: Specify the path of your pretrained Cellpose model file and load it.
--   **Input Channels**: Select which channels (e.g., `organoid1`) to segment.
--   Click **"Apply"**.
-
-##### **Immune and Other Cell Segmentation**
--   **Pretrained Model**: Specify the path of your pretrained Cellpose model file and load it.
--   **Input Channels**: Select which channel (e.g., `tcell1`) to segment.
--   Click **"Apply"**.
-
-
-### Visualization and Verification
-
-After segmentation, use the **Visualize the sample** button:
-1.  Select the sample from the dropdown.
-2.  Click **"Visualize the sample"**.
-3.  This launches **Napari**: overlay segmented and original raw channels for easy inspection.
+2.  **Image Format**: Input images should be converted to **Zarr** format (using **Convert All Images to Zarr** in the napari Data Preparation tab) for efficient multiprocessing.
 
 
 ---
@@ -310,26 +281,14 @@ Pre-configured btrack motion model config files (`.json`) for common cell types 
 
 These configs define the motion model parameters (e.g., max search radius, noise covariance) and are passed directly to the btrack `BayesianTracker`.
 
-### Workflow in `run_behav3d.ipynb`
+### Workflow in the napari plugin
 
-#### 1. Select a Tracking Configuration
-- In the **Tracking** section of the notebook, select the config file appropriate for your cell type.
-- You can point to a custom `.json` config if the defaults don't match your acquisition settings.
+1. Open the **Tracking** tab and pick **btrack** as the method.
+2. Choose a **Config preset**: start with **Cell (bundled)**, and try **Particle (bundled)** or **Custom JSON…** (your own `.json` file) only if the result is poor.
+3. Set **Max search radius** to the fastest plausible one-frame displacement plus a margin of 10-25 %.
+4. Run the tracking and check the tracks in the **Visualization** tab.
 
-#### 2. Configure Tracking Parameters
-
-| Parameter | Description |
-|---|---|
-| **Volume** | Physical XYZ bounding box of your acquisition in micrometers |
-| **Max search radius** | Maximum distance (µm) a cell can travel between frames |
-| **Step size** | Number of frames to look ahead/behind when linking |
-
-#### 3. Run Tracking
-- Click **"Run Tracking"** to link segmented objects into tracks.
-- Output tracks are saved as `.csv` and `.zarr` files per sample in `images/{sample_name}/`.
-
-#### 4. Visualize Tracks
-- Use the **"Visualize the sample"** button to open Napari with the tracked data overlaid on the raw image.
+All parameters, tuning tips and troubleshooting are on the wiki: [btrack page](https://imaigene-dream3d.github.io/BEHAV3D-Explorer/processing/tracking/btrack.html).
 
 ### Output Files
 
