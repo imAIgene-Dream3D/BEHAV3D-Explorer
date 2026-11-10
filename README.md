@@ -434,6 +434,14 @@ if os.environ.get("BEHAV3D_DEV_MODE") == "1":
 
 ---
 
+## How to cite
+
+If you use BEHAV3D Explorer in your work, please cite:
+
+de Blank, S., Rios-Jimenez, E., Rubio-Munoz, A., Hoffman, O., Vervoort, B. M. T., Wezenaar, A. K. L., Mazalo, J. K., Molina-Moreno, M., Chang, H.-F., Wehrens, E. J., Rios, A. C., & Alieva, M. (2026). BEHAV3D-Explorer enables natural language-assisted profiling of 3D cellular dynamics. *bioRxiv*. https://doi.org/10.64898/2026.11.06.764820
+
+---
+
 ## About AI Usage
 
 *The BEHAV3D Explorer toolkit was developed with the assistance of AI models from OpenAI (Codex, ChatGPT), Anthropic (Sonnet, Haiku, Opus), Cursor and Google (Gemini Flash, Gemini Pro).*
