@@ -1685,7 +1685,8 @@ def calculate_cell_distance(
 
 # Bump when the invasiveness definition changes. Contact CSVs written with an older
 # version are recomputed when invasiveness is requested.
-INVASIVENESS_VERSION = 2
+# 3: invasiveness cutout has at least 1 voxel of margin (see _invasiveness_slicer).
+INVASIVENESS_VERSION = 3
 
 
 def _surface_contact_percentage(cell_mask, org_cutout, sampling, contact_threshold):
@@ -1702,6 +1703,25 @@ def _surface_contact_percentage(cell_mask, org_cutout, sampling, contact_thresho
         return 0.0
     d_org = distance_transform_edt(org_cutout == 0, sampling=sampling)
     return 100.0 * np.count_nonzero(d_org[surface] <= contact_threshold) / n_surface
+
+
+def _invasiveness_slicer(lo, hi, ext, shape):
+    """
+    Cutout for the invasiveness of one cell: its bounding box (``lo``/``hi``, inclusive)
+    grown by ``ext`` voxels per axis, but by at least 1 voxel.
+
+    The contact cutout uses no margin at a Contact Threshold of 0 um, so the cell then
+    touches the cutout border on every side and border_value=1 in
+    _surface_contact_percentage drops every surface voxel on its bounding-box faces. A
+    cell that fills its bounding box (e.g. a small blocky segment) is left with no surface
+    and reads 0 % even when fully engulfed, and partly embedded cells shift by a few
+    points. With the 1-voxel margin only the true image border is excluded. For
+    thresholds > 0 the margin is already >= 2 voxels, so nothing changes there.
+    """
+    return tuple(
+        slice(max(0, l - max(1, e)), min(n, h + max(1, e) + 1))
+        for l, h, e, n in zip(lo, hi, ext, shape)
+    )
 
 
 def _contact_cache_meta_path(csv_path):
@@ -1924,7 +1944,11 @@ def _calculate_contact_single_timepoint(args):
         # Uses the same contact definition as {org}_contact_on_distance: an organoid type
         # with no contact on distance gets 0%, so the two columns always agree.
         if calculate_invasiveness and organoid_segments_dict:
-            cell_mask = seg_cutout == segment_id
+            inv_slicer = _invasiveness_slicer(
+                (min_z, min_y, min_x), (max_z, max_y, max_x), (z_ext, y_ext, x_ext),
+                (stack_max_z, stack_max_y, stack_max_x),
+            )
+            cell_mask = current_segments[inv_slicer] == segment_id
             sampling = [element_size_z, element_size_y, element_size_x]
             any_invasiveness_list = []
             invasiveness_perc_list = []
@@ -1932,7 +1956,7 @@ def _calculate_contact_single_timepoint(args):
             for org_type, org_segments in organoid_segments_dict.items():
                 if org_real_contact[org_type]:
                     invasiveness_perc = _surface_contact_percentage(
-                        cell_mask, org_segments[slicer], sampling, contact_threshold
+                        cell_mask, org_segments[inv_slicer], sampling, contact_threshold
                     )
                 else:
                     invasiveness_perc = 0.0
