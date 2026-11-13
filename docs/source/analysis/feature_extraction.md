@@ -300,11 +300,11 @@ When ticked, for each organoid type `<org>`:
 | `any_org_invasiveness_perc` | Maximum across all organoid types |
 | `any_org_invasiveness` | `True` when the cell is invasive for any organoid type |
 
+Here "surface voxels" are the immune cell's own outermost voxels (its mask minus a one-voxel erosion), and "contacting" uses the same Contact Threshold and real (µm) distance as `<org>_contact_on_distance`.
+
 This is a **percentage relative to the cell's own size**, not a raw voxel count. With the default contact threshold of `0` µm it is the part of the immune cell that lies inside an organoid mask; a larger threshold also counts organoid tissue just outside the cell. It is analysed in [Invasiveness](population_analysis/invasiveness.md).
 
-### Death
-
-where "surface voxels" are the immune cell's own outermost voxels (its mask minus a one-voxel erosion), and "contacting" uses the same Contact Threshold and real (µm) distance as `<org>_contact_on_distance`.
+The cell's surface is taken from a cutout around it with at least one voxel of margin, so every outer voxel counts except those on the image border (a cell cut by the image edge is measured on its visible part only). Contact files written before this margin was added (invasiveness definition version < 3) are recomputed automatically when invasiveness is requested; at a Contact Threshold of 0 µm, blocky cells that filled their bounding box previously read 0 % even when engulfed.
 
 ```{note}
 Because invasiveness uses the Contact Threshold, the threshold sets how generous the measure is: a Contact Threshold of 0 µm counts only surface voxels that overlap the organoid mask, and the percentage rises as the threshold grows. If your cell and organoid masks do not overlap or touch (a small gap between segmentations is common), a very small threshold gives almost no contact and invasiveness stays near 0. Check the contact fraction at the threshold you choose.
