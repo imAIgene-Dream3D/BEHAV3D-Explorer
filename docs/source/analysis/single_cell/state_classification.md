@@ -290,10 +290,13 @@ Compares the proportions of the full behavioural states between the levels of on
 | **Group in Y:** | — | Read-only; shows the compared column (one row per pairwise comparison). |
 | **Group conditions** | off | Pools the compared column's levels into two custom groups and runs a single comparison between them. |
 | **Group per page (Ctrl/Cmd click for multiple):** | none | Columns that paginate the report. |
+| **Show fold change (log scale)** | off | Draws each state's fold change instead of the difference in percentage points (see below). |
 
 **▶ Condition Comparison Report** writes one PDF and its CSVs:
 
 - **Proportion difference per state** — a signed bar for each pair of levels, with a whisker for the standard error of the difference, using each sample as a replicate.
+
+  With **Show fold change (log scale)** ticked, each bar instead shows the larger mean share divided by the smaller one, drawn towards the level where the state is larger, on a log axis labelled 1×, 1.5×, 2×, … So 5% → 10% shows as 2×, while 45% → 50% shows as only 1.1×. Shares below 0.2% are raised to 0.2% before dividing, so a state missing from one level gets a large but finite bar; such bars are hatched. States that are rare in both levels can show large fold changes from few cells, so check their whiskers. The CSV always holds both the difference (`diff`) and the fold change (`log2_fc`, `fold_change` = right / left level, `se_log2_fc`, `fc_floored`).
 - **Prevalence over time** — each state's prevalence for each level, as lines with a standard-error band. The underlying values are saved as CSVs.
 
 ## Contact Analysis
@@ -305,6 +308,7 @@ Found as the **Contact analysis** card in the report list. It needs only this cl
 | **Group per page** list | none | Splits the report into one page set per group. |
 | **State column:** | `full_behavioral_state` | `full_behavioral_state`, `hmm_intrinsic_behavioral_state` or `raw_hmm_state` (original numbered states). |
 | **Contact columns to compare (Ctrl/Cmd click for 2+):** | none | The contact columns of the features table; select at least two. |
+| **Show fold change (log scale)** | off | Plots per-state fold changes instead of percentage-point differences, as in the [Condition Comparison Report](#condition-comparison-report). |
 
 **▶ Create Contact Type Comparison** (enabled when the table has at least two contact columns) writes a PDF with per-state differences between contact columns (one row per pair) and the stacked state composition per contact column, plus two CSVs. Each combination of columns gets its own folder, so different comparisons do not overwrite each other.
 

@@ -805,6 +805,7 @@ def save_state_condition_comparison_report(
     include_over_time=False,
     time_col="position_t",
     minutes_per_frame=None,
+    fold_change=False,
     verbose=True,
 ):
     """Per-cluster overall (pooled, non-per-timepoint) proportion difference between every
@@ -812,6 +813,11 @@ def save_state_condition_comparison_report(
     split into multiple groups (columns) via `group_x`/`group_cols`.
 
     diff = mean of the second level minus mean of the first level in each pair.
+
+    fold_change : bool, optional
+        When True, the bars show the log2 fold change of the mean shares (larger / smaller,
+        towards the larger level) instead of the percentage-point difference. The CSV
+        always holds both.
 
     condition_groups : dict[str, str], optional
         Maps raw condition_col levels to merged group labels (see
@@ -975,6 +981,7 @@ def save_state_condition_comparison_report(
             out_pdf=output_pdf_path,
             out_csv=output_csv_path,
             pdf_pages=pdf,
+            fold_change=fold_change,
         )
         if time_series_stats is not None:
             condition_levels = unit_metadata[condition_col].astype(str).drop_duplicates().tolist()

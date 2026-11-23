@@ -317,8 +317,11 @@ Compares cluster proportions between the levels of a metadata column (e.g. organ
 | **Group in Y** | — | Read-only: shows the **Compare condition**. |
 | **Group conditions** | off | Pools the compared column's levels into two groups and runs one comparison. |
 | **Group per page** | none selected | Columns that paginate the report. |
+| **Show fold change (log scale)** | off | Draws each cluster's fold change instead of the difference in percentage points (see below). |
 
 Click **▶ Condition Comparison Report**. Each cluster gets a signed bar of the proportion difference with a whisker for its standard error; an extra page shows each cluster's prevalence over time per condition.
+
+With **Show fold change (log scale)** ticked, each bar shows the larger mean share divided by the smaller one, drawn towards the condition where the cluster is larger, on a log axis labelled 1×, 1.5×, 2×, … So 5% → 10% shows as 2×, while 45% → 50% shows as only 1.1×. Shares below 0.2% are raised to 0.2% before dividing, so a cluster missing from one condition gets a large but finite bar; such bars are hatched. Clusters that are rare in both conditions can show large fold changes from a handful of tracks, so check their whiskers. The CSV always holds both the difference (`diff`) and the fold change (`log2_fc`, `fold_change` = right / left level, `se_log2_fc`, `fc_floored`).
 
 ### Contact analysis
 
@@ -353,7 +356,7 @@ Cluster composition of contact vs. no_contact tracks, in the Group in X / Y / pa
 
 #### Contact Condition Comparison
 
-Comparison of cluster composition between the contact and no_contact groups — the contact version of the [Condition Comparison Report](#condition-comparison-report). **▶ Create Contact Condition Comparison**.
+Comparison of cluster composition between the contact and no_contact groups — the contact version of the [Condition Comparison Report](#condition-comparison-report). Tick **Show fold change (log scale)** above the button to plot fold changes instead of percentage-point differences. **▶ Create Contact Condition Comparison**.
 
 #### Contact Cluster Heatmap
 

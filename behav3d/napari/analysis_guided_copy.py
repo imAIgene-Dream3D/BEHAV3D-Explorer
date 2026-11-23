@@ -337,15 +337,16 @@ STATE_COMPARISON_REPORT = {
         "another column."
     ),
     "concept": None,
-    "what_get": "A condition-comparison PDF showing the mean difference for each pair of levels.",
+    "what_get": "A condition-comparison PDF showing the mean difference (or, optionally, the fold change) for each pair of levels.",
     "decide": [
         _decide("Which condition column to compare (optionally pooled into two groups)", _ONLY_YOU),
         _decide("Column to split by", _SUGGESTED),
+        _decide("Percentage-point difference or fold change", _SUGGESTED),
     ],
     "has_params": True,
     "seed": (
         "Explain the BEHAV3D state Condition Comparison Report: what the "
-        "difference bars show and how to choose condition/levels/facet."
+        "difference (or fold change) bars show and how to choose condition/levels/facet."
     ),
 }
 
@@ -551,15 +552,16 @@ TRACK_COMPARISON_REPORT = {
         "optionally split by another column."
     ),
     "concept": None,
-    "what_get": "A condition-comparison PDF showing the mean difference for each pair of levels.",
+    "what_get": "A condition-comparison PDF showing the mean difference (or, optionally, the fold change) for each pair of levels.",
     "decide": [
         _decide("Which condition column to compare (optionally pooled into two groups)", _ONLY_YOU),
         _decide("Column to split by", _SUGGESTED),
+        _decide("Percentage-point difference or fold change", _SUGGESTED),
     ],
     "has_params": True,
     "seed": (
         "Explain the BEHAV3D track Condition Comparison Report: what the "
-        "difference bars show and how to choose condition/levels/facet."
+        "difference (or fold change) bars show and how to choose condition/levels/facet."
     ),
 }
 
