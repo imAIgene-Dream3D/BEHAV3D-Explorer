@@ -1258,22 +1258,12 @@ class ProcessingQueuePanel(QWidget):
         """Overwrite All / Skip Existing / Cancel for steps that are not planned per item."""
         if not existing:
             return False
-        details = "\n".join(f"  • {w}" for w in existing)
-        box = QMessageBox(self)
-        box.setWindowTitle("Overwrite Existing Data?")
-        box.setText(
-            f"The following data already exists:\n\n{details}\n\n"
-            "What do you want to do?"
-        )
-        box.addButton("Overwrite All", QMessageBox.DestructiveRole)
-        btn_skip = box.addButton("Skip Existing", QMessageBox.AcceptRole)
-        btn_cancel = box.addButton("Cancel", QMessageBox.RejectRole)
-        box.setDefaultButton(btn_cancel)
-        box.exec_()
-        clicked = box.clickedButton()
-        if clicked == btn_cancel:
+        from behav3d.napari._overwrite_prompt import prompt_overwrite_batch
+
+        choice = prompt_overwrite_batch(self, "Overwrite Existing Data?", existing)
+        if choice == "cancel":
             return None
-        return clicked == btn_skip
+        return choice == "skip"
 
     # ── Run queue (event-driven state machine) ─────────────────────────
     #
