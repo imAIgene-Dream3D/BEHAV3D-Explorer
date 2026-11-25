@@ -793,19 +793,8 @@ def _bp_save_channel_display(viewer, metadata_loader, out_dir_fn):
     params = getattr(metadata_loader, "behav3d_parameters", None)
     if not isinstance(params, dict):
         return
-    channels_cfg = params.setdefault("viewer_display", {}).setdefault("channels", {})
-    for layer in viewer.layers:
-        if " – Ch" not in layer.name:
-            continue
-        try:
-            ch_idx = int(layer.name.rsplit("Ch", 1)[1])
-        except (ValueError, IndexError):
-            continue
-        if hasattr(layer, "contrast_limits") and hasattr(layer, "colormap"):
-            channels_cfg[ch_idx] = {
-                "colormap": str(layer.colormap.name),
-                "contrast_limits": [float(layer.contrast_limits[0]), float(layer.contrast_limits[1])],
-            }
+    from behav3d.napari._loaders import snapshot_channel_display
+    snapshot_channel_display(viewer, params)
     _save_behav3d_params(metadata_loader, out_dir_fn)
 
 

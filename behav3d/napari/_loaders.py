@@ -33,6 +33,37 @@ def _noop(_msg: str) -> None:
     return None
 
 
+def saved_channel_display(params: Optional[dict], channel: int) -> Optional[dict]:
+    """Saved ``{"colormap", "contrast_limits"}`` for a raw channel, or None.
+
+    Reads ``viewer_display.channels`` from ``behav3d_parameters``; keys may be
+    ints or strings (YAML round-trips vary).
+    """
+    channels = ((params or {}).get("viewer_display") or {}).get("channels") or {}
+    return channels.get(channel) or channels.get(str(channel))
+
+
+def snapshot_channel_display(viewer, params: dict) -> None:
+    """Record colormap + contrast limits of every ``... – Ch<n>`` image layer
+    into ``params["viewer_display"]["channels"]`` (mutates ``params``)."""
+    channels_cfg = params.setdefault("viewer_display", {}).setdefault("channels", {})
+    for layer in viewer.layers:
+        if " – Ch" not in layer.name:
+            continue
+        try:
+            ch_idx = int(layer.name.rsplit("Ch", 1)[1])
+        except (ValueError, IndexError):
+            continue
+        if hasattr(layer, "contrast_limits") and hasattr(layer, "colormap"):
+            channels_cfg[ch_idx] = {
+                "colormap": str(layer.colormap.name),
+                "contrast_limits": [
+                    float(layer.contrast_limits[0]),
+                    float(layer.contrast_limits[1]),
+                ],
+            }
+
+
 def detect_cell_type_columns(row: pd.Series) -> Dict[str, str]:
     """Return ``{cell_type_name: prefix}`` for all detected cell types in a row.
 

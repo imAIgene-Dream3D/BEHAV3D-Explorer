@@ -533,31 +533,60 @@ def _load_all_segments_for_sample(
     return result, sources
 
 
-def _add_channel_layers(viewer, dask_img, sample_name: str, prefix: str = _PREVIEW_PREFIX):
+def _add_channel_layers(
+    viewer,
+    dask_img,
+    sample_name: str,
+    prefix: str = _PREVIEW_PREFIX,
+    params: dict | None = None,
+    on_display_changed=None,
+):
     """Split a (T, C, Z, Y, X) dask array along C and add each channel as a
-    napari Image layer with additive blending."""
+    napari Image layer with additive blending.
+
+    ``params`` (``behav3d_parameters``) supplies the colormap / contrast limits
+    last saved by any tab (``viewer_display.channels``); channels without a
+    saved entry fall back to the default colour and auto-contrast.
+    ``on_display_changed`` is connected to the layer's colormap / contrast
+    events so user tweaks can be persisted.
+    """
+    from behav3d.napari._loaders import saved_channel_display
+
     if dask_img is None:
         return
     n_channels = dask_img.shape[1] if dask_img.ndim >= 5 else 1
     for c in range(n_channels):
         ch_data = dask_img[:, c, ...] if dask_img.ndim >= 5 else dask_img
-        color = _CHANNEL_COLORS[c % len(_CHANNEL_COLORS)]
-        layer = viewer.add_image(
-            ch_data,
+        saved = saved_channel_display(params, c)
+        default_color = _CHANNEL_COLORS[c % len(_CHANNEL_COLORS)]
+        color = (saved or {}).get("colormap") or default_color
+        add_kwargs = dict(
             name=f"{prefix} {sample_name} – Ch{c}",
-            colormap=color,
             blending="additive",
             opacity=0.7,
             visible=True,
         )
-        # Auto-contrast on non-zero pixels
         try:
-            flat = np.asarray(ch_data[0]).ravel()
-            flat = flat[flat > 0]
-            if flat.size > 0:
-                layer.contrast_limits = (0, float(np.percentile(flat, 99.8)))
+            layer = viewer.add_image(ch_data, colormap=color, **add_kwargs)
         except Exception:
-            pass
+            # Saved colormap no longer resolvable -> fall back to the default.
+            layer = viewer.add_image(ch_data, colormap=default_color, **add_kwargs)
+        limits = (saved or {}).get("contrast_limits")
+        if limits and len(limits) == 2:
+            layer.contrast_limits = (float(limits[0]), float(limits[1]))
+        else:
+            # Auto-contrast on non-zero pixels
+            try:
+                flat = np.asarray(ch_data[0]).ravel()
+                flat = flat[flat > 0]
+                if flat.size > 0:
+                    layer.contrast_limits = (0, float(np.percentile(flat, 99.8)))
+            except Exception:
+                pass
+        # Connect AFTER the initial limits so restoring doesn't re-save.
+        if on_display_changed is not None:
+            layer.events.contrast_limits.connect(on_display_changed)
+            layer.events.colormap.connect(on_display_changed)
 
 
 def _overlay_for_volume(seg_vol, dead_vol, threshold_pct, frame_label="", log_fn=None):
@@ -761,6 +790,12 @@ class CellTypeFeaturePanel(QWidget):
         self._thr_preview_timer.setSingleShot(True)
         self._thr_preview_timer.setInterval(THRESHOLD_PREVIEW_DELAY_MS)
         self._thr_preview_timer.timeout.connect(self._apply_pending_threshold_preview)
+        # Debounced persistence of raw-channel colormap / contrast edits made
+        # on the preview layers (shared with the Visualizer tab's settings).
+        self._display_save_timer = QTimer(self)
+        self._display_save_timer.setSingleShot(True)
+        self._display_save_timer.setInterval(1000)
+        self._display_save_timer.timeout.connect(self._persist_preview_channel_display)
         # Background-execution infrastructure.
         self.tab_progress_row = tab_progress_row
         self._bg = BackgroundOperation(self)
@@ -2085,6 +2120,31 @@ class CellTypeFeaturePanel(QWidget):
             on_failed=_on_failed,
         )
 
+    def _on_preview_channel_display_changed(self, event=None):
+        self._display_save_timer.start()
+
+    def _persist_preview_channel_display(self):
+        """Save the preview's raw-channel colormap / contrast to YAML."""
+        from behav3d.napari._loaders import snapshot_channel_display
+
+        params = getattr(self.metadata_loader, "behav3d_parameters", None)
+        if not isinstance(params, dict) or self.viewer is None:
+            return
+        try:
+            snapshot_channel_display(self.viewer, params)
+        except Exception as e:  # layers may be mid-teardown
+            self.log(f"Warning: Could not read channel display settings: {e}")
+            return
+        out_dir = self.metadata_loader.output_dir
+        if not out_dir:
+            return
+        params_path = Path(out_dir) / "behav3d_parameters.yml"
+        try:
+            with open(params_path, "w") as f:
+                yaml.safe_dump(params, f, sort_keys=False)
+        except Exception as e:
+            self.log(f"Warning: Could not save display settings: {e}")
+
     # ── Non-organoid Dead Threshold Preview ──────────────────────────────────
     # -- Dead Threshold Preview (all panel types) -------------------------
     def _on_preview_dead_clicked(self):
@@ -2267,7 +2327,11 @@ class CellTypeFeaturePanel(QWidget):
             # Raw channels
             if raw_dask is not None:
                 n_ch = raw_dask.shape[1] if raw_dask.ndim >= 5 else 1
-                _add_channel_layers(viewer, raw_dask, sample_name)
+                _add_channel_layers(
+                    viewer, raw_dask, sample_name,
+                    params=self.metadata_loader.behav3d_parameters,
+                    on_display_changed=self._on_preview_channel_display_changed,
+                )
                 self.log(f"  Added {n_ch} raw channel(s).")
             else:
                 self.log("  \u26a0\ufe0f Could not load raw image.")
