@@ -48,6 +48,7 @@ def save_state_contact_type_comparison(
     state_colors=None,
     groupby_cols=("sample_name", "TrackID"),
     extra_group_cols=None,
+    fold_change=False,
     verbose=False,
 ):
     """Per-`state_col` comparison of behavioral-state composition among timepoints where each
@@ -74,6 +75,10 @@ def save_state_contact_type_comparison(
     restricted to the tracks belonging to that combination, labeled in its title and appended to
     the same PDF. The CSVs likewise gain one column per `extra_group_cols` entry. With no
     `extra_group_cols`, output is unchanged.
+
+    With `fold_change=True` the diff bars show the log2 fold change of the mean shares (larger /
+    smaller, towards the larger contact column) instead of the percentage-point difference; the
+    diff CSV always holds both.
 
     Returns a dict of artifact paths plus `state_order`/`contact_cols`.
     """
@@ -110,7 +115,7 @@ def save_state_contact_type_comparison(
             fig = _no_data_page(f"No timepoints found where any of {contact_cols} is True — nothing to plot.")
             pdf.savefig(fig)
             plt.close(fig)
-        pd.DataFrame(columns=["class", "mean_a", "mean_b", "diff", "group", "level_a", "level_b"]).to_csv(diff_csv_path, index=False)
+        pd.DataFrame(columns=["class", "mean_a", "mean_b", "diff", "log2_fc", "group", "level_a", "level_b"]).to_csv(diff_csv_path, index=False)
         pd.DataFrame(columns=["contact_col", "state", "proportion"]).to_csv(stacked_csv_path, index=False)
         return {
             "contact_cols": contact_cols, "state_col": str(state_col),
@@ -187,10 +192,14 @@ def save_state_contact_type_comparison(
                 diff_stats,
                 class_order=resolved_state_order,
                 colors=resolved_colors,
-                title=f"Contact type comparison by {state_col} — cluster-size difference{title_suffix}",
+                title=(
+                    f"Contact type comparison by {state_col} — "
+                    f"{'cluster-size fold change' if fold_change else 'cluster-size difference'}{title_suffix}"
+                ),
                 out_pdf=pdf_path,
                 out_csv=None,
                 pdf_pages=pdf,
+                fold_change=fold_change,
             )
             for diff_group_label, pairs in diff_stats.items():
                 for (level_a, level_b), diff_df in pairs.items():

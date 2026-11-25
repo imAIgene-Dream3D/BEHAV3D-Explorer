@@ -35,6 +35,7 @@ from qtpy.QtWidgets import (
 )
 
 from behav3d.core.run_plan import ALL_ORGANOIDS, Action, PlanItem, RunPlan, Status
+from behav3d.napari._scrollable_box import ScrollableChoiceBox, available_height
 
 
 def prompt_overwrite(
@@ -90,10 +91,7 @@ def prompt_overwrite(
     text_parts.append("")
     text_parts.append(body_suffix)
 
-    box = QMessageBox(parent)
-    box.setWindowTitle(title)
-    box.setIcon(QMessageBox.Warning)
-    box.setText("\n".join(text_parts))
+    box = ScrollableChoiceBox(parent, title, "\n".join(text_parts))
 
     btn_overwrite = box.addButton(overwrite_label, QMessageBox.DestructiveRole)
 
@@ -226,7 +224,7 @@ class RunPlanDialog(QDialog):
     def __init__(self, parent: Optional[QWidget], title: str, items: Sequence[PlanItem]):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(760, 460)
+        self.resize(760, min(460, available_height(parent) - 48))
         self._items = list(items)
         self._combos: List[QComboBox] = []
 
@@ -393,10 +391,7 @@ def _prompt_loop(parent, title, text, items, *, batch, extra_buttons, customize)
         skip_label = "Skip Existing" if batch else "Skip"
 
     while True:
-        box = QMessageBox(parent)
-        box.setWindowTitle(title)
-        box.setIcon(QMessageBox.Warning)
-        box.setText(text)
+        box = ScrollableChoiceBox(parent, title, text)
         btn_overwrite = box.addButton(
             "Overwrite All" if batch else "Overwrite", QMessageBox.DestructiveRole
         )

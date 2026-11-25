@@ -1234,6 +1234,7 @@ def save_track_condition_comparison_report(
     tmin_col="position_t_min",
     tmax_col="position_t_max",
     minutes_per_frame=None,
+    fold_change=False,
     verbose=False,
     pdf_pages=None,
     csv_dir=None,
@@ -1271,6 +1272,11 @@ def save_track_condition_comparison_report(
     minutes_per_frame : float, optional
         When given (and include_over_time=True), the over-time page's x-axis and raw CSV are
         converted to minutes; otherwise they stay in raw frame units.
+
+    fold_change : bool, optional
+        When True, the bars show the log2 fold change of the mean shares (larger / smaller,
+        towards the larger level) instead of the percentage-point difference. The CSV always
+        holds both.
     """
     obs = adata_tracks.obs
     extra_group_cols = [c for c in (group_cols or []) if c in obs.columns]
@@ -1401,6 +1407,7 @@ def save_track_condition_comparison_report(
                 out_pdf=out_pdf,
                 out_csv=out_csv,
                 pdf_pages=pdf,
+                fold_change=fold_change,
             )
         else:
             diff_stats_by_group = compute_condition_diff_stats_pairwise(
@@ -1419,6 +1426,7 @@ def save_track_condition_comparison_report(
                 out_pdf=out_pdf,
                 out_csv=out_csv,
                 pdf_pages=pdf,
+                fold_change=fold_change,
             )
 
         if time_series_stats is not None:

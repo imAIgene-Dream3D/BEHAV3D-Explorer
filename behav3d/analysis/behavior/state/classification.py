@@ -850,6 +850,79 @@ def _merge_optional_window_features(df_base, df_window, *, join_cols):
     return df_base.merge(df_window, on=join_cols, how="left", validate="one_to_one")
 
 
+def _first_scored_value_per_track_for_skipped_rows(df, col, *, id_cols=("sample_name", "TrackID")):
+    """For every start-offset-skipped row, the ``col`` value of its track's first scored row.
+
+    "First" follows the frame's row order (same as ``group[scored].iloc[0]`` per track).
+    Returns a Series indexed like the skipped rows, keeping ``col``'s dtype; rows whose
+    track has no scored row (or a missing track key) get NA.
+    """
+    id_cols = list(id_cols)
+    keys_ok = df[id_cols].notna().all(axis=1).to_numpy()
+    scored = df["_start_offset_scored"].to_numpy(dtype=bool) & keys_ok
+    skipped = df["_start_offset_skipped"].to_numpy(dtype=bool) & keys_ok
+    df_first = df.loc[scored, id_cols + [col]].drop_duplicates(subset=id_cols, keep="first")
+    first_by_track = df_first[col].set_axis(pd.MultiIndex.from_frame(df_first[id_cols]))
+    skipped_keys = pd.MultiIndex.from_frame(df.loc[skipped, id_cols])
+    return first_by_track.reindex(skipped_keys).set_axis(df.index[skipped])
+
+
+def _backfill_start_offset_rows_from_raw_state(
+    df,
+    *,
+    raw_col=HMM_INTRINSIC_RAW_STATE_COL,
+    intrinsic_col=INTRINSIC_STATE_COL,
+):
+    """Training path: skipped rows take the raw state (and its intrinsic label) of their
+    track's first scored row; tracks whose first scored state is NA are left as they are."""
+    first_raw = _first_scored_value_per_track_for_skipped_rows(df, raw_col)
+    fill_mask = first_raw.notna().to_numpy()
+    if not bool(fill_mask.any()):
+        return df
+    fill_raw = first_raw[fill_mask]
+    df.loc[fill_raw.index, raw_col] = fill_raw
+    intrinsic_by_raw = {
+        v: _format_hmm_raw_state_value_for_key(v, label=raw_col)
+        for v in pd.unique(fill_raw.to_numpy(dtype=object))
+    }
+    fill_intrinsic = pd.Series(
+        [intrinsic_by_raw[v] for v in fill_raw.to_numpy(dtype=object)],
+        index=fill_raw.index,
+        dtype=object,
+    )
+    fill_intrinsic = fill_intrinsic[fill_intrinsic != ""]
+    if len(fill_intrinsic) > 0:
+        df.loc[fill_intrinsic.index, intrinsic_col] = fill_intrinsic.to_numpy()
+    return df
+
+
+def _backfill_start_offset_rows_from_applied_states(
+    obs,
+    *,
+    raw_col=HMM_INTRINSIC_RAW_STATE_COL,
+    intrinsic_col=INTRINSIC_STATE_COL,
+    confidence_col=INTRINSIC_STATE_CONFIDENCE_COL,
+):
+    """Apply path: skipped rows take the raw state, intrinsic label and confidence of their
+    track's first scored row, each only when that value is present (finite for confidence)."""
+    first_raw = _first_scored_value_per_track_for_skipped_rows(obs, raw_col)
+    first_intrinsic = _first_scored_value_per_track_for_skipped_rows(obs, intrinsic_col)
+    first_conf = pd.to_numeric(
+        _first_scored_value_per_track_for_skipped_rows(obs, confidence_col),
+        errors="coerce",
+    )
+    raw_mask = first_raw.notna().to_numpy()
+    if bool(raw_mask.any()):
+        obs.loc[first_raw.index[raw_mask], raw_col] = first_raw[raw_mask]
+    intrinsic_mask = first_intrinsic.notna().to_numpy()
+    if bool(intrinsic_mask.any()):
+        obs.loc[first_intrinsic.index[intrinsic_mask], intrinsic_col] = first_intrinsic[intrinsic_mask].to_numpy()
+    conf_mask = np.isfinite(first_conf.to_numpy(dtype=float, na_value=np.nan))
+    if bool(conf_mask.any()):
+        obs.loc[first_conf.index[conf_mask], confidence_col] = first_conf[conf_mask].to_numpy(dtype=float)
+    return obs
+
+
 def _compute_hmm_sequence_lengths(df, *, id_cols=("sample_name", "TrackID")):
     if df is None or len(df) == 0:
         return []
@@ -1758,22 +1831,7 @@ def run_hmm_state_clustering(
     _short_track_summary = _summarize_hmm_short_tracks(df_model)
     _warn_hmm_short_tracks(_short_track_summary, start_offset=start_offset)
     if start_offset_fill_mode == "backfill" and start_offset > 0:
-        for _, group_idx in df_model.groupby(["sample_name", "TrackID"], sort=False, observed=False).groups.items():
-            group = df_model.loc[list(group_idx)]
-            scored_group = group[group["_start_offset_scored"]]
-            skipped_group = group[group["_start_offset_skipped"]]
-            if len(scored_group) == 0 or len(skipped_group) == 0:
-                continue
-            first_raw = scored_group[HMM_INTRINSIC_RAW_STATE_COL].iloc[0]
-            if pd.isna(first_raw):
-                continue
-            df_model.loc[skipped_group.index, HMM_INTRINSIC_RAW_STATE_COL] = first_raw
-            first_intrinsic = _format_hmm_raw_state_value_for_key(
-                first_raw,
-                label=HMM_INTRINSIC_RAW_STATE_COL,
-            )
-            if first_intrinsic != "":
-                df_model.loc[skipped_group.index, INTRINSIC_STATE_COL] = first_intrinsic
+        _backfill_start_offset_rows_from_raw_state(df_model)
 
     _model_meta_obs_extra = [
         c for c in ("origin_cell_type",) if c in df_model.columns and c not in set(binary_cols_to_merge)
@@ -2379,21 +2437,7 @@ def apply_hmm_deployment_artifact_to_full_dataset(
         adata_full.obs.loc[adata_full.obs.index[score_mask], INTRINSIC_STATE_CONFIDENCE_COL] = state_confidence
 
         if str(prepared["resolved_start_offset_fill_mode"]) == "backfill" and int(prepared["resolved_start_offset"]) > 0:
-            for _, group_idx in adata_full.obs.groupby(["sample_name", "TrackID"], sort=False, observed=False).groups.items():
-                group = adata_full.obs.loc[list(group_idx)]
-                scored_group = group[group["_start_offset_scored"]]
-                skipped_group = group[group["_start_offset_skipped"]]
-                if len(scored_group) == 0 or len(skipped_group) == 0:
-                    continue
-                first_raw = scored_group[HMM_INTRINSIC_RAW_STATE_COL].iloc[0]
-                first_intrinsic = scored_group[INTRINSIC_STATE_COL].iloc[0]
-                first_conf = pd.to_numeric(pd.Series(scored_group[INTRINSIC_STATE_CONFIDENCE_COL]), errors="coerce").iloc[0]
-                if not pd.isna(first_raw):
-                    adata_full.obs.loc[skipped_group.index, HMM_INTRINSIC_RAW_STATE_COL] = first_raw
-                if not pd.isna(first_intrinsic):
-                    adata_full.obs.loc[skipped_group.index, INTRINSIC_STATE_COL] = first_intrinsic
-                if np.isfinite(first_conf):
-                    adata_full.obs.loc[skipped_group.index, INTRINSIC_STATE_CONFIDENCE_COL] = first_conf
+            _backfill_start_offset_rows_from_applied_states(adata_full.obs)
 
     adata_full.obs[HMM_INTRINSIC_RAW_STATE_COL] = _coerce_hmm_raw_state_series(
         adata_full.obs[HMM_INTRINSIC_RAW_STATE_COL],

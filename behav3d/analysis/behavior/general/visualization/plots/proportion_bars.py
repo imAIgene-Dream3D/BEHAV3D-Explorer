@@ -267,14 +267,19 @@ DIFF_BAR_LEGEND_TEXT = (
     "Bar = difference in mean cluster share (right level − left level)\n"
     "whisker = SEM of the difference"
 )
+FOLD_CHANGE_BAR_LEGEND_TEXT = (
+    "Bar = fold change of mean cluster share (larger / smaller), towards the larger level\n"
+    "whisker = SE (log2 scale); hatched = a share < 0.2% was raised to 0.2%"
+)
 # Inches reserved below a diff-bar grid for the last row's tick labels + x-axis label plus the
 # two footnote lines.
 _DIFF_GRID_BOTTOM_IN = 0.92
 
 
-def _add_diff_bar_legend(fig, *, y, fontsize=7):
+def _add_diff_bar_legend(fig, *, y, fontsize=7, fold_change=False):
     """Draw the note explaining the bars and whiskers, centered near the bottom of `fig`."""
-    fig.text(0.5, y, DIFF_BAR_LEGEND_TEXT, ha="center", va="bottom", fontsize=fontsize, linespacing=1.4)
+    text = FOLD_CHANGE_BAR_LEGEND_TEXT if fold_change else DIFF_BAR_LEGEND_TEXT
+    fig.text(0.5, y, text, ha="center", va="bottom", fontsize=fontsize, linespacing=1.4)
 
 
 def _diff_grid_title_margin_in(title, fig_w_in):
@@ -311,27 +316,51 @@ def _diff_grid_figure(fig_w, heights_in, top_in, *, ncols, width_ratios=None):
     return fig, outer, fig_h
 
 
+# Mean cluster shares below this (as a fraction, i.e. 0.2%) are raised to it before taking the
+# fold change, so a cluster absent on one side gives a large but finite ratio instead of infinity.
+FOLD_CHANGE_FLOOR = 0.002
+
+
 def _class_diff_rows(class_order, vals_a_panel, vals_b_panel):
-    """Per-class mean difference (b - a) and its standard error between two panels of samples.
-    ``se_diff`` needs at least two samples on each side, and is NaN otherwise."""
+    """Per-class mean difference (b - a) and its standard error between two panels of samples,
+    plus the log2 fold change of the means (b / a) and its delta-method standard error.
+    ``se_diff``/``se_log2_fc`` need at least two samples on each side, and are NaN otherwise.
+    Means below ``FOLD_CHANGE_FLOOR`` are floored for the fold change only (``fc_floored``)."""
     rows = []
     for class_name in class_order:
         vals_a = pd.to_numeric(vals_a_panel[class_name], errors="coerce").dropna().to_numpy()
         vals_b = pd.to_numeric(vals_b_panel[class_name], errors="coerce").dropna().to_numpy()
         mean_a = float(np.mean(vals_a)) if len(vals_a) > 0 else float("nan")
         mean_b = float(np.mean(vals_b)) if len(vals_b) > 0 else float("nan")
+        both = np.isfinite(mean_a) and np.isfinite(mean_b)
         if len(vals_a) >= 2 and len(vals_b) >= 2:
-            var_a = float(np.var(vals_a, ddof=1))
-            var_b = float(np.var(vals_b, ddof=1))
-            se_diff = float(np.sqrt(var_a / len(vals_a) + var_b / len(vals_b)))
+            sem2_a = float(np.var(vals_a, ddof=1)) / len(vals_a)
+            sem2_b = float(np.var(vals_b, ddof=1)) / len(vals_b)
+            se_diff = float(np.sqrt(sem2_a + sem2_b))
         else:
-            se_diff = float("nan")
+            sem2_a = sem2_b = se_diff = float("nan")
+        if both:
+            fc_a = max(mean_a, FOLD_CHANGE_FLOOR)
+            fc_b = max(mean_b, FOLD_CHANGE_FLOOR)
+            log2_fc = float(np.log2(fc_b / fc_a))
+            fc_floored = bool(mean_a < FOLD_CHANGE_FLOOR or mean_b < FOLD_CHANGE_FLOOR)
+            se_log2_fc = (
+                float(np.sqrt(sem2_a / fc_a ** 2 + sem2_b / fc_b ** 2) / np.log(2.0))
+                if np.isfinite(se_diff) else float("nan")
+            )
+        else:
+            log2_fc = se_log2_fc = float("nan")
+            fc_floored = False
         rows.append({
             "class": class_name,
             "mean_a": mean_a,
             "mean_b": mean_b,
-            "diff": (mean_b - mean_a) if np.isfinite(mean_a) and np.isfinite(mean_b) else float("nan"),
+            "diff": (mean_b - mean_a) if both else float("nan"),
             "se_diff": se_diff,
+            "log2_fc": log2_fc,
+            "fold_change": float(2.0 ** log2_fc) if both else float("nan"),
+            "se_log2_fc": se_log2_fc,
+            "fc_floored": fc_floored,
             "n_a": int(len(vals_a)),
             "n_b": int(len(vals_b)),
         })
@@ -431,34 +460,43 @@ def draw_diff_barh(
     xlim=None,
     bar_height_frac=0.6,
     label_fontsize=8,
+    fold_change=False,
 ):
     """One horizontal bar per class showing signed proportion difference (diff_df['diff'] in
     fractional units, plotted as percent), with a one-sided whisker (SEM of the difference,
     extending only outward from zero, cap drawn only at the outer end - not at the bar tip).
     class_order[0] is drawn at the top (matches typical reference-figure convention: first
-    cluster on top)."""
+    cluster on top).
+
+    With ``fold_change=True`` the bar is instead ``log2_fc`` on a log2 axis labelled as
+    fold changes (1×, 2×, ...): it points towards the level with the larger share and its
+    length reads as larger / smaller. Bars whose fold change used a floored mean are hatched."""
     class_order = [str(c) for c in list(class_order)]
     by_class = diff_df.set_index("class")
     rows = list(reversed(class_order))
     y_positions = list(range(len(rows)))
+    value_col, se_col, scale = _diff_value_cols(fold_change)
 
-    max_abs = 0.0
-    for class_name in rows:
-        if class_name not in by_class.index:
-            continue
-        diff_pct = float(by_class.loc[class_name, "diff"]) * 100.0
-        se_pct = float(by_class.loc[class_name, "se_diff"]) * 100.0 if np.isfinite(by_class.loc[class_name, "se_diff"]) else 0.0
-        max_abs = max(max_abs, abs(diff_pct) + se_pct)
-    xmax = xlim if xlim is not None else max(max_abs * 1.35, 5.0)
+    if xlim is not None:
+        xmax = xlim
+    else:
+        xmax = _diff_global_xmax(_diff_plus_se_max(diff_df, fold_change=fold_change), fold_change)
 
     for y, class_name in zip(y_positions, rows):
         if class_name not in by_class.index:
             continue
         row = by_class.loc[class_name]
-        diff_pct = float(row["diff"]) * 100.0 if np.isfinite(row["diff"]) else 0.0
-        se_pct = float(row["se_diff"]) * 100.0 if np.isfinite(row.get("se_diff", float("nan"))) else 0.0
+        # Named *_pct for the default view; in fold-change mode they hold log2 units.
+        diff_pct = float(row[value_col]) * scale if np.isfinite(row[value_col]) else 0.0
+        se_raw = row.get(se_col, float("nan"))
+        se_pct = float(se_raw) * scale if np.isfinite(se_raw) else 0.0
         color = colors.get(class_name, "#808080")
-        ax.barh([y], [diff_pct], height=bar_height_frac, color=color, edgecolor="none", linewidth=0.0)
+        floored = bool(fold_change and row.get("fc_floored", False))
+        ax.barh(
+            [y], [diff_pct], height=bar_height_frac, color=color,
+            edgecolor="white" if floored else "none", linewidth=0.0,
+            hatch="////" if floored else None,
+        )
         if se_pct > 0:
             # One-sided: only extend further away from zero, not back toward it, so the
             # whisker doesn't double up on top of the bar / neighboring rows. Cap is drawn
@@ -484,7 +522,44 @@ def draw_diff_barh(
     ax.spines["right"].set_visible(False)
     ax.spines["left"].set_visible(False)
     ax.tick_params(axis="y", length=0)
-    ax.set_xlabel("Cluster size difference (%)", fontsize=8)
+    if fold_change:
+        ticks = _fold_change_ticks(xmax)
+        ax.set_xticks(ticks)
+        ax.set_xticklabels([_fold_change_label(t) for t in ticks])
+        ax.set_xlim(-xmax, xmax)
+        ax.set_xlabel("Cluster size fold change (larger / smaller)", fontsize=8)
+    else:
+        ax.set_xlabel("Cluster size difference (%)", fontsize=8)
+
+
+def _diff_value_cols(fold_change):
+    """``(value column, SE column, display scale)`` drawn by `draw_diff_barh`."""
+    return ("log2_fc", "se_log2_fc", 1.0) if fold_change else ("diff", "se_diff", 100.0)
+
+
+def _fold_change_label(log2_value):
+    """'1×', '1.5×', '2×', ... for a log2 tick (sign only says which side, so it is dropped)."""
+    fold = 2.0 ** abs(float(log2_value))
+    return f"{fold:.2f}".rstrip("0").rstrip(".") + "×"
+
+
+def _fold_change_ticks(xmax):
+    """Symmetric log2 tick positions for a fold-change axis spanning ±``xmax``."""
+    candidates = [1.25, 1.5, 2.0, 3.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0]
+    folds = [f for f in candidates if np.log2(f) <= xmax + 1e-9]
+    if len(folds) > 4:
+        folds = [f for f in folds if f >= 2.0 and float(np.log2(f)).is_integer()]
+        while len(folds) > 4:
+            folds = folds[1::2]
+    if not folds:
+        folds = [2.0 ** xmax]
+    pos = [float(np.log2(f)) for f in folds]
+    return [-p for p in reversed(pos)] + [0.0] + pos
+
+
+def _diff_global_xmax(max_abs, fold_change):
+    """Shared x half-range for a grid of diff panels, from the largest |value| + SE."""
+    return max(max_abs * 1.15, 1.0) if fold_change else max(max_abs * 1.35, 5.0)
 
 
 def draw_grouped_value_barh(
@@ -552,12 +627,16 @@ def _diff_df_has_data(diff_df):
     return diff_df is not None and bool(np.isfinite(diff_df["diff"].to_numpy(dtype=float)).any())
 
 
-def _diff_plus_se_max(diff_df):
+def _diff_plus_se_max(diff_df, fold_change=False):
     """Max of |diff| + se_diff (percent) across a diff_df's rows, treating a non-finite
     se_diff as 0 - matches the one-sided whisker drawn by `draw_diff_barh` so it's never
-    clipped."""
-    diff_pct = diff_df["diff"].to_numpy(dtype=float) * 100.0
-    se_pct = np.nan_to_num(diff_df["se_diff"].to_numpy(dtype=float), nan=0.0) * 100.0
+    clipped. With ``fold_change``, the same over ``log2_fc`` + ``se_log2_fc``."""
+    value_col, se_col, scale = _diff_value_cols(fold_change)
+    if value_col not in diff_df.columns:
+        return 0.0
+    diff_pct = diff_df[value_col].to_numpy(dtype=float) * scale
+    se_values = diff_df[se_col].to_numpy(dtype=float) if se_col in diff_df.columns else np.zeros(len(diff_df))
+    se_pct = np.nan_to_num(se_values, nan=0.0) * scale
     finite = np.isfinite(diff_pct)
     if not finite.any():
         return 0.0
@@ -588,10 +667,14 @@ def plot_condition_diff_grid(
     max_cols_per_page=4,
     label_fontsize=9,
     pdf_pages=None,
+    fold_change=False,
 ):
     """Multi-page PDF: one row per pairwise level comparison (the same set of pairs is shared
     across every group), one column per group (or a single column if diff_stats_by_group has
     only the '(all)' key). Saves a PDF and (optionally) a merged long-form CSV.
+
+    ``fold_change=True`` draws log2 fold changes instead of percentage-point differences (see
+    `draw_diff_barh`); the CSV carries both either way.
 
     If ``pdf_pages`` (an open ``matplotlib.backends.backend_pdf.PdfPages``) is given, pages are
     appended to it instead of a standalone ``out_pdf`` file being created; ``out_pdf`` is still
@@ -611,8 +694,8 @@ def plot_condition_diff_grid(
     for pairs in diff_stats_by_group.values():
         for df in pairs.values():
             if len(df) > 0:
-                global_xmax = max(global_xmax, _diff_plus_se_max(df))
-    global_xmax = max(global_xmax * 1.35, 5.0)
+                global_xmax = max(global_xmax, _diff_plus_se_max(df, fold_change=fold_change))
+    global_xmax = _diff_global_xmax(global_xmax, fold_change)
 
     out_pdf = str(out_pdf)
     long_rows = []
@@ -652,7 +735,7 @@ def plot_condition_diff_grid(
                         ax.text(0.5, 0.5, "—", ha="center", va="center", fontsize=10, transform=ax.transAxes)
                         ax.axis("off")
                         continue
-                    draw_diff_barh(ax, class_order, diff_df, colors, xlim=global_xmax)
+                    draw_diff_barh(ax, class_order, diff_df, colors, xlim=global_xmax, fold_change=fold_change)
                     if c > 0:
                         ax.set_yticklabels([])
 
@@ -663,7 +746,7 @@ def plot_condition_diff_grid(
                     long_rows.append(df_long)
 
             fig.suptitle(page_title, fontsize=11, fontweight="bold", y=1.0 - 0.12 / fig_h, va="top")
-            _add_diff_bar_legend(fig, y=0.06 / fig_h)
+            _add_diff_bar_legend(fig, y=0.06 / fig_h, fold_change=fold_change)
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
@@ -691,6 +774,7 @@ def plot_condition_diff_grid_2d(
     figsize_per_panel=(3.2, None),
     label_fontsize=9,
     pdf_pages=None,
+    fold_change=False,
 ):
     """Multi-page PDF: a true 2D grid of diff-bar panels — columns = ``grid_axis_cols[0]``,
     rows = ``grid_axis_cols[1]`` — for a binary ``condition_col`` (exactly one pairwise
@@ -755,8 +839,8 @@ def plot_condition_diff_grid_2d(
                 for pairs in diff_stats_by_facet.values():
                     d = pairs.get((level_a, level_b))
                     if d is not None and len(d) > 0:
-                        global_xmax = max(global_xmax, _diff_plus_se_max(d))
-            global_xmax = max(global_xmax * 1.35, 5.0)
+                        global_xmax = max(global_xmax, _diff_plus_se_max(d, fold_change=fold_change))
+            global_xmax = _diff_global_xmax(global_xmax, fold_change)
 
             page_title = title if level_a is not None else f"{title} — no {condition_col} comparison available"
             if page_key != "(all)":
@@ -805,7 +889,7 @@ def plot_condition_diff_grid_2d(
                         ax.text(0.5, 0.5, "—", ha="center", va="center", fontsize=10, transform=ax.transAxes)
                         ax.axis("off")
                         continue
-                    draw_diff_barh(ax, class_order, diff_df, colors, xlim=global_xmax)
+                    draw_diff_barh(ax, class_order, diff_df, colors, xlim=global_xmax, fold_change=fold_change)
                     if c > 0:
                         ax.set_yticklabels([])
 
@@ -820,7 +904,7 @@ def plot_condition_diff_grid_2d(
                     long_rows.append(df_long)
 
             fig.suptitle(page_title, fontsize=11, fontweight="bold", y=1.0 - 0.12 / fig_h, va="top")
-            _add_diff_bar_legend(fig, y=0.06 / fig_h)
+            _add_diff_bar_legend(fig, y=0.06 / fig_h, fold_change=fold_change)
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 

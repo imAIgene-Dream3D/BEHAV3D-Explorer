@@ -298,6 +298,82 @@ def test_draw_diff_barh_extends_the_whisker_by_the_standard_error_with_no_text_m
     plt.close(fig)
 
 
+def test_class_diff_rows_report_log2_fold_change_and_delta_method_se():
+    panel_a = pd.DataFrame({"rest": [0.04, 0.06]})
+    panel_b = pd.DataFrame({"rest": [0.08, 0.12]})
+
+    row = proportion_bars._class_diff_rows(["rest"], panel_a, panel_b)[0]
+
+    assert row["log2_fc"] == pytest.approx(1.0)
+    assert row["fold_change"] == pytest.approx(2.0)
+    expected_se = np.sqrt((0.0002 / 2) / 0.05 ** 2 + (0.0008 / 2) / 0.10 ** 2) / np.log(2.0)
+    assert row["se_log2_fc"] == pytest.approx(expected_se)
+    assert row["fc_floored"] is False
+
+
+def test_class_diff_rows_floor_a_missing_class_for_the_fold_change_only():
+    panel_a = pd.DataFrame({"rest": [0.0, 0.0]})
+    panel_b = pd.DataFrame({"rest": [0.02, 0.02]})
+
+    row = proportion_bars._class_diff_rows(["rest"], panel_a, panel_b)[0]
+
+    assert row["diff"] == pytest.approx(0.02)
+    assert row["log2_fc"] == pytest.approx(np.log2(0.02 / proportion_bars.FOLD_CHANGE_FLOOR))
+    assert row["fc_floored"] is True
+
+
+def test_draw_diff_barh_fold_change_points_to_the_larger_side_with_fold_labels():
+    diff_df = pd.DataFrame(proportion_bars._class_diff_rows(
+        ["up", "down", "big"],
+        pd.DataFrame({"up": [0.05, 0.05], "down": [0.12, 0.12], "big": [0.45, 0.45]}),
+        pd.DataFrame({"up": [0.10, 0.10], "down": [0.06, 0.06], "big": [0.50, 0.50]}),
+    ))
+    fig, ax = plt.subplots()
+
+    proportion_bars.draw_diff_barh(ax, ["up", "down", "big"], diff_df, {}, fold_change=True)
+
+    widths = {lbl.get_text(): p.get_width() for lbl, p in zip(ax.get_yticklabels(), ax.patches)}
+    assert widths["up"] == pytest.approx(1.0)
+    assert widths["down"] == pytest.approx(-1.0)
+    assert widths["big"] == pytest.approx(np.log2(0.5 / 0.45))
+    labels = [t.get_text() for t in ax.get_xticklabels()]
+    assert "1×" in labels and "2×" in labels
+    assert "fold change" in ax.get_xlabel()
+    plt.close(fig)
+
+
+def test_plot_condition_diff_grid_fold_change_writes_both_measures_to_csv(tmp_path):
+    per_sample_class_props, sample_metadata = _build_condition_diff_inputs()
+    diff_stats = proportion_bars.compute_condition_diff_stats_pairwise(
+        per_sample_class_props, sample_metadata, class_order=["rest", "move"], condition_col="condition",
+    )
+    out_pdf = tmp_path / "fold.pdf"
+
+    result = proportion_bars.plot_condition_diff_grid(
+        diff_stats,
+        class_order=["rest", "move"],
+        colors={"rest": "#4477AA", "move": "#EE6677"},
+        title="Fold change",
+        out_pdf=out_pdf,
+        out_csv=out_pdf.with_suffix(".csv"),
+        fold_change=True,
+    )
+
+    assert Path(result["pdf_path"]).exists()
+    csv_out = pd.read_csv(result["csv_path"])
+    assert {"diff", "se_diff", "log2_fc", "fold_change", "se_log2_fc", "fc_floored"} <= set(csv_out.columns)
+
+
+def test_fold_change_ticks_stay_readable_for_large_ranges():
+    ticks = proportion_bars._fold_change_ticks(np.log2(300.0))
+    positive = [t for t in ticks if t > 0]
+    assert 0.0 in ticks
+    assert len(positive) <= 4
+    assert ticks == sorted(ticks)
+    assert proportion_bars._fold_change_label(np.log2(1.5)) == "1.5×"
+    assert proportion_bars._fold_change_label(-1.0) == "2×"
+
+
 def test_feature_box_draws_boxes_without_test_marks():
     from behav3d.analysis.behavior.general.visualization.plots.feature_box import plot_feature_box_by_group
 

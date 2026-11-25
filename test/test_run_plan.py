@@ -517,6 +517,34 @@ def test_run_plan_dialog_locks_incomplete_rows():
     ]
 
 
+def test_overwrite_box_fits_parent_window_and_scrolls():
+    from qtpy.QtWidgets import QApplication, QMessageBox, QWidget
+
+    from behav3d.napari._scrollable_box import ScrollableChoiceBox
+
+    app = QApplication.instance() or QApplication([])
+    parent = QWidget()
+    parent.resize(800, 500)
+    parent.show()
+    app.processEvents()
+
+    text = "\n".join(f"  • Img{i:04d} / CD8 — Complete" for i in range(400))
+    box = ScrollableChoiceBox(parent, "Existing Data", text)
+    box.addButton("Overwrite All", QMessageBox.DestructiveRole)
+    btn_cancel = box.addButton("Cancel", QMessageBox.RejectRole)
+    box._fit_to_window()
+    box.show()
+    app.processEvents()
+
+    assert box.height() <= parent.frameGeometry().height()
+    assert box._scroll.verticalScrollBar().maximum() > 0, "long text must scroll"
+    assert btn_cancel.isVisible()
+
+    box.reject()  # Esc / window close
+    assert box.clickedButton() is btn_cancel
+    parent.close()
+
+
 # ── feature extraction ───────────────────────────────────────────────────
 def _write_features(root, sn, with_combined=True):
     from behav3d.core.run_plan import feature_paths

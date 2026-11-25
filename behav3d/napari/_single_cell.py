@@ -337,6 +337,17 @@ def _clear_layout(layout) -> None:
             item.layout().deleteLater()
 
 
+def _make_fold_change_checkbox() -> QCheckBox:
+    """'Show fold change' toggle shared by the condition comparison reports."""
+    chk = QCheckBox("Show fold change (log scale)")
+    chk.setToolTip(
+        "Plot each cluster's fold change (larger share / smaller share, drawn towards the "
+        "condition where it is larger) on a log axis instead of the difference in percentage "
+        "points. Shares below 0.2% are raised to 0.2% (hatched bars). The CSV always has both."
+    )
+    return chk
+
+
 def _make_info_label(text: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setWordWrap(True)
@@ -1267,11 +1278,13 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
             "group_x_grouped": "chk_comparison_group_x_conditions",
             "group_x_levels": "group_selector_comparison_x",
             "group_cols": "list_comparison_group_cols",
+            "fold_change": "chk_comparison_fold_change",
         },
         "contact_type_comparison": {
             "state_col": "combo_state_contact_type_state_col",
             "contact_cols": "list_state_contact_type_compare_cols",
             "group_cols": "list_state_contact_group_cols",
+            "fold_change": "chk_state_contact_type_fold_change",
         },
         "contact_shift": {
             "contact_col": "combo_state_shift_contact_col",
@@ -2085,6 +2098,8 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.list_comparison_group_cols = QListWidget()
         self.list_comparison_group_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
         g_state_comparison.addWidget(self.list_comparison_group_cols)
+        self.chk_comparison_fold_change = _make_fold_change_checkbox()
+        g_state_comparison.addWidget(self.chk_comparison_fold_change)
         comparison_row = QHBoxLayout()
         self.btn_condition_comparison = QPushButton("▶ Condition Comparison Report")
         _style_secondary(self.btn_condition_comparison)
@@ -2213,6 +2228,8 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.list_state_contact_type_compare_cols = QListWidget()
         self.list_state_contact_type_compare_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
         g_state_contact.addWidget(self.list_state_contact_type_compare_cols)
+        self.chk_state_contact_type_fold_change = _make_fold_change_checkbox()
+        g_state_contact.addWidget(self.chk_state_contact_type_fold_change)
         state_contact_type_row = QHBoxLayout()
         self.btn_state_contact_type_comparison = QPushButton("▶ Create Contact Type Comparison")
         _style_secondary(self.btn_state_contact_type_comparison)
@@ -4584,6 +4601,7 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
             return
         state_col_choice = self.combo_state_contact_type_state_col.currentText()
         selected_extra_cols = [item.text() for item in self.list_state_contact_group_cols.selectedItems()]
+        fold_change = self.chk_state_contact_type_fold_change.isChecked()
         _raw_md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
         md_snapshot = _raw_md.copy() if _raw_md is not None else None
         out = self._out_dir()
@@ -4608,6 +4626,7 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
                 contact_cols=contact_cols,
                 state_col=state_col,
                 extra_group_cols=selected_extra_cols or None,
+                fold_change=fold_change,
                 verbose=True,
             )
 
@@ -4913,6 +4932,7 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
             right = self.group_selector_comparison_x.right_items()
             group_x_levels_map = {lvl: "+".join(left) for lvl in left}
             group_x_levels_map.update({lvl: "+".join(right) for lvl in right})
+        fold_change = self.chk_comparison_fold_change.isChecked()
         out = self._out_dir()
         md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
         self._log(f"▶ Generating condition comparison report for '{ct}'…")
@@ -4956,6 +4976,7 @@ class StateClassificationSubTab(_ReportSettingsMixin, QWidget):
                 state_order=_get_classification_state_order(adata, state_col),
                 include_over_time=True,
                 minutes_per_frame=minutes_per_frame if minutes_valid else None,
+                fold_change=fold_change,
                 verbose=True,
             )
 
@@ -6306,6 +6327,7 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             "group_x_grouped": "chk_track_comparison_group_x_conditions",
             "group_x_levels": "group_selector_track_comparison_x",
             "group_cols": "list_track_comparison_group_cols",
+            "fold_change": "chk_track_comparison_fold_change",
         },
         "exemplars": {
             "n_per_cluster": "spin_n_per_cluster",
@@ -6327,6 +6349,7 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             "group_y_grouped": "chk_contact_group_y_conditions",
             "group_y_levels": "group_selector_contact_y",
             "group_cols": "list_contact_group_cols",
+            "fold_change": "chk_contact_condition_fold_change",
         },
         "contact_duration": {
             # Unit before threshold: the unit sets the threshold's range.
@@ -7470,6 +7493,8 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
         self.list_track_comparison_group_cols = QListWidget()
         self.list_track_comparison_group_cols.setSelectionMode(QAbstractItemView.ExtendedSelection)
         g_track_comparison.addWidget(self.list_track_comparison_group_cols)
+        self.chk_track_comparison_fold_change = _make_fold_change_checkbox()
+        g_track_comparison.addWidget(self.chk_track_comparison_fold_change)
         track_comparison_row = QHBoxLayout()
         self.btn_track_condition_comparison = QPushButton("▶ Condition Comparison Report")
         _style_secondary(self.btn_track_condition_comparison)
@@ -7601,6 +7626,8 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             "Contact condition comparison (grid of class composition differences between "
             "contact/no-contact groups):"
         ))
+        self.chk_contact_condition_fold_change = _make_fold_change_checkbox()
+        g_contact.addWidget(self.chk_contact_condition_fold_change)
         contact_condition_comparison_row = QHBoxLayout()
         self.btn_contact_condition_comparison = QPushButton("▶ Create Contact Condition Comparison")
         _style_secondary(self.btn_contact_condition_comparison)
@@ -11179,6 +11206,7 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             right = self.group_selector_track_comparison_x.right_items()
             group_x_levels_map = {lvl: "+".join(left) for lvl in left}
             group_x_levels_map.update({lvl: "+".join(right) for lvl in right})
+        fold_change = self.chk_track_comparison_fold_change.isChecked()
         out = self._out_dir()
         self._log(f"▶ Creating track condition comparison plot for '{ct}'…")
         track_adata = self._track_adata
@@ -11211,6 +11239,7 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
                 condition_groups=condition_groups,
                 include_over_time=True,
                 minutes_per_frame=minutes_per_frame if minutes_valid else None,
+                fold_change=fold_change,
                 verbose=True,
             )
 
@@ -11562,6 +11591,7 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
             right = self.group_selector_contact_y.right_items()
             group_y_levels_map = {lvl: "+".join(left) for lvl in left}
             group_y_levels_map.update({lvl: "+".join(right) for lvl in right})
+        fold_change = self.chk_contact_condition_fold_change.isChecked()
         md = getattr(self.metadata_loader, "metadata", None) if self.metadata_loader else None
         out = self._out_dir()
         self._log(f"▶ Creating contact condition comparison for '{ct}'…")
@@ -11618,6 +11648,7 @@ class TrackClassificationSubTab(_ReportSettingsMixin, QWidget):
                 group_x_levels_map=group_x_levels_map,
                 group_y_levels_map=group_y_levels_map,
                 group_cols=selected_extra_cols or None,
+                fold_change=fold_change,
                 verbose=True,
                 csv_dir=csv_dir,
             )
