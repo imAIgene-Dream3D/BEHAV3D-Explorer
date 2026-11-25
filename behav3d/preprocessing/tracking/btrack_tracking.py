@@ -1,5 +1,4 @@
-import json
-import tempfile
+import warnings
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -13,16 +12,18 @@ import btrack.io
 
 from behav3d.io.images import _ensure_zarr, load_image, get_filepath_stem
 from behav3d.preprocessing.tracking import convert_segments_to_tracks, prepare_tracking_sample
-
-# ---------------------------------------------------------------------------
-# Resolve config presets to bundled JSON paths
-# ---------------------------------------------------------------------------
-_MODELS_DIR = Path(__file__).parent / "models"
-
-_PRESET_MAP = {
-    "cell": _MODELS_DIR / "cell_config.json",
-    "particle": _MODELS_DIR / "particle_config.json",
-}
+from behav3d.preprocessing.tracking.btrack_config import (  # noqa: F401  (re-exported)
+    DEFAULT_PRESET,
+    PRESET_MAP as _PRESET_MAP,
+    build_active_config,
+    list_presets,
+    motion_crowding_from_frames,
+    read_panel_values,
+    resolve_config as _resolve_config,
+    suggest_preset,
+    write_custom_config,
+    write_temp_config,
+)
 
 _SUPPORTED_BTRACK_VISUAL_FEATURES = (
     "area",
@@ -307,60 +308,55 @@ def _extract_btrack_objects_dataframe(
     return df_objects, visual_feature_cols
 
 
-def _resolve_config(config_preset):
-    """Return an absolute Path to a btrack JSON config file.
+def _segments_column(sample, cell_type):
+    """Name of the metadata column holding this cell type's segmentation path."""
+    for prefix in ["or", "im", "ot"]:
+        col_name = f"{prefix}_{cell_type}_segments_image_path"
+        if col_name in sample.index and pd.notna(sample[col_name]):
+            return col_name
+    return f"{cell_type}_segments_image_path"
 
-    Parameters
-    ----------
-    config_preset : str or Path
-        Either a preset name ("cell", "particle") or a path to a custom
-        JSON configuration file.
+
+def estimate_motion_crowding(metadata, cell_type, n_pairs=20):
+    """Measure motion scale D and crowding N (um) from the segmentations.
+
+    Samples up to ``n_pairs`` evenly spaced consecutive-frame pairs per sample
+    and pools the distances over samples; no tracking is run. Returns
+    ``(D, N)``, or ``(None, None)`` when no sample has enough objects.
     """
-    if isinstance(config_preset, Path):
-        return config_preset
-    key = str(config_preset).strip().lower()
-    if key in _PRESET_MAP:
-        return _PRESET_MAP[key]
-    # Treat as a file path
-    p = Path(config_preset)
-    if p.exists():
-        return p
-    raise FileNotFoundError(
-        f"btrack config not found: '{config_preset}'. "
-        f"Use a preset name ({list(_PRESET_MAP.keys())}) or an existing JSON path."
-    )
-
-
-def _override_hypothesis_model(config_path, hypotheses=None, dist_thresh=None,
-                                time_thresh=None):
-    """Load a btrack legacy JSON config, optionally override hypothesis fields,
-    and write a patched temp file so ``tracker.configure()`` can read it.
-
-    The wrapper ``{"TrackerConfig": {...}}`` is preserved so btrack uses
-    its legacy loader (PascalCase keys).
-
-    Returns the path to the temporary file (caller is responsible for cleanup).
-    """
-    with open(config_path, "r") as f:
-        cfg = json.load(f)
-
-    # Work on the inner dict while keeping the wrapper intact.
-    inner = cfg.get("TrackerConfig", cfg)
-    hmodel = inner.get("HypothesisModel", {})
-    if hypotheses is not None:
-        hmodel["hypotheses"] = list(hypotheses)
-    if dist_thresh is not None:
-        hmodel["dist_thresh"] = int(dist_thresh)
-    if time_thresh is not None:
-        hmodel["time_thresh"] = int(time_thresh)
-    inner["HypothesisModel"] = hmodel
-
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False, encoding="utf-8"
-    )
-    json.dump(cfg, tmp)
-    tmp.close()
-    return Path(tmp.name)
+    steps, nn = [], []
+    for _, sample in metadata.iterrows():
+        col = _segments_column(sample, cell_type)
+        if col not in sample.index or pd.isna(sample[col]):
+            continue
+        segments = load_image(Path(sample[col]))
+        n_t = int(segments.shape[0])
+        if n_t < 2:
+            continue
+        xy = float(sample["pixel_distance_xy"])
+        z = float(sample["pixel_distance_z"])
+        ndim = len(segments.shape) - 1
+        scale = np.array([z, xy, xy])[-ndim:]
+        wanted = set()
+        for i in np.unique(np.linspace(0, n_t - 2, min(n_pairs, n_t - 1)).astype(int)):
+            wanted.update((int(i), int(i) + 1))
+        centroids = {}
+        for t in sorted(wanted):
+            seg_t = np.asarray(segments[t])
+            if seg_t.max() == 0:
+                centroids[t] = np.empty((0, ndim))
+                continue
+            props = regionprops_table(seg_t, properties=["centroid"])
+            centroids[t] = np.column_stack(
+                [props[f"centroid-{k}"] for k in range(ndim)]) * scale
+        frames = [centroids.get(t, np.empty((0, ndim))) for t in range(n_t)]
+        d_s, n_s = motion_crowding_from_frames(frames, n_pairs=n_pairs)
+        if d_s is not None:
+            steps.append(d_s)
+            nn.append(n_s)
+    if not steps:
+        return None, None
+    return float(np.median(steps)), float(np.median(nn))
 
 
 # ---------------------------------------------------------------------------
@@ -376,20 +372,33 @@ def btrack_image(
     element_size_x=1,
     element_size_y=1,
     element_size_z=1,
-    config_preset="cell",
-    max_search_radius=100,
+    config_preset=DEFAULT_PRESET,
+    max_search_radius=None,
     update_method="EXACT",
     step_size=100,
     volume_padding=10,
-    use_optimize=False,
+    use_optimize=None,
     hypotheses=None,
     dist_thresh=None,
     time_thresh=None,
     n_workers=1,
     use_visual_features=None,
     return_trackimg=True,
+    assignment_tolerance=None,
+    new_track_position_variance=None,
+    lost_track_probability=None,
+    measurement_noise=None,
+    link_tolerance=None,
+    track_start_end_penalty=None,
+    allow_divisions=None,
+    optimizer_time_limit_s=None,
 ):
     """Run btrack (Bayesian tracking) on a single segmentation array.
+
+    All distances are in um and all variances in um^2 (BEHAV3D links on
+    physical coordinates). Every tuning argument defaults to ``None``, which
+    keeps the value stored in the preset/custom JSON (``BEHAV3D.panel`` block
+    for the runtime fields); only non-``None`` values override it.
 
     Parameters
     ----------
@@ -408,33 +417,49 @@ def btrack_image(
     element_size_x/y/z : float
         Physical pixel sizes for coordinate scaling.
     config_preset : str or Path
-        ``"cell"``, ``"particle"``, or a path to a custom JSON.
-    max_search_radius : int
-        Maximum isotropic search radius (pixels).
+        A preset key (see ``list_presets()``; ``"tcell_tuned"`` by default,
+        ``"cell"``/``"particle"`` are the untuned legacy presets) or a path
+        to a custom JSON.
+    max_search_radius : float, optional
+        Longest single-frame jump that may be linked (um).
     update_method : str
-        ``"EXACT"`` or ``"APPROXIMATE"``.
+        ``"EXACT"`` or ``"APPROXIMATE"`` (no effect on quality).
     step_size : int
-        Frames per tracking iteration batch.
+        Frames per progress step (no effect on the tracks).
     volume_padding : int
-        Pixels added around data bounding-box for volume estimation.
-    use_optimize : bool
-        Whether to run the global hypothesis optimizer (Step 2).
+        Padding around the data bounding-box for volume estimation (um).
+    use_optimize : bool, optional
+        Whether to run the global hypothesis optimizer (Step 2). Recommended.
     hypotheses : list of str, optional
-        Override the hypothesis list in the config (e.g.
-        ``["P_FP", "P_init", "P_term", "P_link"]``). ``None`` keeps
-        the config-file default.
-    dist_thresh : int, optional
-        Override distance threshold for hypothesis generation.
+        Legacy explicit hypothesis list; prefer ``allow_divisions``.
+    dist_thresh : float, optional
+        Gap-bridging distance (um).
     time_thresh : int, optional
-        Override time threshold for hypothesis generation.
+        Gap-bridging frames.
     n_workers : int, optional
         Number of parallel workers for regionprops extraction. Path-backed
         inputs use multiprocessing when ``n_workers > 1``.
     use_visual_features : bool, optional
-        Whether to use raw-image-derived visual features during linking.
-        ``None`` is treated the same as ``False``.
+        Deprecated: raw appearance features degrade linking. Still honoured,
+        with a warning. ``None`` is treated the same as ``False``.
     return_trackimg : bool
         Whether to produce a tracked zarr image.
+    assignment_tolerance : float, optional
+        ``MotionModel.accuracy`` (um, 0 < value <= 10).
+    new_track_position_variance : float, optional
+        Initial position variance of a new track (um^2).
+    lost_track_probability : float, optional
+        ``MotionModel.prob_not_assign`` (0 < value < 1).
+    measurement_noise : float, optional
+        Measurement noise variance (um^2).
+    link_tolerance : float, optional
+        ``HypothesisModel.lambda_link`` (um).
+    track_start_end_penalty : float, optional
+        ``HypothesisModel.lambda_dist`` (um).
+    allow_divisions : bool, optional
+        Add the ``P_branch`` hypothesis (dividing cells only).
+    optimizer_time_limit_s : int, optional
+        Time limit for the optimizer's solver, in seconds.
     """
     assert segments is not None or segments_path is not None, \
         "Either segments or segments_path must be provided"
@@ -460,7 +485,20 @@ def btrack_image(
     # Resolve config and whether this run should use visual updates
     # ------------------------------------------------------------------
     config_path = _resolve_config(config_preset)
+    panel_values = read_panel_values(config_path)
+    if max_search_radius is None:
+        max_search_radius = panel_values["max_search_radius"]
+    if use_optimize is None:
+        use_optimize = bool(panel_values["use_optimize"])
+    if optimizer_time_limit_s is None:
+        optimizer_time_limit_s = panel_values["optimizer_time_limit_s"]
     use_visual_updates = bool(use_visual_features)
+    if use_visual_updates:
+        warnings.warn(
+            "btrack visual features are deprecated: raw area/shape/intensity "
+            "cues degraded linking in tests. Consider turning them off.",
+            stacklevel=2,
+        )
     visual_feature_spec = _get_btrack_visual_feature_spec(use_visual_updates)
     if visual_feature_spec["needs_raw_image"] and raw_image is None:
         if raw_image_path is None:
@@ -513,22 +551,23 @@ def btrack_image(
         for obj, props in zip(objects, feature_records):
             obj.properties = props
 
-    # Load config, optionally overriding hypothesis params
-    # Resolve the config file path, writing a patched temp file when needed.
-    need_override = use_optimize and (
-        hypotheses is not None or dist_thresh is not None or time_thresh is not None
-    )
-    if need_override:
-        active_config_path = _override_hypothesis_model(
-            config_path,
-            hypotheses=hypotheses,
-            dist_thresh=dist_thresh,
-            time_thresh=time_thresh,
-        )
-        _delete_active_config = True
-    else:
-        active_config_path = config_path
-        _delete_active_config = False
+    # Apply only the explicit overrides to the preset; everything else in the
+    # JSON passes through untouched. The result is validated (btrack aborts
+    # the whole process on out-of-range values) and written to a temp file.
+    overrides = {
+        "assignment_tolerance": assignment_tolerance,
+        "new_track_position_variance": new_track_position_variance,
+        "lost_track_probability": lost_track_probability,
+        "measurement_noise": measurement_noise,
+        "link_tolerance": link_tolerance,
+        "track_start_end_penalty": track_start_end_penalty,
+        "allow_divisions": allow_divisions,
+        "dist_thresh": dist_thresh,
+        "time_thresh": time_thresh,
+    }
+    active_config_path = write_temp_config(
+        build_active_config(config_path, overrides, hypotheses=hypotheses))
+    _delete_active_config = True
 
     try:
         with btrack.BayesianTracker() as tracker:
@@ -566,8 +605,10 @@ def btrack_image(
             )
 
             # Step 2 — Global hypothesis optimizer (optional)
+            # Passing options replaces btrack's own default solver time
+            # limit, so always pass one explicitly.
             if use_optimize:
-                tracker.optimize()
+                tracker.optimize(tm_lim=int(1000 * optimizer_time_limit_s))
 
             tracks = tracker.tracks
     finally:
@@ -637,12 +678,12 @@ def run_btracking(
     metadata,
     output_dir,
     cell_type,
-    config_preset="cell",
-    max_search_radius=100,
+    config_preset=DEFAULT_PRESET,
+    max_search_radius=None,
     update_method="EXACT",
     step_size=100,
     volume_padding=10,
-    use_optimize=False,
+    use_optimize=None,
     hypotheses=None,
     dist_thresh=None,
     time_thresh=None,
@@ -653,6 +694,14 @@ def run_btracking(
     log_callback=None,
     progress_cb=None,
     plan=None,
+    assignment_tolerance=None,
+    new_track_position_variance=None,
+    lost_track_probability=None,
+    measurement_noise=None,
+    link_tolerance=None,
+    track_start_end_penalty=None,
+    allow_divisions=None,
+    optimizer_time_limit_s=None,
     **kwargs,
 ):
     """Run btrack (Bayesian tracking) on all samples for a given cell type.
@@ -666,28 +715,21 @@ def run_btracking(
     cell_type : str
         Name of the cell type to track.
     config_preset : str or Path
-        ``"cell"``, ``"particle"``, or path to custom JSON.
-    max_search_radius : int
-        Max isotropic search radius (pixels).
-    update_method : str
-        ``"EXACT"`` or ``"APPROXIMATE"``.
-    step_size : int
-        Frames per tracking batch.
+        Preset key (see ``list_presets()``) or path to a custom JSON.
+    max_search_radius, use_optimize, hypotheses, dist_thresh, time_thresh,
+    assignment_tolerance, new_track_position_variance,
+    lost_track_probability, measurement_noise, link_tolerance,
+    track_start_end_penalty, allow_divisions, optimizer_time_limit_s :
+        Tuning overrides in um / um^2; ``None`` keeps the preset value. See
+        :func:`btrack_image`.
+    update_method, step_size : optional
+        Kept for compatibility; they do not change the tracks.
     volume_padding : int
-        Pixels padding around data bounding-box.
-    use_optimize : bool
-        Run global hypothesis optimizer (Step 2).
-    hypotheses : list of str, optional
-        Override hypothesis list (None keeps config default).
-    dist_thresh : int, optional
-        Override distance threshold.
-    time_thresh : int, optional
-        Override time threshold.
+        Padding around data bounding-box (um).
     n_workers : int
         Number of parallel workers for regionprops extraction.
     use_visual_features : bool, optional
-        Whether to use raw-image-derived visual features during linking.
-        ``None`` is treated the same as ``False``.
+        Deprecated; see :func:`btrack_image`.
     return_trackimg : bool
         Whether to save tracked zarr image.
     overwrite : bool
@@ -783,6 +825,14 @@ def run_btracking(
                 n_workers=n_workers,
                 use_visual_features=use_visual_features,
                 return_trackimg=return_trackimg,
+                assignment_tolerance=assignment_tolerance,
+                new_track_position_variance=new_track_position_variance,
+                lost_track_probability=lost_track_probability,
+                measurement_noise=measurement_noise,
+                link_tolerance=link_tolerance,
+                track_start_end_penalty=track_start_end_penalty,
+                allow_divisions=allow_divisions,
+                optimizer_time_limit_s=optimizer_time_limit_s,
             )
 
         # Update metadata with prefixed column names

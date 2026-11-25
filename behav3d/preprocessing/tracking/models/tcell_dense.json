@@ -1,0 +1,131 @@
+{
+  "TrackerConfig": {
+    "MotionModel": {
+      "name": "cell_motion_rw",
+      "dt": 1.0,
+      "measurements": 3,
+      "states": 3,
+      "accuracy": 2.0907434920937913,
+      "prob_not_assign": 0.0005088008066463635,
+      "max_lost": 6,
+      "A": {
+        "matrix": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      },
+      "H": {
+        "matrix": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      },
+      "P": {
+        "sigma": 973.927222644415,
+        "matrix": [
+          0.43330746698400546,
+          0.0,
+          0.0,
+          0.0,
+          0.43330746698400546,
+          0.0,
+          0.0,
+          0.0,
+          0.04456976408774282
+        ]
+      },
+      "R": {
+        "sigma": 288.2403147057278,
+        "matrix": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.9049462295461135
+        ]
+      },
+      "G": {
+        "sigma": 1.0743002878765013,
+        "matrix": [
+          0.9985016779831943,
+          0.9985016779831943,
+          0.10270532501709471
+        ]
+      }
+    },
+    "ObjectModel": {},
+    "HypothesisModel": {
+      "name": "cell_hypothesis",
+      "hypotheses": [
+        "P_FP",
+        "P_init",
+        "P_term",
+        "P_link",
+        "P_dead"
+      ],
+      "lambda_time": 14.03058282048419,
+      "lambda_dist": 103.48465803344752,
+      "lambda_link": 194.24822643766663,
+      "lambda_branch": 50.0,
+      "eta": 1.7374372123922036e-05,
+      "theta_dist": 2.3746952406726223,
+      "theta_time": 29.45523372206743,
+      "dist_thresh": 38.9872304376694,
+      "time_thresh": 10,
+      "apop_thresh": 17,
+      "segmentation_miss_rate": 0.2149672906083275,
+      "apoptosis_rate": 0.013134169567406595,
+      "relax": false
+    }
+  },
+  "BEHAV3D": {
+    "label": "T cells \u2014 dense field",
+    "description": "Tuned on the densest movie (~160 cells/frame, nearest neighbour often < 7 \u00b5m).",
+    "when_to_use": "Crowded fields where cells touch frequently.",
+    "units": "\u00b5m and \u00b5m\u00b2 (BEHAV3D links on physical coordinates); valid for any pixel size",
+    "tuned_frame_interval_min": 2,
+    "panel": {
+      "max_search_radius_um": 252.51,
+      "assignment_tolerance_um": 2.091,
+      "new_track_position_variance_um2": 422.01,
+      "lost_track_probability": 0.00051,
+      "measurement_noise_um2": 288.24,
+      "use_optimizer": true,
+      "gap_bridging_distance_um": 38.99,
+      "gap_bridging_frames": 10,
+      "link_tolerance_um": 194.25,
+      "track_start_end_penalty_um": 103.485,
+      "allow_divisions": false,
+      "optimizer_time_limit_s": 60
+    },
+    "validation_composite": {
+      "clean": 0.9532,
+      "noise_5pct_mixed": 0.7972,
+      "interval_4min": 0.9411,
+      "interval_6min": 0.9321,
+      "interval_10min": 0.9179,
+      "clean_8_curated": 0.9632,
+      "dense_Img010": 0.8732
+    },
+    "validation_note": "composite = \u00bd link F1 + \u00bd AssA vs manual GT (1 = perfect); BEHAV3D's bundled cell_config scores 0.918 clean in the same setting",
+    "source": "Tracking_GT/btrack_optimization"
+  }
+}

@@ -89,8 +89,11 @@ _EXPERIMENT_NOTE_CHAR_LIMIT = 32_000
 # methods it does not use; only the selected method's block applies.
 _TRACKING_METHOD_KEYS = {
     "btrack": (
-        "max_search_radius", "use_visual_features", "use_optimize",
-        "hypotheses", "dist_thresh", "time_thresh", "step_size",
+        "config_preset", "max_search_radius", "assignment_tolerance",
+        "new_track_position_variance", "lost_track_probability",
+        "use_optimize", "dist_thresh", "time_thresh", "link_tolerance",
+        "optimizer_time_limit_s", "measurement_noise",
+        "track_start_end_penalty", "allow_divisions",
     ),
     "bounded_propagation": ("min_overlap_fraction", "segment_size_min"),
     "reporter_propagation": ("min_overlap_fraction", "segment_size_min"),
@@ -103,7 +106,10 @@ _TRACKING_METHOD_KEYS = {
     ),
 }
 # btrack Step 2 (global optimization) settings, unused while it is off.
-_BTRACK_OPTIMIZER_KEYS = ("hypotheses", "dist_thresh", "time_thresh")
+_BTRACK_OPTIMIZER_KEYS = (
+    "dist_thresh", "time_thresh", "link_tolerance",
+    "optimizer_time_limit_s", "allow_divisions",
+)
 _STATE_CLASSIFICATION_KEYS = (
     "n_states", "selected_features", "binary_features_to_group",
     "additional_window_features", "window_features_window",

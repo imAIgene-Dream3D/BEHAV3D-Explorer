@@ -110,6 +110,8 @@ class QSwitch(QAbstractButton):
 _SUFFIX = {
     ("distance", True): " µm",
     ("distance", False): " px",
+    ("area", True): " µm²",
+    ("area", False): " px²",
     ("volume", True): " µm³",
     ("volume", False): " vox",
 }
@@ -188,10 +190,14 @@ class UnitGroupManager:
         return row
 
     # -- registration ---------------------------------------------------
-    def register(self, widget, kind, native_value, native_unit="pixel"):
+    def register(self, widget, kind, native_value, native_unit="pixel",
+                 max_native=None):
         """Register ``widget`` (a spinbox) holding a value of ``kind``.
 
-        ``kind`` is ``"distance"`` or ``"volume"``. ``native_value`` is the
+        ``kind`` is ``"distance"``, ``"area"`` or ``"volume"``. When
+        ``max_native`` is given, the widget's maximum is kept at that native
+        limit converted to the current display unit (a hard limit that must
+        not change when the user toggles px/µm). ``native_value`` is the
         value in the parameter's *native* unit, which is what gets persisted
         and passed to the backend. ``native_unit`` names that native unit:
 
@@ -202,6 +208,7 @@ class UnitGroupManager:
         widget._unit_kind = kind
         widget._unit_native_unit = native_unit
         widget._unit_native = float(native_value)
+        widget._unit_max_native = None if max_native is None else float(max_native)
         self._set_display(widget)
         self._update_suffix(widget)
         widget.valueChanged.connect(lambda _v, w=widget: self._on_edit(w))
@@ -287,6 +294,10 @@ class UnitGroupManager:
             widget._unit_native, widget._unit_kind, widget._unit_native_unit
         )
         widget.blockSignals(True)
+        max_native = getattr(widget, "_unit_max_native", None)
+        if max_native is not None:
+            widget.setMaximum(self._native_to_display(
+                max_native, widget._unit_kind, widget._unit_native_unit))
         if isinstance(widget, QSpinBox):
             widget.setValue(int(round(disp)))
         elif isinstance(widget, QDoubleSpinBox):

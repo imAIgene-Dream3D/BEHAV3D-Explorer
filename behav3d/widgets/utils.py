@@ -193,7 +193,15 @@ _DEFAULT_CONFIG = {
                 "use_optimize": False,
                 "hypotheses": ["P_FP", "P_init", "P_term", "P_link"],
                 "dist_thresh": 60,
-                "time_thresh": 3
+                "time_thresh": 3,
+                "assignment_tolerance": 8.0,
+                "new_track_position_variance": 40.0,
+                "lost_track_probability": 0.1,
+                "measurement_noise": 5.0,
+                "link_tolerance": 450.0,
+                "track_start_end_penalty": 0.5,
+                "allow_divisions": False,
+                "optimizer_time_limit_s": 60
             }
         },
         "other": {
@@ -223,7 +231,15 @@ _DEFAULT_CONFIG = {
                 "use_optimize": False,
                 "hypotheses": ["P_FP", "P_init", "P_term", "P_link"],
                 "dist_thresh": 60,
-                "time_thresh": 3
+                "time_thresh": 3,
+                "assignment_tolerance": 8.0,
+                "new_track_position_variance": 40.0,
+                "lost_track_probability": 0.1,
+                "measurement_noise": 5.0,
+                "link_tolerance": 450.0,
+                "track_start_end_penalty": 0.5,
+                "allow_divisions": False,
+                "optimizer_time_limit_s": 60
             }
         },
         "organoid": {
@@ -253,7 +269,15 @@ _DEFAULT_CONFIG = {
                 "use_optimize": False,
                 "hypotheses": ["P_FP", "P_init", "P_term", "P_link"],
                 "dist_thresh": 60,
-                "time_thresh": 3
+                "time_thresh": 3,
+                "assignment_tolerance": 8.0,
+                "new_track_position_variance": 40.0,
+                "lost_track_probability": 0.1,
+                "measurement_noise": 5.0,
+                "link_tolerance": 450.0,
+                "track_start_end_penalty": 0.5,
+                "allow_divisions": False,
+                "optimizer_time_limit_s": 60
             }
         }
     },

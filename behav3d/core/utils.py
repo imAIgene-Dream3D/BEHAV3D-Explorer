@@ -69,11 +69,14 @@ def unit_conversion_factor(kind, pixel_distance_xy, pixel_distance_z=None):
       ``f = pixel_distance_xy`` (µm per pixel, XY).
     - ``"volume"`` (e.g. minimum segment size in voxels):
       ``f = pixel_distance_xy**2 * pixel_distance_z`` (µm³ per voxel).
+    - ``"area"`` (e.g. a position variance in µm²): ``f = pixel_distance_xy**2``.
     - anything else (dimensionless / fixed-by-definition): ``f = 1.0``.
     """
     xy = float(pixel_distance_xy)
     if kind == "distance":
         return xy
+    if kind == "area":
+        return xy * xy
     if kind == "volume":
         z = float(pixel_distance_z if pixel_distance_z is not None else xy)
         return xy * xy * z

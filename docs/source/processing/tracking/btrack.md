@@ -7,125 +7,128 @@ its **hypothesis model** is *"used by the global optimizer to build the final se
 tracks"* ([btrack documentation](https://btrack.readthedocs.io/en/stable/user_guide/configuration.html)).
 
 In BEHAV3D EXPLORER, btrack runs in **two steps** on a cell type's per-timepoint
-segmentation: **Step 1**, the Kalman-filter tracker, always runs; **Step 2**, the global
-hypothesis optimiser, is optional (tick **Enable global track optimization** to include
-it). Both steps run together in the same tracking run. Choose btrack when objects lose frame-to-frame overlap, regardless of their
-biological identity (see [Tracking overview](index.md)). It is the method pre-selected for
-immune (🔵) cell types in a fresh project.
+segmentation. **Step 1** links detections from frame to frame with a Kalman filter.
+**Step 2**, the global hypothesis optimizer, takes the track pieces left by Step 1 and
+decides across the whole movie which pieces to join. Step 2 is **on by default**: it
+roughly halves the number of broken tracks. Choose btrack when objects lose frame-to-frame
+overlap, regardless of their biological identity (see [Tracking overview](index.md)). It
+is the method pre-selected for immune (🔵) cell types in a fresh project.
+
+All distances are in **µm** and all variances in **µm²**, because btrack links on physical
+coordinates. The **Distance units:** switch at the top of the panel only changes how
+values are displayed (see [Distance units](index.md#distance-units)).
 
 ## Workflow at a glance
 
 1. **Open the Tracking tab** and pick the sub-tab for the cell type you want to track.
 2. From the **Method:** dropdown, pick **btrack (Bayesian)**.
-3. [Configure Step 1 — Kalman Filter Tracking](#step-1--kalman-filter-tracking-parameters) (always used):
-   1. **Config preset**: start with **Cell (bundled)**; try **Particle (bundled)** or your own file only if Cell gives poor results.
-   2. **Max search radius**: measure the fastest plausible one-frame displacement, then add a 10–25 % margin.
-   3. **Update method**: keep **EXACT**; switch to **APPROXIMATE** only if tracking is too slow.
-   4. **Step size (frames)**: leave at `100`; it only sets how often progress is reported.
-   5. **Use visual features**: tick to add size, shape and intensity as linking cues (needs the raw image).
-4. (Optional) [Configure Step 2 — Global Hypothesis Optimizer](#step-2--global-hypothesis-optimizer-parameters):
-   1. Tick **Enable global track optimization**.
-   2. Tick only the hypotheses your data needs (`P_branch` for division; keep `P_init` / `P_term` so tracks can start and end, e.g. at the field borders).
-   3. Derive **Distance threshold** / **Time threshold** from the largest spatial and missing-frame gaps that should be bridged.
+3. Choose a **Preset**, or click **Suggest…** and let BEHAV3D pick one from your data. Selecting a preset fills every field below.
+4. Optionally adjust the fields ([Step 1](#step-1--frame-to-frame-linking), [Step 2](#step-2--global-optimizer), [Advanced](#advanced)). Edits never change the preset file; the preset name shows *(modified)*.
 5. **Click *Run … Tracking*** (the green button at the bottom of the sub-tab, named after the cell type) and inspect the result in the Visualization tab.
-6. [Iterate](#tuning-the-parameters). For batch or queued runs, see [Generic workflow](index.md#generic-workflow-per-sub-tab).
+6. [Iterate](#tuning-the-parameters). Use **Reset to preset** to go back, or **Export JSON…** to save your values as a new preset file. For batch or queued runs, see [Generic workflow](index.md#generic-workflow-per-sub-tab).
 
-## The two steps
+When you reopen a project, each field shows the value used in the previous run of that
+experiment (if the preset is unchanged); otherwise it shows the preset value.
 
-- **Step 1 — Kalman Filter Tracking** — links detections between frames using the motion
-  model, which predicts each object's next position from its recent movement. A track
-  stays open for up to 5 frames without a detection (set in both bundled presets), so
-  short gaps are already bridged here.
-- **Step 2 — Global Hypothesis Optimizer** — looks at the track pieces (tracklets) left by
-  Step 1 across the whole movie and decides which pieces to join, where tracks start and
-  end, where cells divide and which pieces are false positives. Pieces classified as false
-  positives are still written to the output. It only runs when **Enable global
-  track optimization** is ticked (off by default); until then its controls are greyed out.
+## Presets
 
-Distances are entered in the unit of the **Distance units:** switch at the top of the
-panel (**µm** by default; see [Distance units](index.md#distance-units)).
+| Preset | Use when |
+|---|---|
+| **T cells - tuned** (default) | Motile cells imaged every ~2–6 min with a reasonable segmentation. |
+| **T cells - full optimum** | Same situations; also uses settings that are not shown in the panel. |
+| **T cells - dense** | Crowded fields, or segmentation that often misses or splits cells. |
+| **T cells - long interval** | Frame interval around 8–10 min, or fast cells. |
+| **T cells - noisy segmentation** | Tuned for noisy centroids; kept for reference. |
+| **btrack default - cell / particle (untuned)** | btrack's own example settings; kept so old projects still load. |
+| **Custom JSON…** | Your own btrack configuration file; the fields show its values. |
 
-### Step 1 — Kalman Filter Tracking parameters
+Frame intervals above about 10 min can reduce tracking accuracy whatever parameters you
+choose, because cells move too far between frames to be matched reliably.
 
-| Control | Default | Range | What it does |
-|---|---|---|---|
-| **Config preset** | `Cell (bundled)` | `Cell (bundled)` / `Particle (bundled)` / `Custom JSON…` | Motion and hypothesis model (see below the table). **Custom JSON…** activates the path field and **Browse** button below it to load your own btrack configuration file. |
-| **Max search radius** | `100` | 1–999999 | Largest distance between a track's last position and a new detection that can still be linked; farther detections start new tracks. Derive it from the fastest measured one-frame displacement plus a modest margin — the default is not a recommendation. |
-| **Update method** | `EXACT` | `EXACT` / `APPROXIMATE` | **EXACT** = full Bayesian belief matrix (accurate, slower). **APPROXIMATE** = local spatial search (faster; for very crowded frames, > 1000 cells per frame). |
-| **Step size (frames)** | `100` | 1–10000 | Frames btrack advances between progress reports. Tracking always runs to completion, so it changes neither the tracks nor the memory use — leave it at `100`. |
-| **Use visual features** | off | checkbox | Also feeds each object's size and shape (area, major and minor axis length) and its mean intensity in every raw-image channel to the tracker as extra linking cues, besides position. Needs the raw image (`raw_image_path`) in the metadata. |
-| **Workers** | `1` | 1 to (CPU cores − 1) | CPU cores used to measure the objects and write the result. The tracker itself runs on one core. |
+### Suggest…
 
-The two bundled presets are btrack's example settings for cells and for particles. Both
-use the same constant-velocity motion model; they differ in their noise and assignment
-settings and in the optimiser's built-in values. In Step 2, the **Cell** preset lets
-tracks start and end anywhere in the field, whereas **Particle** only near the field
-edges or the start and end of the movie.
+**Suggest…** opens a window that measures your segmentation (no tracking needed):
 
-### Step 2 — Global Hypothesis Optimizer parameters
+- **Motion scale (D)**: how far cells travel between two frames. For every cell it takes the distance to the closest cell in the next frame and reports the value that 95 % of cells stay below.
+- **Crowding (N)**: how close neighbouring cells sit within one frame; the nearest-neighbour distance that only 5 % of cells fall below.
+- **Ambiguity (D / N)**: motion scale divided by crowding. Above about 0.9 a cell could plausibly be matched to a neighbour, so the more careful presets are chosen.
+
+Then answer two questions: does the segmentation miss or split cells (no / some / often),
+and do the cells divide. The window shows the recommended preset with the reason and the
+fields it will change (search radius and gap distance are raised to at least 3× and 4× the
+motion scale, and gap frames to 10 when the segmentation is not perfect). **Apply to
+fields** fills the panel.
+
+## Step 1 — Frame-to-frame linking
 
 | Control | Default | What it does |
 |---|---|---|
-| **Enable global track optimization** | off | Adds Step 2 to the run: the optimiser works on the tracklets that Step 1 leaves. |
-| **Hypotheses** | `P_FP`, `P_init`, `P_term`, `P_link` ticked | Which explanations the optimiser may assign to a tracklet (a short track piece left by Step 1). **P_FP — False positive** is always on (greyed out). Add **P_branch** only for dividing cells (definitions below). **P_dead** cannot detect cell death here: btrack only proposes it for detections classified as apoptotic, which BEHAV3D EXPLORER does not provide. Ticking **P_merge** has no effect: btrack does not generate merge hypotheses. |
-| **Distance threshold** | `60` | Maximum distance for generating link/branch hypotheses (in the selected distance unit). |
-| **Time threshold** | `3` | Maximum frame gap for generating link hypotheses (1–999 frames). |
+| **Max search radius** | 125 µm | Longest single-frame jump that may be linked. It only clips links; it does not choose between candidates. Too small a value loses cells; any value comfortably above the fastest step behaves the same. |
+| **Assignment tolerance** | 8 µm | Half-width of the box over which the predicted position is compared with each detection (`accuracy`). **Must be between 0.1 and 10 µm**; btrack crashes above 10. Below about 5 µm almost nothing is linked with the tuned presets. |
+| **New-track position uncertainty** | 40 µm² | How uncertain the position of a newly started track is. Too large: new tracks never find their second detection. Too small: tracks cannot follow a moving cell. |
+| **Lost-track probability** | 0.1 | Prior probability that a track has no detection in the next frame. Higher: tracks break more readily (Step 2 can rejoin them). Lower: tracks hold on and may grab a wrong neighbour. |
+| **Workers** | 1 | CPU cores used to measure the objects and write the result (1 to cores − 1). The tracker itself runs on one core. |
 
-**Hypotheses** — checkbox label in the GUI, with the definition from the [btrack documentation](https://btrack.readthedocs.io/en/stable/user_guide/configuration.html):
+These three settings work together: the tolerance is judged against the predicted spread,
+which comes from the new-track uncertainty and the measurement noise. Change them one at a
+time.
 
-| Checkbox | btrack definition |
-|---|---|
-| **P_FP — False positive** | "Hypothesis that a tracklet is a false positive detection." |
-| **P_init — Track initialization** | "Hypothesis that a tracklet starts at the beginning of the movie or edge of the FOV." |
-| **P_term — Track termination** | "Hypothesis that a tracklet ends at the end of the movie or edge of the FOV." |
-| **P_link — Track linking** | "Hypothesis that two tracklets should be linked together." |
-| **P_branch — Track branching** | "Hypothesis that a tracklet can split onto two daughter tracklets." |
-| **P_dead — Cell death** | "Hypothesis that a tracklet terminates without leaving the FOV." |
-| **P_merge — Track merging** | "Hypothesis that two tracklets merge into one tracklet." |
+## Step 2 — Global optimizer
 
-`P_link` and `P_branch` are limited by the distance and time thresholds.
+| Control | Default | What it does |
+|---|---|---|
+| **Enable global track optimization** | on | Joins broken tracks, bridges gaps and removes spurious fragments. Recommended. |
+| **Gap-bridging distance** | 40 µm | Track pieces whose ends are farther apart than this are never joined. About 4–6× the typical one-frame step. |
+| **Gap-bridging frames** | 5 | Longest disappearance that can be bridged. Use 10 if the segmentation misses cells. |
+| **Link tolerance** | 450 µm | How quickly the probability of joining two pieces falls with distance. Lower: only close pieces are joined (purer, more fragments). Higher: more gaps bridged, more wrong joins. |
+
+Link tolerance and the track start/end penalty work as a pair: the optimizer compares
+*joining* two pieces against *ending one track and starting another*. Only their ratio
+matters, which is why presets with a strict link tolerance also use a very small penalty.
+
+## Advanced
+
+| Control | Default | What it does |
+|---|---|---|
+| **Optimizer time limit** | 60 s | Stops the Step 2 solver after this long; the best solution found so far is used. Protects against very long runs on dense data. |
+| **Measurement noise** | 5 µm² | How much the filter trusts each centroid. Too small: it follows segmentation jitter. Too large: sluggish prediction. Raise it for noisy centroids (split or merged objects). |
+| **Track start/end penalty** | 0.5 µm | How easily a track may begin or end away from the image border. Higher: fewer wrong joins, more fragments. Lower: more complete tracks, more risk of wrong joins. |
+| **Allow divisions** | off | Adds the `P_branch` hypothesis for dividing cells. The parent track ends at the division and each daughter starts a new TrackID; the parent–daughter link is not written to the tracks CSV. Leave off for cells that do not divide. |
 
 ## Tuning the parameters
 
-After inspecting the result in the Visualization tab, identify the failure mode and tune accordingly.
+After inspecting the result in the Visualization tab, identify the failure mode:
 
-**Step 1 — Kalman filter**
+*Tracks are broken into many short pieces*
+- Make sure **Enable global track optimization** is on.
+- Raise **Gap-bridging frames** (up to 10) and **Gap-bridging distance**, or raise **Link tolerance**.
 
-*Tracks are fragmented*
-- Cause: **Max search radius** is smaller than the fastest cell's single-frame displacement.
-- Fix: **raise Max search radius** until the fragmentation goes away.
+*Two cells swap identity, or tracks jump between neighbours*
+- Lower **Link tolerance** or **Gap-bridging distance**, or raise **Track start/end penalty** (Advanced).
+- In a crowded field, try the **T cells - dense** preset.
 
-*IDs jump between neighbouring cells*
-- Cause: the search radius is generous and positions alone are ambiguous.
-- Fix: lower **Max search radius**, or tick **Use visual features** so size, shape and intensity help tell neighbours apart.
+*Almost nothing is linked*
+- **Assignment tolerance** is too small (use 6–10 µm), or **New-track position uncertainty** is too large.
 
-*Tracking is very slow / runs out of memory*
-- Cause: many cells per frame with **EXACT** update, or a long movie.
-- Fix: switch **Update method** to **APPROXIMATE**. If the run stops because worker processes crashed (out of memory), lower **Workers**.
-
-*The Cell preset doesn't suit your data*
-- Fix: try **Particle (bundled)**, or load your own configuration with **Custom JSON…**.
-
-**Step 2 — Global optimiser**
-
-*Cell divisions*
-- Fix: **tick P_branch**. The parent track then ends at the division and each daughter starts a new TrackID; the parent–daughter link is not written to the tracks CSV. Without it, one daughter usually continues the parent's TrackID and the other starts a new one.
+*Tracking takes minutes or never ends*
+- Lower **Optimizer time limit**, tighten **Gap-bridging distance**, and keep **Allow divisions** off on dense data.
 
 *Spurious divisions appear*
-- Cause: **P_branch** is ticked although the cells do not divide, or the thresholds are generous.
-- Fix: **untick P_branch**, or lower **Distance threshold** / **Time threshold**.
+- Untick **Allow divisions**.
 
-*Gaps you expected to be bridged are not*
-- Cause: **Time threshold** or **Distance threshold** is too small.
-- Fix: set each just above the largest valid gap you measured (convert frames to time with your frame interval).
+*A custom JSON is rejected before tracking starts*
+- BEHAV3D checks `accuracy` (0–10), `max_lost` (0–10) and `prob_not_assign` (0–1) before running; the message names the offending value.
 
-*Unrelated cells are bridged together*
-- Cause: the thresholds are too generous.
-- Fix: **lower one of them**, usually **Time threshold** first.
+## Python API
 
-*Step 2 is very slow*
-- Cause: many hypotheses combined with large thresholds.
-- Fix: tighten the thresholds.
+`run_btracking` and `btrack_image` take the same parameters as keyword arguments
+(`assignment_tolerance`, `new_track_position_variance`, `lost_track_probability`,
+`measurement_noise`, `link_tolerance`, `track_start_end_penalty`, `allow_divisions`,
+`optimizer_time_limit_s`, plus `max_search_radius`, `dist_thresh`, `time_thresh`,
+`use_optimize`). Anything left as `None` keeps the value stored in the preset. The old
+`update_method`, `step_size`, `hypotheses` and `use_visual_features` arguments are still
+accepted for existing scripts; update method and step size do not change the tracks, and
+visual features are deprecated.
 
 ## Outputs
 
@@ -133,8 +136,9 @@ Standard tracking outputs (tracked zarr + tracks CSV) — see [Tracking overview
 
 ## Good practices & tips
 
-- **Set Max search radius carefully.** The optimiser (Step 2) cannot fix a poorly tuned search radius.
-- **Use EXACT unless tracking is too slow.** Runtime depends on cells per frame, number of frames and the optimiser's hypothesis set, so time one sample first.
+- **Start from a preset** rather than from scratch, and change one field at a time.
+- **Keep the optimizer on.** A poorly tuned Step 1 can be partly repaired by Step 2, but not the other way round.
+- **Fix the segmentation first** if cells are often missed or split: that costs more accuracy than any parameter can recover.
 - **Workers are capped at one less than your CPU core count**, so the computer stays responsive.
 
 ## See also

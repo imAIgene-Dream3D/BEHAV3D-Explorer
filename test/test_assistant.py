@@ -2806,14 +2806,7 @@ def test_btrack_step2_action_enables_then_calibrates_gap_controls():
     for control in enabled_controls[1:]:
         control["visible"] = True
         control["enabled"] = True
-    enabled_controls.append({
-        "id": "tracking.tcell.btrack.hypotheses",
-        "cell_type": "tcell",
-        "value": ["P_FP", "P_init", "P_term", "P_link"],
-        "visible": True,
-        "enabled": True,
-    })
-    tune = app.btrack_step2_action(
+    tune =app.btrack_step2_action(
         {
             "current_step": "tracking",
             "active_cell_type": "tcell",
@@ -2829,7 +2822,8 @@ def test_btrack_step2_action_enables_then_calibrates_gap_controls():
     }
     assert changed["tracking.tcell.btrack.distance_threshold"] == 40
     assert changed["tracking.tcell.btrack.time_threshold"] == 4
-    assert "P_FP, P_init, P_term, P_link" in tune["text"]
+    assert "Gap-bridging distance" in tune["text"]
+    assert "Allow divisions" in tune["text"]
 
 
 def test_segmentation_minimum_size_uses_half_estimated_cell_volume():
@@ -3555,7 +3549,6 @@ def test_experiment_reference_reports_only_settings_in_effect(tmp_path=None):
         "method": "btrack",
         "btrack": {
             "max_search_radius": 150, "use_optimize": True,
-            "hypotheses": ["P_FP", "P_init", "P_term", "P_link"],
             "dist_thresh": 100, "time_thresh": 5,
         },
     }
@@ -3711,7 +3704,7 @@ def test_prompt_encodes_pi_feedback_scenarios():
     assert "60 um/min at 15 seconds per frame is 15 um/frame" in sp
     assert "Do not provide a numeric example speed" in sp
     assert "btrack Step 2 is the Global Hypothesis Optimizer" in sp
-    assert "offer to enable Step 2 for a complete setup" in sp
+    assert "offer to enable it" in sp
     assert "do not present disabled defaults as recommendations" in sp
     assert "Filtering must be run even when all filters are disabled" in sp
     assert "keep Start offset at 1" in sp
@@ -3862,11 +3855,11 @@ class _FakeTrackingPanel:
         self.rp_min_overlap_fraction = _FakeSpin(0.1, 0.0, 1.0)
         self.rp_segment_size_min = _FakeSpin(100)
         self.bt_max_search_radius = _FakeSpin(radius, 1, 9999)
-        self.bt_use_visual_features = _FakeCheck(False)
+        self.bt_assignment_tolerance = _FakeSpin(8.0, 0.1, 10.0)
         self.bt_use_optimize = _FakeCheck(False)
         self.bt_dist_thresh = _FakeSpin(40.0)
         self.bt_time_thresh = _FakeSpin(5)
-        self.bt_hyp_checks = {"P_FP": _FakeCheck(True), "P_branch": _FakeCheck(False)}
+        self.bt_link_tolerance = _FakeSpin(450.0)
         self._bt_unit_mgr = type("_Unit", (), {"physical": True})()
         self.persisted = 0
 
@@ -3896,9 +3889,11 @@ def test_live_control_registry_targets_actual_cell_type_only():
     assert by_id["tracking.tcell.btrack.use_global_optimization"]["visible"] is True
     assert by_id["tracking.tcell.btrack.maximum_search_radius"]["unit"] == "um"
     assert by_id["tracking.tcell.btrack.distance_threshold"]["visible"] is False
-    assert by_id["tracking.tcell.btrack.hypotheses"]["visible"] is False
+    assert by_id["tracking.tcell.btrack.link_tolerance"]["visible"] is False
+    assert by_id["tracking.tcell.btrack.assignment_tolerance"]["visible"] is True
     assert by_id["tracking.organoid1.btrack.distance_threshold"]["visible"] is True
-    assert by_id["tracking.organoid1.btrack.hypotheses"]["visible"] is True
+    assert by_id["tracking.organoid1.btrack.link_tolerance"]["visible"] is True
+    assert "tracking.tcell.btrack.hypotheses" not in ids
     assert active_cell_type(main, "tracking") == "tcell"
     assert apply_set_ui_value(main, "tracking.tcell.btrack.maximum_search_radius", 125)
     assert tcell.bt_max_search_radius.value() == 125

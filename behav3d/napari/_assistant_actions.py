@@ -65,14 +65,18 @@ _LEAF_LABELS = {
     "config_preset": "btrack preset",
     "config_path": "btrack config path",
     "max_search_radius": "maximum search radius",
-    "update_method": "btrack update method",
-    "step_size": "btrack step size",
+    "assignment_tolerance": "assignment tolerance",
+    "new_track_position_variance": "new-track position uncertainty",
+    "lost_track_probability": "lost-track probability",
+    "measurement_noise": "measurement noise",
+    "link_tolerance": "link tolerance",
+    "track_start_end_penalty": "track start/end penalty",
+    "allow_divisions": "allow divisions",
+    "optimizer_time_limit_s": "optimizer time limit",
     "n_workers": "worker count",
     "use_optimize": "global optimization",
-    "use_visual_features": "use visual features",
-    "hypotheses": "btrack hypotheses",
-    "dist_thresh": "distance threshold",
-    "time_thresh": "time threshold",
+    "dist_thresh": "gap-bridging distance",
+    "time_thresh": "gap-bridging frames",
     "features_choice": "feature groups",
     "contact_threshold": "contact distance",
     "dead_perc_threshold": "dead-pixel threshold",
@@ -429,8 +433,14 @@ _TRACK_FIELD = {
     "btrack.config_preset": "bt_config_preset",
     "btrack.config_path": "bt_config_path",
     "btrack.max_search_radius": "bt_max_search_radius",
-    "btrack.update_method": "bt_update_method",
-    "btrack.step_size": "bt_step_size",
+    "btrack.assignment_tolerance": "bt_assignment_tolerance",
+    "btrack.new_track_position_variance": "bt_new_track_variance",
+    "btrack.lost_track_probability": "bt_lost_prob",
+    "btrack.measurement_noise": "bt_measurement_noise",
+    "btrack.link_tolerance": "bt_link_tolerance",
+    "btrack.track_start_end_penalty": "bt_start_end_penalty",
+    "btrack.allow_divisions": "bt_allow_divisions",
+    "btrack.optimizer_time_limit_s": "bt_optimizer_time_limit",
     "btrack.n_workers": "bt_n_workers",
     "btrack.use_optimize": "bt_use_optimize",
     "btrack.dist_thresh": "bt_dist_thresh",
@@ -443,8 +453,6 @@ def _apply_tracking(main_widget, dotted: str, value):
     if len(parts) < 3:
         return None
     category, rest = parts[1], ".".join(parts[2:])
-    if rest == "btrack.hypotheses":
-        return _fan_checkset(main_widget, "tracking_tab", category, "bt_hyp_checks", value)
     widget_attr = _TRACK_FIELD.get(rest)
     if widget_attr is None:
         return None
@@ -1792,7 +1800,7 @@ def _apply_create_btrack_config_copy(main_widget, action: ProposedAction) -> boo
     if destination.exists():
         return False
     source = (Path(__file__).resolve().parents[1] / "preprocessing" / "tracking"
-              / "models" / "cell_config.json")
+              / "models" / "tcell_tuned.json")
     if not source.exists():
         return False
     try:
@@ -2085,7 +2093,7 @@ TOOL_SCHEMA = [
     {
         "name": "create_btrack_config_copy",
         "description": (
-            "Copy the bundled cell btrack configuration to a new JSON file and select "
+            "Copy the tuned T-cell btrack configuration to a new JSON file and select "
             "it for one cell type. File creation always requires confirmation."
         ),
         "parameters": {

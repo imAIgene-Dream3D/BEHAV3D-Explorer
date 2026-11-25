@@ -96,7 +96,7 @@
       "reporter propagation only when both conditions hold",
       "use btrack when moving objects no longer overlap",
       "one-frame displacement",
-      "step size only after an out-of-memory error"
+      "assignment tolerance must stay between 0.1 and 10 micrometres"
     ]
   },
   {
@@ -375,9 +375,8 @@
     "user": "What about Step 2 and global optimization?",
     "required": [
       "global optimization is step 2",
-      "after step 1 has been previewed",
-      "offer to enable step 2",
-      "false positive, initialization, termination, and linking",
+      "on by default",
+      "gap-bridging distance",
       "largest gap to bridge"
     ]
   },

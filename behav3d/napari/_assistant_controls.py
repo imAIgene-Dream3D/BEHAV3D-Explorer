@@ -253,8 +253,8 @@ def _selection_binding(control_id, label, widget, **kwargs):
 
 def _display_unit(manager, kind: str, pixel_unit: str) -> str:
     if manager is not None and bool(getattr(manager, "physical", False)):
-        return "um3" if kind == "volume" else "um"
-    return pixel_unit
+        return {"volume": "um3", "area": "um2"}.get(kind, "um")
+    return pixel_unit + "^2" if kind == "area" else pixel_unit
 
 
 def _metadata_bindings(main_widget) -> list[dict]:
@@ -741,14 +741,25 @@ def _tracking_bindings(main_widget) -> list[dict]:
         ("btrack.config_preset", "btrack configuration preset", "bt_config_preset", None, "btrack"),
         ("btrack.config_path", "btrack custom configuration", "bt_config_path", None, "btrack"),
         ("btrack.maximum_search_radius", "btrack maximum search radius", "bt_max_search_radius", "distance", "btrack"),
-        ("btrack.update_method", "btrack update method", "bt_update_method", None, "btrack"),
-        ("btrack.step_size", "btrack step size", "bt_step_size", "frames", "btrack"),
-        ("btrack.use_visual_features", "Use visual features", "bt_use_visual_features", None, "btrack"),
+        ("btrack.assignment_tolerance", "btrack assignment tolerance", "bt_assignment_tolerance", "distance", "btrack"),
+        ("btrack.new_track_uncertainty", "btrack new-track position uncertainty", "bt_new_track_variance", "area", "btrack"),
+        ("btrack.lost_track_probability", "btrack lost-track probability", "bt_lost_prob", None, "btrack"),
         ("btrack.workers", "btrack workers", "bt_n_workers", None, "btrack"),
         ("btrack.use_global_optimization", "Enable global track optimization", "bt_use_optimize", None, "btrack"),
-        ("btrack.distance_threshold", "btrack optimizer distance threshold", "bt_dist_thresh", "distance", "btrack"),
-        ("btrack.time_threshold", "btrack optimizer time threshold", "bt_time_thresh", "frames", "btrack"),
+        ("btrack.distance_threshold", "btrack optimizer gap-bridging distance", "bt_dist_thresh", "distance", "btrack"),
+        ("btrack.time_threshold", "btrack optimizer gap-bridging frames", "bt_time_thresh", "frames", "btrack"),
+        ("btrack.link_tolerance", "btrack optimizer link tolerance", "bt_link_tolerance", "distance", "btrack"),
+        ("btrack.optimizer_time_limit", "btrack optimizer time limit", "bt_optimizer_time_limit", "seconds", "btrack"),
+        ("btrack.measurement_noise", "btrack measurement noise", "bt_measurement_noise", "area", "btrack"),
+        ("btrack.track_start_end_penalty", "btrack track start/end penalty", "bt_start_end_penalty", "distance", "btrack"),
+        ("btrack.allow_divisions", "btrack allow divisions", "bt_allow_divisions", None, "btrack"),
     ]
+    # btrack Step 2 settings are hidden while the optimizer is off.
+    _btrack_step2_suffixes = {
+        "btrack.distance_threshold", "btrack.time_threshold",
+        "btrack.link_tolerance", "btrack.optimizer_time_limit",
+        "btrack.allow_divisions",
+    }
     # Map the researcher-facing method label carried by each spec to the
     # internal method key so parameter visibility follows the selected method
     # regardless of the dropdown's display order.
@@ -772,30 +783,19 @@ def _tracking_bindings(main_widget) -> list[dict]:
             visible = True
             if method in _label_to_key:
                 visible = method_key == _label_to_key[method]
-                if method == "btrack" and suffix in {
-                    "btrack.distance_threshold", "btrack.time_threshold",
-                }:
+                if method == "btrack" and suffix in _btrack_step2_suffixes:
                     visible = visible and optimizer_enabled
-            if unit == "distance":
+            if unit in ("distance", "area"):
                 manager = {
                     "LapTrack": getattr(panel, "_lap_unit_mgr", None),
                     "TrackPy": getattr(panel, "_tp_unit_mgr", None),
                     "btrack": getattr(panel, "_bt_unit_mgr", None),
                 }.get(method)
-                unit = _display_unit(manager, "distance", "pixels")
+                unit = _display_unit(manager, unit, "pixels")
             out.append(_binding(f"tracking.{cell_type}.{suffix}",
                                 f"{cell_type}: {label}", widget, step="tracking",
                                 unit=unit, method=method, cell_type=str(cell_type),
                                 visible=visible, persist=getattr(panel, "_persist", None)))
-        checks = getattr(panel, "bt_hyp_checks", {}) or {}
-        if checks:
-            out.append(_checkset_binding(
-                f"tracking.{cell_type}.btrack.hypotheses",
-                f"{cell_type}: btrack optimization hypotheses", checks,
-                step="tracking", method="btrack", cell_type=str(cell_type),
-                visible=method_key == "btrack" and optimizer_enabled,
-                persist=getattr(panel, "_persist", None),
-            ))
     return out
 
 
