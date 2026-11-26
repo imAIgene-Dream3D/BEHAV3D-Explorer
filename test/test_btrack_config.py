@@ -69,6 +69,11 @@ def test_tuned_preset_values_match_panel_block():
     assert values["optimizer_time_limit_s"] == 60
 
 
+def test_dense_preset_gives_optimizer_more_time():
+    values = bc.read_panel_values(bc.resolve_config("tcell_dense"))
+    assert values["optimizer_time_limit_s"] == 600
+
+
 def test_legacy_preset_reads_values_from_tracker_config():
     values = bc.read_panel_values(bc.resolve_config("cell"))
     assert values["assignment_tolerance"] == 10

@@ -114,7 +114,7 @@
       "link_tolerance_um": 194.25,
       "track_start_end_penalty_um": 103.485,
       "allow_divisions": false,
-      "optimizer_time_limit_s": 60
+      "optimizer_time_limit_s": 600
     },
     "validation_composite": {
       "clean": 0.9532,

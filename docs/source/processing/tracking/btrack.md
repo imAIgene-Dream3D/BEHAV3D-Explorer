@@ -90,7 +90,7 @@ matters, which is why presets with a strict link tolerance also use a very small
 
 | Control | Default | What it does |
 |---|---|---|
-| **Optimizer time limit** | 60 s | Stops the Step 2 solver after this long; the best solution found so far is used. Protects against very long runs on dense data. |
+| **Optimizer time limit** | 60 s (600 s in **T cells - dense**) | Stops the Step 2 solver after this long; the best solution found so far is used. Dense fields need more solver time, and a solver that is cut short links less accurately. |
 | **Measurement noise** | 5 µm² | How much the filter trusts each centroid. Too small: it follows segmentation jitter. Too large: sluggish prediction. Raise it for noisy centroids (split or merged objects). |
 | **Track start/end penalty** | 0.5 µm | How easily a track may begin or end away from the image border. Higher: fewer wrong joins, more fragments. Lower: more complete tracks, more risk of wrong joins. |
 | **Allow divisions** | off | Adds the `P_branch` hypothesis for dividing cells. The parent track ends at the division and each daughter starts a new TrackID; the parent–daughter link is not written to the tracks CSV. Leave off for cells that do not divide. |
@@ -111,7 +111,8 @@ After inspecting the result in the Visualization tab, identify the failure mode:
 - **Assignment tolerance** is too small (use 6–10 µm), or **New-track position uncertainty** is too large.
 
 *Tracking takes minutes or never ends*
-- Lower **Optimizer time limit**, tighten **Gap-bridging distance**, and keep **Allow divisions** off on dense data.
+- Tighten **Gap-bridging distance** and keep **Allow divisions** off on dense data.
+- Lowering **Optimizer time limit** speeds up the run but can cost linking accuracy, because the solver stops before it finds the best solution.
 
 *Spurious divisions appear*
 - Untick **Allow divisions**.
