@@ -32,6 +32,7 @@ Select a preset (or a custom JSON) and the panel fields are filled from the file
 | Gap-bridging frames | `HypothesisModel.time_thresh` | frames | Longest disappearance that can be bridged. |
 | Link tolerance | `HypothesisModel.lambda_link` | µm | How quickly the chance of joining two pieces falls with distance. |
 | Optimizer time limit (advanced) | runtime option | s | Stops the solver; the best solution so far is used. |
+| No limit (advanced, `optimizer_no_time_limit`) | runtime option | — | The solver runs until it finds the best solution; the time limit is ignored. |
 | Measurement noise (advanced) | `MotionModel.R` | µm² | How much the filter trusts each centroid. |
 | Track start/end penalty (advanced) | `HypothesisModel.lambda_dist` | µm | Larger values let tracks start and end mid-field. |
 | Allow divisions (advanced) | `P_branch` in `hypotheses` | – | Only for dividing cells. |

@@ -45,14 +45,16 @@ FIELD_SPECS = [
     ("time_thresh", "bt_time_thresh", None),
     ("link_tolerance", "bt_link_tolerance", "distance"),
     ("optimizer_time_limit_s", "bt_optimizer_time_limit", None),
+    ("optimizer_no_time_limit", "bt_optimizer_no_time_limit", None),
     ("measurement_noise", "bt_measurement_noise", "area"),
     ("track_start_end_penalty", "bt_start_end_penalty", "distance"),
     ("allow_divisions", "bt_allow_divisions", None),
 ]
 _INT_KEYS = {"time_thresh", "optimizer_time_limit_s"}
-_BOOL_KEYS = {"use_optimize", "allow_divisions"}
+_BOOL_KEYS = {"use_optimize", "allow_divisions", "optimizer_no_time_limit"}
 _STEP2_WIDGETS = ("bt_dist_thresh", "bt_time_thresh", "bt_link_tolerance",
-                  "bt_optimizer_time_limit", "bt_allow_divisions")
+                  "bt_optimizer_time_limit", "bt_optimizer_no_time_limit",
+                  "bt_allow_divisions")
 
 _INTERVAL_NOTE = (
     "Frame interval above 10 min: tracking accuracy can drop whatever "
@@ -147,6 +149,9 @@ def _update_step2_enabled(panel):
     enabled = panel.bt_use_optimize.isChecked()
     for attr in _STEP2_WIDGETS:
         getattr(panel, attr).setEnabled(enabled)
+    # "No limit" overrides the typed time limit.
+    panel.bt_optimizer_time_limit.setEnabled(
+        enabled and not panel.bt_optimizer_no_time_limit.isChecked())
 
 
 def _update_path_enabled(panel):
@@ -299,6 +304,7 @@ def btrack_run_kwargs(params):
         "track_start_end_penalty": float(params["track_start_end_penalty"]),
         "allow_divisions": bool(params["allow_divisions"]),
         "optimizer_time_limit_s": int(params["optimizer_time_limit_s"]),
+        "optimizer_no_time_limit": bool(params.get("optimizer_no_time_limit", False)),
         "n_workers": int(params["n_workers"]),
     }
 
@@ -355,6 +361,7 @@ def _build_widgets(panel):
     panel.bt_optimizer_time_limit.setRange(5, 3600)
     panel.bt_optimizer_time_limit.setSuffix(" s")
     panel.bt_optimizer_time_limit.setMaximumWidth(90)
+    panel.bt_optimizer_no_time_limit = QCheckBox("No limit")
     panel.bt_measurement_noise = _dspin(0.01, 99999, 2, 1)
     panel.bt_start_end_penalty = _dspin(0.01, 99999, 2, 0.1)
     panel.bt_allow_divisions = QCheckBox("Allow divisions (P_branch)")
@@ -497,11 +504,18 @@ def _add_step2_rows(panel, form):
 
 def _add_advanced_rows(panel, form):
     h = make_help_row
+    limit_box = QWidget()
+    limit_row = QHBoxLayout(limit_box)
+    limit_row.setContentsMargins(0, 0, 0, 0)
+    limit_row.addWidget(panel.bt_optimizer_time_limit)
+    limit_row.addWidget(panel.bt_optimizer_no_time_limit)
     form.addRow("Optimizer time limit:", h(
-        panel.bt_optimizer_time_limit, "Optimizer time limit",
+        limit_box, "Optimizer time limit",
         "Stops the optimizer's solver after this long; the best solution "
-        "found so far is used. Protects against very long runs on dense "
-        "data."))
+        "found so far is used. Dense fields need more time, and a solver "
+        "that is cut short links less accurately.\n\n"
+        "No limit: the solver runs until it finds the best solution and the "
+        "time above is ignored. On dense data this can take a long time."))
     form.addRow("Measurement noise:", h(
         panel.bt_measurement_noise, "Measurement noise",
         "How much the filter trusts each detected centre (variance, µm²).\n\n"
@@ -530,6 +544,8 @@ def _connect_signals(panel):
     panel.bt_reset_btn.clicked.connect(lambda: load_preset_values(panel))
     panel.bt_export_btn.clicked.connect(lambda: _export_json(panel))
     panel.bt_use_optimize.toggled.connect(lambda _c: _update_step2_enabled(panel))
+    panel.bt_optimizer_no_time_limit.toggled.connect(
+        lambda _c: _update_step2_enabled(panel))
     for _key, attr, _kind in FIELD_SPECS:
         widget = getattr(panel, attr)
         signal = widget.toggled if isinstance(widget, QCheckBox) else widget.valueChanged

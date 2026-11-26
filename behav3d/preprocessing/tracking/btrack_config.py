@@ -38,6 +38,17 @@ _LEGACY_LABELS = {
 MAX_ACCURACY = 10.0
 MAX_MAX_LOST = 10
 
+# GLPK's ``tm_lim`` is a C int in milliseconds; its maximum (~24.8 days) is
+# GLPK's own "no limit" default.
+GLPK_NO_TIME_LIMIT_MS = 2**31 - 1
+
+
+def solver_time_limit_ms(time_limit_s, no_time_limit=False):
+    """GLPK ``tm_lim`` (ms) for the optimizer; no limit when requested."""
+    if no_time_limit:
+        return GLPK_NO_TIME_LIMIT_MS
+    return min(int(1000 * time_limit_s), GLPK_NO_TIME_LIMIT_MS)
+
 # Panel key -> key inside the ``BEHAV3D.panel`` block of a preset file.
 _PANEL_KEYS = {
     "max_search_radius": "max_search_radius_um",
@@ -52,6 +63,7 @@ _PANEL_KEYS = {
     "track_start_end_penalty": "track_start_end_penalty_um",
     "allow_divisions": "allow_divisions",
     "optimizer_time_limit_s": "optimizer_time_limit_s",
+    "optimizer_no_time_limit": "optimizer_no_time_limit",
 }
 
 # Used when neither the BEHAV3D block nor the TrackerConfig provides a value.
@@ -68,6 +80,7 @@ PANEL_DEFAULTS = {
     "track_start_end_penalty": 0.5,
     "allow_divisions": False,
     "optimizer_time_limit_s": 60,
+    "optimizer_no_time_limit": False,
 }
 
 # Hypotheses that must always be present; P_branch is the only user choice.

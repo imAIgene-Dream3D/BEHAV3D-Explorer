@@ -750,6 +750,7 @@ def _tracking_bindings(main_widget) -> list[dict]:
         ("btrack.time_threshold", "btrack optimizer gap-bridging frames", "bt_time_thresh", "frames", "btrack"),
         ("btrack.link_tolerance", "btrack optimizer link tolerance", "bt_link_tolerance", "distance", "btrack"),
         ("btrack.optimizer_time_limit", "btrack optimizer time limit", "bt_optimizer_time_limit", "seconds", "btrack"),
+        ("btrack.optimizer_no_time_limit", "btrack optimizer: no time limit", "bt_optimizer_no_time_limit", None, "btrack"),
         ("btrack.measurement_noise", "btrack measurement noise", "bt_measurement_noise", "area", "btrack"),
         ("btrack.track_start_end_penalty", "btrack track start/end penalty", "bt_start_end_penalty", "distance", "btrack"),
         ("btrack.allow_divisions", "btrack allow divisions", "bt_allow_divisions", None, "btrack"),
@@ -758,6 +759,7 @@ def _tracking_bindings(main_widget) -> list[dict]:
     _btrack_step2_suffixes = {
         "btrack.distance_threshold", "btrack.time_threshold",
         "btrack.link_tolerance", "btrack.optimizer_time_limit",
+        "btrack.optimizer_no_time_limit",
         "btrack.allow_divisions",
     }
     # Map the researcher-facing method label carried by each spec to the

@@ -74,6 +74,28 @@ def test_dense_preset_gives_optimizer_more_time():
     assert values["optimizer_time_limit_s"] == 600
 
 
+def test_presets_keep_a_time_limit_by_default():
+    for key in bc.PRESET_MAP:
+        values = bc.read_panel_values(bc.resolve_config(key))
+        assert values["optimizer_no_time_limit"] is False
+
+
+def test_solver_time_limit_converts_seconds_to_ms():
+    assert bc.solver_time_limit_ms(60) == 60_000
+
+
+def test_solver_time_limit_ignores_seconds_when_unlimited():
+    assert bc.solver_time_limit_ms(60, no_time_limit=True) == bc.GLPK_NO_TIME_LIMIT_MS
+
+
+def test_no_time_limit_round_trips_through_export(tmp_path):
+    src = bc.resolve_config("tcell_tuned")
+    values = bc.read_panel_values(src)
+    values["optimizer_no_time_limit"] = True
+    out = bc.write_custom_config(src, values, tmp_path / "unlimited.json")
+    assert bc.read_panel_values(out)["optimizer_no_time_limit"] is True
+
+
 def test_legacy_preset_reads_values_from_tracker_config():
     values = bc.read_panel_values(bc.resolve_config("cell"))
     assert values["assignment_tolerance"] == 10
@@ -254,6 +276,7 @@ def test_backend_keeps_legacy_kwargs_and_adds_new_ones():
         for new in ("assignment_tolerance", "new_track_position_variance",
                     "lost_track_probability", "measurement_noise",
                     "link_tolerance", "track_start_end_penalty",
-                    "allow_divisions", "optimizer_time_limit_s"):
+                    "allow_divisions", "optimizer_time_limit_s",
+                    "optimizer_no_time_limit"):
             assert new in params
         assert params["config_preset"].default == "tcell_tuned"

@@ -91,6 +91,7 @@ matters, which is why presets with a strict link tolerance also use a very small
 | Control | Default | What it does |
 |---|---|---|
 | **Optimizer time limit** | 60 s (600 s in **T cells - dense**) | Stops the Step 2 solver after this long; the best solution found so far is used. Dense fields need more solver time, and a solver that is cut short links less accurately. |
+| **No limit** (next to the time limit) | off | The solver runs until it finds the best solution; the time limit is ignored. Can take a long time on dense data. |
 | **Measurement noise** | 5 µm² | How much the filter trusts each centroid. Too small: it follows segmentation jitter. Too large: sluggish prediction. Raise it for noisy centroids (split or merged objects). |
 | **Track start/end penalty** | 0.5 µm | How easily a track may begin or end away from the image border. Higher: fewer wrong joins, more fragments. Lower: more complete tracks, more risk of wrong joins. |
 | **Allow divisions** | off | Adds the `P_branch` hypothesis for dividing cells. The parent track ends at the division and each daughter starts a new TrackID; the parent–daughter link is not written to the tracks CSV. Leave off for cells that do not divide. |
@@ -125,7 +126,7 @@ After inspecting the result in the Visualization tab, identify the failure mode:
 `run_btracking` and `btrack_image` take the same parameters as keyword arguments
 (`assignment_tolerance`, `new_track_position_variance`, `lost_track_probability`,
 `measurement_noise`, `link_tolerance`, `track_start_end_penalty`, `allow_divisions`,
-`optimizer_time_limit_s`, plus `max_search_radius`, `dist_thresh`, `time_thresh`,
+`optimizer_time_limit_s`, `optimizer_no_time_limit`, plus `max_search_radius`, `dist_thresh`, `time_thresh`,
 `use_optimize`). Anything left as `None` keeps the value stored in the preset. The old
 `update_method`, `step_size`, `hypotheses` and `use_visual_features` arguments are still
 accepted for existing scripts; update method and step size do not change the tracks, and

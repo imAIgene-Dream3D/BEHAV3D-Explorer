@@ -20,6 +20,7 @@ from behav3d.preprocessing.tracking.btrack_config import (  # noqa: F401  (re-ex
     motion_crowding_from_frames,
     read_panel_values,
     resolve_config as _resolve_config,
+    solver_time_limit_ms as _solver_time_limit_ms,
     suggest_preset,
     write_custom_config,
     write_temp_config,
@@ -392,6 +393,7 @@ def btrack_image(
     track_start_end_penalty=None,
     allow_divisions=None,
     optimizer_time_limit_s=None,
+    optimizer_no_time_limit=None,
 ):
     """Run btrack (Bayesian tracking) on a single segmentation array.
 
@@ -460,6 +462,9 @@ def btrack_image(
         Add the ``P_branch`` hypothesis (dividing cells only).
     optimizer_time_limit_s : int, optional
         Time limit for the optimizer's solver, in seconds.
+    optimizer_no_time_limit : bool, optional
+        Let the solver run until it finds the best solution;
+        ``optimizer_time_limit_s`` is then ignored.
     """
     assert segments is not None or segments_path is not None, \
         "Either segments or segments_path must be provided"
@@ -492,6 +497,8 @@ def btrack_image(
         use_optimize = bool(panel_values["use_optimize"])
     if optimizer_time_limit_s is None:
         optimizer_time_limit_s = panel_values["optimizer_time_limit_s"]
+    if optimizer_no_time_limit is None:
+        optimizer_no_time_limit = bool(panel_values["optimizer_no_time_limit"])
     use_visual_updates = bool(use_visual_features)
     if use_visual_updates:
         warnings.warn(
@@ -608,7 +615,8 @@ def btrack_image(
             # Passing options replaces btrack's own default solver time
             # limit, so always pass one explicitly.
             if use_optimize:
-                tracker.optimize(tm_lim=int(1000 * optimizer_time_limit_s))
+                tracker.optimize(tm_lim=_solver_time_limit_ms(
+                    optimizer_time_limit_s, optimizer_no_time_limit))
 
             tracks = tracker.tracks
     finally:
@@ -702,6 +710,7 @@ def run_btracking(
     track_start_end_penalty=None,
     allow_divisions=None,
     optimizer_time_limit_s=None,
+    optimizer_no_time_limit=None,
     **kwargs,
 ):
     """Run btrack (Bayesian tracking) on all samples for a given cell type.
@@ -719,7 +728,8 @@ def run_btracking(
     max_search_radius, use_optimize, hypotheses, dist_thresh, time_thresh,
     assignment_tolerance, new_track_position_variance,
     lost_track_probability, measurement_noise, link_tolerance,
-    track_start_end_penalty, allow_divisions, optimizer_time_limit_s :
+    track_start_end_penalty, allow_divisions, optimizer_time_limit_s,
+    optimizer_no_time_limit :
         Tuning overrides in um / um^2; ``None`` keeps the preset value. See
         :func:`btrack_image`.
     update_method, step_size : optional
@@ -833,6 +843,7 @@ def run_btracking(
                 track_start_end_penalty=track_start_end_penalty,
                 allow_divisions=allow_divisions,
                 optimizer_time_limit_s=optimizer_time_limit_s,
+                optimizer_no_time_limit=optimizer_no_time_limit,
             )
 
         # Update metadata with prefixed column names
